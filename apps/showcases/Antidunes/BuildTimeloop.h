@@ -355,7 +355,12 @@ void addSweepFluidParticleCoupling(
 
    // TODO: maybe put this FlagUID in the antidunesBoundaryHandling
    const FlagUID FormerMO_Flag("former moving obstacle");
-   
+
+   auto sphereSelector = [](const size_t particleIdx, const auto& ac)
+   {
+      return ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
+   };
+
    // sweep for mapping particles into the LBM cells
    const bool strictlyConserveMomentum = false;
    timeloop->add() << Sweep(
@@ -364,7 +369,7 @@ void addSweepFluidParticleCoupling(
          simObjs->particleFieldID, simObjs->particleAccessor,
          AntidunesBoundaryHandling_T::movingObstacleFlagID,
          FormerMO_Flag,
-         lbm_mesapd_coupling::RegularParticlesSelector(),
+         sphereSelector,   // map all spheres, regardless if they are fixed or not
          strictlyConserveMomentum),
       "Sweep (coupling): MovingParticleMapping");
 
