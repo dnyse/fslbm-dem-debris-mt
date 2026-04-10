@@ -27,7 +27,7 @@
 #include "core/Environment.h"
 #include "core/waLBerlaBuildInfo.h"
 
-#include "timeloopFSLBM/all.h"
+#include "timeloop/all.h"
 
 #include "BuildTimeloop.h" 
 #include "WriteData.h"
@@ -56,8 +56,8 @@ int main(int argc, char** argv)
    // ----------------------------------------------------------------------------------------------------------------------------------
    WALBERLA_ROOT_SECTION()
    {
-      filesystem::create_directories(simParams->blockForest.snapshotBaseFolder);
-      filesystem::create_directories(simParams->evaluation.baseFolderName);
+      std::filesystem::create_directories(simParams->blockForest.snapshotBaseFolder);
+      std::filesystem::create_directories(simParams->evaluation.baseFolderName);
    }
 
    // Log computed params
