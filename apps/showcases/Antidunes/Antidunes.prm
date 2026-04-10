@@ -12,20 +12,20 @@ DomainParameters
 {
    domainSize         <3200, 60, 160>;
    wavePeriods        1;         // never set to 0 -> division by zero, even if you initialize a flat particle bed
-   liquidHeightFactor 2.862;    // h_0 / d (water height / avg particle diameter) -> from experiment [E1=2.862, E2=3.1724, E3=3.27586, E4=3.5862]
-   floorHeightFactor  4.1393;    // from domain bottom to sine's average
+   liquidHeightFactor 2.862;     // h_0 / d (water height / avg particle diameter) -> from experiment [E1=2.862, E2=3.1724, E3=3.27586, E4=3.5862]
+   floorHeightFactor  4.1393;    // (floor height / avg particle diameter) from domain bottom to sine's average
    initialAmplitude   0;         // defined from minimum peak to maximum peak as by Pascal et al. (2021)
 }
 
 PIDParameters
 {
-    targetMeanVelocityMagnitude 0.02;
-    proportionalGain            2e-4;
-    derivativeGain              1e-6;
-    integralGain                2e-4;
-    maxRamp                     1e-4;
-    minActuatingVariable        0;
-    maxActuatingVariable        1e-3;
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
 }
 
 PhysicsParameters
@@ -39,16 +39,16 @@ PhysicsParameters
 
 ParticleParameters
 {
-    inFileName spheres_out.dat;
-    bedCopiesInX 1;
-    bedCopiesInY 1;
-    densityRatio 2.55;
-    fixingHeightFactor 1.5; // proportional to the mean particle diameter
-    frictionCoefficient 0.5;
-    restitutionCoefficient 0.97;
-    numSubCycles 10;
-    useLubricationCorrection true;
-    useNoSlipParticles false;
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5; // proportional to the mean particle diameter
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
 }
 
 ModelParameters
@@ -105,6 +105,7 @@ VTK
       ghostLayers          0;
       baseFolder           vtk-out;
       samplingResolution   1;
+      useMPIIO false;
 
       writers
       {
@@ -120,14 +121,22 @@ VTK
          //force;
       }
 
-      CellBB_filter {
+      // X-Z midplane
+      CellBB_filter_0 {
          min < 0, 29, 0 >;
          max < 3200, 30, 160 >;
       }
 
+      // Y-Z inlet plane
+      CellBB_filter_1 {
+         min < 0, 0, 0 >;
+         max < 1, 60, 160 >;
+      }
+
       inclusion_filters
       {
-         CellBB_filter;
+         CellBB_filter_0;
+         CellBB_filter_1;
          //liquidInterfaceFilter; // only include liquid and interface cells in VTK output
       }
 
@@ -137,6 +146,7 @@ VTK
          gas_cell_zero_setter;          // sets velocity=0 and density=1 all gas cells before writing VTK output
       }
    }
+
    domain_decomposition
    {
       writeFrequency             10000000000;

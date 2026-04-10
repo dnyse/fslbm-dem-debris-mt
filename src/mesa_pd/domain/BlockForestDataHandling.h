@@ -23,6 +23,8 @@
 #include "blockforest/BlockDataHandling.h"
 #include "blockforest/BlockForest.h"
 #include "core/Abort.h"
+#include "core/mpi/RecvBuffer.h"
+#include "core/mpi/SendBuffer.h"
 
 namespace walberla{
 namespace mesa_pd{
@@ -72,21 +74,21 @@ public:
 
    internal::ParticleDeleter* initialize( IBlock * const block ) override;
 
-   void serialize( IBlock * const block, const BlockDataID & id, mpi::SendBuffer & buffer ) override;
+   void serialize( IBlock * const block, const BlockDataID & id, walberla::mpi::SendBuffer & buffer ) override;
    internal::ParticleDeleter* deserialize( IBlock * const block ) override;
-   void deserialize( IBlock * const block, const BlockDataID & id, mpi::RecvBuffer & buffer ) override;
+   void deserialize( IBlock * const block, const BlockDataID & id, walberla::mpi::RecvBuffer & buffer ) override;
 
-   void serializeCoarseToFine( Block * const block, const BlockDataID & id, mpi::SendBuffer & buffer, const uint_t child ) override;
-   void serializeFineToCoarse( Block * const block, const BlockDataID & id, mpi::SendBuffer & buffer ) override;
+   void serializeCoarseToFine( Block * const block, const BlockDataID & id, walberla::mpi::SendBuffer & buffer, const uint_t child ) override;
+   void serializeFineToCoarse( Block * const block, const BlockDataID & id, walberla::mpi::SendBuffer & buffer ) override;
 
    internal::ParticleDeleter* deserializeCoarseToFine( Block * const block ) override;
    internal::ParticleDeleter* deserializeFineToCoarse( Block * const block ) override;
 
-   void deserializeCoarseToFine( Block * const block, const BlockDataID & id, mpi::RecvBuffer & buffer ) override;
-   void deserializeFineToCoarse( Block * const block, const BlockDataID & id, mpi::RecvBuffer & buffer, const uint_t child ) override;
+   void deserializeCoarseToFine( Block * const block, const BlockDataID & id, walberla::mpi::RecvBuffer & buffer ) override;
+   void deserializeFineToCoarse( Block * const block, const BlockDataID & id, walberla::mpi::RecvBuffer & buffer, const uint_t child ) override;
 
 private:
-   void deserializeImpl( IBlock * const block, const BlockDataID & id, mpi::RecvBuffer & buffer );
+   void deserializeImpl( IBlock * const block, const BlockDataID & id, walberla::mpi::RecvBuffer & buffer );
 
    std::shared_ptr<data::ParticleStorage> ps_;
 };

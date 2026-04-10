@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include "blockforest/StructuredBlockForest.h"
+
 #include "core/uid/SUID.h"
 
 #include "FlagInfo.h"
