@@ -26,7 +26,7 @@
 
 #include "core/Environment.h"
 #include "core/waLBerlaBuildInfo.h"
-
+#include "sqlite/SQLite.h"
 #include "timeloop/all.h"
 
 #include "BuildTimeloop.h" 
@@ -147,6 +147,14 @@ int main(int argc, char** argv)
       {
          WALBERLA_LOG_INFO_ON_ROOT(t << " - acceleration: " << (*simObjs->acceleration)[0] << ", meanVelocity: " << (*simObjs->meanVelocity)[0]);
          writeFluidInfo(simParams, simObjs, t);
+
+         WALBERLA_ROOT_SECTION()
+         {
+            sqlite::storeRunInSqliteDB(simParams->evaluation.baseFolderName + "/antidunes.sqlite",
+               simObjs->dataCols->getIntCols(),
+               simObjs->dataCols->getStrCols(),
+               simObjs->dataCols->getRealCols());
+         }
       }
 
       if (t % simParams->evaluation.performanceLogFrequency == uint_c(0) && t > uint_c(0))

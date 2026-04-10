@@ -131,6 +131,7 @@ void setupSimState(const std::shared_ptr< const SimulationParams >& simParams, c
    // They will be later computed during evalutation stages
    simObjs->meanVelocity = std::make_shared< Vector3< real_t > >(real_c(0));
    simObjs->totalFluidMass = std::make_shared< real_t >(real_c(0));
+   simObjs->dataCols = std::make_shared< DataCols >();
    
    if (bfParams.loadSnapshot)
    {

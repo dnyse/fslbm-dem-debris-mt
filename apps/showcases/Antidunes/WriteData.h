@@ -85,10 +85,15 @@ void writeFluidInfo(const std::shared_ptr<const SimulationParams>& simParams, co
       const real_t reynoldsNumber = meanVelocityX * simParams->computed.liquidHeight / simParams->computed.viscosity;
       const real_t weberNumber = real_c(1.0) * meanVelocityX * meanVelocityX * simParams->computed.liquidHeight / simParams->computed.surfaceTension;
 
-      std::ofstream fluidInfoFile(simParams->evaluation.baseFolderName + "/fluidInfo.txt", std::ofstream::app);
-      fluidInfoFile << timestep << " " << (*simObjs->acceleration)[0] << " " << meanVelocityX << " " << (*simObjs->totalFluidMass) 
-                        << " " << froudeNumber << " " << reynoldsNumber << " " << weberNumber << "\n";
-      fluidInfoFile.close();
+      simObjs->dataCols->add("timestep", int(timestep));
+      simObjs->dataCols->add("acceleration_x", (*simObjs->acceleration)[0]);
+      simObjs->dataCols->add("meanVelocity_x", (*simObjs->meanVelocity)[0]);
+      simObjs->dataCols->add("meanVelocity_y", (*simObjs->meanVelocity)[1]);
+      simObjs->dataCols->add("meanVelocity_z", (*simObjs->meanVelocity)[2]);
+      simObjs->dataCols->add("totalFluidMass", *simObjs->totalFluidMass);
+      simObjs->dataCols->add("froudeNumber", froudeNumber);
+      simObjs->dataCols->add("reynoldsNumber", reynoldsNumber);
+      simObjs->dataCols->add("weberNumber", weberNumber);
       
       if (std::isnan(reynoldsNumber)) WALBERLA_ABORT("reynoldsNumber is nan!")
    }

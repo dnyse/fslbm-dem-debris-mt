@@ -30,6 +30,7 @@
 
 #include "AntidunesBoundaryHandling.h"
 #include "AntidunesLatticeModel.h"
+#include "DataCols.h"
 #include "PIDController.h"
 
 namespace walberla {
@@ -89,12 +90,14 @@ struct SimulationObjects
    // Simulation state ------------------------------------------------------------------------------------------------
    const std::string                simStateFile{ "simState.file" };
    const std::string                pidStateFile{ "pidState.file" };
-   
+
    uint_t                           beginTimeStep;
    shared_ptr< PIDController >      pidController;
    shared_ptr< Vector3< real_t > >  acceleration;
    shared_ptr< Vector3< real_t > >  meanVelocity;
    shared_ptr< real_t >             totalFluidMass;
+   
+   shared_ptr< DataCols >           dataCols;
 };
 
 } // namespace antidunes

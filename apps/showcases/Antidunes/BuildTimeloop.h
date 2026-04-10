@@ -443,6 +443,7 @@ void addAfterTimeStepDataEvaluators(
          simObjs->fillFieldID, 
          simObjs->pdfFieldID,
          simParams->evaluation.baseFolderName, 
+         simObjs->dataCols,
          simParams->evaluation.evaluationFrequency);
    timeloop->addFuncAfterTimeStep(averageDataSliceEvaluator, "Evaluator: AverageDataSlice");
 
@@ -464,7 +465,7 @@ void addAfterTimeStepDataEvaluators(
          simObjs->particleAccessor, 
          bedLoadTransportAveragingFactor, 
          simObjs->numParticles,
-         simParams->evaluation.baseFolderName,
+         simObjs->dataCols,
          simParams->evaluation.evaluationFrequency);
    timeloop->addFuncAfterTimeStep(bedloadTransportEvaluator, "Evaluator: BedloadTransport");
 
@@ -472,7 +473,7 @@ void addAfterTimeStepDataEvaluators(
    TotalHydrodynamicForceEvaluator < ParticleAccessor_T > 
       totalHydrodynamicForceEvaluator(
          simObjs->particleAccessor,
-         simParams->evaluation.baseFolderName, 
+         simObjs->dataCols, 
          simParams->evaluation.evaluationFrequency);
    timeloop->addFuncAfterTimeStep(totalHydrodynamicForceEvaluator, "Evaluator: TotalHydrodynamicForce");
 }

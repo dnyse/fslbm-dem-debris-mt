@@ -23,6 +23,7 @@
 #pragma once
 
 #include "Utility.h"
+#include "DataCols.h"
 
 namespace walberla
 {
@@ -35,9 +36,10 @@ class AverageDataSliceEvaluator
 {
  public:
    AverageDataSliceEvaluator(const shared_ptr< StructuredBlockStorage >& blocks, const ConstBlockDataID& flagFieldID,
-                             const ConstBlockDataID& fillFieldID, const ConstBlockDataID& pdfFieldID, const std::string& baseFolderName, uint_t frequency)
+                             const ConstBlockDataID& fillFieldID, const ConstBlockDataID& pdfFieldID, 
+                             const std::string& baseFolderName, const shared_ptr< DataCols >& dataCols, uint_t frequency)
       : blocks_(blocks), flagFieldID_(flagFieldID), fillFieldID_(fillFieldID), pdfFieldID_(pdfFieldID), 
-      baseFolderName_(baseFolderName), frequency_(frequency), executionCounter_(uint_c(0))
+      baseFolderName_(baseFolderName), dataCols_(dataCols), frequency_(frequency), executionCounter_(uint_c(0))
    {
       xlen_ = blocks_->getNumberOfXCells();
       ylen_ = blocks_->getNumberOfYCells();
@@ -144,7 +146,8 @@ class AverageDataSliceEvaluator
                               base + "/fillSlice_" + std::to_string(executionCounter_) + ".txt");
          write2DVectorToFile(x_z_VelocityX_, xlen_, zlen_,
                               base + "/velXSlice_" + std::to_string(executionCounter_) + ".txt");
-         // WALBERLA_LOG_DEVEL(" Max fluid z-position = " << maxFluidZPos_);
+
+         dataCols_->add("maxFluidPos_z", int(maxFluidZPos_));
       }
    }
 
@@ -164,6 +167,7 @@ class AverageDataSliceEvaluator
    std::vector< uint_t > x_z_FluidCellCount_;
 
    std::string baseFolderName_;
+   shared_ptr< DataCols > dataCols_;
    uint_t frequency_;
    uint_t executionCounter_;
 };
@@ -174,9 +178,9 @@ class BedloadTransportEvaluator
 {
  public:
    BedloadTransportEvaluator(const shared_ptr< ParticleAccessor_T >& ac, real_t normalizationFactor,
-                             uint_t numParticles, const std::string& baseFolderName, uint_t frequency)
+                             uint_t numParticles, const shared_ptr< DataCols >& dataCols, uint_t frequency)
       : ac_(ac), normalizationFactor_(normalizationFactor), numParticles_(numParticles),
-        baseFolderName_(baseFolderName), frequency_(frequency), executionCounter_(uint_c(0))
+        dataCols_(dataCols), frequency_(frequency), executionCounter_(uint_c(0))
    {}
 
    void operator()()
@@ -220,10 +224,8 @@ class BedloadTransportEvaluator
    void writeToFile(){
       WALBERLA_ROOT_SECTION()
       {
-         // append values to the same file
-         std::ofstream bedloadFile(baseFolderName_ + "/bedload.txt", std::ofstream::app);
-         bedloadFile << executionCounter_ << " " << avgTransportRate_ << " " << averageVelocity_ << std::endl;
-         bedloadFile.close();
+         dataCols_->add("avgParticleTransportRate", avgTransportRate_);
+         dataCols_->add("avgParticleVelocity", averageVelocity_);
       }
    }
 
@@ -238,7 +240,7 @@ class BedloadTransportEvaluator
    real_t averageVelocity_;
    real_t avgTransportRate_;
 
-   std::string baseFolderName_;
+   shared_ptr< DataCols > dataCols_;
    uint_t frequency_;
    uint_t executionCounter_;
 };
@@ -249,8 +251,8 @@ class TotalHydrodynamicForceEvaluator
 {
  public:
    TotalHydrodynamicForceEvaluator(const shared_ptr< ParticleAccessor_T >& ac,
-       const std::string& baseFolderName, uint_t frequency)
-      : ac_(ac), baseFolderName_(baseFolderName),
+       const shared_ptr< DataCols >& dataCols, uint_t frequency)
+      : ac_(ac), dataCols_(dataCols),
       frequency_(frequency), executionCounter_(uint_c(0))
    {}
 
@@ -290,10 +292,10 @@ class TotalHydrodynamicForceEvaluator
    void writeToFile(){
       WALBERLA_ROOT_SECTION()
       {
-         // append values to the same file
-         std::ofstream bedloadFile(baseFolderName_ + "/totalParticleHydroAndMaxPosZ.txt", std::ofstream::app);
-         bedloadFile << executionCounter_ << " " << totalHydrodynamicForce_ << " " << maxParticlePosZ_ << std::endl;
-         bedloadFile.close();
+         dataCols_->add("totalHydroForce_x", totalHydrodynamicForce_[0]);
+         dataCols_->add("totalHydroForce_y", totalHydrodynamicForce_[1]);
+         dataCols_->add("totalHydroForce_z", totalHydrodynamicForce_[2]);
+         dataCols_->add("maxParticlePos_z", maxParticlePosZ_);
       }
    }
 
@@ -304,7 +306,7 @@ class TotalHydrodynamicForceEvaluator
    Vector3< real_t > totalHydrodynamicForce_;
    real_t maxParticlePosZ_;
 
-   std::string baseFolderName_;
+   shared_ptr< DataCols > dataCols_;
    uint_t frequency_;
    uint_t executionCounter_;
 };
