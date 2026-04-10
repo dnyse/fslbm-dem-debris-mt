@@ -24,7 +24,6 @@
 #include "BlockStorage.h"
 
 #include "core/DataTypes.h"
-#include "core/NonCopyable.h"
 #include "core/cell/Cell.h"
 #include "core/cell/CellInterval.h"
 #include "core/debug/Debug.h"
@@ -97,11 +96,13 @@ struct StructuredBlockDataCreator {
 */
 //**********************************************************************************************************************
 
-class StructuredBlockStorage : private NonCopyable {
+class StructuredBlockStorage {
 
 public:
 
    StructuredBlockStorage() = delete;
+   StructuredBlockStorage( const StructuredBlockStorage& ) = delete;
+   StructuredBlockStorage& operator=( const StructuredBlockStorage& ) = delete;
 
    /// helper class for adding multiple block data initialization functions
    class StructuredBlockDataAdder {
@@ -599,7 +600,7 @@ inline Vector3<real_t> StructuredBlockStorage::getGlobalCellCenterFromBlockLocal
    Cell globalCell;
    transformBlockLocalToGlobalCell( globalCell, block, cell );
    Vector3<real_t> center;
-   getCellCenter( center[0], center[1], center[2], cell, getLevel(block) );
+   getCellCenter( center[0], center[1], center[2], globalCell, getLevel(block) );
    return center;
 }
 

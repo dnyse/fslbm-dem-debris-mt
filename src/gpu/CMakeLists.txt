@@ -7,7 +7,7 @@
 add_library( walberla_gpu )
 add_library( walberla::gpu ALIAS walberla_gpu )
 target_link_libraries( walberla_gpu PUBLIC walberla::blockforest walberla::core walberla::communication
-        walberla::domain_decomposition walberla::executiontree walberla::field walberla::stencil walberla::lbm )
+        walberla::domain_decomposition walberla::executiontree walberla::field walberla::stencil )
 
 # CUDA linkage
 if ( WALBERLA_BUILD_WITH_CUDA )
@@ -68,8 +68,13 @@ if (WALBERLA_BUILD_WITH_CUDA)
     )
 endif (WALBERLA_BUILD_WITH_CUDA)
 
+add_subdirectory( timeloop )
+add_subdirectory( timing )
+
 add_subdirectory( sweeps )
 add_subdirectory( communication )
-add_subdirectory( lbm )
+if ( WALBERLA_BUILD_LEGACY_LBM )
+   add_subdirectory( lbm )
+endif ()
 
 ###################################################################################################

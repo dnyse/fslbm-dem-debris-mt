@@ -165,9 +165,9 @@ namespace stencil {
       return vectorToDirection(vec[0], vec[1], vec[2]);
    }
 
-   inline bool isFaceDirection(Direction dir) { return 1 <= dir && dir <= 6; }
-   inline bool isEdgeDirection(Direction dir) { return 7 <= dir && dir <= 18; }
-   inline bool isCornerDirection(Direction dir) { return 19 <= dir; }
+   inline constexpr bool isFaceDirection(Direction dir) { return 1 <= dir && dir <= 6; }
+   inline constexpr bool isEdgeDirection(Direction dir) { return 7 <= dir && dir <= 18; }
+   inline constexpr bool isCornerDirection(Direction dir) { return 19 <= dir; }
 
 
    /// The x,y,z component for each normalized direction \ingroup stencil
@@ -198,7 +198,7 @@ namespace stencil {
    } };
 
    /// String representation for each direction \ingroup stencil
-   const std::array< std::string, NR_OF_DIRECTIONS > dirToString {
+   inline const std::array< std::string, NR_OF_DIRECTIONS > dirToString {
       "C", "N", "S", "W", "E", "T", "B",
       "NW", "NE", "SW", "SE", "TN", "TS", "TW", "TE", "BN", "BS", "BW","BE",
       "TNE", "TNW", "TSE", "TSW", "BNE", "BNW", "BSE", "BSW",
