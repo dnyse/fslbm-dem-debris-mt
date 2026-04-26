@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# antidunes.sh — build and run helper for the Antidunes showcase
+# See docs/HOWTO_BUILD_AND_RUN.md for full documentation.
+set -euo pipefail
+
+# ── paths derived from script location ────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+LOAD_MODULES=true
+DO_CONFIGURE=false
+DO_BUILD=false
+DO_BED=false
+DO_RUN=false
+FRESH=false
+BUILD_DIR="$REPO_ROOT/build"
+JOBS="$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
+NP=72
+BED_NP=9
+PRM="$SCRIPT_DIR/Antidunes.prm"
+BED_PRM="$SCRIPT_DIR/BedGeneration.prm"
+CONDA_ENV="walberla-codegen"
+DO_SYNC=false
+REMOTE="fritz.scvl"
+REMOTE_PATH="~/mt-dennys/"
+
+# ── usage ─────────────────────────────────────────────────────────────────────
+usage() {
+cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Steps (pick one or more, or use --all):
+  --configure       CMake configure
+  --build           Build Antidunes + BedGeneration targets
+  --bed             Run BedGeneration (generates spheres_out.dat)
+  --run             Run Antidunes main simulation
+  --all             configure + build + bed + run
+  --sync            rsync repo to remote (excludes build/ and dotfiles)
+
+Environment:
+  --local           Skip module loading — use this on a local machine
+  --conda-env NAME  Conda environment to activate (default: $CONDA_ENV)
+  --fresh           Pass --fresh to CMake (force clean reconfigure)
+
+Paths:
+  --build-dir DIR   CMake build directory   (default: $BUILD_DIR)
+  --prm FILE        Antidunes parameter file (default: Antidunes.prm in script dir)
+  --bed-prm FILE    BedGeneration prm file   (default: BedGeneration.prm in script dir)
+  --remote HOST     SSH host for --sync      (default: $REMOTE)
+  --remote-path P   Remote destination path  (default: $REMOTE_PATH)
+
+Parallelism:
+  --jobs N          Build parallelism        (default: $JOBS)
+  --np N            MPI ranks for Antidunes  (default: $NP)
+  --bed-np N        MPI ranks for BedGeneration (default: $BED_NP)
+
+  -h, --help        Show this help
+
+Examples:
+  # Sync changes to supercomputer, then build and run there
+  ./antidunes.sh --sync
+
+  # Local machine — full pipeline
+  ./antidunes.sh --local --all --np 8 --bed-np 1
+
+  # Supercomputer — build only, 32 jobs
+  ./antidunes.sh --configure --build --jobs 32
+
+  # Supercomputer — rerun with different prm, skip rebuild
+  ./antidunes.sh --run --prm myparams.prm --np 72
+EOF
+}
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+[[ $# -eq 0 ]] && { usage; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --local)       LOAD_MODULES=false ;;
+        --configure)   DO_CONFIGURE=true ;;
+        --build)       DO_BUILD=true ;;
+        --bed)         DO_BED=true ;;
+        --run)         DO_RUN=true ;;
+        --all)         DO_CONFIGURE=true; DO_BUILD=true; DO_BED=true; DO_RUN=true ;;
+        --fresh)       FRESH=true ;;
+        --build-dir)   BUILD_DIR="$2"; shift ;;
+        --jobs)        JOBS="$2"; shift ;;
+        --np)          NP="$2"; shift ;;
+        --bed-np)      BED_NP="$2"; shift ;;
+        --prm)         PRM="$2"; shift ;;
+        --bed-prm)     BED_PRM="$2"; shift ;;
+        --conda-env)   CONDA_ENV="$2"; shift ;;
+        --sync)        DO_SYNC=true ;;
+        --remote)      REMOTE="$2"; shift ;;
+        --remote-path) REMOTE_PATH="$2"; shift ;;
+        -h|--help)     usage; exit 0 ;;
+        *) echo "Unknown option: $1"; echo; usage; exit 1 ;;
+    esac
+    shift
+done
+
+BIN_DIR="$BUILD_DIR/apps/showcases/Antidunes"
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+log() { echo; echo "==> $*"; }
+
+# ── sync to remote ────────────────────────────────────────────────────────────
+if $DO_SYNC; then
+    log "Syncing to $REMOTE:$REMOTE_PATH"
+    rsync -avz \
+        --exclude='build/' \
+        --exclude='.*' \
+        "$REPO_ROOT/" "$REMOTE:$REMOTE_PATH"
+fi
+
+# ── module loading (supercomputer only) ───────────────────────────────────────
+if $LOAD_MODULES; then
+    log "Loading modules"
+    module load gcc/14.2.0
+    module load openmpi/4.1.3-gcc14.2.0
+    module load cmake
+    module load python
+
+    log "Activating conda environment: $CONDA_ENV"
+    # conda activate does not work in non-interactive shells without this
+    CONDA_BASE="$(conda info --base 2>/dev/null)"
+    # shellcheck source=/dev/null
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+    conda activate "$CONDA_ENV"
+else
+    log "Skipping module load (--local)"
+    # If a conda env is already active, honour it; otherwise use the system Python.
+    if [[ -z "${CONDA_PREFIX:-}" ]]; then
+        echo "    No conda env active. Using system Python: $(which python3 2>/dev/null || echo 'not found')"
+    else
+        echo "    Using active conda env: $CONDA_PREFIX"
+    fi
+fi
+
+# Resolve Python root for CMake (after potential conda activation)
+PYTHON_ROOT="${CONDA_PREFIX:-$(python3 -c 'import sys; print(sys.prefix)' 2>/dev/null || echo '')}"
+
+# ── configure ─────────────────────────────────────────────────────────────────
+if $DO_CONFIGURE; then
+    log "Configuring (repo root: $REPO_ROOT)"
+    CMAKE_CMD=(
+        cmake
+        $($FRESH && echo "--fresh" || true)
+        -B "$BUILD_DIR"
+        -DCMAKE_C_COMPILER="$(which gcc)"
+        -DCMAKE_CXX_COMPILER="$(which g++)"
+        -DWALBERLA_BUILD_SHOWCASES=ON
+        -DWALBERLA_BUILD_WITH_CODEGEN=ON
+        -DCMAKE_BUILD_TYPE=Release
+    )
+    [[ -n "$PYTHON_ROOT" ]] && CMAKE_CMD+=(-DPython_ROOT_DIR="$PYTHON_ROOT")
+    CMAKE_CMD+=("$REPO_ROOT")
+
+    cd "$REPO_ROOT"
+    "${CMAKE_CMD[@]}"
+fi
+
+# ── build ─────────────────────────────────────────────────────────────────────
+if $DO_BUILD; then
+    log "Building Antidunes (jobs: $JOBS)"
+    cmake --build "$BUILD_DIR" --target Antidunes     -- -j"$JOBS"
+
+    log "Building BedGeneration (jobs: $JOBS)"
+    cmake --build "$BUILD_DIR" --target BedGeneration -- -j"$JOBS"
+fi
+
+# ── bed generation ────────────────────────────────────────────────────────────
+if $DO_BED; then
+    log "Running BedGeneration (np=$BED_NP, prm=$BED_PRM)"
+    [[ -f "$BIN_DIR/BedGeneration" ]] || { echo "BedGeneration binary not found in $BIN_DIR — did you --build?"; exit 1; }
+    cd "$BIN_DIR"
+    mpirun -n "$BED_NP" ./BedGeneration "$BED_PRM"
+fi
+
+# ── main simulation ───────────────────────────────────────────────────────────
+if $DO_RUN; then
+    log "Running Antidunes (np=$NP, prm=$PRM)"
+    [[ -f "$BIN_DIR/Antidunes" ]] || { echo "Antidunes binary not found in $BIN_DIR — did you --build?"; exit 1; }
+    [[ -f "$BIN_DIR/spheres_out.dat" ]] || {
+        echo "WARNING: spheres_out.dat not found in $BIN_DIR."
+        echo "         Run --bed first, or copy it there manually."
+    }
+    cd "$BIN_DIR"
+    mpirun -n "$NP" ./Antidunes "$PRM"
+fi
+
+log "Done."
