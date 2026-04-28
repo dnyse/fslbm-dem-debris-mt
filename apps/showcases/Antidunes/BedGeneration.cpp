@@ -207,12 +207,12 @@ int main(int argc, char** argv)
 
       SNN(*ps, forest, domain);
 
-      // gravity
+      // gravity - buoyancy
       ps->forEachParticle(
          false, kernel::SelectLocal(), accessor,
          [densityParticle_SI, densityFluid_SI, gravity_SI](const size_t idx, auto& ac) {
             mesa_pd::addForceAtomic(
-               idx, ac, Vec3(0, 0, -densityParticle_SI * ac.getVolume(idx) * gravity_SI));
+               idx, ac, Vec3(0, 0, -(densityParticle_SI - densityFluid_SI) * ac.getVolume(idx) * gravity_SI));
          },
          accessor);
 

@@ -176,8 +176,8 @@ void addSweepSurfaceDynamics(
    const std::unique_ptr< SweepTimeloop >& timeloop)
 {
    WALBERLA_LOG_INFO_ON_ROOT("addSweepSurfaceDynamics");
-   // add standard waLBerla boundary handling
-   // but why apply boundary to gas/boundary blocks? shouldnt we apply it to onlyLBM too?
+   // add standard waLBerla boundary handling 
+   // only relavant for onlyGasAndBoundary blocks (i.e. not interface, not inflow, not liquid)
    timeloop->add() << Sweep(simObjs->antidunesBoundaryHandling->getBoundarySweep(), "Sweep: boundary handling",
                            Set< SUID >::emptySet(), StateSweep::onlyGasAndBoundary)
                   << Sweep(EmptySweep(), "Empty sweep: boundary handling", StateSweep::onlyGasAndBoundary);

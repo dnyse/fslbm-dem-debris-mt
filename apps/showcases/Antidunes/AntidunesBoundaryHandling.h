@@ -58,8 +58,7 @@ class AntidunesBoundaryHandling
  public:
    using flag_t    = typename FlagField_T::value_type;
    using Stencil_T = typename LatticeModel_T::Stencil;
-   using CommunicationStencil_T =
-      std::conditional_t< LatticeModel_T::Stencil::D == uint_t(2), stencil::D2Q9, stencil::D3Q27 >;
+   using CommunicationStencil_T = std::conditional_t< LatticeModel_T::Stencil::D == uint_t(2), stencil::D2Q9, stencil::D3Q27 >;
    using PdfField_T = lbm::PdfField< LatticeModel_T >;
 
    // boundary
@@ -68,9 +67,8 @@ class AntidunesBoundaryHandling
    using UBB_T      = lbm::UBB< LatticeModel_T, flag_t >;
    using Pressure_T = walberla::free_surface::SimplePressureWithFreeSurface< LatticeModel_T, FlagField_T >;
    using Outlet_T   = lbm::Outlet< LatticeModel_T, FlagField_T, 4, 3 >;
-   using UBB_Inflow_T =
-      lbm::UBB< LatticeModel_T, flag_t >; // creates interface cells in the direction of the prescribed velocity, i.e.,
-                                          // represents an inflow boundary condition
+   using UBB_Inflow_T = lbm::UBB< LatticeModel_T, flag_t >; // creates interface cells in the direction of the prescribed velocity, i.e.,
+                                                            // represents an inflow boundary condition
    using MovingObstacle_T = lbm_mesapd_coupling::SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >;
 
    // handling type
