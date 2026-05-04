@@ -58,6 +58,10 @@ public:
 
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx1, const size_t idx2, ParticleAccessor_T& ac){
+      // lubrication is only defined for sphere-sphere pairs
+      if (ac.getBaseShape(idx1)->getShapeType() != mesa_pd::data::Sphere::SHAPE_TYPE ||
+          ac.getBaseShape(idx2)->getShapeType() != mesa_pd::data::Sphere::SHAPE_TYPE) return;
+
       acd_.getContactThreshold() = lubricationCorrectionKernel_.getNormalCutOffDistance();
       if (double_cast_(idx1, idx2, ac, acd_, ac))
       {

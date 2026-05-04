@@ -22,6 +22,8 @@
 #pragma once
 
 #include "mesa_pd/data/ParticleStorage.h"
+#include "mesa_pd/data/shape/Box.h"
+#include "mesa_pd/data/shape/HalfSpace.h"
 #include "mesa_pd/data/shape/Sphere.h"
 
 #include <algorithm>
@@ -173,6 +175,34 @@ inline void getAverageVelocity(const ParticleAccessor_T& ac, real_t& averageVelo
    walberla::mpi::allReduceInplace(maxHeight, walberla::mpi::MAX);
 
    averageVelocity /= real_t(numParticles);
+}
+
+// Box subclass that behaves like a wall: infinite mass so meff = sphere mass (identical to HalfSpace behavior)
+class FixedBox : public mesa_pd::data::Box {
+public:
+   explicit FixedBox(const mesa_pd::Vec3& edgeLength) : Box(edgeLength) {}
+   void updateMassAndInertia(const real_t /*density*/) override {
+      mass_         = std::numeric_limits<real_t>::infinity();
+      invMass_      = real_t(0);
+      inertiaBF_    = mesa_pd::Mat3(std::numeric_limits<real_t>::infinity());
+      invInertiaBF_ = mesa_pd::Mat3(real_t(0));
+   }
+};
+
+inline auto createBox(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center, const mesa_pd::Vec3& edgeLength)
+{
+   auto p0 = ps.create(true);
+   p0->setPosition(center);
+   p0->setBaseShape(std::make_shared< FixedBox >(edgeLength));
+   p0->getBaseShapeRef()->updateMassAndInertia(real_t(1));
+   p0->setOwner(walberla::mpi::MPIManager::instance()->rank());
+   p0->setType(0);
+   p0->setInteractionRadius(real_t(0.5) * edgeLength.length());
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::GLOBAL);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::INFINITE);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::NON_COMMUNICATING);
+   return p0;
 }
 
 inline auto createPlane(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& pos, const mesa_pd::Vec3& normal)

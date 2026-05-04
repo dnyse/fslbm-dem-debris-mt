@@ -27,6 +27,7 @@
 #include "field/FlagField.h"
 #include "field/communication/PackInfo.h"
 
+#include "geometry/initializer/BoundaryFromBody.h"
 #include "geometry/initializer/BoundaryFromCellInterval.h"
 #include "geometry/initializer/BoundaryFromDomainBorder.h"
 #include "geometry/initializer/BoundaryFromImage.h"
@@ -287,13 +288,15 @@ geometry::initializer::InitializationManager
    auto borderInit   = std::make_shared< BoundaryFromDomainBorder< BoundaryHandling_T > >(*blockForest_, handlingID_);
    auto imgInit =
       std::make_shared< BoundaryFromImage< BoundaryHandling_T, geometry::GrayScaleImage > >(*blockForest_, handlingID_);
-   auto bodyInit = std::make_shared< OverlapFieldFromBody >(*blockForest_, fillFieldID_);
+   auto bodyInit   = std::make_shared< OverlapFieldFromBody >(*blockForest_, fillFieldID_);
+   auto bodyBCInit = std::make_shared< BoundaryFromBody< BoundaryHandling_T > >(*blockForest_, handlingID_);
 
    // register initializers
    initManager.registerInitializer("CellInterval", cellIntvInit);
-   initManager.registerInitializer("Border", borderInit);
-   initManager.registerInitializer("Image", imgInit);
-   initManager.registerInitializer("Body", bodyInit);
+   initManager.registerInitializer("Border",       borderInit);
+   initManager.registerInitializer("Image",        imgInit);
+   initManager.registerInitializer("Body",         bodyInit);   // free-surface fill level
+   initManager.registerInitializer("BodyBC",       bodyBCInit); // LBM boundary conditions from a body shape
 
    return initManager;
 }

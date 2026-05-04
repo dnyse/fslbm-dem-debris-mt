@@ -1,6 +1,6 @@
 BlockForestParameters
 {
-   cellsPerBlock                 < 32, 20, 20 >;
+   cellsPerBlock                 < 100, 20, 20 >;
    periodicity                   < 1, 1, 0 >;
    loadSnapshot                  false;
    storeSnapshot                 true;
@@ -10,7 +10,7 @@ BlockForestParameters
 
 DomainParameters
 {
-   domainSize         <128, 60, 120>;
+   domainSize         <400, 60, 120>;
    wavePeriods        1;         // never set to 0 -> division by zero, even if you initialize a flat particle bed
    liquidHeightFactor 2.862;     // h_0 / d (water height / avg particle diameter) -> from experiment [E1=2.862, E2=3.1724, E3=3.27586, E4=3.5862]
    floorHeightFactor  4.1393;    // (floor height / avg particle diameter) from domain bottom to sine's average
@@ -31,7 +31,7 @@ PIDParameters
 PhysicsParameters
 {
    enableWetting     false;
-   timesteps         2000000;
+   timesteps         1000000;
    Re                3100;       // [E1=3100, E2=3772, E3=4180, E4=4800]
    Fr                1.31;       // [E1=1.31, E2=1.38, E3=1.44, E4=1.45]
    We                15.6188;    // [E1=15.6188, E2=21.48, E3=25.54, E4=30.2493]
@@ -41,7 +41,7 @@ ParticleParameters
 {
    inFileName spheres_out.dat;
    bedCopiesInX 1;
-   bedCopiesInY 1;
+   bedCopiesInY 8; // scalingFactor=500, 500*0.015*8=60 matches domainY
    densityRatio 2.55;
    fixingHeightFactor 1.5; // proportional to the mean particle diameter
    frictionCoefficient 0.5;
@@ -89,6 +89,24 @@ BoundaryParameters
    // Z
    Border { direction T;  walldistance -1; NoSlip{} }
    Border { direction B;  walldistance -1; NoSlip{} }
+
+   // Circular pillar: center (200,30), radius 10 lu, full z height
+   //BodyBC
+   //{
+   //   shape cylinder;
+    //  min < 200, 30, 0 >;
+    //  max < 200, 30, 120 >;
+    //  radius 10;
+    //  NoSlip {}
+   //}
+
+   //Option B: rectangular pillar via CellInterval (commented out)
+   CellInterval
+   {
+      min < 184, 20, 0 >;
+      max < 215, 39, 119 >;
+      NoSlip {}
+   }
 }
 
 MeshOutputParameters
@@ -109,10 +127,10 @@ VTK
 
       writers
       {
-         fill_level;
-         mapped_flag;
+         //fill_level;
+         //mapped_flag;
          velocity;
-         density;
+         //density;
          //curvature;
          //normal;
          //obstacle_normal;
@@ -124,7 +142,7 @@ VTK
       // X-Z midplane
       CellBB_filter_0 {
          min < 0, 29, 0 >;
-         max < 128, 30, 120 >;
+         max < 400, 30, 120 >;
       }
 
       // Y-Z inlet plane

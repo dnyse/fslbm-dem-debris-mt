@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -l
 # antidunes.sh — build and run helper for the Antidunes showcase
 # See docs/HOWTO_BUILD_AND_RUN.md for full documentation.
 set -euo pipefail
@@ -20,7 +20,7 @@ NP=72
 BED_NP=9
 PRM="$SCRIPT_DIR/Antidunes.prm"
 BED_PRM="$SCRIPT_DIR/BedGeneration.prm"
-CONDA_ENV="walberla-codegen"
+CONDA_ENV="walberla"
 DO_SYNC=false
 REMOTE="fritz.scvl"
 REMOTE_PATH="~/mt-dennys/"

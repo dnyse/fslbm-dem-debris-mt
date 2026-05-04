@@ -19,7 +19,7 @@
 //! \author Christoph Rettinger <christoph.rettinger@fau.de>
 //! \author Behzad Safaei <behzad.safaei@fau.de>
 //! \author Christoph Schwarzmeier <christoph.schwarzmeier@fau.de>
-// 
+//
 //======================================================================================================================
 
 #pragma once
@@ -56,11 +56,11 @@ void setupBlockForest(const std::shared_ptr< const SimulationParams >& simParams
    Vector3< uint_t > numBlocks;
    for (uint_t i = 0; i <= 2; ++i) {
       numBlocks[i] = domParams.domainSize[i] / bfParams.cellsPerBlock[i];
-      WALBERLA_CHECK_EQUAL(numBlocks[i] * bfParams.cellsPerBlock[i], domParams.domainSize[i],  
+      WALBERLA_CHECK_EQUAL(numBlocks[i] * bfParams.cellsPerBlock[i], domParams.domainSize[i],
          "Domain size in direction " << i << " is not a multiple of cells per block.")
 
       if(bfParams.periodicity[i]){
-         WALBERLA_CHECK_GREATER_EQUAL(numBlocks[i], uint_c(3),  
+         WALBERLA_CHECK_GREATER_EQUAL(numBlocks[i], uint_c(3),
          "When using particles, use at least three blocks per periodic direction.")
       }
 
@@ -71,14 +71,14 @@ void setupBlockForest(const std::shared_ptr< const SimulationParams >& simParams
       "The number of MPI processes is different from the number of blocks as defined by "
       "\"domainSize/cellsPerBlock\".")
 
-   if (bfParams.loadSnapshot) 
+   if (bfParams.loadSnapshot)
    {
       WALBERLA_LOG_INFO_ON_ROOT("Loading blockForest from snapshot");
       MPIManager::instance()->useWorldComm();
 
       simObjs->blockForest = make_shared< StructuredBlockForest >(
             make_shared< BlockForest >(
-               uint_c(MPIManager::instance()->rank()), 
+               uint_c(MPIManager::instance()->rank()),
                (bfParams.snapshotBaseFolder + "/" + simObjs->blockForestFile).c_str(),
                true,
                false
@@ -87,14 +87,14 @@ void setupBlockForest(const std::shared_ptr< const SimulationParams >& simParams
 
       simObjs->blockForest->createCellBoundingBoxes();
 
-   } 
-   else 
+   }
+   else
    {
       WALBERLA_LOG_INFO_ON_ROOT("Creating blockForest");
       simObjs->blockForest = blockforest::createUniformBlockGrid(
          numBlocks[0], numBlocks[1], numBlocks[2],
          bfParams.cellsPerBlock[0], bfParams.cellsPerBlock[1], bfParams.cellsPerBlock[2],
-         real_c(1.0),   // dx 
+         real_c(1.0),   // dx
          true,          // one block per process
          bfParams.periodicity[0], bfParams.periodicity[1], bfParams.periodicity[2]);
    }
@@ -113,10 +113,10 @@ void setupSimState(const std::shared_ptr< const SimulationParams >& simParams, c
 
    simObjs->beginTimeStep = uint_c(0);
 
-   const real_t accelerationX = real_c(3) * simParams->pid.targetMeanVelocityMagnitude * simParams->computed.viscosity / 
+   const real_t accelerationX = real_c(3) * simParams->pid.targetMeanVelocityMagnitude * simParams->computed.viscosity /
                                  (simParams->computed.liquidHeight * simParams->computed.liquidHeight);
    simObjs->acceleration = std::make_shared< Vector3< real_t > >(accelerationX, real_c(0.0), -simParams->computed.gravity);
-   
+
    simObjs->pidController = std::make_shared< PIDController >(
                                     simParams->pid.targetMeanVelocityMagnitude,
                                     accelerationX,
@@ -127,16 +127,16 @@ void setupSimState(const std::shared_ptr< const SimulationParams >& simParams, c
                                     simParams->pid.minActuatingVariable,
                                     simParams->pid.maxActuatingVariable);
 
-   // Initialize meanVelocity and totalFluidMass as zero 
+   // Initialize meanVelocity and totalFluidMass as zero
    // They will be later computed during evalutation stages
    simObjs->meanVelocity = std::make_shared< Vector3< real_t > >(real_c(0));
    simObjs->totalFluidMass = std::make_shared< real_t >(real_c(0));
    simObjs->dataCols = std::make_shared< DataCols >();
-   
+
    if (bfParams.loadSnapshot)
    {
       WALBERLA_LOG_INFO_ON_ROOT("Loading simState and pidState from snapshot");
-      
+
       WALBERLA_ROOT_SECTION()
       {
          std::ifstream file;
@@ -148,8 +148,8 @@ void setupSimState(const std::shared_ptr< const SimulationParams >& simParams, c
       }
       mpi::broadcastObject(simObjs->beginTimeStep);
       mpi::broadcastObject(*simObjs->acceleration);
-      
-      simObjs->pidController->readStateFromFile(bfParams.snapshotBaseFolder + "/" + simObjs->pidStateFile); 
+
+      simObjs->pidController->readStateFromFile(bfParams.snapshotBaseFolder + "/" + simObjs->pidStateFile);
    }
 
 }
@@ -177,7 +177,7 @@ void setupLBMFields(const std::shared_ptr< const SimulationParams >& simParams, 
    LatticeModel_T latticeModel(simObjs->forceDensityFieldID, simParams->computed.relaxationRate);
 
 
-   if (bfParams.loadSnapshot) 
+   if (bfParams.loadSnapshot)
    {
       WALBERLA_LOG_INFO_ON_ROOT("Loading LBM fields from snapshot");
       const std::string base = bfParams.snapshotBaseFolder + "/";
@@ -193,14 +193,14 @@ void setupLBMFields(const std::shared_ptr< const SimulationParams >& simParams, 
          auto excessHandling = std::make_shared< ScalarFieldHandling< ScalarField_T > >(bf, uint_c(1));
          simObjs->excessMassFieldID = bf->getBlockStorage().loadBlockData( base + simObjs->excessMassFieldFile, excessHandling, "Excess mass field");
       }
-   } 
-   else 
+   }
+   else
    {
       WALBERLA_LOG_INFO_ON_ROOT("Creating LBM fields");
       auto initialVelocity = Vector3< real_t >(simParams->pid.targetMeanVelocityMagnitude, 0, 0);
       simObjs->pdfFieldID = lbm::addPdfFieldToStorage( bf, "PDF field", latticeModel, initialVelocity, real_c(1.0), field::fzyx);
       simObjs->fillFieldID =  field::addToStorage< ScalarField_T >(bf, "Fill level field", real_c(0), field::fzyx, uint_c(2));
-      
+
       if (excessMassModel.isEvenlyAllInterfaceFallbackLiquidType())
       {
          // add additional field for storing excess mass in liquid cells
@@ -238,19 +238,23 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    simObjs->particleStorage  = std::make_shared< mesa_pd::data::ParticleStorage >(1);
    simObjs->particleAccessor = std::make_shared< ParticleAccessor_T >(simObjs->particleStorage);
    simObjs->mesapdDomain     = std::make_shared< mesa_pd::domain::BlockForestDomain >(bf->getBlockForestPointer());
-   
+
    uint_t numParticles = uint_c(0);
    uint_t numFixedParticles = uint_c(0);
 
-   if (bfParams.loadSnapshot) 
+   // Box pillar geometry — must match CellInterval in BoundaryParameters (min <184,20,0>, max <215,39,119>)
+   const Vector3< real_t > boxCenter(real_t(200), real_t(30), real_t(60));
+   const Vector3< real_t > boxHalfExtents(real_t(16), real_t(10), real_t(60));
+
+   if (bfParams.loadSnapshot)
    {
       WALBERLA_LOG_INFO_ON_ROOT("Loading particles from snapshot");
       simObjs->particleStorageID = bf->loadBlockData(bfParams.snapshotBaseFolder + "/" + simObjs->particleStorageFile,
          mesa_pd::domain::createBlockForestDataHandling(simObjs->particleStorage), "Particle Storage");
-      
+
       mesa_pd::mpi::ClearNextNeighborSync{}(*simObjs->particleAccessor);
       mesa_pd::mpi::ClearGhostOwnerSync{}(*simObjs->particleAccessor);
-      
+
       // count and validate particles loaded from snapshot ---------------------------------------
       real_t avgParticleDiameterTest = real_c(0);
       simObjs->particleStorage->forEachParticle(
@@ -263,7 +267,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
             {
                ++numFixedParticles;
             }
-         }, 
+         },
          *simObjs->particleAccessor);
 
       mpi::allReduceInplace(numParticles, mpi::SUM);
@@ -276,13 +280,19 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          WALBERLA_ABORT("Particle diameters not correct.")
       }
    }
-   else 
+   else
    {
       simObjs->particleStorageID = bf->addBlockData(mesa_pd::domain::createBlockForestDataHandling(simObjs->particleStorage), "Particle Storage");
-      
-      // Only create particles if the are below the initialization profile -----------------------------------------------
-      auto createParticleFct = [&simParams](Vector3< real_t > pos) {
-         return pos[2] < initializationProfile(pos[0], simParams->computed.sinusAmplitude, simParams->computed.sinusOffset, simParams->computed.sinusWavelength);
+
+      // Only create particles below the initialization profile and outside the box pillar
+      const real_t maxSphereRadius = real_t(0.5) * simParams->computed.avgParticleDiameter * real_t(1.1);
+      auto createParticleFct = [&simParams, &boxCenter, &boxHalfExtents, maxSphereRadius](Vector3< real_t > pos) {
+         if (pos[2] >= initializationProfile(pos[0], simParams->computed.sinusAmplitude, simParams->computed.sinusOffset, simParams->computed.sinusWavelength))
+            return false;
+         // pillar spans the full z height; use nearest-point distance in x-y to exclude overlapping spheres
+         const real_t dx = std::max(real_t(0), std::abs(pos[0] - boxCenter[0]) - boxHalfExtents[0]);
+         const real_t dy = std::max(real_t(0), std::abs(pos[1] - boxCenter[1]) - boxHalfExtents[1]);
+         return std::sqrt(dx * dx + dy * dy) >= maxSphereRadius;
       };
 
       real_t maxParticleHeight = real_c(0); // top of the sphere (i.e. maxPos + its radius)
@@ -294,10 +304,16 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
                           numParticles, maxParticleHeight, simParams->computed.particleScalingFactor);
 
       WALBERLA_LOG_INFO_ON_ROOT("Max particle height " << maxParticleHeight);
-      if ((simParams->computed.sinusOffset + simParams->computed.sinusAmplitude) > maxParticleHeight)
-         WALBERLA_ABORT("Created particle bed is below desired sinus shape!");
-      if (real_c(2) * simParams->computed.sinusAmplitude > (maxParticleHeight - simParams->computed.particleFixingHeight))
-         WALBERLA_ABORT("Created particle bed is not high enough for desired sinus shape!");
+      // TODO: these checks assume DEM dynamics are active; with useNoSlipParticles=true,
+      // fixingHeightFactor is set large to fix all particles, making particleFixingHeight >> maxParticleHeight
+      // and causing a false abort. Skip them when useNoSlipParticles=true.
+      if (!simParams->particle.useNoSlipParticles)
+      {
+         if ((simParams->computed.sinusOffset + simParams->computed.sinusAmplitude) > maxParticleHeight)
+            WALBERLA_ABORT("Created particle bed is below desired sinus shape!");
+         if (real_c(2) * simParams->computed.sinusAmplitude > (maxParticleHeight - simParams->computed.particleFixingHeight))
+            WALBERLA_ABORT("Created particle bed is not high enough for desired sinus shape!");
+      }
       if (simParams->particle.useNoSlipParticles && (simParams->computed.particleFixingHeight < maxParticleHeight))
          WALBERLA_ABORT("You are using no-slip BCs on particles (which does not set hydrodynamic forces) but do not "
                         "fix all particles - this leads to wrong behavior and is not permitted!")
@@ -319,11 +335,14 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    simObjs->numParticles = numParticles;
 
    WALBERLA_LOG_INFO_ON_ROOT("Total number of particles in the system: " << simObjs->numParticles << " (of which " << numFixedParticles << " are fixed)");
-   
+
 
    // create top and bottom planes --------------------------------------------------------
    createPlane(*simObjs->particleStorage, bf->getDomain().minCorner(), Vector3< real_t >(0, 0,  1));
    createPlane(*simObjs->particleStorage, bf->getDomain().maxCorner(), Vector3< real_t >(0, 0, -1));
+
+   // fixed Box obstacle matching CellInterval in BoundaryParameters (min <184,20,0>, max <215,39,119>)
+   createBox(*simObjs->particleStorage, boxCenter, real_t(2) * boxHalfExtents);
 
    // choose particle sync algorithm -----------------------------------------------------
    const real_t blockSyncExtension    = real_c(2.5);
@@ -334,7 +353,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       simObjs->syncCall = [&simObjs, blockSyncExtension]() {
          mesa_pd::mpi::SyncNextNeighbors{}(*simObjs->particleStorage, *simObjs->mesapdDomain, blockSyncExtension);
       };
-   } 
+   }
    else {
       WALBERLA_LOG_INFO_ON_ROOT("Using SyncGhostOwners for particles")
       simObjs->syncCall = [&simObjs, blockSyncExtension]() {
@@ -357,9 +376,9 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
       simObjs->blockForest, simObjs->pdfFieldID, simObjs->fillFieldID, simObjs->particleFieldID,
       simObjs->particleAccessor, HydrostaticDensityFtor(simObjs->acceleration, simParams->computed.absoluteLiquidHeight));
 
-   // initialize BCs (noSlip top/bottom) from config file
+   // initialize BCs from config (NoSlip top/bottom, BodyBC shapes defined in Antidunes.prm)
    simObjs->antidunesBoundaryHandling->initFromConfig(simParams->cfgPtr->getOneBlock("BoundaryParameters"));
-   
+
    // store the flagField and flagInfo handles in simObjs (only for convenience)
    simObjs->flagFieldID = simObjs->antidunesBoundaryHandling->getFlagFieldID();
    simObjs->flagInfo    = simObjs->antidunesBoundaryHandling->getFlagInfo();
@@ -372,16 +391,16 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
    {
       return ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
    };
-   
+
    // map particles onto LBM domain (this is for initilization. iterations happen in timeloopAfterParticles)
    if (simParams->particle.useNoSlipParticles) {
-      // sets noSlip flag (in flagField through boundaryhandling) for all cells inside the particle 
+      // sets noSlip flag (in flagField through boundaryhandling) for all cells inside the particle
       lbm_mesapd_coupling::ParticleMappingKernel< AntidunesBoundaryHandling_T::BoundaryHandling_T >
          kernel(simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID());
       simObjs->particleStorage->forEachParticle(false, sphereSelector, *simObjs->particleAccessor,
                                              kernel, *simObjs->particleAccessor,
                                              AntidunesBoundaryHandling_T::noSlipFlagID);
-   } 
+   }
    else {
       // same as above but it also stores the UID of the particle in particleFieldID (but no hydro forces are computed here)
       lbm_mesapd_coupling::MovingParticleMappingKernel< AntidunesBoundaryHandling_T::BoundaryHandling_T >
