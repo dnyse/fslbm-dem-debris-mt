@@ -242,9 +242,6 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    uint_t numParticles = uint_c(0);
    uint_t numFixedParticles = uint_c(0);
 
-   // Box pillar geometry — must match CellInterval in BoundaryParameters (min <184,20,0>, max <215,39,119>)
-   const Vector3< real_t > boxCenter(real_t(200), real_t(30), real_t(60));
-   const Vector3< real_t > boxHalfExtents(real_t(16), real_t(10), real_t(60));
 
    if (bfParams.loadSnapshot)
    {
@@ -284,15 +281,21 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    {
       simObjs->particleStorageID = bf->addBlockData(mesa_pd::domain::createBlockForestDataHandling(simObjs->particleStorage), "Particle Storage");
 
-      // Only create particles below the initialization profile and outside the box pillar
+      // Only create particles below the initialization profile and outside any pillar
       const real_t maxSphereRadius = real_t(0.5) * simParams->computed.avgParticleDiameter * real_t(1.1);
-      auto createParticleFct = [&simParams, &boxCenter, &boxHalfExtents, maxSphereRadius](Vector3< real_t > pos) {
+
+      auto createParticleFct = [simParams, maxSphereRadius](Vector3< real_t > pos) {
          if (pos[2] >= initializationProfile(pos[0], simParams->computed.sinusAmplitude, simParams->computed.sinusOffset, simParams->computed.sinusWavelength))
             return false;
-         // pillar spans the full z height; use nearest-point distance in x-y to exclude overlapping spheres
-         const real_t dx = std::max(real_t(0), std::abs(pos[0] - boxCenter[0]) - boxHalfExtents[0]);
-         const real_t dy = std::max(real_t(0), std::abs(pos[1] - boxCenter[1]) - boxHalfExtents[1]);
-         return std::sqrt(dx * dx + dy * dy) >= maxSphereRadius;
+         // pillars span the full z height; use nearest-point distance in x-y to exclude overlapping spheres
+         for (const auto& pillar : simParams->pillars)
+         {
+            const real_t dx = std::max(real_t(0), std::abs(pos[0] - pillar.center[0]) - pillar.halfExtents[0]);
+            const real_t dy = std::max(real_t(0), std::abs(pos[1] - pillar.center[1]) - pillar.halfExtents[1]);
+            if (std::sqrt(dx * dx + dy * dy) < maxSphereRadius)
+               return false;
+         }
+         return true;
       };
 
       real_t maxParticleHeight = real_c(0); // top of the sphere (i.e. maxPos + its radius)
@@ -341,8 +344,8 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    createPlane(*simObjs->particleStorage, bf->getDomain().minCorner(), Vector3< real_t >(0, 0,  1));
    createPlane(*simObjs->particleStorage, bf->getDomain().maxCorner(), Vector3< real_t >(0, 0, -1));
 
-   // fixed Box obstacle matching CellInterval in BoundaryParameters (min <184,20,0>, max <215,39,119>)
-   createBox(*simObjs->particleStorage, boxCenter, real_t(2) * boxHalfExtents);
+   for (const auto& pillar : simParams->pillars)
+      createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
 
    // choose particle sync algorithm -----------------------------------------------------
    const real_t blockSyncExtension    = real_c(2.5);

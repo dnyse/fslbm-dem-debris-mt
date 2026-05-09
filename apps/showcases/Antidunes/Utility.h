@@ -197,7 +197,7 @@ inline auto createBox(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& c
    p0->getBaseShapeRef()->updateMassAndInertia(real_t(1));
    p0->setOwner(walberla::mpi::MPIManager::instance()->rank());
    p0->setType(0);
-   p0->setInteractionRadius(real_t(0.5) * edgeLength.length());
+   p0->setInteractionRadius(std::numeric_limits< real_t >::infinity());
    mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::GLOBAL);
    mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::INFINITE);
    mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);

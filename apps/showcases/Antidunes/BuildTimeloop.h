@@ -52,7 +52,6 @@
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/Reconstructor.h"
 
 
-#include "mesa_pd/data/shape/Box.h"
 #include "mesa_pd/vtk/ParticleVtkOutput.h"
 
 #include "vtk/VTKOutput.h"
@@ -83,8 +82,6 @@ void addBeforeTimeStepVTKOutput(
       simObjs->pdfFieldID, simObjs->flagFieldID, simObjs->fillFieldID,
       BlockDataID{}, simObjs->curvatureFieldID,
       simObjs->normalFieldID, simObjs->obstacleNormalFieldID);
-
-   
    // triangle mesh of free surface ----------------------------------------
    // walberla::free_surface::SurfaceMeshWriter< ScalarField_T, FlagField_T > 
    //    surfaceMeshWriter(simObjs->blockForest, simObjs->fillFieldID, simObjs->flagFieldID, 
@@ -120,24 +117,6 @@ void addBeforeTimeStepVTKOutput(
       simParams->vtk.writeFrequency, simParams->vtk.baseFolder, std::string("simulation_step"),
       false, false, true, false, simObjs->beginTimeStep);
    timeloop->addFuncBeforeTimeStep(vtk::writeFiles(particleVTKOutput), "VTK: sphere data");
-
-   // Box pillar VTK — written as a point at box center with edgeLength attribute.
-   // In ParaView: Filters > Glyph, glyph type Box, scale by edgeLength to render the full solid shape.
-   struct SelectBoxEdgeLength {
-      using return_type = mesa_pd::Vec3;
-      mesa_pd::Vec3 operator()(const mesa_pd::data::Particle& p) const {
-         return static_cast< const mesa_pd::data::Box* >(p.getBaseShape().get())->getEdgeLength();
-      }
-   };
-   auto boxPointData = std::make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
-   boxPointData->addOutput< SelectBoxEdgeLength >("edgeLength");
-   boxPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
-      return pIt->getBaseShape()->getShapeType() == mesa_pd::data::Box::SHAPE_TYPE;
-   });
-   auto boxVTKOutput = vtk::createVTKOutput_PointData(boxPointData, "pillar",
-      simParams->vtk.writeFrequency, simParams->vtk.baseFolder, std::string("simulation_step"),
-      false, false, true, false, simObjs->beginTimeStep);
-   timeloop->addFuncBeforeTimeStep(vtk::writeFiles(boxVTKOutput), "VTK: pillar data");
 }
 
 void addSweepSurfaceGeometry(

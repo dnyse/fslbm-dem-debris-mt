@@ -1,6 +1,113 @@
-# Antidunes — Box Pillar Obstacle Changes
+# Antidunes — Change Log
 
-This document describes all changes made to add a fixed solid box pillar to the Antidunes simulation and the reference code each change is based on.
+---
+
+## Meeting 03
+
+### Goal
+Fix a SIGSEGV crash (fault address `0x18`) that occurred on the first call to `timeloopFSLBM->singleStep()` at `beginTimeStep = 0`.
+
+### Root cause (diagnosed)
+Progressive debug logging narrowed the crash to the box pillar VTK output added in Meeting 01. The execution order is:
+1. fluid field VTK ✓ (logged "done")
+2. sphere particle VTK ✓ (logged "done")
+3. box pillar VTK ✗ → SIGSEGV at address `0x18` before "done" was logged
+
+Address `0x18` = offset 24 from a null pointer = `inertiaBF_` in `BaseShape`. The crash occurred inside `vtk::writeFiles(boxVTKOutput)` — the exact internal call site (particle selector vs. `SelectBoxEdgeLength::operator()` vs. virtual `push()` dispatch) could not be pinpointed without a debug build with symbols on the cluster (GCC 8.5.0, no `-g` flag in the release build).
+
+### Fix
+
+**`BuildTimeloop.h`** — removed the entire box pillar VTK block (`SelectBoxEdgeLength`, `boxPointData`, `boxVTKOutput`, and the before-step registration). The pillar is not needed as a VTK point-data output: it appears as a zero-velocity void in every fluid field VTK slice, and its geometry is fully specified in `Antidunes.prm`. Also removed the `#include "mesa_pd/data/shape/Box.h"` that was only needed for this block.
+
+**`SetupStages.h`** — removed the debug `firstCall` shared_ptr and associated per-rank log from the `createParticleFct` lambda. Simplified the lambda capture from `[simParams, maxSphereRadius, firstCall]` back to `[simParams, maxSphereRadius]`.
+
+**`Antidunes.cpp`** — removed the post-VTK debug marker `addFuncBeforeTimeStep` that was added to identify the crash phase.
+
+---
+
+## Meeting 02
+
+### Goal
+Make pillar geometry configurable at runtime (no recompile) and support an arbitrary number of pillars.
+
+---
+
+### Changed Files
+
+#### 1. `SimulationParams.h`
+
+**Added `parsePillars()` helper:**
+```cpp
+inline std::vector< PillarParams > parsePillars(const shared_ptr< config::Config >& cfg)
+{
+   std::vector< PillarParams > result;
+   config::Config::Blocks blocks;
+   cfg->getOneBlock("Pillars").getBlocks("Pillar", blocks, 0, SIZE_MAX);
+   for (const auto& b : blocks)
+      result.emplace_back(b);
+   return result;
+}
+```
+
+Uses `Config::BlockHandle::getBlocks(key, blocks, min, max)` to collect all `Pillar` sub-blocks from the `Pillars` parent block. `min = 0` makes the list optional (zero pillars is valid).
+
+**Changed `PillarParams pillar` → `std::vector<PillarParams> pillars`** in `SimulationParams`, initialized via `parsePillars(cfg)`.
+
+---
+
+#### 2. `SetupStages.h` — `setupParticles()`
+
+Removed the two hardcoded local constants (`boxCenter`, `boxHalfExtents`).
+
+**`createParticleFct` lambda** now loops over all pillars:
+```cpp
+for (const auto& pillar : simParams->pillars)
+{
+   const real_t dx = std::max(real_t(0), std::abs(pos[0] - pillar.center[0]) - pillar.halfExtents[0]);
+   const real_t dy = std::max(real_t(0), std::abs(pos[1] - pillar.center[1]) - pillar.halfExtents[1]);
+   if (std::sqrt(dx * dx + dy * dy) < maxSphereRadius)
+      return false;
+}
+return true;
+```
+
+A sphere position is rejected if it falls within `maxSphereRadius` of **any** pillar.
+
+**`createBox()` call** replaced by a loop:
+```cpp
+for (const auto& pillar : simParams->pillars)
+   createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
+```
+
+---
+
+#### 3. `Antidunes.prm`
+
+Replaced the single `PillarParameters` block with a `Pillars` block containing one or more `Pillar` sub-blocks:
+
+```
+Pillars
+{
+   Pillar
+   {
+      center      < 200, 30, 60 >;
+      halfExtents < 16, 10, 60 >;
+   }
+   // add further Pillar { ... } blocks here for additional pillars
+}
+```
+
+**To add a second pillar:** add another `Pillar` sub-block and a matching `CellInterval` in `BoundaryParameters` (for the LBM no-slip boundary). The relationship is:
+- `CellInterval min = center - halfExtents`
+- `CellInterval max = center + halfExtents - 1`
+
+Zero `Pillar` blocks is valid — the simulation runs without any pillar.
+
+---
+
+## Meeting 01
+
+This section describes all changes made to add a fixed solid box pillar to the Antidunes simulation and the reference code each change is based on.
 
 ---
 
@@ -65,7 +172,7 @@ inline auto createBox(mesa_pd::data::ParticleStorage& ps,
    p0->getBaseShapeRef()->updateMassAndInertia(real_t(1));
    p0->setOwner(walberla::mpi::MPIManager::instance()->rank());
    p0->setType(0);
-   p0->setInteractionRadius(real_t(0.5) * edgeLength.length());
+   p0->setInteractionRadius(real_t(0.5) * edgeLength.length()); // use pythagoras here or infinity otherwise mpi issue!
    mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::GLOBAL);
    mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
    mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::INFINITE);

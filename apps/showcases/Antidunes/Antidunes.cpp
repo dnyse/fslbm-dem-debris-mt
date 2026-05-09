@@ -29,11 +29,11 @@
 #include "sqlite/SQLite.h"
 #include "timeloop/all.h"
 
-#include "BuildTimeloop.h" 
+#include "BuildTimeloop.h"
 #include "WriteData.h"
-#include "ParticleKernels.h" 
-#include "SimulationParams.h" 
-#include "SimulationObjects.h" 
+#include "ParticleKernels.h"
+#include "SimulationParams.h"
+#include "SimulationObjects.h"
 #include "SetupStages.h"
 
 namespace walberla {
@@ -65,7 +65,7 @@ int main(int argc, char** argv)
    simParams->computed.logOnRoot();
    simParams->computed.writeToFile(simParams->evaluation.baseFolderName);
 
-   // Setup simulation (initialize or load from snapshot) 
+   // Setup simulation (initialize or load from snapshot)
    // ----------------------------------------------------------------------------------------------------------------------------------
    setupBlockForest           (simParams, simObjs);
    setupSimState              (simParams, simObjs);   // beginTimestep + acceleration + pid
@@ -73,21 +73,21 @@ int main(int argc, char** argv)
    setupLBMFields             (simParams, simObjs);   // pdf + fill + excessMass
    setupSurfaceGeometryFields (simParams, simObjs);   // curvature + normal + obstacleNormal + smoothFill
    setupParticles             (simParams, simObjs);   // particleStorage + particleField
-   
+
    // Boundary handling and flags
    // ----------------------------------------------------------------------------------------------------------------------------------
    setupBoundaryHandling      (simParams, simObjs);
-   mapParticlesOntoCells      (simParams, simObjs);   // set solid cells in flagField (+ map UIDs to particleField)  
+   mapParticlesOntoCells      (simParams, simObjs);   // set solid cells in flagField (+ map UIDs to particleField)
 
    // Set liquid/interface/gas cells in flagField (must be called after all solid cells are set)
    // ----------------------------------------------------------------------------------------------------------------------------------
-   simObjs->antidunesBoundaryHandling->initFlagsFromFillLevel();  
+   simObjs->antidunesBoundaryHandling->initFlagsFromFillLevel();
 
    // Init forceDensity (requires valid fill + pdf + flag fields and acceleration)
    // ----------------------------------------------------------------------------------------------------------------------------------
    WALBERLA_LOG_INFO_ON_ROOT("Initializing force density field");
    walberla::free_surface::initForceDensityFieldCodegen< PdfField_T, FlagField_T, VectorFieldFlattened_T, ScalarField_T >(
-      simObjs->blockForest, simObjs->forceDensityFieldID, simObjs->fillFieldID, simObjs->pdfFieldID, simObjs->flagFieldID, 
+      simObjs->blockForest, simObjs->forceDensityFieldID, simObjs->fillFieldID, simObjs->pdfFieldID, simObjs->flagFieldID,
       simObjs->flagInfo, *simObjs->acceleration);
 
    // Communicate after initialization
@@ -109,17 +109,17 @@ int main(int argc, char** argv)
    timeloopFSLBM->setCurrentTimeStep(simObjs->beginTimeStep);
    timeloopAfterDEM->setCurrentTimeStep(simObjs->beginTimeStep);
    timeloopEval->setCurrentTimeStep(simObjs->beginTimeStep);
-   
+
    // Before timestep -----------------------------------------------------
    addBeforeTimeStepVTKOutput          (simParams, simObjs, timeloopFSLBM);
 
    // FSLBM ---------------------------------------------------------------
    addSweepSurfaceGeometry             (simParams, simObjs, timeloopFSLBM);
    addSweepSurfaceDynamics             (simParams, simObjs, timeloopFSLBM);
-   
+
    // LBM-DEM coupling ----------------------------------------------------
    addSweepFluidParticleCoupling       (simParams, simObjs, timeloopAfterDEM);
-   
+
    // DEM -----------------------------------------------------------------
    ParticleKernels< ParticleAccessor_T > particleKernels(simParams, simObjs);
 

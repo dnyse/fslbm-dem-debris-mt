@@ -1,5 +1,5 @@
 BedGeneration{
-    domainSize_SI < 0.8, 0.015, 0.2 >;
+    domainSize_SI < 0.032, 0.015, 0.15 >;
     blocks < 3, 3, 1 >;
     diameter_SI 0.0029;
     gravity_SI 9.81;

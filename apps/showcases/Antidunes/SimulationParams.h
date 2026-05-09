@@ -127,6 +127,30 @@ struct ParticleParams {
    {}
 };
 
+struct PillarParams {
+   Vector3< real_t > center;
+   Vector3< real_t > halfExtents;
+
+   PillarParams(const config::Config::BlockHandle& b)
+   {
+      center      = b.getParameter< Vector3< real_t > >("center");
+      halfExtents = b.getParameter< Vector3< real_t > >("halfExtents");
+   }
+};
+
+inline std::vector< PillarParams > parsePillars(const shared_ptr< config::Config >& cfg)
+{
+   std::vector< PillarParams > result;
+   config::Config::Blocks containers;
+   cfg->getBlocks("Pillars", containers, 0, 1);
+   if (containers.empty()) return result;
+   config::Config::Blocks pillarBlocks;
+   containers[0].getBlocks("Pillar", pillarBlocks, 0, 100);
+   for (const auto& b : pillarBlocks)
+      result.emplace_back(b);
+   return result;
+}
+
 struct ModelParams {
    std::string pdfReconstructionModel;
    std::string pdfRefillingModel;
@@ -299,8 +323,9 @@ struct SimulationParams {
    DomainParams      domain;
    PIDParams         pid;
    PhysicsParams     physics;
-   ParticleParams    particle;
-   ModelParams       model;
+   ParticleParams             particle;
+   std::vector< PillarParams > pillars;
+   ModelParams                model;
    EvaluationParams  evaluation;
    VTKParams         vtk;
 
@@ -314,6 +339,7 @@ struct SimulationParams {
       , pid          { cfg->getOneBlock("PIDParameters") }
       , physics      { cfg->getOneBlock("PhysicsParameters") }
       , particle     { cfg->getOneBlock("ParticleParameters") }
+      , pillars      { parsePillars(cfg) }
       , model        { cfg->getOneBlock("ModelParameters") }
       , evaluation   { cfg->getOneBlock("EvaluationParameters") }
       , vtk          { cfg->getOneBlock("VTK") }
