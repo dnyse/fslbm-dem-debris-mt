@@ -29,6 +29,7 @@
 #include "lbm_mesapd_coupling/utility/ResetHydrodynamicForceTorqueKernel.h"
 
 #include "mesa_pd/collision_detection/AnalyticContactDetection.h"
+#include "mesa_pd/data/shape/CylindricalBoundary.h"
 #include "mesa_pd/data/ParticleStorage.h"
 #include "mesa_pd/domain/BlockForestDomain.h"
 #include "mesa_pd/kernel/DoubleCast.h"
@@ -41,18 +42,69 @@
 #include "mesa_pd/mpi/notifications/ForceTorqueNotification.h"
 #include "mesa_pd/mpi/notifications/HydrodynamicForceTorqueNotification.h"
 
-#include "SimulationParams.h" 
-#include "SimulationObjects.h" 
+#include "SimulationParams.h"
+#include "SimulationObjects.h"
 
 
 namespace walberla {
 namespace antidunes {
 
+// Subclass that hides the hollow-cylinder overload of AnalyticContactDetection with exterior
+// (solid cylinder) contact math. DoubleCast deduces the concrete functor type, so C++ overload
+// resolution picks this method instead of the base-class version.
+class SolidCylinderContactDetection : public mesa_pd::collision_detection::AnalyticContactDetection
+{
+public:
+   using AnalyticContactDetection::operator(); // prevent name hiding of all base overloads
+
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::Sphere& s,
+                   const mesa_pd::data::CylindricalBoundary& cb,
+                   Accessor& ac)
+   {
+      getIdx1() = idx1;
+      getIdx2() = idx2;
+
+      const auto& posSphere = ac.getPosition(idx1);
+      const auto& posCyl    = ac.getPosition(idx2);
+      const auto& axis      = cb.getAxis();
+
+      // Radial vector from cylinder axis to sphere center (component perpendicular to axis)
+      const mesa_pd::Vec3 delta  = posSphere - posCyl;
+      const mesa_pd::Vec3 radial = delta - (delta * axis) * axis;
+      const real_t dist          = radial.length();
+
+      const real_t separation = dist - cb.getRadius() - s.getRadius();
+      if (separation < getContactThreshold())
+      {
+         getPenetrationDepth() = separation;
+         // Normal points radially outward from the cylinder axis toward the sphere
+         getContactNormal() = (dist > real_t(1e-10))
+                                 ? radial / dist
+                                 : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+         getContactPoint() = posSphere - (s.getRadius() + getPenetrationDepth()) * getContactNormal();
+         return true;
+      }
+      return false;
+   }
+
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::CylindricalBoundary& cb,
+                   const mesa_pd::data::Sphere& s,
+                   Accessor& ac)
+   {
+      return operator()(idx2, idx1, s, cb, ac);
+   }
+};
+
+
 class ComputeLubrication {
 public:
    ComputeLubrication(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain, real_t viscosity)
       : domain_(domain)
-      , lubricationCorrectionKernel_(viscosity, 
+      , lubricationCorrectionKernel_(viscosity,
          [](real_t r) { return (real_c(0.001) + real_c(0.00007) * r) * r; })
    {}
 
@@ -84,17 +136,20 @@ private:
 
 class ComputeContacts {
 public:
-   ComputeContacts(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain, 
-      real_t restitutionCoefficient, real_t kappa, 
-      real_t collisionTime, real_t particleTimestepSize, real_t frictionCoefficient)
+   ComputeContacts(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain,
+      real_t restitutionCoefficient, real_t kappa,
+      real_t collisionTime, real_t particleTimestepSize, real_t frictionCoefficient,
+      uint_t numParticleTypes = uint_t(2))
       : domain_(domain)
-      , collisionResponse_(1)
+      , collisionResponse_(numParticleTypes)
       , restitutionCoefficient_(restitutionCoefficient)
       , kappa_(kappa)
       , collisionTime_(collisionTime)
       , particleTimestepSize_(particleTimestepSize)
    {
-      collisionResponse_.setFrictionCoefficientDynamic(size_t(0), size_t(0), frictionCoefficient);
+      for (uint_t t = 0; t < numParticleTypes; ++t)
+         for (uint_t u = t; u < numParticleTypes; ++u)
+            collisionResponse_.setFrictionCoefficientDynamic(t, u, frictionCoefficient);
    }
 
    template< typename ParticleAccessor_T >
@@ -103,8 +158,27 @@ public:
       {
          if (contact_filter_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), *domain_))
          {
+            // Detect degenerate contact geometry that would corrupt DEM integration
+            const auto& n = acd_.getContactNormal();
+            if (std::isnan(n[0]) || std::isnan(n[1]) || std::isnan(n[2]))
+            {
+               const auto s1 = ac.getBaseShape(acd_.getIdx1())
+                                  ? ac.getBaseShape(acd_.getIdx1())->getShapeType() : uint_t(999);
+               const auto s2 = ac.getBaseShape(acd_.getIdx2())
+                                  ? ac.getBaseShape(acd_.getIdx2())->getShapeType() : uint_t(999);
+               WALBERLA_LOG_WARNING_ON_ROOT(
+                  "[ComputeContacts] NaN contact normal detected! "
+                  "type(" << ac.getType(acd_.getIdx1()) << ",shapeType=" << s1 << ") pos=" << ac.getPosition(acd_.getIdx1()) << " <-> "
+                  "type(" << ac.getType(acd_.getIdx2()) << ",shapeType=" << s2 << ") pos=" << ac.getPosition(acd_.getIdx2()) << " | "
+                  "normal=" << n << " penetration=" << acd_.getPenetrationDepth());
+               return; // skip this contact to avoid NaN propagation
+            }
+
             auto meff = real_c(1) / (ac.getInvMass(idx1) + ac.getInvMass(idx2));
-            collisionResponse_.setStiffnessAndDamping(0, 0, restitutionCoefficient_, collisionTime_, kappa_, meff);
+            // Set stiffness for the actual type pair involved in this contact
+            const uint_t t1 = std::min(ac.getType(acd_.getIdx1()), ac.getType(acd_.getIdx2()));
+            const uint_t t2 = std::max(ac.getType(acd_.getIdx1()), ac.getType(acd_.getIdx2()));
+            collisionResponse_.setStiffnessAndDamping(t1, t2, restitutionCoefficient_, collisionTime_, kappa_, meff);
             collisionResponse_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), acd_.getContactNormal(),
                               acd_.getPenetrationDepth(), particleTimestepSize_);
          }
@@ -114,7 +188,7 @@ public:
 private:
    std::shared_ptr< mesa_pd::domain::BlockForestDomain >    domain_;
    mesa_pd::kernel::LinearSpringDashpot                     collisionResponse_;
-   mesa_pd::collision_detection::AnalyticContactDetection   acd_;
+   SolidCylinderContactDetection                            acd_;
    mesa_pd::kernel::DoubleCast                              double_cast_;
    mesa_pd::mpi::ContactFilter                              contact_filter_;
 
@@ -127,8 +201,9 @@ private:
 
 class AddExternalForces {
 public:
-   AddExternalForces(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain, 
-      const std::shared_ptr< Vector3< real_t > >& acceleration, real_t particleDensityRatio)
+   AddExternalForces(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain,
+      const std::shared_ptr< Vector3< real_t > >& acceleration,
+      real_t particleDensityRatio)
       : domain_(domain)
       , acceleration_(acceleration)
       , particleDensityRatio_(particleDensityRatio)
@@ -136,9 +211,13 @@ public:
 
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx, ParticleAccessor_T& ac){
-      // Buoyancy is removed only from the Z component because the hydrostaic contrbution removed during MEM is only applied in Z 
-      Vector3< real_t > bodyForce =  ac.getVolume(idx) * Vector3< real_t >(
-         (*acceleration_)[0], (*acceleration_)[1], (particleDensityRatio_ - real_c(1)) * (*acceleration_)[2]);
+      // Buoyancy is removed only from the Z component because the hydrostatic contribution removed during MEM is only applied in Z
+      // Type 1 = floating sphere; derive its density ratio from invMass×volume (baked in at creation)
+      const real_t rho = (ac.getType(idx) == uint_t(1))
+         ? real_t(1) / (ac.getInvMass(idx) * ac.getVolume(idx))
+         : particleDensityRatio_;
+      Vector3< real_t > bodyForce = ac.getVolume(idx) * Vector3< real_t >(
+         (*acceleration_)[0], (*acceleration_)[1], (rho - real_c(1)) * (*acceleration_)[2]);
 
       mesa_pd::addForceAtomic(idx, ac, ac.getHydrodynamicForce(idx) + bodyForce);
       mesa_pd::addTorqueAtomic(idx, ac, ac.getHydrodynamicTorque(idx));
@@ -155,8 +234,8 @@ private:
 template< typename ParticleAccessor_T >
 class ParticleKernels{
 public:
-   ParticleKernels(const std::shared_ptr< const SimulationParams >& simParams, 
-      const std::shared_ptr< SimulationObjects >& simObjs) 
+   ParticleKernels(const std::shared_ptr< const SimulationParams >& simParams,
+      const std::shared_ptr< SimulationObjects >& simObjs)
       : particleAccessor(simObjs->particleAccessor)
       , particleStorage(simObjs->particleStorage)
       , syncCall(simObjs->syncCall)
@@ -165,14 +244,15 @@ public:
       , computeLubrication(simObjs->mesapdDomain, simParams->computed.viscosity)
       , computeContacts(
          simObjs->mesapdDomain,
-         simParams->particle.restitutionCoefficient, 
-         simParams->computed.particleKappa, 
-         simParams->computed.particleCollisionTime, 
-         simParams->computed.particleTimestepSize, 
-         simParams->particle.frictionCoefficient)
+         simParams->particle.restitutionCoefficient,
+         simParams->computed.particleKappa,
+         simParams->computed.particleCollisionTime,
+         simParams->computed.particleTimestepSize,
+         simParams->particle.frictionCoefficient,
+         uint_t(3))
       , addExternalForces(
-         simObjs->mesapdDomain, 
-         simObjs->acceleration, 
+         simObjs->mesapdDomain,
+         simObjs->acceleration,
          simParams->particle.densityRatio)
       , useLubricationCorrection(simParams->particle.useLubricationCorrection)
    {}
@@ -201,7 +281,7 @@ public:
 
       tp["MESAPD: AverageHydrodynamicForceTorqueKernel"].start();
       particleStorage->forEachParticle(useOpenMP,
-         mesa_pd::kernel::SelectLocal(), *particleAccessor, 
+         mesa_pd::kernel::SelectLocal(), *particleAccessor,
          lbm_mesapd_coupling::AverageHydrodynamicForceTorqueKernel{}, *particleAccessor);
       tp["MESAPD: AverageHydrodynamicForceTorqueKernel"].end();
    }
@@ -216,7 +296,7 @@ public:
             mesa_pd::kernel::SelectLocal(), *particleAccessor,
             vvIntegratorPreForce, *particleAccessor);
          tp["MESAPD: VelocityVerletPreForceUpdate"].end();
-         
+
          // synchronize -----------------------------------------------------------------
          tp["MESAPD: syncCall 1"].start();
          syncCall();
@@ -227,7 +307,7 @@ public:
          {
             tp["MESAPD: ComputeLubrication"].start();
             particleStorage->forEachParticlePairHalf(useOpenMP,
-               mesa_pd::kernel::ExcludeInfiniteInfinite(), *particleAccessor, 
+               mesa_pd::kernel::ExcludeInfiniteInfinite(), *particleAccessor,
                computeLubrication, *particleAccessor);
             tp["MESAPD: ComputeLubrication"].end();
          }
@@ -235,7 +315,7 @@ public:
          // compute contact forces ------------------------------------------------------
          tp["MESAPD: ComputeContacts"].start();
          particleStorage->forEachParticlePairHalf(useOpenMP,
-            mesa_pd::kernel::ExcludeInfiniteInfinite(), *particleAccessor, 
+            mesa_pd::kernel::ExcludeInfiniteInfinite(), *particleAccessor,
             computeContacts, *particleAccessor);
          tp["MESAPD: ComputeContacts"].end();
 
@@ -247,7 +327,7 @@ public:
          // add external forces ---------------------------------------------------------
          tp["MESAPD: AddExternalForces"].start();
          particleStorage->forEachParticle(useOpenMP,
-            mesa_pd::kernel::SelectLocal(), *particleAccessor, 
+            mesa_pd::kernel::SelectLocal(), *particleAccessor,
             addExternalForces, *particleAccessor);
          tp["MESAPD: AddExternalForces"].end();
 
@@ -275,7 +355,7 @@ private:
    std::shared_ptr< mesa_pd::data::ParticleStorage >  particleStorage;
    std::function< void() >                            syncCall;
    bool useOpenMP{ false };
-   
+
    // kernels -------------------------------------------------------------
    mesa_pd::kernel::VelocityVerletPreForceUpdate vvIntegratorPreForce;
    mesa_pd::kernel::VelocityVerletPostForceUpdate vvIntegratorPostForce;

@@ -132,20 +132,27 @@ int main(int argc, char** argv)
 
    WcTimingPool timingPool;
 
-   WALBERLA_LOG_INFO_ON_ROOT("beginTimeStep: " << simObjs->beginTimeStep);
+   WALBERLA_LOG_INFO_ON_ROOT("beginTimeStep: " << simObjs->beginTimeStep << " / " << simParams->physics.timesteps);
    // ----------------------------------------------------------------------------------------------------------------------------------
    for (uint_t t = simObjs->beginTimeStep; t != simParams->physics.timesteps; ++t)
    {
+      WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] FSLBM step");
       timeloopFSLBM->singleStep(timingPool, true);
+
+      WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] DEM sub-cycles");
       particleKernels.reduceAndAvgHydroForces(timingPool, t==0);
       particleKernels.doDEMSubCycles(timingPool, simParams->particle.numSubCycles);
       particleKernels.resetHydroForces(timingPool);
+
+      WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] LBM-DEM coupling");
       timeloopAfterDEM->singleStep(timingPool, true);
+
+      WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] Evaluators");
       timeloopEval->singleStep(timingPool, true);
 
       if (t % simParams->evaluation.evaluationFrequency == uint_c(0) && t > uint_c(0))
       {
-         WALBERLA_LOG_INFO_ON_ROOT(t << " - acceleration: " << (*simObjs->acceleration)[0] << ", meanVelocity: " << (*simObjs->meanVelocity)[0]);
+         WALBERLA_LOG_INFO_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] acceleration: " << (*simObjs->acceleration)[0] << ", meanVelocity: " << (*simObjs->meanVelocity)[0]);
          writeFluidInfo(simParams, simObjs, t);
 
          WALBERLA_ROOT_SECTION()
@@ -159,12 +166,14 @@ int main(int argc, char** argv)
 
       if (t % simParams->evaluation.performanceLogFrequency == uint_c(0) && t > uint_c(0))
       {
+         WALBERLA_LOG_INFO_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] Performance log");
          timingPool.logResultOnRoot();
       }
 
       if (simParams->blockForest.storeSnapshot &&
          t % simParams->blockForest.snapshotFrequency == uint_c(0) && t > uint_c(0))
       {
+         WALBERLA_LOG_INFO_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] Writing checkpoint");
          writeCheckpoint(simParams, simObjs, t);
       }
    }

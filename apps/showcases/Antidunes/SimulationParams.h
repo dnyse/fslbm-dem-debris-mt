@@ -26,6 +26,7 @@
 
 #include "Utility.h"
 
+
 namespace walberla {
 namespace antidunes {
 
@@ -138,6 +139,30 @@ struct PillarParams {
    }
 };
 
+struct CylinderPillarParams {
+   Vector3< real_t > center;
+   real_t            radius;
+
+   CylinderPillarParams(const config::Config::BlockHandle& b)
+   {
+      center = b.getParameter< Vector3< real_t > >("center");
+      radius = b.getParameter< real_t >           ("radius");
+   }
+};
+
+struct FloatingSphereParams {
+   Vector3< real_t > position;
+   real_t            radius;
+   real_t            densityRatio;
+
+   FloatingSphereParams(const config::Config::BlockHandle& b)
+   {
+      position     = b.getParameter< Vector3< real_t > >("position");
+      radius       = b.getParameter< real_t >           ("radius");
+      densityRatio = b.getParameter< real_t >           ("densityRatio");
+   }
+};
+
 inline std::vector< PillarParams > parsePillars(const shared_ptr< config::Config >& cfg)
 {
    std::vector< PillarParams > result;
@@ -147,6 +172,32 @@ inline std::vector< PillarParams > parsePillars(const shared_ptr< config::Config
    config::Config::Blocks pillarBlocks;
    containers[0].getBlocks("Pillar", pillarBlocks, 0, 100);
    for (const auto& b : pillarBlocks)
+      result.emplace_back(b);
+   return result;
+}
+
+inline std::vector< CylinderPillarParams > parseCylinderPillars(const shared_ptr< config::Config >& cfg)
+{
+   std::vector< CylinderPillarParams > result;
+   config::Config::Blocks containers;
+   cfg->getBlocks("CylinderPillars", containers, 0, 1);
+   if (containers.empty()) return result;
+   config::Config::Blocks pillarBlocks;
+   containers[0].getBlocks("CylinderPillar", pillarBlocks, 0, 100);
+   for (const auto& b : pillarBlocks)
+      result.emplace_back(b);
+   return result;
+}
+
+inline std::vector< FloatingSphereParams > parseFloatingSpheres(const shared_ptr< config::Config >& cfg)
+{
+   std::vector< FloatingSphereParams > result;
+   config::Config::Blocks containers;
+   cfg->getBlocks("FloatingSpheres", containers, 0, 1);
+   if (containers.empty()) return result;
+   config::Config::Blocks sphereBlocks;
+   containers[0].getBlocks("FloatingSphere", sphereBlocks, 0, 100);
+   for (const auto& b : sphereBlocks)
       result.emplace_back(b);
    return result;
 }
@@ -323,9 +374,11 @@ struct SimulationParams {
    DomainParams      domain;
    PIDParams         pid;
    PhysicsParams     physics;
-   ParticleParams             particle;
-   std::vector< PillarParams > pillars;
-   ModelParams                model;
+   ParticleParams                       particle;
+   std::vector< PillarParams >          pillars;
+   std::vector< CylinderPillarParams >  cylinderPillars;
+   std::vector< FloatingSphereParams >  floatingSpheres;
+   ModelParams       model;
    EvaluationParams  evaluation;
    VTKParams         vtk;
 
@@ -339,7 +392,9 @@ struct SimulationParams {
       , pid          { cfg->getOneBlock("PIDParameters") }
       , physics      { cfg->getOneBlock("PhysicsParameters") }
       , particle     { cfg->getOneBlock("ParticleParameters") }
-      , pillars      { parsePillars(cfg) }
+      , pillars          { parsePillars(cfg) }
+      , cylinderPillars  { parseCylinderPillars(cfg) }
+      , floatingSpheres  { parseFloatingSpheres(cfg) }
       , model        { cfg->getOneBlock("ModelParameters") }
       , evaluation   { cfg->getOneBlock("EvaluationParameters") }
       , vtk          { cfg->getOneBlock("VTK") }

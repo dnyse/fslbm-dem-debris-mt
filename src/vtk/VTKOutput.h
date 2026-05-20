@@ -316,8 +316,8 @@ private:
    const bool forcePVTU_;
          bool configured_;
          bool uniformGrid_;
-         bool amrFileFormat_;
-         bool oneFilePerProcess_;
+         bool amrFileFormat_      = false;
+         bool oneFilePerProcess_  = false;
 
    const uint_t ghostLayers_;
 

@@ -287,12 +287,20 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       auto createParticleFct = [simParams, maxSphereRadius](Vector3< real_t > pos) {
          if (pos[2] >= initializationProfile(pos[0], simParams->computed.sinusAmplitude, simParams->computed.sinusOffset, simParams->computed.sinusWavelength))
             return false;
-         // pillars span the full z height; use nearest-point distance in x-y to exclude overlapping spheres
+         // box pillars: nearest-point distance in XY
          for (const auto& pillar : simParams->pillars)
          {
             const real_t dx = std::max(real_t(0), std::abs(pos[0] - pillar.center[0]) - pillar.halfExtents[0]);
             const real_t dy = std::max(real_t(0), std::abs(pos[1] - pillar.center[1]) - pillar.halfExtents[1]);
             if (std::sqrt(dx * dx + dy * dy) < maxSphereRadius)
+               return false;
+         }
+         // cylinder pillars: radial distance in XY
+         for (const auto& pillar : simParams->cylinderPillars)
+         {
+            const real_t dx = pos[0] - pillar.center[0];
+            const real_t dy = pos[1] - pillar.center[1];
+            if (std::sqrt(dx * dx + dy * dy) < pillar.radius + maxSphereRadius)
                return false;
          }
          return true;
@@ -345,7 +353,33 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    createPlane(*simObjs->particleStorage, bf->getDomain().maxCorner(), Vector3< real_t >(0, 0, -1));
 
    for (const auto& pillar : simParams->pillars)
-      createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
+   {
+      auto p = createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
+      p->setType(2);
+   }
+
+   for (const auto& pillar : simParams->cylinderPillars)
+   {
+      createCylinder(*simObjs->particleStorage, pillar.center, pillar.radius);
+   }
+
+   for (const auto& fsp : simParams->floatingSpheres)
+   {
+      const mesa_pd::Vec3 pos(fsp.position[0], fsp.position[1], fsp.position[2]);
+      if (simObjs->mesapdDomain->isContainedInProcessSubdomain(
+            uint_c(mpi::MPIManager::instance()->rank()), pos))
+      {
+         auto p = simObjs->particleStorage->create(false);
+         p->setPosition(pos);
+         p->setBaseShape(std::make_shared< mesa_pd::data::Sphere >(fsp.radius));
+         p->getBaseShapeRef()->updateMassAndInertia(fsp.densityRatio);
+         p->setOwner(mpi::MPIManager::instance()->rank());
+         p->setType(1);
+         p->setInteractionRadius(fsp.radius);
+      }
+      WALBERLA_LOG_INFO_ON_ROOT("Created floating sphere: radius=" << fsp.radius
+         << " densityRatio=" << fsp.densityRatio << " position=" << pos);
+   }
 
    // choose particle sync algorithm -----------------------------------------------------
    const real_t blockSyncExtension    = real_c(2.5);
@@ -379,7 +413,7 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
       simObjs->blockForest, simObjs->pdfFieldID, simObjs->fillFieldID, simObjs->particleFieldID,
       simObjs->particleAccessor, HydrostaticDensityFtor(simObjs->acceleration, simParams->computed.absoluteLiquidHeight));
 
-   // initialize BCs from config (NoSlip top/bottom, BodyBC shapes defined in Antidunes.prm)
+   // initialize BCs from config (NoSlip top/bottom, CellInterval pillar defined in Antidunes.prm)
    simObjs->antidunesBoundaryHandling->initFromConfig(simParams->cfgPtr->getOneBlock("BoundaryParameters"));
 
    // store the flagField and flagInfo handles in simObjs (only for convenience)

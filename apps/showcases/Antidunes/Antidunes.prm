@@ -31,7 +31,7 @@ PIDParameters
 PhysicsParameters
 {
    enableWetting     false;
-   timesteps         2000000;
+   timesteps         100000;
    Re                3100;       // [E1=3100, E2=3772, E3=4180, E4=4800]
    Fr                1.31;       // [E1=1.31, E2=1.38, E3=1.44, E4=1.45]
    We                15.6188;    // [E1=15.6188, E2=21.48, E3=25.54, E4=30.2493]
@@ -51,16 +51,41 @@ ParticleParameters
    useNoSlipParticles false;
 }
 
+// Box pillars: both DEM (FixedBox) and LBM (NoSlip CellInterval) use rectangular geometry.
+// Add or remove Pillar blocks to change the number of box pillars (zero is valid).
 Pillars
 {
-   // Each Pillar block defines one box obstacle in lattice units.
-   // center and half-extents must stay consistent with the corresponding
-   // CellInterval in BoundaryParameters (min = center - halfExtents, max = center + halfExtents - 1).
-   // Add or remove Pillar blocks to change the number of pillars (zero is valid).
-   Pillar
+   Pillar   // left pillar: Y=0-22, extends from Y=0 wall
    {
-      center      < 64, 30, 60 >;
-      halfExtents < 16, 10, 60 >;
+      center      < 64, 11.5, 60 >;
+      halfExtents < 16, 11.5, 60 >;
+   }
+   Pillar   // right pillar: Y=37-59, slit = Y=23-36 (14 cells = 7*2, floater diameter=16 cannot pass)
+   {
+      center      < 64, 48.5, 60 >;
+      halfExtents < 16, 11.5, 60 >;
+   }
+}
+
+// Cylinder pillars: DEM uses CylindricalBoundary (exterior contact via SolidCylinderContactDetection);
+// LBM uses a Body block with shape Cylinder in BoundaryParameters (see below).
+// The cylinder spans the full domain height; end caps are the floor/ceiling NoSlip planes.
+//CylinderPillars
+//{
+//   CylinderPillar
+//   {
+//      center < 64, 30, 60 >;   // XY position of the axis; Z is ignored for DEM (infinite along Z)
+//      radius 10;
+//   }
+//}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      position     < 15, 30, 47 >;
+      radius       8;
+      densityRatio 0.5;
    }
 }
 
@@ -91,35 +116,18 @@ StabilityChecker
 
 BoundaryParameters
 {
-   // X
-   //Border { direction W;  walldistance -1; NoSlip{} }
-   //Border { direction E;  walldistance -1; NoSlip{} }
-
-   // Y
-   //Border { direction N;  walldistance -1; NoSlip{} }
-   //Border { direction S;  walldistance -1; NoSlip{} }
-
-   // Z
+   // Z walls
    Border { direction T;  walldistance -1; NoSlip{} }
    Border { direction B;  walldistance -1; NoSlip{} }
 
-   // Circular pillar: center (200,30), radius 10 lu, full z height
-   //BodyBC
-   //{
-   //   shape cylinder;
-    //  min < 200, 30, 0 >;
-    //  max < 200, 30, 120 >;
-    //  radius 10;
-    //  NoSlip {}
-   //}
+   // Box pillar NoSlip: CellInterval min = center - halfExtents, max = center + halfExtents - 1
+   // Left:  center <64,11.5,60>, halfExtents <16,11.5,60> → Y=0-22
+   CellInterval { min < 48,  0, 0 >; max < 79, 22, 119 >; NoSlip{} }
+   // Right: center <64,48.5,60>, halfExtents <16,11.5,60> → Y=37-59, slit Y=23-36 (14 cells = 7*2)
+   CellInterval { min < 48, 37, 0 >; max < 79, 59, 119 >; NoSlip{} }
 
-   //Option B: rectangular pillar via CellInterval (commented out)
-   CellInterval
-   {
-      min < 48, 20, 0 >;
-      max < 79, 39, 119 >;
-      NoSlip {}
-   }
+   // Cylinder pillar NoSlip: min/max are the axis endpoints (bottom and top of the cylinder).
+   // BodyBC { shape Cylinder; min < 64, 30, 0 >; max < 64, 30, 120 >; radius 10; NoSlip{} }
 }
 
 MeshOutputParameters
@@ -155,20 +163,19 @@ VTK
       // X-Z midplane (y = 30, cuts through pillar centre)
       CellBB_filter_0 {
          min < 0, 29, 0 >;
-         max < 128, 30, 120 >;
+         max < 128, 30, 150 >;
       }
 
       // Y-Z inlet plane
       CellBB_filter_1 {
          min < 0, 0, 0 >;
-         max < 1, 60, 120 >;
+         max < 1, 60, 150 >;
       }
 
       // X-Y-Z volume around pillar: full domain in x and y, full z height
-      // pillar occupies x: 48-79, y: 20-39 — slice at any z in ParaView to see flow around pillar
       CellBB_filter_2 {
          min < 0, 0, 0 >;
-         max < 128, 60, 120 >;
+         max < 128, 60, 150 >;
       }
 
       inclusion_filters

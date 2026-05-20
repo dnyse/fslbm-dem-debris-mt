@@ -28,6 +28,7 @@ CMAKE_MINIMUM_REQUIRED (VERSION 3.26)
 PROJECT ( walberla )
 
 set ( CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${walberla_SOURCE_DIR}/cmake ${walberla_SOURCE_DIR}/cmake/compileroptions )
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include ( waLBerlaFunctions )
 

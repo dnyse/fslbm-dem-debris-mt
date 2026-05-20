@@ -23,6 +23,7 @@
 
 #include "mesa_pd/data/ParticleStorage.h"
 #include "mesa_pd/data/shape/Box.h"
+#include "mesa_pd/data/shape/CylindricalBoundary.h"
 #include "mesa_pd/data/shape/HalfSpace.h"
 #include "mesa_pd/data/shape/Sphere.h"
 
@@ -197,6 +198,26 @@ inline auto createBox(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& c
    p0->getBaseShapeRef()->updateMassAndInertia(real_t(1));
    p0->setOwner(walberla::mpi::MPIManager::instance()->rank());
    p0->setType(0);
+   p0->setInteractionRadius(std::numeric_limits< real_t >::infinity());
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::GLOBAL);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::INFINITE);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::NON_COMMUNICATING);
+   return p0;
+}
+
+// Fixed-mass cylinder using CylindricalBoundary shape — repurposed for solid exterior contact via
+// SolidCylinderContactDetection. axis should be normalised (e.g. Z-axis for a vertical pillar).
+// End caps are handled by the existing floor/ceiling HalfSpace planes.
+inline auto createCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center,
+                           real_t radius, const mesa_pd::Vec3& axis = mesa_pd::Vec3(0, 0, 1))
+{
+   auto p0 = ps.create(true);
+   p0->setPosition(center);
+   p0->setBaseShape(std::make_shared< mesa_pd::data::CylindricalBoundary >(radius, axis));
+   p0->getBaseShapeRef()->updateMassAndInertia(real_t(1));
+   p0->setOwner(walberla::mpi::MPIManager::instance()->rank());
+   p0->setType(2);
    p0->setInteractionRadius(std::numeric_limits< real_t >::infinity());
    mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::GLOBAL);
    mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::INFINITE);

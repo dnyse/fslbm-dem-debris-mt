@@ -2,7 +2,148 @@
 
 ---
 
-## Meeting 03
+## Meeting 02
+
+### Goals
+- Fix a NaN quaternion crash when running with a floating sphere obstacle
+- Replace box pillar with a cylindrical pillar supported in both DEM and LBM
+
+---
+
+### 1. `ParticleKernels.h` — NaN contact normal guard
+
+**Added NaN check in `ComputeContacts::operator()`** before applying the contact response:
+
+```cpp
+const auto& n = acd_.getContactNormal();
+if (std::isnan(n[0]) || std::isnan(n[1]) || std::isnan(n[2]))
+{
+   WALBERLA_LOG_WARNING_ON_ROOT("[ComputeContacts] NaN contact normal detected! ...");
+   return; // skip this contact to avoid NaN propagation
+}
+```
+
+**Why:** Two overlapping particles at exactly the same position produce a zero-length contact normal that collapses to NaN after normalization inside `detectSphereSphereCollision`. Passing NaN forces into the velocity Verlet integrator propagates to the quaternion update (`Quaternion.h:241`), which then aborts. The guard logs the offending pair and skips the contact instead.
+
+---
+
+### 2. `ParticleKernels.h` — `SolidCylinderContactDetection`
+
+**Added a subclass of `AnalyticContactDetection`** that overrides `(Sphere, CylindricalBoundary)` contact detection with exterior (solid cylinder) math:
+
+```cpp
+class SolidCylinderContactDetection : public mesa_pd::collision_detection::AnalyticContactDetection
+{
+public:
+   using AnalyticContactDetection::operator(); // prevent name hiding of all base overloads
+
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::Sphere& s,
+                   const mesa_pd::data::CylindricalBoundary& cb,
+                   Accessor& ac)
+   {
+      // Radial distance from cylinder axis; contact fires when sphere is too close from outside
+      const mesa_pd::Vec3 delta  = posSphere - posCyl;
+      const mesa_pd::Vec3 radial = delta - (delta * axis) * axis;
+      const real_t dist          = radial.length();
+      const real_t separation    = dist - cb.getRadius() - s.getRadius();
+      if (separation < getContactThreshold()) { ... }
+   }
+   // symmetric overload delegates to above
+};
+```
+
+**Why `AnalyticContactDetection` is subclassed, not `CylindricalBoundary`:** `DoubleCast` dispatches by `SHAPE_TYPE` integer and `static_cast`s to the base type — a subclass with the same `SHAPE_TYPE` gets sliced and always invokes the base-class (hollow/interior) detection. Subclassing the *functor* instead works because `DoubleCast` deduces the concrete functor type, so C++ overload resolution picks the subclass method.
+
+**Why `using AnalyticContactDetection::operator();` is required:** Defining any `operator()` in the subclass hides *all* base-class `operator()` overloads by C++ name hiding rules. Without the `using` declaration, `DoubleCast`'s calls for all other shape pairs (Sphere-Sphere, Sphere-Box, Ellipsoid-*, etc.) would fail to compile.
+
+**`ComputeContacts::acd_`** changed from `AnalyticContactDetection` to `SolidCylinderContactDetection`. All existing contact pairs (sphere-sphere, sphere-box, sphere-halfspace) are unaffected — they fall through to the inherited base-class methods.
+
+---
+
+### 3. `Utility.h` — `createCylinder()`
+
+**Added `createCylinder()` helper** alongside `createBox()`, using `CylindricalBoundary` as the shape:
+
+```cpp
+inline auto createCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center,
+                           real_t radius, const mesa_pd::Vec3& axis = mesa_pd::Vec3(0, 0, 1))
+```
+
+Sets the same GLOBAL / INFINITE / FIXED / NON_COMMUNICATING flags as `createBox`. Type is 2. Interaction radius is `infinity()` (same as `createBox`).
+
+**Why `CylindricalBoundary` for a solid cylinder:** It stores exactly the data needed (radius + axis) and its `SHAPE_TYPE` is already handled by `DoubleCast`. The hollow/interior contact math it normally triggers is replaced by `SolidCylinderContactDetection`. End caps are handled by the existing floor/ceiling `HalfSpace` planes — no finite-length cylinder shape is needed.
+
+---
+
+### 4. `SimulationParams.h` — `CylinderPillarParams`
+
+**Added `CylinderPillarParams`** (center + radius) and **`parseCylinderPillars()`** alongside the existing `PillarParams` / `parsePillars()`. `SimulationParams` now holds:
+
+```cpp
+std::vector< PillarParams >         pillars;         // box pillars (existing)
+std::vector< CylinderPillarParams > cylinderPillars; // cylinder pillars (new)
+```
+
+Config block key: `CylinderPillars` → `CylinderPillar { center <x,y,z>; radius r; }`. Zero entries is valid.
+
+---
+
+### 5. `SetupStages.h` — cylinder pillar creation
+
+**`createParticleFct` lambda** extended with a radial exclusion check for cylinder pillars:
+
+```cpp
+for (const auto& pillar : simParams->cylinderPillars)
+{
+   const real_t dx = pos[0] - pillar.center[0];
+   const real_t dy = pos[1] - pillar.center[1];
+   if (std::sqrt(dx * dx + dy * dy) < pillar.radius + maxSphereRadius)
+      return false;
+}
+```
+
+**DEM creation loop** added after the box pillar loop:
+
+```cpp
+for (const auto& pillar : simParams->cylinderPillars)
+   createCylinder(*simObjs->particleStorage, pillar.center, pillar.radius);
+```
+
+---
+
+### 6. `Antidunes.prm` — cylinder pillar config
+
+**DEM side:** Added `CylinderPillars` block (active) and kept `Pillars` block (commented out):
+
+```
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 30, 60 >;
+      radius 10;
+   }
+}
+```
+
+**LBM side:** Added `BodyBC` initializer in `BoundaryParameters` (the `Body` key maps to `OverlapFieldFromBody` for fill-level init; `BodyBC` maps to `BoundaryFromBody` for LBM boundary flags):
+
+```
+BodyBC { shape Cylinder; min < 64, 30, 0 >; max < 64, 30, 120 >; radius 10; NoSlip{} }
+```
+
+`min`/`max` are the cylinder axis endpoints (bottom and top). End caps are the existing floor/ceiling `Border` NoSlip lines.
+
+---
+
+### 7. Floating sphere — stability fix
+
+The floating sphere (`FloatingSphereParams`, `AddExternalForces` with type-1 check, optional `FloatingSphere` config block) was already implemented. A NaN quaternion crash was diagnosed and fixed by correcting the position and radius in `Antidunes.prm`:
+
+- **Root cause:** Sphere placed at `z=60` with `radius=10` — the center sat exactly at the free surface (`absoluteLiquidHeight ≈ 60 LU`). MEM computes momentum exchange only over fluid-covered cells; with the sphere half in gas the torque is large, asymmetric, and accumulates until angular velocity diverges.
+- **Fix:** Reduce radius to 4 LU and position fully below the free surface (`z=48`, top of sphere at `z=52`). The sphere is currently commented out in the `.prm` and can be re-enabled.
 
 ### Goal
 Fix a SIGSEGV crash (fault address `0x18`) that occurred on the first call to `timeloopFSLBM->singleStep()` at `beginTimeStep = 0`.
@@ -13,19 +154,17 @@ Progressive debug logging narrowed the crash to the box pillar VTK output added 
 2. sphere particle VTK ✓ (logged "done")
 3. box pillar VTK ✗ → SIGSEGV at address `0x18` before "done" was logged
 
-Address `0x18` = offset 24 from a null pointer = `inertiaBF_` in `BaseShape`. The crash occurred inside `vtk::writeFiles(boxVTKOutput)` — the exact internal call site (particle selector vs. `SelectBoxEdgeLength::operator()` vs. virtual `push()` dispatch) could not be pinpointed without a debug build with symbols on the cluster (GCC 8.5.0, no `-g` flag in the release build).
+Address `0x18` = offset 24 from a null pointer = `inertiaBF_` in `BaseShape`. The crash occurred inside `vtk::writeFiles(boxVTKOutput)` — the exact internal call site could not be pinpointed without a debug build with symbols on the cluster (GCC 8.5.0, no `-g` flag in the release build).
 
 ### Fix
 
-**`BuildTimeloop.h`** — removed the entire box pillar VTK block (`SelectBoxEdgeLength`, `boxPointData`, `boxVTKOutput`, and the before-step registration). The pillar is not needed as a VTK point-data output: it appears as a zero-velocity void in every fluid field VTK slice, and its geometry is fully specified in `Antidunes.prm`. Also removed the `#include "mesa_pd/data/shape/Box.h"` that was only needed for this block.
+**`BuildTimeloop.h`** — removed the entire box pillar VTK block (`SelectBoxEdgeLength`, `boxPointData`, `boxVTKOutput`, and the before-step registration). The pillar appears as a zero-velocity void in every fluid field VTK slice, and its geometry is fully specified in `Antidunes.prm`. Also removed the `#include "mesa_pd/data/shape/Box.h"` that was only needed for this block.
 
-**`SetupStages.h`** — removed the debug `firstCall` shared_ptr and associated per-rank log from the `createParticleFct` lambda. Simplified the lambda capture from `[simParams, maxSphereRadius, firstCall]` back to `[simParams, maxSphereRadius]`.
+**`SetupStages.h`** — removed the debug `firstCall` shared_ptr and associated per-rank log from the `createParticleFct` lambda.
 
 **`Antidunes.cpp`** — removed the post-VTK debug marker `addFuncBeforeTimeStep` that was added to identify the crash phase.
 
 ---
-
-## Meeting 02
 
 ### Goal
 Make pillar geometry configurable at runtime (no recompile) and support an arbitrary number of pillars.
@@ -49,15 +188,11 @@ inline std::vector< PillarParams > parsePillars(const shared_ptr< config::Config
 }
 ```
 
-Uses `Config::BlockHandle::getBlocks(key, blocks, min, max)` to collect all `Pillar` sub-blocks from the `Pillars` parent block. `min = 0` makes the list optional (zero pillars is valid).
-
 **Changed `PillarParams pillar` → `std::vector<PillarParams> pillars`** in `SimulationParams`, initialized via `parsePillars(cfg)`.
 
 ---
 
 #### 2. `SetupStages.h` — `setupParticles()`
-
-Removed the two hardcoded local constants (`boxCenter`, `boxHalfExtents`).
 
 **`createParticleFct` lambda** now loops over all pillars:
 ```cpp
@@ -68,15 +203,15 @@ for (const auto& pillar : simParams->pillars)
    if (std::sqrt(dx * dx + dy * dy) < maxSphereRadius)
       return false;
 }
-return true;
 ```
-
-A sphere position is rejected if it falls within `maxSphereRadius` of **any** pillar.
 
 **`createBox()` call** replaced by a loop:
 ```cpp
 for (const auto& pillar : simParams->pillars)
-   createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
+{
+   auto p = createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
+   p->setType(2);
+}
 ```
 
 ---
@@ -93,21 +228,18 @@ Pillars
       center      < 200, 30, 60 >;
       halfExtents < 16, 10, 60 >;
    }
-   // add further Pillar { ... } blocks here for additional pillars
 }
 ```
 
-**To add a second pillar:** add another `Pillar` sub-block and a matching `CellInterval` in `BoundaryParameters` (for the LBM no-slip boundary). The relationship is:
+Zero `Pillar` blocks is valid — the simulation runs without any pillar. For a box pillar, a matching `CellInterval` is also needed in `BoundaryParameters`:
 - `CellInterval min = center - halfExtents`
 - `CellInterval max = center + halfExtents - 1`
-
-Zero `Pillar` blocks is valid — the simulation runs without any pillar.
 
 ---
 
 ## Meeting 01
 
-This section describes all changes made to add a fixed solid box pillar to the Antidunes simulation and the reference code each change is based on.
+This section describes all changes made to add a fixed solid box pillar to the Antidunes simulation.
 
 ---
 
@@ -127,13 +259,6 @@ A fixed rectangular pillar (`Box` shape in MESA-PD) was added to the middle of t
 
 ### 1. `Utility.h`
 
-**Added includes:**
-```cpp
-#include "mesa_pd/data/shape/Box.h"
-#include "mesa_pd/data/shape/HalfSpace.h"
-```
-`HalfSpace.h` was previously only transitively included and is needed by `createPlane()`.
-
 **Added `FixedBox` subclass** (before `createBox()`):
 ```cpp
 class FixedBox : public mesa_pd::data::Box {
@@ -150,47 +275,19 @@ public:
 
 **Why:** The contact force stiffness is computed as `k_n = m_eff * (π² + ln²(e)) / t_c²` where
 `m_eff = 1 / (invMass_sphere + invMass_obstacle)`. For a wall (`HalfSpace`), `invMass = 0` so
-`m_eff = mass_sphere`. A plain `Box` with finite volume would give a slightly different `m_eff`.
-`FixedBox` overrides `updateMassAndInertia` to set `invMass = 0` (same as `HalfSpace`), making
-the contact response with the pillar identical to the contact response with the floor/ceiling walls.
-
-**Reference:** `src/mesa_pd/data/shape/HalfSpace.h` — `HalfSpace::updateMassAndInertia` (sets
-`mass_ = infinity`, `invMass_ = 0`). The `protected` members `mass_`, `invMass_`, `inertiaBF_`,
-`invInertiaBF_` are defined in `src/mesa_pd/data/shape/BaseShape.h`.
-
----
+`m_eff = mass_sphere`. `FixedBox` overrides `updateMassAndInertia` to set `invMass = 0`, making
+the contact response with the pillar identical to wall contacts.
 
 **Added `createBox()` function:**
 ```cpp
 inline auto createBox(mesa_pd::data::ParticleStorage& ps,
                       const mesa_pd::Vec3& center,
                       const mesa_pd::Vec3& edgeLength)
-{
-   auto p0 = ps.create(true);
-   p0->setPosition(center);
-   p0->setBaseShape(std::make_shared< FixedBox >(edgeLength));
-   p0->getBaseShapeRef()->updateMassAndInertia(real_t(1));
-   p0->setOwner(walberla::mpi::MPIManager::instance()->rank());
-   p0->setType(0);
-   p0->setInteractionRadius(real_t(0.5) * edgeLength.length()); // use pythagoras here or infinity otherwise mpi issue!
-   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::GLOBAL);
-   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
-   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::INFINITE);
-   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::NON_COMMUNICATING);
-   return p0;
-}
 ```
 
-**Key differences from `createPlane()`:**
-- Uses `FixedBox` instead of `HalfSpace`
-- `interactionRadius` = half-diagonal of the box (bounding sphere radius), not infinity
-- Has `INFINITE` flag — required to prevent Box↔HalfSpace contact detection (see below)
+Sets GLOBAL / INFINITE / FIXED / NON_COMMUNICATING flags. Type defaults to 0 and is overridden to 2 in `setupParticles`. Interaction radius is `infinity()`.
 
-**Reference:** `createPlane()` in `Utility.h` — same flag pattern (`GLOBAL`, `INFINITE`, `FIXED`,
-`NON_COMMUNICATING`). The `INFINITE` flag is required: `ExcludeInfiniteInfinite`
-in the contact loop (`ParticleKernels.h:237`) excludes pairs where **both** particles are `INFINITE`.
-Without it, Box↔HalfSpace pairs would be passed to `AnalyticContactDetection`, which has no
-overload for that combination and aborts at the generic fallback (line 166). With `INFINITE` set:
+**Why `INFINITE` flag:** `ExcludeInfiniteInfinite` in the contact loop excludes pairs where both particles are `INFINITE`. Without it, Box↔HalfSpace pairs would reach `AnalyticContactDetection`, which has no overload for that combination and aborts. With `INFINITE` set:
 - Box↔HalfSpace → both INFINITE → excluded ✓
 - Box↔Sphere → Sphere not INFINITE → still included ✓
 
@@ -198,133 +295,31 @@ overload for that combination and aborts at the generic fallback (line 166). Wit
 
 ### 2. `SetupStages.h` — `setupParticles()`
 
-**Added box geometry constants** (before the `if (bfParams.loadSnapshot)` block):
-```cpp
-const Vector3< real_t > boxCenter(real_t(200), real_t(30), real_t(60));
-const Vector3< real_t > boxHalfExtents(real_t(16), real_t(10), real_t(60));
-```
+**Modified `createParticleFct`** to exclude spheres overlapping the pillar column using nearest-point distance in XY (Z is omitted because the pillar spans the full domain height).
 
-Defined once and used in both the particle exclusion filter and the `createBox()` call, so the
-geometry is specified in a single place.
+**Added `createBox()` call** after `createPlane()` calls.
 
 ---
 
-**Modified `createParticleFct`** to exclude spheres overlapping the pillar column:
-```cpp
-const real_t maxSphereRadius = real_t(0.5) * simParams->computed.avgParticleDiameter * real_t(1.1);
-auto createParticleFct = [&simParams, &boxCenter, &boxHalfExtents, maxSphereRadius](Vector3<real_t> pos) {
-   if (pos[2] >= initializationProfile(...)) return false;
-   // pillar spans full z height; use nearest-point distance in x-y
-   const real_t dx = std::max(real_t(0), std::abs(pos[0] - boxCenter[0]) - boxHalfExtents[0]);
-   const real_t dy = std::max(real_t(0), std::abs(pos[1] - boxCenter[1]) - boxHalfExtents[1]);
-   return std::sqrt(dx * dx + dy * dy) >= maxSphereRadius;
-};
-```
+### 3. `Antidunes.prm`
 
-**Why:** `initSpheresFromFile` calls `createParticleFct(pos)` with the sphere center before
-radius is known. Without this filter, spheres from the bed file that fall inside (or touching)
-the pillar volume would be created, causing their centers to be inside the box. The
-`detectSphereBoxCollision` function has a special `!outside` fallback (line 96–121 in
-`AnalyticCollisionFunctions.h`) for sphere centers inside the box — avoiding this entirely
-is cleaner.
-
-The exclusion check uses the same nearest-point distance formula as `detectSphereBoxCollision`
-itself: clamp sphere center to box bounds, measure distance. The z-axis check is omitted because
-the pillar spans the full domain height (z half-extent = 60 = domain half-height), making that
-term always zero.
-
-**Reference:** `src/mesa_pd/collision_detection/AnalyticCollisionFunctions.h` —
-`detectSphereBoxCollision` lines 56–142. The `margin` uses the `1.1 × avgParticleDiameter`
-factor already used at `SetupStages.h:336` for lubrication correction safety.
-
----
-
-**Added `createBox()` call** (after `createPlane()` calls):
-```cpp
-createBox(*simObjs->particleStorage, boxCenter, real_t(2) * boxHalfExtents);
-```
-
-**Reference:** `createPlane()` calls directly above at `SetupStages.h:331–332`.
-
----
-
-### 3. `BuildTimeloop.h` — `addBeforeTimeStepVTKOutput()`
-
-**Added include:**
-```cpp
-#include "mesa_pd/data/shape/Box.h"
-```
-
-**Added custom VTK output selector and writer for the pillar:**
-```cpp
-struct SelectBoxEdgeLength {
-   using return_type = mesa_pd::Vec3;
-   mesa_pd::Vec3 operator()(const mesa_pd::data::ParticleStorage::iterator& pIt) const {
-      return static_cast< mesa_pd::data::Box* >(pIt->getBaseShape().get())->getEdgeLength();
-   }
-};
-auto boxPointData = std::make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
-boxPointData->addOutput< SelectBoxEdgeLength >("edgeLength");
-boxPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
-   return pIt->getBaseShape()->getShapeType() == mesa_pd::data::Box::SHAPE_TYPE;
-});
-auto boxVTKOutput = vtk::createVTKOutput_PointData(boxPointData, "pillar",
-   simParams->vtk.writeFrequency, simParams->vtk.baseFolder, ...);
-timeloop->addFuncBeforeTimeStep(vtk::writeFiles(boxVTKOutput), "VTK: pillar data");
-```
-
-Output file: `vtk-out/pillar_*.vtu` — one point at the box center with attribute `edgeLength = (32, 20, 120)`.
-
-**ParaView visualization:** Load `pillar_*.vtu` → Filters → Glyph → glyph type **Box** →
-Scale Array: `edgeLength`, Scale Mode: `vector`. This renders the pillar as a correctly-sized
-solid box at the correct position.
-
-**Reference:** Existing sphere particle VTK output at `BuildTimeloop.h:109–122`. The
-`SelectBoxEdgeLength` selector follows the `OutputSelector` pattern in
-`src/mesa_pd/vtk/OutputSelector.h` and the `SelectParticleInteractionRadius` pattern in
-`src/mesa_pd/data/ParticleStorage.h:1480`.
+Added `CellInterval` in `BoundaryParameters` for the LBM NoSlip boundary matching the box geometry.
 
 ---
 
 ## What Was NOT Changed (and Why)
 
-### LBM boundary condition
-The `CellInterval` in `Antidunes.prm` already defines the pillar as a `NoSlip` boundary for the
-fluid. `BoundaryFromCellInterval` (registered in `AntidunesBoundaryHandling.impl.h:295`) handles
-this at startup via `initFromConfig`.
-
-### Zero velocity in pillar cells
-`ZeroSetter` in `src/lbm/free_surface/VtkWriter.h:186` already zeros PDFs in cells where
-`flagInfo_.isGas() || flagInfo_.isObstacle()` before every VTK write. NoSlip cells are obstacle
-cells → velocity is always shown as zero in VTK output. For the simulation physics, the NoSlip
-bounce-back operates on adjacent fluid cell PDFs and never reads the obstacle cell's own PDFs.
-
 ### Particle mapping (LBM–DEM coupling)
-Both `mapParticlesOntoCells` (`SetupStages.h:390`) and `MovingParticleMapping`
-(`BuildTimeloop.h:359`) use a `sphereSelector` that filters by `Sphere::SHAPE_TYPE`. The
-`FixedBox` (`Box::SHAPE_TYPE = 3`) is excluded from mapping, so it never conflicts with the
-`CellInterval` NoSlip flags already set by the boundary handling.
+Both `mapParticlesOntoCells` and `MovingParticleMapping` use a `sphereSelector` filtering by `Sphere::SHAPE_TYPE`. Box and cylinder pillars are excluded from MEM mapping — they never conflict with the NoSlip flags set by the boundary handling.
 
 ### Fill level inside pillar
-`initFlagsFromFillLevels` in `src/lbm/free_surface/InitFunctions.h:86` explicitly skips cells
-where `handling->isBoundary()` is true. NoSlip cells are boundary cells → they keep their NoSlip
-flag regardless of fill level. `initFillLevelsInBoundaries` additionally sets fill_level = 1 in
-all obstacle cells to prevent the bubble model from treating them as gas.
+`initFlagsFromFillLevels` explicitly skips cells where `handling->isBoundary()` is true. NoSlip cells keep their flag regardless of fill level.
+
+### Zero velocity in pillar cells
+`ZeroSetter` already zeros PDFs in obstacle cells before every VTK write.
 
 ---
 
 ## Verified Contact Detection Correctness
 
-The sphere–box contact normal always points **outward** (from box surface toward sphere center)
-for spheres approaching from outside, via `detectSphereBoxCollision` in
-`src/mesa_pd/collision_detection/AnalyticCollisionFunctions.h`:
-
-```cpp
-const Vec3 q( R * p );  // nearest point on box surface (world frame, relative to box center)
-const Vec3 n( d - q );  // sphere_center - nearest_surface_point  →  always points outward
-```
-
-The `DoubleCast` kernel (`src/mesa_pd/kernel/DoubleCast.h:88–92`) routes `Sphere ↔ Box` pairs
-to `AnalyticContactDetection`, which calls `detectSphereBoxCollision`. `LinearSpringDashpot`
-then applies the contact force using the computed normal — identical parameter set (type 0 vs 0,
-same friction/restitution/kappa) as sphere–wall contacts.
+The sphere–box contact normal always points **outward** via `detectSphereBoxCollision` in `AnalyticCollisionFunctions.h`. `DoubleCast` routes `Sphere ↔ Box` pairs to `AnalyticContactDetection`, which calls `detectSphereBoxCollision`. `LinearSpringDashpot` applies the contact force using the same parameter set (type 2 vs 0, same friction/restitution/kappa) as sphere–wall contacts.
