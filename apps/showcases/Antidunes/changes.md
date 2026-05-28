@@ -2,324 +2,332 @@
 
 ---
 
+## Physics Analysis
+
+### MEM three-phase correction (Eq. 5.9)
+
+The Momentum Exchange Method force on particles is computed in
+`src/lbm_mesapd_coupling/momentum_exchange_method/boundary/SimpleBB.h` (aliased as `MovingObstacle_T` in `AntidunesBoundaryHandling.h:72`).
+It implements only the standard two-phase formula (Ladd 1994 / GIMEM Wen 2014):
+
+```
+Δj_q = c_q · (f̃ + f')   [+ Galilean correction]
+```
+
+When a particle boundary link crosses an **interface or gas cell**, the correct three-phase formula (Eq. 5.9, Bogner & Rüde 2013) is:
+
+```
+Δj_q = c_q · φ(x_b) · [f̃(x_b,t) + f(x_b,t+1)]  +  2·c_q · [1−φ(x_b)] · f_q^eq(ρ_g, 0)
+```
+
+`SimpleBB` has no access to the fill-level field and applies no such correction.
+
+**Effect in this simulation:** The gas pressure is set to `ρ_gas = 1` (`BubbleModelConstantPressure(real_c(1))` in `Antidunes.cpp:100`), matching the LBM reference liquid density.
+With `ρ_gas = ρ_liquid = 1`, the static pressure terms in the error cancel exactly.
+The residual error is `O(Ma · (1−φ))` — a velocity-dependent second-order term that is negligible at the low Mach numbers of this simulation.
+The missing correction would be significant only with a real air-water density ratio (`ρ_gas/ρ_liquid ≈ 1/1000`).
+
+---
+
+### Buoyancy uses submerged volume (FIXED)
+
+**Problem (original):** `AddExternalForces::operator()` applied `ρ_f · V_full · g` for all particles,
+overestimating buoyancy for partially submerged floating spheres (type 1).
+
+**Fix (active in `ParticleKernels.h`):** For floating spheres, the precomputed submerged volume
+`V_sub` from `computeSubmergedVolumes()` (spherical-cap integration over the fill-level field)
+is used instead of the full sphere volume. Non-floaters are always fully submerged so their
+behaviour is unchanged (`V_sub = V_full`).
+
+```cpp
+// X/Y: full-volume driving force (pressure-gradient body force acts on the whole particle).
+// Z:   gravity (rho * vFull) minus correct buoyancy (vSub × g, fluid density = 1).
+Vector3< real_t > bodyForce(
+   vFull * (*acceleration_)[0],
+   vFull * (*acceleration_)[1],
+   (rho * vFull - vSub) * (*acceleration_)[2]);
+```
+
+---
+
+## NaN crash fix — PDF reconstruction at the free-surface contact circle
+
+**Symptom:** Simulation crashed with NaN after a few hundred timesteps when a floating sphere
+started at or near its equilibrium position at the free surface.
+
+**Root cause:** When the sphere moves and uncovers a contact-circle cell (where the sphere
+surface meets the free surface, fill ≈ 0.5), `PdfReconstructionManager` must synthesise fresh
+PDFs. `GradsMomentApproximationReconstructor` (Chikatamarla et al., EPL 2006; Dorschner et al.,
+JCP 2015) computes `f[i] = f^eq + Pneq` where `Pneq` uses a velocity gradient from the
+D3Q27 neighbourhood. In the free-surface context, ~⅓ of those neighbours are gas cells that
+pass `isDomain()` but carry near-zero PDFs. This underestimates `ρ_avg` and produces a large
+spurious `Pneq` term that pushes individual `f[i]` negative. After one streaming step
+`ρ = Σf[i] < 0` and the cumulant collision (ω ≈ 1.998) diverges to NaN.
+
+Note: `GradsMomentApproximationReconstructor` has no fallback for incomplete neighbourhoods —
+it was designed for solid-wall contexts where "missing" neighbours are absent, not gas cells
+with physically zero PDFs.
+
+### Fix 1 — `BuildTimeloop.h`: switch to `EquilibriumReconstructor`
+
+```cpp
+// two-arg overload of makePdfReconstructionManager uses EquilibriumReconstructor internally
+lbm_mesapd_coupling::makePdfReconstructionManager< PdfField_T, BoundaryHandling_T >(
+   blockForest, pdfFieldID, handlingID, particleFieldID, particleAccessor,
+   FormerMO_Flag,
+   walberla::free_surface::flagIDs::interfaceFlagID,  // see Fix 2
+   strictlyConserveMomentum)
+```
+
+`EquilibriumReconstructor` sets `f[i] = f^eq(ρ_avg, u_particle) ≥ 0` for all 27 directions —
+guaranteed positive regardless of neighbourhood quality.
+
+### Fix 2 — `BuildTimeloop.h`: mark uncovered cells as `interfaceFlagID`
+
+Contact-circle cells have fill ≈ 0.52 (set by `ObstacleFillLevelSweep` when active, or frozen
+from the initial fill otherwise) and are physically interface cells. With `liquidFlagID`,
+`StreamReconstructAdvectSweep` performs a full 27-direction streaming step, pulling f=0 from
+gas neighbours and corrupted PDFs from obstacle neighbours → `ρ < 0` → NaN.
+
+With `interfaceFlagID`, `StreamReconstructAdvectSweep` *reconstructs* gas-facing PDFs from the
+atmosphere density (ρ=1, u=0) rather than streaming zeros. `CellConversionSweep` then converts
+the cell to LIQUID or GAS naturally based on fill level within the same timestep.
+
+This flag also applies to submerged and above-surface uncovered cells (always all FormerMO cells),
+but those cases are self-correcting within one FSLBM step via `CellConversionSweep`.
+
+---
+
+## Active source changes (waLBerla library files)
+
+### `src/lbm/free_surface/surface_geometry/CurvatureModel.impl.h`
+
+`ObstacleNormalSweep` and `ObstacleFillLevelSweep` are now **unconditional** in
+`FiniteDifferenceMethod::addSweeps` (previously gated on `enableWetting_`). Also
+`NormalSweep` always uses `includeObstacleNeighbors=true`.
+
+This affects other showcases that use the library class. Antidunes uses `BuildTimeloop.h`
+directly and manages these sweeps independently (currently commented out — see note below).
+
+### `src/lbm/free_surface/surface_geometry/ObstacleFillLevelSweep.impl.h`
+
+Removed the `WALBERLA_CHECK_GREATER(normal.length(), 0, ...)` assertion that aborted when an
+obstacle cell's neighbourhood is exactly symmetric (e.g., sphere equator with liquid below,
+gas above, producing a zero net normal). Replaced with an equal-weight fallback:
+
+```cpp
+const real_t weight = obstNormalSqrLen > 0
+   ? std::abs(obstNormal * dirVector_normalized)  // normal-weighted (original)
+   : real_c(1);                                   // equal-weight fallback when normal is zero
+```
+
+### `src/lbm/free_surface/surface_geometry/ObstacleNormalSweep.impl.h`
+
+Added `WALBERLA_LOG_DEVEL_ON_ROOT` when an obstacle cell's averaged direction vector is zero
+(triggers the equal-weight fallback in `ObstacleFillLevelSweep`). Visible with `WALBERLA_LOGLEVEL=DEVEL`.
+
+### `src/lbm/free_surface/dynamics/ExcessMassDistributionSweep.h/.impl.h`
+
+Added `newGas` flag to the isolated-cell warning in `distributeMassInterfaceAndLiquid` so the
+log message reports whether the orphaned cell converted to gas or liquid.
+
+### `src/lbm_mesapd_coupling/momentum_exchange_method/boundary/SimpleBB.h`
+
+Added finite-check on `pdf_old` before the bounce-back computation:
+
+```cpp
+if (!std::isfinite(pdf_old))
+   WALBERLA_LOG_WARNING("[SimpleBB] NaN/Inf pdf_old at fluid cell (" << x << "," << y << "," << z
+      << ") -> obstacle (" << nx << "," << ny << "," << nz << ") dir=" << dir << " pdf=" << pdf_old);
+```
+
+`SimpleBB` is a victim, not the NaN origin — this diagnostic identifies which fluid cell was
+already corrupt when the bounce-back tried to read it.
+
+### `src/lbm_mesapd_coupling/momentum_exchange_method/reconstruction/PdfReconstructionManager.h`
+
+Added finite-check after `(*reconstructor_)(...)` to detect if reconstruction itself produced NaN
+(distinguishes fill-level collapse from reconstruction failure as two different failure modes).
+
+---
+
+## Note on `ObstacleNormalSweep` / `ObstacleFillLevelSweep` in Antidunes
+
+These sweeps are currently **commented out** in `BuildTimeloop.h`, and `NormalSweep` has
+`includeObstacleNeighbors=false` to match. The two are a coupled pair:
+`ObstacleFillLevelSweep` writes fictitious fill values into obstacle cells of `smoothFillField`;
+`NormalSweep` reads them when `includeObstacleNeighbors=true`. Without `ObstacleFillLevelSweep`
+running, obstacle cells have fill=0 (indistinguishable from gas), so enabling
+`includeObstacleNeighbors` would corrupt normals near pillars and sphere.
+
+Re-enable both together if wetting / contact-angle effects at obstacle surfaces are needed.
+
+---
+
+## Meeting 04
+
+### Goal
+
+Fix NaN crashes when a floating sphere touches the free surface, understand the root cause,
+test three initial positions (submerged, at surface, in gas), and implement a `settlingSteps`
+mechanism for initialisation stabilisation.
+
+---
+
+### Findings from Testing Three Starting Positions
+
+| Variant | Start z | Result | Notes |
+|---------|---------|--------|-------|
+| `two_cylinder_floater.prm` | 30 (submerged) | ✅ 100 000 steps | Sphere rises through liquid; contact circle grows from 0 — fill-level gradient always well-defined |
+| `two_cylinder_floater_surface.prm` | 56 (at surface) | ❌ step 581 | Full-radius contact from t=0; settlingSteps=500 improves from step 12 → 581, but fill-level drift during settling corrupts cells that crash 81 steps after release |
+| `two_cylinder_floater_gas.prm` | 90 (in gas) | ❌ step 2668 | Sphere falls ~2259 steps before surface contact; contact circle grows ~409 steps then fails — same NaN mechanism as surface variant |
+
+---
+
+### 1. `SimulationParams.h` — `settlingSteps` in `FloatingSphereParams`
+
+Added `settlingSteps` field (default 0): number of LBM timesteps the sphere is held FIXED
+before being released to float freely. Non-zero values let the FSLBM establish a stable
+fill-level distribution around the stationary contact circle before the sphere first moves.
+
+---
+
+### 2. `SetupStages.h` — FIXED flag on creation + `releaseSettledFloatingSpheres`
+
+If `fsp.settlingSteps > 0`, the FIXED flag is set on the new particle at creation.
+`releaseSettledFloatingSpheres()` is called each timestep and unsets FIXED when
+`currentStep == fsp.settlingSteps`.
+
+---
+
+### 3. `Antidunes.cpp` — call `releaseSettledFloatingSpheres`
+
+Called at the top of the main time loop before the FSLBM step.
+
+---
+
+### 4. New `.prm` files — three floating sphere test cases
+
+- **`prms/two_cylinder_floater.prm`**: sphere z=30 (submerged), `settlingSteps 0` — ✅ runs 100 000 steps
+- **`prms/two_cylinder_floater_surface.prm`**: sphere z=56 (at surface), `settlingSteps 500` — ❌ crashes at step 581
+- **`prms/two_cylinder_floater_gas.prm`**: sphere z=90 (in gas), `settlingSteps 0` — ❌ crashes at step 2668
+
+---
+
+## Meeting 03
+
+### Root Causes Diagnosed
+
+#### 1. `blockSyncExtension` too small
+
+`SyncNextNeighbors` ghost-copies a particle to a neighboring block only if the particle center is within `blockSyncExtension` of the block boundary. The hardcoded `2.5` meant a large floating sphere could physically overlap a block without being synced there → LBM saw stale PDFs → NaN hydro force.
+
+**Fix (`SetupStages.h`):** `blockSyncExtension` is now `max(2.5, largest_floater_radius)`.
+
+#### 2. MPI count mismatch in `computeSubmergedVolumes`
+
+Different vector sizes on different ranks caused `MPI_Allreduce` with mismatched `count` → undefined behaviour → silent corruption → eventual NaN.
+
+**Fix (`ParticleKernels.h`):** Pre-size all vectors to `simParams->floatingSpheres.size()` (same on all ranks). Only the owning rank writes its UID/position; `allReduceInplace(SUM)` broadcasts to all.
+
+#### 3. `phiSum` overcounting
+
+Each block computed `phi_avg = localSum / localCount` then `allReduce SUM` added partial averages — overcounting when ring cells are split across blocks.
+
+**Fix (`ParticleKernels.h`):** Raw numerator and denominator accumulated per Z-slice into flat vectors, both reduced globally, divided after. `phiSum` feeds the spherical-cap formula `V_sub = π·h²·(3r−h)/3`.
+
+#### 4. Sphere top half initialised in gas zone
+
+Sphere center at Z=52, radius=10: top half (Z=52–62) above free surface (≈Z=52.5). `MovingObstacle` cells in gas conflicted with the free-surface PDF scheme → NaN from timestep 0.
+
+**Fix:** Position sphere fully submerged from initialisation.
+
+---
+
 ## Meeting 02
 
-### Goals
-- Fix a NaN quaternion crash when running with a floating sphere obstacle
-- Replace box pillar with a cylindrical pillar supported in both DEM and LBM
+### Goal
+
+Fix a NaN quaternion crash when running with a floating sphere obstacle. Replace box pillar with a cylindrical pillar supported in both DEM and LBM.
 
 ---
 
 ### 1. `ParticleKernels.h` — NaN contact normal guard
 
-**Added NaN check in `ComputeContacts::operator()`** before applying the contact response:
-
-```cpp
-const auto& n = acd_.getContactNormal();
-if (std::isnan(n[0]) || std::isnan(n[1]) || std::isnan(n[2]))
-{
-   WALBERLA_LOG_WARNING_ON_ROOT("[ComputeContacts] NaN contact normal detected! ...");
-   return; // skip this contact to avoid NaN propagation
-}
-```
-
-**Why:** Two overlapping particles at exactly the same position produce a zero-length contact normal that collapses to NaN after normalization inside `detectSphereSphereCollision`. Passing NaN forces into the velocity Verlet integrator propagates to the quaternion update (`Quaternion.h:241`), which then aborts. The guard logs the offending pair and skips the contact instead.
+Added NaN check in `ComputeContacts::operator()` before applying contact response. Two overlapping particles at exactly the same position produce a zero-length contact normal → NaN after normalization → quaternion abort. Guard logs and skips the contact instead.
 
 ---
 
 ### 2. `ParticleKernels.h` — `SolidCylinderContactDetection`
 
-**Added a subclass of `AnalyticContactDetection`** that overrides `(Sphere, CylindricalBoundary)` contact detection with exterior (solid cylinder) math:
+Subclass of `AnalyticContactDetection` that overrides `(Sphere, CylindricalBoundary)` contact
+detection with exterior (solid cylinder) math. The base class uses hollow/interior math.
+`ComputeContacts::acd_` changed to `SolidCylinderContactDetection`; all other shape pairs
+fall through to inherited base-class methods unchanged.
 
-```cpp
-class SolidCylinderContactDetection : public mesa_pd::collision_detection::AnalyticContactDetection
-{
-public:
-   using AnalyticContactDetection::operator(); // prevent name hiding of all base overloads
-
-   template< typename Accessor >
-   bool operator()(const size_t idx1, const size_t idx2,
-                   const mesa_pd::data::Sphere& s,
-                   const mesa_pd::data::CylindricalBoundary& cb,
-                   Accessor& ac)
-   {
-      // Radial distance from cylinder axis; contact fires when sphere is too close from outside
-      const mesa_pd::Vec3 delta  = posSphere - posCyl;
-      const mesa_pd::Vec3 radial = delta - (delta * axis) * axis;
-      const real_t dist          = radial.length();
-      const real_t separation    = dist - cb.getRadius() - s.getRadius();
-      if (separation < getContactThreshold()) { ... }
-   }
-   // symmetric overload delegates to above
-};
-```
-
-**Why `AnalyticContactDetection` is subclassed, not `CylindricalBoundary`:** `DoubleCast` dispatches by `SHAPE_TYPE` integer and `static_cast`s to the base type — a subclass with the same `SHAPE_TYPE` gets sliced and always invokes the base-class (hollow/interior) detection. Subclassing the *functor* instead works because `DoubleCast` deduces the concrete functor type, so C++ overload resolution picks the subclass method.
-
-**Why `using AnalyticContactDetection::operator();` is required:** Defining any `operator()` in the subclass hides *all* base-class `operator()` overloads by C++ name hiding rules. Without the `using` declaration, `DoubleCast`'s calls for all other shape pairs (Sphere-Sphere, Sphere-Box, Ellipsoid-*, etc.) would fail to compile.
-
-**`ComputeContacts::acd_`** changed from `AnalyticContactDetection` to `SolidCylinderContactDetection`. All existing contact pairs (sphere-sphere, sphere-box, sphere-halfspace) are unaffected — they fall through to the inherited base-class methods.
+**Why subclass the functor:** `DoubleCast` dispatches by `SHAPE_TYPE` and slices shape subclasses,
+so overriding the functor is the correct extension point. `using AnalyticContactDetection::operator();`
+is required to prevent C++ name hiding of all base-class overloads.
 
 ---
 
-### 3. `Utility.h` — `createCylinder()`
+### 3. `SimulationParams.h` — `CylinderPillarParams`
 
-**Added `createCylinder()` helper** alongside `createBox()`, using `CylindricalBoundary` as the shape:
-
-```cpp
-inline auto createCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center,
-                           real_t radius, const mesa_pd::Vec3& axis = mesa_pd::Vec3(0, 0, 1))
-```
-
-Sets the same GLOBAL / INFINITE / FIXED / NON_COMMUNICATING flags as `createBox`. Type is 2. Interaction radius is `infinity()` (same as `createBox`).
-
-**Why `CylindricalBoundary` for a solid cylinder:** It stores exactly the data needed (radius + axis) and its `SHAPE_TYPE` is already handled by `DoubleCast`. The hollow/interior contact math it normally triggers is replaced by `SolidCylinderContactDetection`. End caps are handled by the existing floor/ceiling `HalfSpace` planes — no finite-length cylinder shape is needed.
+Added `CylinderPillarParams` (center + radius) and `parseCylinderPillars()`. `SimulationParams`
+now holds both `pillars` (box) and `cylinderPillars` (cylinder) vectors.
 
 ---
 
-### 4. `SimulationParams.h` — `CylinderPillarParams`
+### 4. `SetupStages.h` — cylinder pillar creation
 
-**Added `CylinderPillarParams`** (center + radius) and **`parseCylinderPillars()`** alongside the existing `PillarParams` / `parsePillars()`. `SimulationParams` now holds:
-
-```cpp
-std::vector< PillarParams >         pillars;         // box pillars (existing)
-std::vector< CylinderPillarParams > cylinderPillars; // cylinder pillars (new)
-```
-
-Config block key: `CylinderPillars` → `CylinderPillar { center <x,y,z>; radius r; }`. Zero entries is valid.
-
----
-
-### 5. `SetupStages.h` — cylinder pillar creation
-
-**`createParticleFct` lambda** extended with a radial exclusion check for cylinder pillars:
-
-```cpp
-for (const auto& pillar : simParams->cylinderPillars)
-{
-   const real_t dx = pos[0] - pillar.center[0];
-   const real_t dy = pos[1] - pillar.center[1];
-   if (std::sqrt(dx * dx + dy * dy) < pillar.radius + maxSphereRadius)
-      return false;
-}
-```
-
-**DEM creation loop** added after the box pillar loop:
-
-```cpp
-for (const auto& pillar : simParams->cylinderPillars)
-   createCylinder(*simObjs->particleStorage, pillar.center, pillar.radius);
-```
-
----
-
-### 6. `Antidunes.prm` — cylinder pillar config
-
-**DEM side:** Added `CylinderPillars` block (active) and kept `Pillars` block (commented out):
-
-```
-CylinderPillars
-{
-   CylinderPillar
-   {
-      center < 64, 30, 60 >;
-      radius 10;
-   }
-}
-```
-
-**LBM side:** Added `BodyBC` initializer in `BoundaryParameters` (the `Body` key maps to `OverlapFieldFromBody` for fill-level init; `BodyBC` maps to `BoundaryFromBody` for LBM boundary flags):
-
-```
-BodyBC { shape Cylinder; min < 64, 30, 0 >; max < 64, 30, 120 >; radius 10; NoSlip{} }
-```
-
-`min`/`max` are the cylinder axis endpoints (bottom and top). End caps are the existing floor/ceiling `Border` NoSlip lines.
-
----
-
-### 7. Floating sphere — stability fix
-
-The floating sphere (`FloatingSphereParams`, `AddExternalForces` with type-1 check, optional `FloatingSphere` config block) was already implemented. A NaN quaternion crash was diagnosed and fixed by correcting the position and radius in `Antidunes.prm`:
-
-- **Root cause:** Sphere placed at `z=60` with `radius=10` — the center sat exactly at the free surface (`absoluteLiquidHeight ≈ 60 LU`). MEM computes momentum exchange only over fluid-covered cells; with the sphere half in gas the torque is large, asymmetric, and accumulates until angular velocity diverges.
-- **Fix:** Reduce radius to 4 LU and position fully below the free surface (`z=48`, top of sphere at `z=52`). The sphere is currently commented out in the `.prm` and can be re-enabled.
-
-### Goal
-Fix a SIGSEGV crash (fault address `0x18`) that occurred on the first call to `timeloopFSLBM->singleStep()` at `beginTimeStep = 0`.
-
-### Root cause (diagnosed)
-Progressive debug logging narrowed the crash to the box pillar VTK output added in Meeting 01. The execution order is:
-1. fluid field VTK ✓ (logged "done")
-2. sphere particle VTK ✓ (logged "done")
-3. box pillar VTK ✗ → SIGSEGV at address `0x18` before "done" was logged
-
-Address `0x18` = offset 24 from a null pointer = `inertiaBF_` in `BaseShape`. The crash occurred inside `vtk::writeFiles(boxVTKOutput)` — the exact internal call site could not be pinpointed without a debug build with symbols on the cluster (GCC 8.5.0, no `-g` flag in the release build).
-
-### Fix
-
-**`BuildTimeloop.h`** — removed the entire box pillar VTK block (`SelectBoxEdgeLength`, `boxPointData`, `boxVTKOutput`, and the before-step registration). The pillar appears as a zero-velocity void in every fluid field VTK slice, and its geometry is fully specified in `Antidunes.prm`. Also removed the `#include "mesa_pd/data/shape/Box.h"` that was only needed for this block.
-
-**`SetupStages.h`** — removed the debug `firstCall` shared_ptr and associated per-rank log from the `createParticleFct` lambda.
-
-**`Antidunes.cpp`** — removed the post-VTK debug marker `addFuncBeforeTimeStep` that was added to identify the crash phase.
-
----
-
-### Goal
-Make pillar geometry configurable at runtime (no recompile) and support an arbitrary number of pillars.
-
----
-
-### Changed Files
-
-#### 1. `SimulationParams.h`
-
-**Added `parsePillars()` helper:**
-```cpp
-inline std::vector< PillarParams > parsePillars(const shared_ptr< config::Config >& cfg)
-{
-   std::vector< PillarParams > result;
-   config::Config::Blocks blocks;
-   cfg->getOneBlock("Pillars").getBlocks("Pillar", blocks, 0, SIZE_MAX);
-   for (const auto& b : blocks)
-      result.emplace_back(b);
-   return result;
-}
-```
-
-**Changed `PillarParams pillar` → `std::vector<PillarParams> pillars`** in `SimulationParams`, initialized via `parsePillars(cfg)`.
-
----
-
-#### 2. `SetupStages.h` — `setupParticles()`
-
-**`createParticleFct` lambda** now loops over all pillars:
-```cpp
-for (const auto& pillar : simParams->pillars)
-{
-   const real_t dx = std::max(real_t(0), std::abs(pos[0] - pillar.center[0]) - pillar.halfExtents[0]);
-   const real_t dy = std::max(real_t(0), std::abs(pos[1] - pillar.center[1]) - pillar.halfExtents[1]);
-   if (std::sqrt(dx * dx + dy * dy) < maxSphereRadius)
-      return false;
-}
-```
-
-**`createBox()` call** replaced by a loop:
-```cpp
-for (const auto& pillar : simParams->pillars)
-{
-   auto p = createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
-   p->setType(2);
-}
-```
-
----
-
-#### 3. `Antidunes.prm`
-
-Replaced the single `PillarParameters` block with a `Pillars` block containing one or more `Pillar` sub-blocks:
-
-```
-Pillars
-{
-   Pillar
-   {
-      center      < 200, 30, 60 >;
-      halfExtents < 16, 10, 60 >;
-   }
-}
-```
-
-Zero `Pillar` blocks is valid — the simulation runs without any pillar. For a box pillar, a matching `CellInterval` is also needed in `BoundaryParameters`:
-- `CellInterval min = center - halfExtents`
-- `CellInterval max = center + halfExtents - 1`
+Radial exclusion check added to `createParticleFct` for cylinder pillars. DEM creation via
+`createCylinder()` (using `CylindricalBoundary` shape with `SolidCylinderContactDetection`).
 
 ---
 
 ## Meeting 01
 
-This section describes all changes made to add a fixed solid box pillar to the Antidunes simulation.
+### Goal
+
+Add a fixed solid box pillar obstacle to the Antidunes simulation.
 
 ---
 
-## Overview
+### 1. `Utility.h` — `FixedBox` and `createBox()`
 
-A fixed rectangular pillar (`Box` shape in MESA-PD) was added to the middle of the simulation domain, geometrically matching the `CellInterval` already defined in `BoundaryParameters` of `Antidunes.prm`. The pillar acts as a solid obstacle for both the DEM particle bed and the LBM fluid.
+`FixedBox` subclass of `mesa_pd::data::Box` overrides `updateMassAndInertia` to set
+`invMass = 0` (same as a wall), so contact stiffness with the pillar is identical to
+sphere–wall contacts. `createBox()` sets GLOBAL / INFINITE / FIXED / NON_COMMUNICATING flags.
 
-**Pillar geometry (LBM lattice units):**
-- CellInterval (from `Antidunes.prm`): `min <184, 20, 0>`, `max <215, 39, 119>`
-- Box center: `(200, 30, 60)`
-- Box half-extents: `(16, 10, 60)`
-- Box edge lengths: `(32, 20, 120)`
-
----
-
-## Changed Files
-
-### 1. `Utility.h`
-
-**Added `FixedBox` subclass** (before `createBox()`):
-```cpp
-class FixedBox : public mesa_pd::data::Box {
-public:
-   explicit FixedBox(const mesa_pd::Vec3& edgeLength) : Box(edgeLength) {}
-   void updateMassAndInertia(const real_t /*density*/) override {
-      mass_         = std::numeric_limits<real_t>::infinity();
-      invMass_      = real_t(0);
-      inertiaBF_    = mesa_pd::Mat3(std::numeric_limits<real_t>::infinity());
-      invInertiaBF_ = mesa_pd::Mat3(real_t(0));
-   }
-};
-```
-
-**Why:** The contact force stiffness is computed as `k_n = m_eff * (π² + ln²(e)) / t_c²` where
-`m_eff = 1 / (invMass_sphere + invMass_obstacle)`. For a wall (`HalfSpace`), `invMass = 0` so
-`m_eff = mass_sphere`. `FixedBox` overrides `updateMassAndInertia` to set `invMass = 0`, making
-the contact response with the pillar identical to wall contacts.
-
-**Added `createBox()` function:**
-```cpp
-inline auto createBox(mesa_pd::data::ParticleStorage& ps,
-                      const mesa_pd::Vec3& center,
-                      const mesa_pd::Vec3& edgeLength)
-```
-
-Sets GLOBAL / INFINITE / FIXED / NON_COMMUNICATING flags. Type defaults to 0 and is overridden to 2 in `setupParticles`. Interaction radius is `infinity()`.
-
-**Why `INFINITE` flag:** `ExcludeInfiniteInfinite` in the contact loop excludes pairs where both particles are `INFINITE`. Without it, Box↔HalfSpace pairs would reach `AnalyticContactDetection`, which has no overload for that combination and aborts. With `INFINITE` set:
-- Box↔HalfSpace → both INFINITE → excluded ✓
-- Box↔Sphere → Sphere not INFINITE → still included ✓
+**Why `INFINITE` flag:** prevents Box↔HalfSpace pairs from reaching `AnalyticContactDetection`
+(no overload for that combination). Box↔Sphere is still included because Sphere is not INFINITE.
 
 ---
 
 ### 2. `SetupStages.h` — `setupParticles()`
 
-**Modified `createParticleFct`** to exclude spheres overlapping the pillar column using nearest-point distance in XY (Z is omitted because the pillar spans the full domain height).
-
-**Added `createBox()` call** after `createPlane()` calls.
+`createParticleFct` excludes spheres overlapping the pillar column (nearest-point XY distance).
+`createBox()` called after `createPlane()` calls.
 
 ---
 
-### 3. `Antidunes.prm`
+### 3. `SimulationParams.h` — `parsePillars()`
 
-Added `CellInterval` in `BoundaryParameters` for the LBM NoSlip boundary matching the box geometry.
+`PillarParams` with center + halfExtents. `parsePillars()` reads zero-or-more `Pillar` sub-blocks
+from the `Pillars` config block. `SimulationParams` holds `std::vector<PillarParams> pillars`.
 
 ---
 
 ## What Was NOT Changed (and Why)
 
 ### Particle mapping (LBM–DEM coupling)
-Both `mapParticlesOntoCells` and `MovingParticleMapping` use a `sphereSelector` filtering by `Sphere::SHAPE_TYPE`. Box and cylinder pillars are excluded from MEM mapping — they never conflict with the NoSlip flags set by the boundary handling.
+Both `mapParticlesOntoCells` and `MovingParticleMapping` use a `sphereSelector` filtering by
+`Sphere::SHAPE_TYPE`. Box and cylinder pillars are excluded from MEM mapping — they never
+conflict with the NoSlip flags set by the boundary handling.
 
 ### Fill level inside pillar
-`initFlagsFromFillLevels` explicitly skips cells where `handling->isBoundary()` is true. NoSlip cells keep their flag regardless of fill level.
+`initFlagsFromFillLevels` explicitly skips cells where `handling->isBoundary()` is true.
+NoSlip cells keep their flag regardless of fill level.
 
 ### Zero velocity in pillar cells
 `ZeroSetter` already zeros PDFs in obstacle cells before every VTK write.
-
----
-
-## Verified Contact Detection Correctness
-
-The sphere–box contact normal always points **outward** via `detectSphereBoxCollision` in `AnalyticCollisionFunctions.h`. `DoubleCast` routes `Sphere ↔ Box` pairs to `AnalyticContactDetection`, which calls `detectSphereBoxCollision`. `LinearSpringDashpot` applies the contact force using the same parameter set (type 2 vs 0, same friction/restitution/kappa) as sphere–wall contacts.

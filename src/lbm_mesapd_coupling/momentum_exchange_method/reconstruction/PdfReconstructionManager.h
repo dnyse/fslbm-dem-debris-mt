@@ -23,10 +23,12 @@
 #pragma once
 
 #include "core/debug/Debug.h"
+#include "core/logging/Logging.h"
 #include "domain_decomposition/StructuredBlockStorage.h"
 #include "field/Field.h"
 #include "field/FlagField.h"
 #include "field/iterators/IteratorMacros.h"
+#include "lbm/field/PdfField.h"
 
 #include "lbm_mesapd_coupling/DataTypes.h"
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/Reconstructor.h"
@@ -172,6 +174,16 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
                                                 size_t particleIdx = ac_->uidToIdx(particleField->get(x,y,z));
                                                 WALBERLA_ASSERT_UNEQUAL( particleIdx, ac_->getInvalidIdx(), "Index of particle is invalid!" );
                                                 (*reconstructor_)(block, x, y, z, pdfField, particleIdx, *ac_);
+                                                // Diagnostic: detect if reconstructor produced NaN PDFs (e.g. all neighbors were
+                                                // obstacle or gas cells so GradsMomentApproximation had no valid stencil).
+                                                for( uint_t f = 0; f < PdfField_T::Stencil::Size; ++f ) {
+                                                   if( !std::isfinite(pdfField->get(x,y,z,f)) ) {
+                                                      WALBERLA_LOG_WARNING("[PdfReconstruction] NaN/Inf after reconstruction at ("
+                                                         << x << "," << y << "," << z << ") f=" << f
+                                                         << " val=" << pdfField->get(x,y,z,f) );
+                                                      break;
+                                                   }
+                                                }
                                                 if( conserveMomentumWhenRestoring_ && pdfField->isInInnerPart(Cell(x,y,z)) ) {
                                                    // the (artificially) added momentum in the restored fluid cell has to be subtracted from the former particle to ensure momentum conservation
                                                    // force = momentum / dt, with dt = 1

@@ -158,6 +158,15 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
 
    real_t pdf_old = pdfField_->get( x, y, z, Stencil_T::idx[dir] );
 
+   // Diagnostic: detect NaN/Inf PDFs in fluid cells so we can trace the origin of LBM field corruption.
+   // This fires before the bounce-back writes the NaN back into the obstacle cell, letting us see
+   // which fluid cell was already corrupt when SimpleBB tried to read it.
+   if( !std::isfinite(pdf_old) ) {
+      WALBERLA_LOG_WARNING( "[SimpleBB] NaN/Inf pdf_old at fluid cell (" << x << "," << y << "," << z
+         << ") -> obstacle (" << nx << "," << ny << "," << nz << ") dir=" << dir
+         << " pdf=" << pdf_old );
+   }
+
    // apply bounce back scheme
    const real_t delta = real_c( 0.5 );
    real_t pdf_new = pdf_old;

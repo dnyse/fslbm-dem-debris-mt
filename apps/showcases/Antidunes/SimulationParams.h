@@ -113,6 +113,7 @@ struct ParticleParams {
    uint_t      numSubCycles;
    bool        useLubricationCorrection;
    bool        useNoSlipParticles;
+   bool        useParticleBed;
 
    ParticleParams(const config::Config::BlockHandle& b)
       : inFileName               { b.getParameter< std::string >("inFileName") }
@@ -125,6 +126,7 @@ struct ParticleParams {
       , numSubCycles             { b.getParameter< uint_t >     ("numSubCycles") }
       , useLubricationCorrection { b.getParameter< bool >       ("useLubricationCorrection") }
       , useNoSlipParticles       { b.getParameter< bool >       ("useNoSlipParticles") }
+      , useParticleBed           { b.getParameter< bool >       ("useParticleBed", true) }
    {}
 };
 
@@ -154,12 +156,18 @@ struct FloatingSphereParams {
    Vector3< real_t > position;
    real_t            radius;
    real_t            densityRatio;
+   // Number of LBM timesteps the sphere is held fixed before being released to float freely.
+   // Use this when starting with the sphere at or above the free surface: the FSLBM needs time
+   // to establish a stable fill-level distribution around the contact line before the sphere moves.
+   // 0 = release immediately (default, correct for fully submerged start).
+   uint_t            settlingSteps;
 
    FloatingSphereParams(const config::Config::BlockHandle& b)
    {
-      position     = b.getParameter< Vector3< real_t > >("position");
-      radius       = b.getParameter< real_t >           ("radius");
-      densityRatio = b.getParameter< real_t >           ("densityRatio");
+      position      = b.getParameter< Vector3< real_t > >("position");
+      radius        = b.getParameter< real_t >           ("radius");
+      densityRatio  = b.getParameter< real_t >           ("densityRatio");
+      settlingSteps = b.getParameter< uint_t >           ("settlingSteps", uint_t(0));
    }
 };
 

@@ -1,6 +1,6 @@
 BlockForestParameters
 {
-   cellsPerBlock                 < 16, 30, 75 >; // 8x2x2 = 32 processes
+   cellsPerBlock                 < 32, 20, 30 >;
    periodicity                   < 1, 1, 0 >;
    loadSnapshot                  false;
    storeSnapshot                 true;
@@ -10,7 +10,7 @@ BlockForestParameters
 
 DomainParameters
 {
-   domainSize         <128, 60, 150>;
+   domainSize         <128, 60, 180>;
    wavePeriods        1;         // never set to 0 -> division by zero, even if you initialize a flat particle bed
    liquidHeightFactor 2.862;     // h_0 / d (water height / avg particle diameter) -> from experiment [E1=2.862, E2=3.1724, E3=3.27586, E4=3.5862]
    floorHeightFactor  4.1393;    // (floor height / avg particle diameter) from domain bottom to sine's average
@@ -41,35 +41,40 @@ ParticleParameters
 {
    inFileName spheres_out.dat;
    bedCopiesInX 1;
-   bedCopiesInY 1; // scalingFactor=500, 500*0.015*8=60 matches domainY
+   bedCopiesInY 1;
    densityRatio 2.55;
-   fixingHeightFactor 1.5; // proportional to the mean particle diameter
+   fixingHeightFactor 1.5;
    frictionCoefficient 0.5;
    restitutionCoefficient 0.97;
    numSubCycles 10;
    useLubricationCorrection true;
    useNoSlipParticles false;
+   useParticleBed true;
 }
 
+// Two box pillars creating a slit opening at Y=23-36 (14 cells wide).
 Pillars
 {
-   // halfExtents < hx, hy, hz > in lattice units; both LBM (NoSlip CellInterval) and DEM use rectangular geometry.
-   // Add or remove Pillar blocks to change the number of pillars (zero is valid).
-   Pillar
+   Pillar   // left pillar: Y=0-22
    {
-      center      < 64, 30, 75 >;
-      halfExtents < 16, 10, 75 >;
+      center      < 64, 11.5, 60 >;
+      halfExtents < 16, 11.5, 60 >;
+   }
+   Pillar   // right pillar: Y=37-59, slit = Y=23-36 (14 cells = 7*2, floater diameter=16 cannot pass)
+   {
+      center      < 64, 48.5, 60 >;
+      halfExtents < 16, 11.5, 60 >;
    }
 }
 
-FloatingSphere
+FloatingSpheres
 {
-   // Large buoyant sphere (densityRatio < 1 → upward buoyancy → floats).
-   // Placed at canal inlet; flow pushes it downstream until it wedges against the pillar face.
-   // type=1 in MESA-PD so AddExternalForces uses its own densityRatio.
-   position     < 15, 30, 60 >;
-   radius       10;
-   densityRatio 0.5;
+   FloatingSphere
+   {
+      position     < 15, 30, 47 >;
+      radius       8;
+      densityRatio 0.5;
+   }
 }
 
 ModelParameters
@@ -102,9 +107,11 @@ BoundaryParameters
    // Z walls
    Border { direction T;  walldistance -1; NoSlip{} }
    Border { direction B;  walldistance -1; NoSlip{} }
-   // Pillar NoSlip: CellInterval min = center - halfExtents, max = center + halfExtents - 1
-   // center <64,30,75>, halfExtents <16,10,75> → min <48,20,0>, max <79,39,149>
-   CellInterval { min < 48, 20, 0 >; max < 79, 39, 149 >; NoSlip{} }
+
+   // Left pillar NoSlip: center <64,11.5,60>, halfExtents <16,11.5,60> → Y=0-22
+   CellInterval { min < 48,  0, 0 >; max < 79, 22, 119 >; NoSlip{} }
+   // Right pillar NoSlip: center <64,48.5,60>, halfExtents <16,11.5,60> → Y=37-59, slit Y=23-36
+   CellInterval { min < 48, 37, 0 >; max < 79, 59, 119 >; NoSlip{} }
 }
 
 MeshOutputParameters
@@ -125,31 +132,19 @@ VTK
 
       writers
       {
-         //fill_level;
-         //mapped_flag;
          velocity;
-         //density;
-         //curvature;
-         //normal;
-         //obstacle_normal;
-         //pdf;
-         //flag;
-         //force;
       }
 
-      // X-Z midplane (y = 30, cuts through pillar centre)
       CellBB_filter_0 {
          min < 0, 29, 0 >;
          max < 128, 30, 150 >;
       }
 
-      // Y-Z inlet plane
       CellBB_filter_1 {
          min < 0, 0, 0 >;
          max < 1, 60, 150 >;
       }
 
-      // X-Y-Z volume around pillar: full domain in x and y, full z height
       CellBB_filter_2 {
          min < 0, 0, 0 >;
          max < 128, 60, 150 >;
@@ -160,13 +155,11 @@ VTK
          CellBB_filter_0;
          CellBB_filter_1;
          CellBB_filter_2;
-         //liquidInterfaceFilter; // only include liquid and interface cells in VTK output
       }
 
       before_functions
       {
-         //ghost_layer_synchronization; // only needed if writing the ghost layer
-         gas_cell_zero_setter;          // sets velocity=0 and density=1 all gas cells before writing VTK output
+         gas_cell_zero_setter;
       }
    }
 

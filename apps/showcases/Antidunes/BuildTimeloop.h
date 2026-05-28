@@ -50,6 +50,8 @@
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/Reconstructor.h"
 
 #include "mesa_pd/data/shape/Box.h"
+#include "mesa_pd/data/shape/CylindricalBoundary.h"
+#include "mesa_pd/vtk/OutputSelector.h"
 #include "mesa_pd/vtk/ParticleVtkOutput.h"
 
 #include "vtk/VTKOutput.h"
@@ -160,6 +162,44 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
                                                          false, false, true, false, simObjs->beginTimeStep);
       timeloop->addFuncBeforeTimeStep(vtk::writeFiles(boxVTKOutput), "VTK: pillar data");
    }
+
+   // Cylinder pillar VTK — one point per pillar at the axis centre with a glyphScale attribute.
+   // In ParaView: Filters > Glyph, Glyph Type = Cylinder, Scale Mode = Scale by Components,
+   // Scale Array = glyphScale, Scale Factor = 1. Then add Filters > Transform, Rotate X = 90
+   // to align the cylinder axis (VTK glyph Y-axis) with the simulation Z-axis.
+   // glyphScale = (2r, domainZ, 2r): the unit cylinder (r=0.5, h=1) scaled component-wise
+   // gives the correct radius and full-domain height without any manual fudge factors.
+   if (!simParams->cylinderPillars.empty())
+   {
+      struct SelectCylinderGlyphScale
+      {
+         using return_type = mesa_pd::Vec3;
+         real_t domainZ;
+         explicit SelectCylinderGlyphScale(real_t dz) : domainZ(dz) {}
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const auto* shape = dynamic_cast< const mesa_pd::data::CylindricalBoundary* >(p.getBaseShape().get());
+            if (!shape) return mesa_pd::Vec3(real_t(0));
+            const real_t r = shape->getRadius();
+            return mesa_pd::Vec3(real_t(2) * r, domainZ, real_t(2) * r);
+         }
+      };
+
+      auto cylinderPointData = std::make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
+      cylinderPointData->addOutput(
+         "glyphScale",
+         std::make_shared< mesa_pd::vtk::OutputSelector< SelectCylinderGlyphScale > >(
+            SelectCylinderGlyphScale(real_c(simParams->domain.domainSize[2]))));
+      cylinderPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
+         const auto& shape = pIt->getBaseShape();
+         return pIt->getType() == uint_t(2) && shape &&
+                shape->getShapeType() == mesa_pd::data::CylindricalBoundary::SHAPE_TYPE;
+      });
+      auto cylinderVTKOutput = vtk::createVTKOutput_PointData(
+         cylinderPointData, "cylinder_pillar", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
+         std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
+      timeloop->addFuncBeforeTimeStep(vtk::writeFiles(cylinderVTKOutput), "VTK: cylinder pillar data");
+   }
 }
 
 void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& simParams,
@@ -167,6 +207,32 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
                              const std::unique_ptr< SweepTimeloop >& timeloop)
 {
    WALBERLA_LOG_INFO_ON_ROOT("addSweepSurfaceGeometry");
+
+   // ObstacleNormalSweep and ObstacleFillLevelSweep are commented out (originally borrowed from the
+   // wetting module). They are a coupled pair: ObstacleFillLevelSweep writes fictitious fill values
+   // into obstacle cells of smoothFillField; NormalSweep's includeObstacleNeighbors reads them.
+   // Without ObstacleFillLevelSweep, obstacle cells have fill=0 (indistinguishable from gas), so
+   // includeObstacleNeighbors must also be false — otherwise obstacle cells corrupt the gradient stencil.
+   //
+   // Re-enable both together if wetting / contact-angle effects at obstacle surfaces are needed:
+   //
+   // walberla::free_surface::ObstacleNormalSweep< CommunicationStencil_T, FlagField_T, VectorField_T >
+   //    obstacleNormalSweep(simObjs->obstacleNormalFieldID, simObjs->flagFieldID,
+   //                        walberla::free_surface::flagIDs::interfaceFlagID,
+   //                        walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs,
+   //                        simObjs->flagInfo.getObstacleIDSet(), false, true, true);
+   // timeloop->add() << Sweep(obstacleNormalSweep, "Sweep: obstacle normal computation")
+   //                 << AfterFunction(Communication_T(simObjs->blockForest, simObjs->obstacleNormalFieldID),
+   //                                  "Communication: after obstacle normal sweep");
+   //
+   // walberla::free_surface::ObstacleFillLevelSweep< CommunicationStencil_T, FlagField_T, ScalarField_T, VectorField_T >
+   //    obstacleFillLevelSweep(simObjs->smoothFillFieldID, simObjs->fillFieldID, simObjs->flagFieldID,
+   //                           simObjs->obstacleNormalFieldID,
+   //                           walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs,
+   //                           simObjs->flagInfo.getObstacleIDSet());
+   // timeloop->add() << Sweep(obstacleFillLevelSweep, "Sweep: obstacle fill level computation")
+   //                 << AfterFunction(Communication_T(simObjs->blockForest, simObjs->smoothFillFieldID),
+   //                                  "Communication: after obstacle fill level sweep");
 
    // smooth fill level field for decreasing error in finite difference normal and curvature computation (see
    // dissertation of S. Bogner, 2017 (section 4.4.2.1))
@@ -184,10 +250,13 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
                                     "Communication: after smoothing sweep");
 
    // compute interface normals (using smoothed fill level field)
+   // includeObstacleNeighbors=false: must match the commented-out ObstacleFillLevelSweep above.
+   // If ObstacleFillLevelSweep is not running, obstacle cells have fill=0 in smoothFillField,
+   // so including them would treat obstacle surfaces as gas → wrong normals near pillars/sphere.
    walberla::free_surface::NormalSweep< CommunicationStencil_T, FlagField_T, ScalarField_T, VectorField_T > normalSweep(
       simObjs->normalFieldID, simObjs->smoothFillFieldID, simObjs->flagFieldID,
       walberla::free_surface::flagIDs::interfaceFlagID, walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs,
-      simObjs->flagInfo.getObstacleIDSet(), true, false, true, false);
+      simObjs->flagInfo.getObstacleIDSet(), true, true, false, false);
 
    timeloop->add() << Sweep(normalSweep, "Sweep: normal computation", StateSweep::fullFreeSurface)
                    << Sweep(EmptySweep(), "Empty sweep: normal")
@@ -433,21 +502,59 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
       "Sweep (coupling): MovingParticleMapping");
 
    // sweep for restoring PDFs in cells previously occupied by particles
-   auto gradReconstructor =
-      lbm_mesapd_coupling::makeGradsMomentApproximationReconstructor< AntidunesBoundaryHandling_T::BoundaryHandling_T >(
-         simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simParams->computed.relaxationRate,
-         false, // recomputeTargetDensity
-         true   // useCentralDifferences
-      );
+   //
+   // FIX: switch from GradsMomentApproximationReconstructor to EquilibriumReconstructor.
+   //
+   // GradsMomentApproximation constructs f_i = f_i^eq(ρ_avg, u_particle) + Pneq_correction.
+   // The Pneq term involves velocity gradients computed from neighboring FLUID cells.
+   // At the contact circle (z ≈ absoluteLiquidHeight, just inside the sphere surface), the
+   // neighbors include:
+   //   - interface cells with fill-drift-corrupted PDFs (contact-line mass imbalance)
+   //   - gas cells (fill=0, PDF=0 — above the free surface)
+   //   - obstacle cells (still inside the sphere)
+   // The Pneq correction applied on top of an already-low average density (only ~⅔ of the
+   // D3Q27 stencil has valid fluid neighbours) pushes individual f_i negative.  After one
+   // FSLBM streaming step those negative values propagate into adjacent liquid cells and the
+   // Cumulant collision (τ ≈ 0.501) diverges → NaN.
+   //
+   // EquilibriumReconstructor sets ALL 27 PDFs to f_i^eq(ρ_avg, u_particle) ≥ 0.
+   // Streaming from gas neighbours (PDF=0) then reduces ρ, but keeps every f_i ≥ 0, so the
+   // collision cannot produce NaN from a negative-density state.
+   //
+   // Previous (now-commented) GradsMoment version, kept for reference:
+   // auto gradReconstructor =
+   //    lbm_mesapd_coupling::makeGradsMomentApproximationReconstructor< AntidunesBoundaryHandling_T::BoundaryHandling_T >(
+   //       simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simParams->computed.relaxationRate,
+   //       false,  // recomputeTargetDensity
+   //       true    // useCentralDifferences
+   //    );
 
    timeloop->add()
       << Sweep(makeSharedSweep(
+                  // two-arg overload: uses EquilibriumReconstructor internally.
+                  //
+                  // FIX: mark newly-uncovered cells as INTERFACE, not LIQUID.
+                  //
+                  // When the sphere moves and uncovers a contact-circle cell, that cell retains
+                  // the fictitious fill level assigned by ObstacleFillLevelSweep (≈0.5247524).
+                  // A fill of ~0.5 is physically an interface cell — it is only half-filled with
+                  // liquid.  If we set the flag to LIQUID, StreamReconstructAdvectSweep performs
+                  // a full 27-direction streaming step: directions pointing into gas neighbours
+                  // pull in f=0, and directions into still-obstacle neighbours pull in
+                  // SimpleBB-modified (and possibly corrupted) PDFs.  The sum Σf[i] can go
+                  // negative → Cumulant collision diverges → NaN at t=577.
+                  //
+                  // By setting the flag to INTERFACE, StreamReconstructAdvectSweep instead
+                  // *reconstructs* PDFs for gas-facing directions from the atmosphere density
+                  // (ρ=1, u=0), guaranteeing every f[i] ≥ 0.  The FSLBM dynamics then
+                  // naturally evolve the fill level and convert the cell to LIQUID or GAS in
+                  // the following CellConversionSweep if appropriate.
                   lbm_mesapd_coupling::makePdfReconstructionManager< PdfField_T,
                                                                      AntidunesBoundaryHandling_T::BoundaryHandling_T >(
                      simObjs->blockForest, simObjs->pdfFieldID, simObjs->antidunesBoundaryHandling->getHandlingID(),
                      simObjs->particleFieldID, simObjs->particleAccessor, FormerMO_Flag,
-                     walberla::free_surface::flagIDs::liquidFlagID, gradReconstructor, strictlyConserveMomentum)),
-               "Sweep (coupling): PDF Reconstruction (moving particles)")
+                     walberla::free_surface::flagIDs::interfaceFlagID, strictlyConserveMomentum)),
+               "Sweep (coupling): PDF Reconstruction (moving particles) [EquilibriumReconstructor+Interface]")
       << AfterFunction(
             Communication_T(simObjs->blockForest, simObjs->flagFieldID, simObjs->particleFieldID),
             "Communication (coupling): after PDF reconstruction (flagField + particleField)") // unsure if necessary but

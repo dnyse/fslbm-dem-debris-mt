@@ -42,8 +42,17 @@
 #include "mesa_pd/mpi/notifications/ForceTorqueNotification.h"
 #include "mesa_pd/mpi/notifications/HydrodynamicForceTorqueNotification.h"
 
+#include "core/logging/Logging.h"
+#include "core/math/Constants.h"
+#include "core/mpi/Reduce.h"
+#include "mesa_pd/data/Flags.h"
+#include "mesa_pd/data/shape/Sphere.h"
+
 #include "SimulationParams.h"
 #include "SimulationObjects.h"
+
+#include <algorithm>
+#include <unordered_map>
 
 
 namespace walberla {
@@ -207,26 +216,57 @@ public:
       : domain_(domain)
       , acceleration_(acceleration)
       , particleDensityRatio_(particleDensityRatio)
+      , submergedVolumes_(nullptr)
    {}
+
+   void setSubmergedVolumes(const std::unordered_map< walberla::id_t, real_t >* sv) {
+      submergedVolumes_ = sv;
+   }
 
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx, ParticleAccessor_T& ac){
-      // Buoyancy is removed only from the Z component because the hydrostatic contribution removed during MEM is only applied in Z
-      // Type 1 = floating sphere; derive its density ratio from invMass×volume (baked in at creation)
+      // Buoyancy acts only in Z because the hydrostatic MEM contribution is only in Z.
+      // Type 1 = floating sphere; derive its density ratio from invMass×volume (baked in at creation).
       const real_t rho = (ac.getType(idx) == uint_t(1))
          ? real_t(1) / (ac.getInvMass(idx) * ac.getVolume(idx))
          : particleDensityRatio_;
-      Vector3< real_t > bodyForce = ac.getVolume(idx) * Vector3< real_t >(
-         (*acceleration_)[0], (*acceleration_)[1], (rho - real_c(1)) * (*acceleration_)[2]);
 
-      mesa_pd::addForceAtomic(idx, ac, ac.getHydrodynamicForce(idx) + bodyForce);
-      mesa_pd::addTorqueAtomic(idx, ac, ac.getHydrodynamicTorque(idx));
+      const real_t vFull = ac.getVolume(idx);
+      // For floating spheres use the precomputed submerged volume so that the gas-phase portion
+      // of the sphere does not contribute a spurious upward buoyancy force.
+      // Non-floaters are always fully submerged, so vSub = vFull leaves their behaviour unchanged.
+      real_t vSub = vFull;
+      if (ac.getType(idx) == uint_t(1) && submergedVolumes_) {
+         auto it = submergedVolumes_->find(ac.getUid(idx));
+         if (it != submergedVolumes_->end()) vSub = it->second;
+      }
+
+      // X/Y: full-volume driving force (pressure-gradient body force acts on the whole particle).
+      // Z:   gravity (rho * vFull) minus correct buoyancy (vSub × g, fluid density = 1).
+      Vector3< real_t > bodyForce(
+         vFull * (*acceleration_)[0],
+         vFull * (*acceleration_)[1],
+         (rho * vFull - vSub) * (*acceleration_)[2]);
+
+      auto hydro_force  = ac.getHydrodynamicForce(idx);
+      auto hydro_torque = ac.getHydrodynamicTorque(idx);
+
+      if (!std::isfinite(hydro_force[0]) || !std::isfinite(hydro_force[1]) || !std::isfinite(hydro_force[2]))
+         WALBERLA_LOG_WARNING("[AddExternalForces] NaN/Inf hydrodynamic force on uid=" << ac.getUid(idx)
+            << " pos=" << ac.getPosition(idx));
+      if (!std::isfinite(hydro_torque[0]) || !std::isfinite(hydro_torque[1]) || !std::isfinite(hydro_torque[2]))
+         WALBERLA_LOG_WARNING("[AddExternalForces] NaN/Inf hydrodynamic torque on uid=" << ac.getUid(idx)
+            << " pos=" << ac.getPosition(idx));
+
+      mesa_pd::addForceAtomic(idx, ac, hydro_force + bodyForce);
+      mesa_pd::addTorqueAtomic(idx, ac, hydro_torque);
    }
 
 private:
-   std::shared_ptr< mesa_pd::domain::BlockForestDomain > domain_;
-   std::shared_ptr< Vector3< real_t > > acceleration_;
-   real_t particleDensityRatio_;
+   std::shared_ptr< mesa_pd::domain::BlockForestDomain >   domain_;
+   std::shared_ptr< Vector3< real_t > >                    acceleration_;
+   real_t                                                   particleDensityRatio_;
+   const std::unordered_map< walberla::id_t, real_t >*     submergedVolumes_;
 };
 
 
@@ -239,6 +279,8 @@ public:
       : particleAccessor(simObjs->particleAccessor)
       , particleStorage(simObjs->particleStorage)
       , syncCall(simObjs->syncCall)
+      , blockForest_(simObjs->blockForest)
+      , fillFieldID_(simObjs->fillFieldID)
       , vvIntegratorPreForce(simParams->computed.particleTimestepSize)
       , vvIntegratorPostForce(simParams->computed.particleTimestepSize)
       , computeLubrication(simObjs->mesapdDomain, simParams->computed.viscosity)
@@ -255,7 +297,30 @@ public:
          simObjs->acceleration,
          simParams->particle.densityRatio)
       , useLubricationCorrection(simParams->particle.useLubricationCorrection)
-   {}
+      , evalFrequency_(simParams->evaluation.evaluationFrequency)
+      , stepCounter_(uint_t(0))
+   {
+      // Build floater UID/radius list with the same size on ALL ranks so that
+      // allReduceInplace calls in computeSubmergedVolumes are always MPI-valid.
+      // Only the owner rank (non-ghost) contributes each UID; SUM broadcasts it.
+      const size_t nF = simParams->floatingSpheres.size();
+      floaterUIDs_.assign(nF, walberla::id_t(0));
+      floaterRadii_.resize(nF);
+      for (size_t fi = 0; fi < nF; ++fi)
+         floaterRadii_[fi] = simParams->floatingSpheres[fi].radius;
+
+      uint_t assignIdx = 0;
+      for (size_t idx = 0; idx < particleAccessor->size(); ++idx)
+      {
+         if (particleAccessor->getType(idx) != uint_t(1)) continue;
+         if (mesa_pd::data::particle_flags::isSet(
+                particleAccessor->getFlags(idx),
+                mesa_pd::data::particle_flags::GHOST)) continue;
+         if (assignIdx < nF)
+            floaterUIDs_[assignIdx++] = particleAccessor->getUid(idx);
+      }
+      mpi::allReduceInplace(floaterUIDs_, mpi::SUM);
+   }
 
    template< typename TP >
    void resetHydroForces(timing::TimingPool<TP> & tp){
@@ -288,6 +353,10 @@ public:
 
    template< typename TP >
    void doDEMSubCycles(timing::TimingPool<TP> & tp, uint_t numSubCycles = uint_t(1)){
+      // Submerged volume is computed once per LBM step (fill field does not change during DEM sub-cycles).
+      computeSubmergedVolumes();
+      addExternalForces.setSubmergedVolumes(&submergedVolumes_);
+
       for (auto subCycle = uint_t(0); subCycle < numSubCycles; ++subCycle)
       {
          // velocity verlet pre-force (update positions) --------------------------------
@@ -350,19 +419,173 @@ public:
       }
    }
 
+   // Estimates the submerged volume of every floating sphere (type 1) once per LBM step.
+   // For each Z-slice dz through the sphere, 4 cells just outside the sphere in XY are sampled
+   // from the fill field. Their average fill level phi(dz) ≈ 1 below the free surface and ≈ 0
+   // above it, so sum_dz phi(dz) approximates h (submersion depth). V_sub is then the spherical
+   // cap formula pi*h^2*(3r-h)/3, clamped to [0, V_sphere].
+   void computeSubmergedVolumes()
+   {
+      const size_t nF = floaterUIDs_.size();
+      if (nF == 0) { submergedVolumes_.clear(); return; }
+
+      // Gather current positions from owner ranks (skip ghost copies so each
+      // sphere contributes exactly once; allReduce SUM then broadcasts to all ranks).
+      // Using floaterUIDs_.size() as nF guarantees all 72 ranks call allReduceInplace
+      // with the same vector length — avoiding the undefined MPI count mismatch.
+      std::vector< real_t > cenX(nF, real_t(0));
+      std::vector< real_t > cenY(nF, real_t(0));
+      std::vector< real_t > cenZ(nF, real_t(0));
+
+      for (size_t idx = 0; idx < particleAccessor->size(); ++idx)
+      {
+         if (particleAccessor->getType(idx) != uint_t(1)) continue;
+         if (mesa_pd::data::particle_flags::isSet(
+                particleAccessor->getFlags(idx),
+                mesa_pd::data::particle_flags::GHOST)) continue;
+         const auto uid = particleAccessor->getUid(idx);
+         for (size_t fi = 0; fi < nF; ++fi)
+         {
+            if (floaterUIDs_[fi] != uid) continue;
+            const auto& pos = particleAccessor->getPosition(idx);
+            cenX[fi] = pos[0];  cenY[fi] = pos[1];  cenZ[fi] = pos[2];
+            break;
+         }
+      }
+      mpi::allReduceInplace(cenX, mpi::SUM);
+      mpi::allReduceInplace(cenY, mpi::SUM);
+      mpi::allReduceInplace(cenZ, mpi::SUM);
+
+      // Build per-floater slice offsets (each floater has 2*r_cells+1 Z-slices).
+      // Track raw (numerator, denominator) per slice so that ring cells split across
+      // block boundaries are averaged correctly after the global allReduce.
+      std::vector< size_t > rCells(nF);
+      std::vector< size_t > sliceOffsets(nF + 1, size_t(0));
+      for (size_t fi = 0; fi < nF; ++fi)
+      {
+         rCells[fi]           = static_cast< size_t >(std::ceil(floaterRadii_[fi]));
+         sliceOffsets[fi + 1] = sliceOffsets[fi] + size_t(2) * rCells[fi] + size_t(1);
+      }
+      const size_t totalSlices = sliceOffsets[nF];
+
+      std::vector< real_t > sliceNum(totalSlices, real_t(0)); // sum of phi per slice
+      std::vector< real_t > sliceDen(totalSlices, real_t(0)); // cell count per slice
+
+      for (auto& iblock : *blockForest_)
+      {
+         auto* fillField = iblock.getData< ScalarField_T >(fillFieldID_);
+         const CellInterval& blockCellBB = blockForest_->getBlockCellBB(iblock);
+
+         for (size_t fi = 0; fi < nF; ++fi)
+         {
+            const real_t   r  = floaterRadii_[fi];
+            const int      rc = static_cast< int >(rCells[fi]);
+            Vector3< real_t > c(cenX[fi], cenY[fi], cenZ[fi]);
+            blockForest_->mapToPeriodicDomain(c);
+
+            for (int dz = -rc; dz <= rc; ++dz)
+            {
+               const real_t dz_r      = static_cast< real_t >(dz);
+               const real_t r_ring_sq = r * r - dz_r * dz_r;
+               if (r_ring_sq < real_t(0)) continue;
+
+               const int    r_outer = static_cast< int >(std::sqrt(r_ring_sq)) + 1;
+               const real_t sz      = c[2] + dz_r;
+
+               if (sz < blockForest_->getDomain().zMin() ||
+                   sz >= blockForest_->getDomain().zMax()) continue;
+
+               const size_t sliceIdx = sliceOffsets[fi] + static_cast< size_t >(dz + rc);
+
+               const std::array< std::pair< int, int >, 4 > dirs = {{
+                  {r_outer, 0}, {-r_outer, 0}, {0, r_outer}, {0, -r_outer}
+               }};
+
+               for (auto [ddx, ddy] : dirs)
+               {
+                  Vector3< real_t > samplePos(c[0] + static_cast< real_t >(ddx),
+                                              c[1] + static_cast< real_t >(ddy), sz);
+                  blockForest_->mapToPeriodicDomain(samplePos);
+
+                  const Cell globalCell = blockForest_->getCell(samplePos);
+                  if (!blockCellBB.contains(globalCell)) continue;
+
+                  Cell localCell;
+                  blockForest_->transformGlobalToBlockLocalCell(localCell, iblock, globalCell);
+                  if (!fillField->xyzSize().contains(localCell)) continue;
+
+                  sliceNum[sliceIdx] += fillField->get(localCell[0], localCell[1], localCell[2]);
+                  sliceDen[sliceIdx] += real_t(1);
+               }
+            }
+         }
+      }
+
+      mpi::allReduceInplace(sliceNum, mpi::SUM);
+      mpi::allReduceInplace(sliceDen, mpi::SUM);
+
+      // Compute phiSum = sum_dz( average_phi(dz) ) ≈ submersion depth h in LU
+      std::vector< real_t > phiSum(nF, real_t(0));
+      for (size_t fi = 0; fi < nF; ++fi)
+      {
+         const int rc2 = static_cast< int >(rCells[fi]);
+         for (int dz = -rc2; dz <= rc2; ++dz)
+         {
+            const size_t sliceIdx = sliceOffsets[fi] + static_cast< size_t >(dz + rc2);
+            if (sliceDen[sliceIdx] > real_t(0))
+               phiSum[fi] += sliceNum[sliceIdx] / sliceDen[sliceIdx];
+         }
+      }
+
+      submergedVolumes_.clear();
+      for (size_t fi = 0; fi < nF; ++fi)
+      {
+         const real_t r     = floaterRadii_[fi];
+         const real_t h     = std::clamp(phiSum[fi], real_t(0), real_t(2) * r);
+         const real_t vSub  = math::pi * h * h * (real_t(3) * r - h) / real_t(3);
+         const real_t vFull = (real_t(4) / real_t(3)) * math::pi * r * r * r;
+
+         WALBERLA_ASSERT_GREATER_EQUAL(h, real_t(0));
+         WALBERLA_ASSERT_LESS_EQUAL(h, real_t(2) * r);
+         WALBERLA_ASSERT_GREATER_EQUAL(vSub, real_t(0));
+         WALBERLA_ASSERT_LESS_EQUAL(vSub, vFull);
+
+         submergedVolumes_[floaterUIDs_[fi]] = vSub;
+
+         if (stepCounter_ % evalFrequency_ == uint_t(0))
+         {
+            WALBERLA_LOG_INFO_ON_ROOT("[FloaterBuoyancy] uid=" << floaterUIDs_[fi]
+               << "  phiSum=" << phiSum[fi]
+               << "  h=" << h << " LU"
+               << "  V_sub=" << vSub << " / " << vFull << " LU³"
+               << "  submersion=" << real_t(100) * vSub / vFull << "%"
+               << "  (expect ~densityRatio×100% at equilibrium)");
+         }
+      }
+      ++stepCounter_;
+   }
+
 private:
    std::shared_ptr< ParticleAccessor_T >              particleAccessor;
    std::shared_ptr< mesa_pd::data::ParticleStorage >  particleStorage;
    std::function< void() >                            syncCall;
    bool useOpenMP{ false };
 
-   // kernels -------------------------------------------------------------
+   shared_ptr< StructuredBlockForest >                blockForest_;
+   BlockDataID                                        fillFieldID_;
+   std::vector< walberla::id_t >                      floaterUIDs_;   // same size on all ranks
+   std::vector< real_t >                              floaterRadii_;  // indexed by floaterUIDs_
+   std::unordered_map< walberla::id_t, real_t >       submergedVolumes_;
+
+   // kernels — declaration order must match initializer-list order to avoid -Wreorder
    mesa_pd::kernel::VelocityVerletPreForceUpdate vvIntegratorPreForce;
    mesa_pd::kernel::VelocityVerletPostForceUpdate vvIntegratorPostForce;
    ComputeLubrication computeLubrication;
    ComputeContacts computeContacts;
    AddExternalForces addExternalForces;
    bool useLubricationCorrection;
+   uint_t                                             evalFrequency_;
+   uint_t                                             stepCounter_;
 };
 
 } // namespace antidunes

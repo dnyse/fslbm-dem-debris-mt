@@ -496,11 +496,12 @@ void ExcessMassDistributionSweepInterfaceAndLiquid< LatticeModel_T, FlagField_T,
    // disable OpenMP to avoid mass distribution to neighboring cells before they have distributed their excess mass
    WALBERLA_FOR_ALL_CELLS_INCLUDING_GHOST_LAYER_XYZ_OMP(fillField, uint_c(1), omp critical, {
       const Cell cell(x, y, z);
+      bool newGas = false; // hoisted so it is visible at the distributeMassInterfaceAndLiquid call below
 
       if (flagField->isFlagSet(cell, Base_T::flagInfo_.convertedFlag))
       {
          // identify cells that were converted to gas/liquid in this time step
-         const bool newGas = flagField->isMaskSet(cell, Base_T::flagInfo_.convertedFlag | Base_T::flagInfo_.gasFlag);
+         newGas = flagField->isMaskSet(cell, Base_T::flagInfo_.convertedFlag | Base_T::flagInfo_.gasFlag);
          const bool newLiquid =
             flagField->isMaskSet(cell, Base_T::flagInfo_.convertedFlag | Base_T::flagInfo_.liquidFlag);
 
@@ -525,7 +526,7 @@ void ExcessMassDistributionSweepInterfaceAndLiquid< LatticeModel_T, FlagField_T,
       if (!realIsEqual(srcExcessMassField->get(cell), real_c(0), real_c(1e-14)))
       {
          distributeMassInterfaceAndLiquid(fillField, dstExcessMassField, flagField, pdfField, cell,
-                                          srcExcessMassField->get(cell));
+                                          srcExcessMassField->get(cell), newGas);
       }
    }) // WALBERLA_FOR_ALL_CELLS_INCLUDING_GHOST_LAYER_XYZ
 
@@ -537,7 +538,7 @@ template< typename PdfField_T >
 void ExcessMassDistributionSweepInterfaceAndLiquid< LatticeModel_T, FlagField_T, ScalarField_T, VectorField_T >::
    distributeMassInterfaceAndLiquid(ScalarField_T* fillField, ScalarField_T* dstExcessMassField,
                                     const FlagField_T* flagField, const PdfField_T* pdfField, const Cell& cell,
-                                    real_t excessMass)
+                                    real_t excessMass, bool newGas)
 {
    using Base_T = ExcessMassDistributionSweepBase_T;
 
@@ -551,8 +552,10 @@ void ExcessMassDistributionSweepInterfaceAndLiquid< LatticeModel_T, FlagField_T,
 
    if (liquidAndInterfaceNeighbors == uint_c(0))
    {
-      WALBERLA_LOG_WARNING(
-         "No liquid or interface cell is in the neighborhood to distribute excess mass to. Mass is lost/gained.");
+      WALBERLA_LOG_WARNING("No liquid or interface cell is in the neighborhood to distribute excess mass to."
+                           " Mass is lost/gained."
+                           " Cell (" << cell.x() << ", " << cell.y() << ", " << cell.z() << ")"
+                           " converted to " << (newGas ? "gas" : "liquid") << ".");
       return;
    }
 

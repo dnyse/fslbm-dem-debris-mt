@@ -95,27 +95,26 @@ void FiniteDifferenceMethod< Stencil_T, LatticeModel_T, FlagField_T, ScalarField
    BlockDataID smoothFillFieldID = field::addToStorage< ScalarField_T >(
       geometryHandler.blockForest_, "Smooth fill level field", real_c(0), fillFieldLayout, uint_c(1));
 
-   if (geometryHandler.enableWetting_)
-   {
-      // compute obstacle normals
-      ObstacleNormalSweep< Stencil_T, FlagField_T, VectorField_T > obstacleNormalSweep(
-         geometryHandler.obstacleNormalFieldID_, geometryHandler.flagFieldID_, flagIDs::interfaceFlagID,
-         flagIDs::liquidInterfaceGasFlagIDs, geometryHandler.obstacleFlagIDSet_, false, true, true);
-      timeloop.add() << Sweep(obstacleNormalSweep, "Sweep: obstacle normal computation")
-                     << AfterFunction(
-                           Communication_T(geometryHandler.blockForest_, geometryHandler.obstacleNormalFieldID_),
-                           "Communication: after obstacle normal sweep");
+   // Compute obstacle normals and reflect fill levels into obstacle cells so that interface cells adjacent to the
+   // obstacle have a complete fill-level gradient stencil. This is required by the FiniteDifferenceMethod whenever an
+   // obstacle touches the free surface (moving particles, walls at the contact line), regardless of wetting.
+   // Without these sweeps, obstacle cells have no fill level → gradient ≈ 0 → zero normal → NaN cascade.
+   ObstacleNormalSweep< Stencil_T, FlagField_T, VectorField_T > obstacleNormalSweep(
+      geometryHandler.obstacleNormalFieldID_, geometryHandler.flagFieldID_, flagIDs::interfaceFlagID,
+      flagIDs::liquidInterfaceGasFlagIDs, geometryHandler.obstacleFlagIDSet_, false, true, true);
+   timeloop.add() << Sweep(obstacleNormalSweep, "Sweep: obstacle normal computation")
+                  << AfterFunction(
+                        Communication_T(geometryHandler.blockForest_, geometryHandler.obstacleNormalFieldID_),
+                        "Communication: after obstacle normal sweep");
 
-      // reflect fill level into obstacle cells such that they can be used for smoothing the fill level field and for
-      // computing the interface normal; MUST be performed BEFORE SmoothingSweep
-      ObstacleFillLevelSweep< Stencil_T, FlagField_T, ScalarField_T, VectorField_T > obstacleFillLevelSweep(
-         smoothFillFieldID, geometryHandler.fillFieldID_, geometryHandler.flagFieldID_,
-         geometryHandler.obstacleNormalFieldID_, flagIDs::liquidInterfaceGasFlagIDs,
-         geometryHandler.obstacleFlagIDSet_);
-      timeloop.add() << Sweep(obstacleFillLevelSweep, "Sweep: obstacle fill level computation")
-                     << AfterFunction(Communication_T(geometryHandler.blockForest_, smoothFillFieldID),
-                                      "Communication: after obstacle fill level sweep");
-   }
+   // reflect fill level into obstacle cells; MUST be performed BEFORE SmoothingSweep
+   ObstacleFillLevelSweep< Stencil_T, FlagField_T, ScalarField_T, VectorField_T > obstacleFillLevelSweep(
+      smoothFillFieldID, geometryHandler.fillFieldID_, geometryHandler.flagFieldID_,
+      geometryHandler.obstacleNormalFieldID_, flagIDs::liquidInterfaceGasFlagIDs,
+      geometryHandler.obstacleFlagIDSet_);
+   timeloop.add() << Sweep(obstacleFillLevelSweep, "Sweep: obstacle fill level computation")
+                  << AfterFunction(Communication_T(geometryHandler.blockForest_, smoothFillFieldID),
+                                   "Communication: after obstacle fill level sweep");
 
    // smooth fill level field for decreasing error in finite difference normal and curvature computation (see
    // dissertation of S. Bogner, 2017 (section 4.4.2.1))
@@ -130,11 +129,13 @@ void FiniteDifferenceMethod< Stencil_T, LatticeModel_T, FlagField_T, ScalarField
                   << AfterFunction(Communication_T(geometryHandler.blockForest_, smoothFillFieldID),
                                    "Communication: after smoothing sweep");
 
-   // compute interface normals (using smoothed fill level field)
+   // compute interface normals (using smoothed fill level field);
+   // always include obstacle neighbors and compute in ghost layer so obstacle-adjacent interface cells get a
+   // complete stencil — the contact-angle curvature correction (enableWetting_) is kept separate
    NormalSweep< Stencil_T, FlagField_T, ScalarField_T, VectorField_T > normalSweep(
       geometryHandler.normalFieldID_, smoothFillFieldID, geometryHandler.flagFieldID_, flagIDs::interfaceFlagID,
-      flagIDs::liquidInterfaceGasFlagIDs, geometryHandler.obstacleFlagIDSet_, true, geometryHandler.enableWetting_,
-      true, geometryHandler.enableWetting_);
+      flagIDs::liquidInterfaceGasFlagIDs, geometryHandler.obstacleFlagIDSet_, true, true,
+      true, true);
    timeloop.add() << Sweep(normalSweep, "Sweep: normal computation", StateSweep::fullFreeSurface)
                   << Sweep(emptySweep(), "Empty sweep: normal")
                   << AfterFunction(Communication_T(geometryHandler.blockForest_, geometryHandler.normalFieldID_),

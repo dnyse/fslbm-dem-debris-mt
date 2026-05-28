@@ -1,0 +1,166 @@
+// 2× resolution of only_floater.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// All spatial lattice-unit quantities are scaled by 2:
+//   domainSize         128×60×180  →  256×120×360
+//   cellsPerBlock       32×20×30   →   64×40×60     (same 4×3×6 = 72 processes)
+//   sphere position    (15,30,56)  →  (30,60,112)
+//   sphere radius           8      →      16
+//   BodyBC cylinder positions/radii scaled by 2
+//   VTK filter bounds scaled by 2
+//   settlingSteps       500        →  1000  (sphere 2× larger; needs longer to stabilise)
+//
+// Dimensionless numbers (Re, Fr, We), factors (liquidHeightFactor, floorHeightFactor),
+// PID gains, and model parameters are unchanged — they are resolution-independent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 40, 60 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <256, 120, 360>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // 2× resolution: all lattice-unit lengths doubled.
+      // absoluteLiquidHeight ≈ 112  (was 56 at 1× resolution).
+      // densityRatio=0.5 → equilibrium at half-submerged → centre at z=112.
+      // settlingSteps doubled to 1000 to give the larger sphere the same number of
+      // flow-advection timescales to establish a stable contact-line fill field.
+      position     < 30, 60, 112 >;
+      radius       16;
+      densityRatio 0.5;
+      settlingSteps 1000;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 128, 30, 0 >; max < 128, 30, 360 >; radius 16; NoSlip{} }
+   BodyBC { shape Cylinder; min < 128, 90, 0 >; max < 128, 90, 360 >; radius 16; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Filters scaled ×2 from only_floater.prm:
+      //   filter_0: Y-midplane slab  (y=59–60, same relative position in 120-cell domain)
+      //   filter_1: X=0 face slice   (x=0–1)
+      //   filter_2: full XY volume   (up to z=300, i.e. 5/6 of domain height as in original)
+      CellBB_filter_0 { min < 0, 59, 0 >; max < 256, 60, 300 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;  max < 1, 120, 300 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;  max < 256, 120, 300 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

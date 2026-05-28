@@ -200,7 +200,7 @@ class ExcessMassDistributionSweepInterfaceAndLiquid
    template< typename PdfField_T >
    void distributeMassInterfaceAndLiquid(ScalarField_T* fillField, ScalarField_T* dstExcessMassField,
                                          const FlagField_T* flagField, const PdfField_T* pdfField, const Cell& cell,
-                                         real_t excessMass);
+                                         real_t excessMass, bool newGas);
 
    BlockDataID excessMassFieldID_;
    field::FieldClone< ScalarField_T, true > excessMassFieldClone_;

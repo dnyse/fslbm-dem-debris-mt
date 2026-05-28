@@ -132,20 +132,42 @@ int main(int argc, char** argv)
 
    WcTimingPool timingPool;
 
+   // [DEBUG — disabled after fix confirmed at t=15027+]
+   // Watch cells used to track PDF/density drift at the contact-circle cells that produced NaN crashes.
+   // All three are at distance 7.9215 from sphere centre (15,30,56), radius=8 — the outermost
+   // sphere-interior layer, uncovered first as the sphere oscillates at the free surface.
+   //   Run 1 (no sweeps):   NaN at t=581 in cells (8.5,29.5,60.5) and (8.5,34.5,56.5)
+   //   Run 2 (with sweeps): NaN at t=577 in cell  (7.5,27.5,56.5)
+   // Re-enable by uncommenting the block below and the three trackWatchCells / checkPdfNaN calls.
+   //
+   // const std::vector< Vector3< real_t > > watchCells = {
+   //    Vector3< real_t >(real_t(8.5), real_t(29.5), real_t(60.5)),   // run-1 NaN cell 1
+   //    Vector3< real_t >(real_t(8.5), real_t(34.5), real_t(56.5)),   // run-1 NaN cell 2 / run-2 obstacle
+   //    Vector3< real_t >(real_t(7.5), real_t(27.5), real_t(56.5)),   // run-2 NaN cell (flag=liquid at crash)
+   // };
+   // constexpr uint_t WATCH_FREQ = 50;  // periodic; dense tracking: || t >= uint_c(560)
+
    WALBERLA_LOG_INFO_ON_ROOT("beginTimeStep: " << simObjs->beginTimeStep << " / " << simParams->physics.timesteps);
    // ----------------------------------------------------------------------------------------------------------------------------------
    for (uint_t t = simObjs->beginTimeStep; t != simParams->physics.timesteps; ++t)
    {
+      releaseSettledFloatingSpheres(simParams, simObjs, t);
+
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] FSLBM step");
       timeloopFSLBM->singleStep(timingPool, true);
+      // if (checkPdfNaN(simObjs, "timeloopFSLBM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopFSLBM at t=" << t);
+      // if (t % WATCH_FREQ == uint_c(0) || t >= uint_c(560)) trackWatchCells(simObjs, "post-FSLBM", t, watchCells);
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] DEM sub-cycles");
       particleKernels.reduceAndAvgHydroForces(timingPool, t==0);
       particleKernels.doDEMSubCycles(timingPool, simParams->particle.numSubCycles);
       particleKernels.resetHydroForces(timingPool);
+      // if (t % WATCH_FREQ == uint_c(0) || t >= uint_c(560)) trackWatchCells(simObjs, "post-DEM", t, watchCells);
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] LBM-DEM coupling");
       timeloopAfterDEM->singleStep(timingPool, true);
+      // if (checkPdfNaN(simObjs, "timeloopAfterDEM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopAfterDEM at t=" << t);
+      // if (t % WATCH_FREQ == uint_c(0) || t >= uint_c(560)) trackWatchCells(simObjs, "post-AfterDEM", t, watchCells);
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] Evaluators");
       timeloopEval->singleStep(timingPool, true);

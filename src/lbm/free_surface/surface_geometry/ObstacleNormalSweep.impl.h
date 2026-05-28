@@ -99,6 +99,16 @@ void ObstacleNormalSweep< Stencil_T, FlagField_T, VectorField_T >::operator()(IB
          const real_t invlength = -real_c(1) / real_c(std::sqrt(sqrObstNormal));
          obstacleNormal *= invlength;
       }
+      else if (computeInObstacleCell)
+      {
+         // Zero normal after averaging: obstacle cell has fluid neighbours in exactly symmetric
+         // opposing directions (e.g. liquid below and gas above the sphere equator). The fill
+         // level for this cell will be assigned by ObstacleFillLevelSweep's equal-weight fallback.
+         WALBERLA_LOG_DEVEL_ON_ROOT("ObstacleNormalSweep: zero obstacle normal at cell ("
+                                    << x << "," << y << "," << z
+                                    << "). Fluid-neighbour directions cancelled. Using equal-weight "
+                                    << "fallback in ObstacleFillLevelSweep.");
+      }
    }); // WALBERLA_FOR_ALL_CELLS_INCLUDING_GHOST_LAYER_XYZ
 }
 

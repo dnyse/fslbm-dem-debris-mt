@@ -1,6 +1,6 @@
 BlockForestParameters
 {
-   cellsPerBlock                 < 32, 20, 20 >;
+   cellsPerBlock                 < 32, 20, 30 >;
    periodicity                   < 1, 1, 0 >;
    loadSnapshot                  false;
    storeSnapshot                 true;
@@ -10,7 +10,7 @@ BlockForestParameters
 
 DomainParameters
 {
-   domainSize         <128, 60, 120>;
+   domainSize         <128, 60, 180>;
    wavePeriods        1;         // never set to 0 -> division by zero, even if you initialize a flat particle bed
    liquidHeightFactor 2.862;     // h_0 / d (water height / avg particle diameter) -> from experiment [E1=2.862, E2=3.1724, E3=3.27586, E4=3.5862]
    floorHeightFactor  4.1393;    // (floor height / avg particle diameter) from domain bottom to sine's average
@@ -49,6 +49,7 @@ ParticleParameters
    numSubCycles 10;
    useLubricationCorrection true;
    useNoSlipParticles false;
+   useParticleBed true;
 }
 
 // Box pillars: both DEM (FixedBox) and LBM (NoSlip CellInterval) use rectangular geometry.

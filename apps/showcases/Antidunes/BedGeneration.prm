@@ -1,11 +1,11 @@
 BedGeneration{
-    domainSize_SI < 0.032, 0.015, 0.15 >;
-    blocks < 3, 3, 1 >;
-    diameter_SI 0.0029;
+    domainSize_SI < 0.32, 0.15, 1.0 >;
+    blocks < 3, 2, 12 >;
+    diameter_SI 0.02;
     gravity_SI 9.81;
     densityFluid_SI 1000;
     densityParticle_SI 2550;
-    generationSpacing_SI 0.005;
+    generationSpacing_SI 0.035;
     initialVelocity_SI 1;
     dt_SI 5e-5;
     frictionCoefficient 0.5;

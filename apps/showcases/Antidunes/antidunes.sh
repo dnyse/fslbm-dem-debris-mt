@@ -17,7 +17,7 @@ FRESH=false
 BUILD_DIR="$REPO_ROOT/build"
 JOBS="$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
 NP=72
-BED_NP=9
+BED_NP=72
 PRM="$SCRIPT_DIR/Antidunes.prm"
 BED_PRM="$SCRIPT_DIR/BedGeneration.prm"
 CONDA_ENV="walberla"
@@ -101,6 +101,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 BIN_DIR="$BUILD_DIR/apps/showcases/Antidunes"
+
+# Resolve prm paths to absolute so they survive the 'cd $BIN_DIR' before mpirun
+PRM="$(realpath "$PRM")"
+BED_PRM="$(realpath "$BED_PRM")"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 log() { echo; echo "==> $*"; }

@@ -59,9 +59,20 @@ void ObstacleFillLevelSweep< Stencil_T, FlagField_T, ScalarField_T, VectorField_
       if (isPartOfMaskSet(flagFieldPtr, obstacleFlagMask) &&
           isFlagInNeighborhood< Stencil_T >(flagFieldPtr, liquidInterfaceGasFlagMask))
       {
-         WALBERLA_CHECK_GREATER(obstacleNormalField->get(x, y, z).length(), real_c(0),
-                                "An obstacleNormal of an obstacle cell was found to be zero in obstacleNormalSweep. "
-                                "This is not plausible.");
+         // A zero obstacle normal can legitimately occur when the obstacle cell's fluid
+         // neighbours are in exactly opposing directions (e.g. a sphere equatorial cell with
+         // liquid directly below and gas directly above: direction vectors ±z cancel in the
+         // D3Q27 sum). In that case fall back to an equal-weight average of fluid-neighbour
+         // fill levels instead of the normal-weighted projection.
+         // Log once per cell so we know when the former assertion would have fired.
+         const real_t obstNormalSqrLen = obstacleNormalField->get(x, y, z).sqrLength();
+         if (obstNormalSqrLen <= real_c(0))
+         {
+            WALBERLA_LOG_DEVEL_ON_ROOT("ObstacleFillLevelSweep: zero obstacle normal at cell ("
+                                       << x << "," << y << "," << z
+                                       << ") — using equal-weight fill-level average "
+                                       << "(former CHECK_GREATER assertion would have fired here).");
+         }
 
          real_t sum       = real_c(0);
          real_t weightSum = real_c(0);
@@ -69,10 +80,18 @@ void ObstacleFillLevelSweep< Stencil_T, FlagField_T, ScalarField_T, VectorField_
          {
             if (isPartOfMaskSet(flagFieldPtr.neighbor(*dir), liquidInterfaceGasFlagMask))
             {
-               const Vector3< real_t > dirVector =
-                  Vector3< real_t >(real_c(dir.cx()), real_c(dir.cy()), real_c(dir.cz())).getNormalized();
-
-               const real_t weight = std::abs(obstacleNormalField->get(x, y, z) * dirVector);
+               real_t weight;
+               if (obstNormalSqrLen > real_c(0))
+               {
+                  const Vector3< real_t > dirVector =
+                     Vector3< real_t >(real_c(dir.cx()), real_c(dir.cy()), real_c(dir.cz())).getNormalized();
+                  weight = std::abs(obstacleNormalField->get(x, y, z) * dirVector);
+               }
+               else
+               {
+                  // Zero normal: equal weight so all fluid neighbours contribute equally.
+                  weight = real_c(1);
+               }
 
                sum += weight * fillFieldSrcPtr.neighbor(*dir);
 

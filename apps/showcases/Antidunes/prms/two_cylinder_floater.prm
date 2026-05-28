@@ -1,0 +1,204 @@
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;         // never set to 0 -> division by zero, even if you initialize a flat particle bed
+   liquidHeightFactor 2.862;     // h_0 / d (water height / avg particle diameter) -> from experiment [E1=2.862, E2=3.1724, E3=3.27586, E4=3.5862]
+   floorHeightFactor  4.1393;    // (floor height / avg particle diameter) from domain bottom to sine's average
+   initialAmplitude   0;         // defined from minimum peak to maximum peak as by Pascal et al. (2021)
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;   // wetting delayed invalid-normal onset but caused 17x faster crash once normals failed
+   timesteps         100000;
+   Re                3100;       // [E1=3100, E2=3772, E3=4180, E4=4800]
+   Fr                1.31;       // [E1=1.31, E2=1.38, E3=1.44, E4=1.45]
+   We                15.6188;    // [E1=15.6188, E2=21.48, E3=25.54, E4=30.2493]
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// Two cylinder pillars at the same X, placed symmetrically across the domain in Y.
+//
+// Geometry (XY cross-section):
+//   Pillar 1: center Y=15, radius 8  →  inner surface at Y=23
+//   Pillar 2: center Y=45, radius 8  →  inner surface at Y=37
+//   Gap between surfaces: 37−23 = 14 cells  <  sphere diameter 16  →  sphere cannot pass through
+//   Pillar 1 to Y=0 wall: 15−8 = 7 cells    <  sphere radius 8     →  sphere cannot escape sideways
+//   Pillar 2 to Y=60 wall: 60−45−8 = 7 cells <  sphere radius 8    →  same
+//
+// The sphere (radius 8, Y=30) flows from X=15 toward X=64 and contacts both pillar upstream
+// faces simultaneously at X ≈ 58 (= 64 − sqrt(16²−15²)). The flow presses it against the
+// pillar faces; the contact reaction in −X balances the flow force. The sphere is stably trapped
+// at Y=30 (symmetric equilibrium — unlike the single-pillar case where Y=30 is an unstable saddle).
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 15, 90 >;   // XY position of the axis; Z is ignored for DEM (infinite along Z)
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 64, 45, 90 >;
+      radius 8;
+   }
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // Equilibrium Z: absoluteLiquidHeight = avgDiameter*(floorFactor+liquidFactor).
+      // Confirmed from output: avgParticleDiameter=8.00 → absoluteLiquidHeight≈56.
+      // densityRatio=0.5 → sphere floats half-submerged → centre at free surface → z≈56.
+      //
+      // Starting fully submerged (z=35, z=52) or above the surface (z=81) all crash early:
+      //   z=35/52: sphere rose through liquid → vacated cells become interface cells with all-liquid
+      //            neighbours → fill gradient≈0 → zero normal → NaN.
+      //   z=81:    sphere was 25 LU above free surface (in gas) → fell under gravity → hit surface
+      //            at high velocity at step 2277 → NaN on impact.
+      // Starting at z=56 (centre at free surface) creates interface cells with liquid below and
+      // gas above → valid gradient → valid normal from the first timestep.
+      //
+      // Sphere diameter 16 > inter-pillar gap 14 → wedged at X ≈ 58.
+      // Sphere radius 8 > wall−pillar gap 7 → cannot escape to Y walls.
+      position     < 15, 30, 30 >;  // fully submerged start; settlingSteps not needed
+      radius       8;
+      densityRatio 0.5;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   // Z walls
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+
+   // Y walls (non-periodic Y)
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+
+   // Cylinder pillar NoSlip: min/max are the axis endpoints (bottom and top of the cylinder).
+   BodyBC { shape Cylinder; min < 64, 15, 0 >; max < 64, 15, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 45, 0 >; max < 64, 45, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // X-Z midplane through Y=30 (centre of the inter-pillar gap)
+      CellBB_filter_0 {
+         min < 0, 29, 0 >;
+         max < 128, 30, 150 >;
+      }
+
+      // Y-Z inlet plane
+      CellBB_filter_1 {
+         min < 0, 0, 0 >;
+         max < 1, 60, 150 >;
+      }
+
+      // Full domain volume
+      CellBB_filter_2 {
+         min < 0, 0, 0 >;
+         max < 128, 60, 150 >;
+      }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions
+      {
+         gas_cell_zero_setter;
+      }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}
