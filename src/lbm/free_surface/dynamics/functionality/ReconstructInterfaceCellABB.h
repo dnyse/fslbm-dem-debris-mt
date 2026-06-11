@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include "core/logging/Logging.h"
+
 #include "lbm/field/MacroscopicValueCalculation.h"
 #include "lbm/field/PdfField.h"
 #include "lbm/free_surface/dynamics/PdfReconstructionModel.h"
@@ -34,6 +36,7 @@
 #include "GetLaplacePressure.h"
 
 #include <functional>
+#include <sstream>
 
 namespace walberla
 {
@@ -86,6 +89,28 @@ void reconstructInterfaceCellLegacy(const FlagField_T* flagField, const ConstPdf
    auto pdfField = dynamic_cast< const lbm::PdfField< LatticeModel_T >* >(pdfFieldIt.getField());
    WALBERLA_ASSERT_NOT_NULLPTR(pdfField);
    const real_t rho = lbm::getDensityAndMomentumDensity(u, pdfField->latticeModel(), pdfFieldIt);
+
+   // TEMP DIAGNOSTIC (remove after investigation): warn when the interface-cell density collapses toward
+   // zero — this is the `u /= rho` site where a near-zero or non-finite rho produces NaN/Inf velocities.
+   // At this point `u` still holds the momentum density (Σ c_i f_i), before the division. The negated
+   // comparison also fires for rho == NaN. Throttled to the first 50 hits per rank to avoid flooding.
+   if (!(std::abs(rho) > real_t(1e-3)))
+   {
+      static uint_t lowRhoLogCount = uint_t(0);
+      if (lowRhoLogCount < uint_t(50))
+      {
+         // dump all 27 populations f_i (the local sum that makes up rho) with their lattice directions
+         std::ostringstream pdfDump;
+         for (auto d = Stencil_T::begin(); d != Stencil_T::end(); ++d)
+            pdfDump << " f[" << d.toIdx() << "](" << d.cx() << "," << d.cy() << "," << d.cz()
+                    << ")=" << pdfFieldIt.getF(d.toIdx());
+         WALBERLA_LOG_WARNING("[LOW-RHO] interface cell " << pdfFieldIt.cell() << " rho=" << rho
+            << " momentumDensity=(" << u[0] << "," << u[1] << "," << u[2]
+            << ") — u/=rho will produce a non-finite/huge velocity. 27 PDFs:" << pdfDump.str());
+         ++lowRhoLogCount;
+      }
+   }
+
    u /= rho;
 
    const real_t dir_independent =

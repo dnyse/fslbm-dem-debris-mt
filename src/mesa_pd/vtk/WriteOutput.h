@@ -67,6 +67,15 @@ void writeOutput(std::ostream& os, const Rot3& data, const uint_t component)
    walberla::vtk::toStream(os, (data.getMatrix() * Vec3(1_r, 0_r, 0_r))[component]);
 }
 
+// 9-component rotation matrix (row-major): allows ParaView Tensor Glyph without a Python script.
+template <>
+inline
+void writeOutput(std::ostream& os, const std::array<real_t, 9>& data, const uint_t component)
+{
+   WALBERLA_ASSERT_LESS(component, 9);
+   walberla::vtk::toStream(os, data[component]);
+}
+
 template <typename T>
 inline
 void writeOutput(walberla::vtk::Base64Writer& b64, const T& data, const uint_t component)
@@ -99,6 +108,14 @@ void writeOutput(walberla::vtk::Base64Writer& b64, const Rot3& data, const uint_
 {
    WALBERLA_ASSERT_LESS(component, 3);
    b64 << (data.getMatrix() * Vec3(1_r, 0_r, 0_r))[component];
+}
+
+template <>
+inline
+void writeOutput(walberla::vtk::Base64Writer& b64, const std::array<real_t, 9>& data, const uint_t component)
+{
+   WALBERLA_ASSERT_LESS(component, 9);
+   b64 << data[component];
 }
 
 } // namespace vtk

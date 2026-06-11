@@ -136,6 +136,61 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       timeloop->addFuncBeforeTimeStep(vtk::writeFiles(floaterVTKOutput), "VTK: floater data");
    }
 
+   // floating boxes (type 3) ---------------------------------------------
+   // One point per floating box, carrying edgeLength, full orientation, and velocity so the
+   // actual ORIENTED solid can be rendered in ParaView (a freely-rotating box needs its
+   // rotation, unlike a sphere). Recipe in ParaView:
+   //   Filters > Glyph: Glyph Type = Box, Scale Array = edgeLength, Scale Mode = Scale by Components,
+   //                    Orientation Mode = ... then Filters > Tensor Glyph using "rotation"
+   //   (the 3x3 body→world matrix, 9 components) to apply the box's actual orientation; or color
+   //   by "velocity". The unit ParaView box (edge 1) scaled by edgeLength gives the true size.
+   if (!simParams->floatingBoxes.empty())
+   {
+      WALBERLA_LOG_INFO_ON_ROOT("AddOutputFloatingBoxes")
+
+      struct SelectBoxEdgeLength
+      {
+         using return_type = mesa_pd::Vec3;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const auto& shape = p.getBaseShape();
+            if (!shape || shape->getShapeType() != mesa_pd::data::Box::SHAPE_TYPE)
+               return mesa_pd::Vec3(real_t(0));
+            return static_cast< const mesa_pd::data::Box* >(shape.get())->getEdgeLength();
+         }
+      };
+      // Full 3x3 orientation for a ParaView Tensor Glyph. getMatrix() is body→world
+      // (Support.h: world = getMatrix()*body), but ParaView's Tensor Glyph applies the 9-tuple with
+      // the opposite (column-major) ordering, which would render the INVERSE rotation — the box glyph
+      // tilts the wrong way and mismatches the mapped obstacle hole. So we emit the TRANSPOSE here
+      // (Rᵀ, i.e. column-major of R) so the glyph orientation matches the actual obstacle. This is a
+      // visualization-only ordering; the buoyancy/torque math uses getMatrix() directly and is unaffected.
+      struct SelectParticleRotationMatrix
+      {
+         using return_type = std::array< real_t, 9 >;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const mesa_pd::Mat3 R = p.getRotation().getMatrix();
+            return { R(0, 0), R(1, 0), R(2, 0),
+                     R(0, 1), R(1, 1), R(2, 1),
+                     R(0, 2), R(1, 2), R(2, 2) };
+         }
+      };
+
+      auto boxFloaterData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
+      boxFloaterData->addOutput< SelectBoxEdgeLength >("edgeLength");
+      boxFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
+      boxFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      boxFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
+         using namespace walberla::mesa_pd::data::particle_flags;
+         return pIt->getType() == uint_t(3) && !isSet(pIt->getFlags(), GHOST);
+      });
+      auto boxFloaterVTKOutput = vtk::createVTKOutput_PointData(
+         boxFloaterData, "floaterBox", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
+         std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
+      timeloop->addFuncBeforeTimeStep(vtk::writeFiles(boxFloaterVTKOutput), "VTK: floating box data");
+   }
+
    // Box pillar VTK — one point per pillar at box center with edgeLength attribute.
    // In ParaView: Filters > Glyph, glyph type Box, scale by edgeLength to render the full solid shape.
    if (!simParams->pillars.empty())
@@ -486,8 +541,15 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    // TODO: maybe put this FlagUID in the antidunesBoundaryHandling
    const FlagUID FormerMO_Flag("former moving obstacle");
 
-   auto sphereSelector = [](const size_t particleIdx, const auto& ac) {
-      return ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
+   // Map every sphere (bed type 0 + floating type 1) AND every floating box (type 3) as a moving
+   // obstacle, so the box is a full two-way-coupled floater — blocks the fluid, receives a MEM
+   // hydrodynamic force via SimpleBB, and has its vacated cells reconstructed — exactly like a sphere.
+   // Fixed pillars (type 2) are deliberately excluded here; they are mapped separately as static
+   // NoSlip/FreeSlip (see SetupStages). Must stay consistent with `floaterSelector` in SetupStages.
+   auto movingObstacleSelector = [](const size_t particleIdx, const auto& ac) {
+      const bool isSphere      = ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
+      const bool isFloatingBox = ac.getType(particleIdx) == uint_t(3);
+      return isSphere || isFloatingBox;
    };
 
    // sweep for mapping particles into the LBM cells
@@ -497,7 +559,7 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
          simObjs->blockForest, simObjs->pdfFieldID, simObjs->antidunesBoundaryHandling->getHandlingID(),
          simObjs->particleFieldID, simObjs->particleAccessor, AntidunesBoundaryHandling_T::movingObstacleFlagID,
          FormerMO_Flag,
-         sphereSelector, // map all spheres, regardless if they are fixed or not
+         movingObstacleSelector, // all spheres + floating boxes (not fixed pillars)
          strictlyConserveMomentum),
       "Sweep (coupling): MovingParticleMapping");
 
@@ -529,32 +591,48 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    //       true    // useCentralDifferences
    //    );
 
+   // Bogner & Rüde (2013) state-selection + EquilibriumReconstructor.
+   //
+   // Each FormerMO cell is classified by its D3Q27 non-obstacle neighbourhood B(x):
+   //   no liquid            →  GAS        (φ = 0)
+   //   no gas, no unknown   →  LIQUID     (φ = 1, clearly submerged)
+   //   everything else      →  INTERFACE  (φ = mean fill of interface cells in B(x))
+   // The φ seeding (§5.2) is done in the manager's pass 2 via the fill field.
+   //
+   // Held as a named shared_ptr so the AfterFunction below can flush its per-branch FormerMO→state
+   // conversion counters (see logAndResetConversionCounts / contact_ring_crash_analysis.md §5.3).
+   // useBognerReconstruction (prm: ModelParameters.useBognerReconstruction):
+   //   true  → per-cell gas/liquid/interface state selection (+ φ seeding) as above.
+   //   false → every FormerMO cell is reconstructed uniformly as INTERFACE (target = fluid below),
+   //           with no φ seeding — the legacy all-interface path. The manager type is unchanged
+   //           (the toggle is a runtime flag), so the conversion-count AfterFunction still compiles;
+   //           with Bogner off the counters simply stay zero.
+   auto bognerReconstructionManager =
+      lbm_mesapd_coupling::makePdfReconstructionManagerBogner< PdfField_T,
+                                                               AntidunesBoundaryHandling_T::BoundaryHandling_T,
+                                                               ScalarField_T >(
+         simObjs->blockForest, simObjs->pdfFieldID, simObjs->antidunesBoundaryHandling->getHandlingID(),
+         simObjs->particleFieldID, simObjs->particleAccessor, FormerMO_Flag,
+         walberla::free_surface::flagIDs::interfaceFlagID,
+         strictlyConserveMomentum,
+         walberla::free_surface::flagIDs::liquidFlagID,
+         walberla::free_surface::flagIDs::gasFlagID,
+         walberla::free_surface::flagIDs::interfaceFlagID,
+         simObjs->fillFieldID,
+         simParams->model.useBognerReconstruction);
+
+   const uint_t convLogFreq = simParams->evaluation.evaluationFrequency;
+
    timeloop->add()
-      << Sweep(makeSharedSweep(
-                  // two-arg overload: uses EquilibriumReconstructor internally.
-                  //
-                  // FIX: mark newly-uncovered cells as INTERFACE, not LIQUID.
-                  //
-                  // When the sphere moves and uncovers a contact-circle cell, that cell retains
-                  // the fictitious fill level assigned by ObstacleFillLevelSweep (≈0.5247524).
-                  // A fill of ~0.5 is physically an interface cell — it is only half-filled with
-                  // liquid.  If we set the flag to LIQUID, StreamReconstructAdvectSweep performs
-                  // a full 27-direction streaming step: directions pointing into gas neighbours
-                  // pull in f=0, and directions into still-obstacle neighbours pull in
-                  // SimpleBB-modified (and possibly corrupted) PDFs.  The sum Σf[i] can go
-                  // negative → Cumulant collision diverges → NaN at t=577.
-                  //
-                  // By setting the flag to INTERFACE, StreamReconstructAdvectSweep instead
-                  // *reconstructs* PDFs for gas-facing directions from the atmosphere density
-                  // (ρ=1, u=0), guaranteeing every f[i] ≥ 0.  The FSLBM dynamics then
-                  // naturally evolve the fill level and convert the cell to LIQUID or GAS in
-                  // the following CellConversionSweep if appropriate.
-                  lbm_mesapd_coupling::makePdfReconstructionManager< PdfField_T,
-                                                                     AntidunesBoundaryHandling_T::BoundaryHandling_T >(
-                     simObjs->blockForest, simObjs->pdfFieldID, simObjs->antidunesBoundaryHandling->getHandlingID(),
-                     simObjs->particleFieldID, simObjs->particleAccessor, FormerMO_Flag,
-                     walberla::free_surface::flagIDs::interfaceFlagID, strictlyConserveMomentum)),
-               "Sweep (coupling): PDF Reconstruction (moving particles) [EquilibriumReconstructor+Interface]")
+      << Sweep(makeSharedSweep(bognerReconstructionManager),
+               "Sweep (coupling): PDF Reconstruction (moving particles) [Bogner2way+EquilibriumReconstructor]")
+      << AfterFunction(
+            [bognerReconstructionManager, convLogFreq, step = uint_t(0)]() mutable {
+               ++step;
+               if (convLogFreq > uint_t(0) && step % convLogFreq == uint_t(0))
+                  bognerReconstructionManager->logAndResetConversionCounts(step);
+            },
+            "AfterFunction (coupling): log FormerMO→state conversion counts")
       << AfterFunction(
             Communication_T(simObjs->blockForest, simObjs->flagFieldID, simObjs->particleFieldID),
             "Communication (coupling): after PDF reconstruction (flagField + particleField)") // unsure if necessary but

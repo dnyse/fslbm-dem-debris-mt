@@ -114,6 +114,9 @@ struct ParticleParams {
    bool        useLubricationCorrection;
    bool        useNoSlipParticles;
    bool        useParticleBed;
+   real_t      floaterRingBand;   // sphere V_sub plane-fit: keep interface cells with |dist-r|<band.
+                                  // 1.5 = contact-ring restriction (default). A large value (e.g. 1e6)
+                                  // reproduces the old full-box sampling, for clean A/B comparison.
 
    ParticleParams(const config::Config::BlockHandle& b)
       : inFileName               { b.getParameter< std::string >("inFileName") }
@@ -127,6 +130,7 @@ struct ParticleParams {
       , useLubricationCorrection { b.getParameter< bool >       ("useLubricationCorrection") }
       , useNoSlipParticles       { b.getParameter< bool >       ("useNoSlipParticles") }
       , useParticleBed           { b.getParameter< bool >       ("useParticleBed", true) }
+      , floaterRingBand          { b.getParameter< real_t >     ("floaterRingBand", real_t(1.5)) }
    {}
 };
 
@@ -210,6 +214,36 @@ inline std::vector< FloatingSphereParams > parseFloatingSpheres(const shared_ptr
    return result;
 }
 
+struct FloatingBoxParams {
+   Vector3< real_t > position;
+   Vector3< real_t > halfExtents;   // half-size in each dimension; edgeLength = 2 * halfExtents
+   real_t            densityRatio;
+   uint_t            settlingSteps;      // same semantics as FloatingSphereParams::settlingSteps
+   real_t            initialTiltAngleDeg; // initial rotation about the Y-axis (degrees); 0 = upright
+
+   FloatingBoxParams(const config::Config::BlockHandle& b)
+   {
+      position             = b.getParameter< Vector3< real_t > >("position");
+      halfExtents          = b.getParameter< Vector3< real_t > >("halfExtents");
+      densityRatio         = b.getParameter< real_t >           ("densityRatio");
+      settlingSteps        = b.getParameter< uint_t >           ("settlingSteps", uint_t(0));
+      initialTiltAngleDeg  = b.getParameter< real_t >           ("initialTiltAngleDeg", real_t(0));
+   }
+};
+
+inline std::vector< FloatingBoxParams > parseFloatingBoxes(const shared_ptr< config::Config >& cfg)
+{
+   std::vector< FloatingBoxParams > result;
+   config::Config::Blocks containers;
+   cfg->getBlocks("FloatingBoxes", containers, 0, 1);
+   if (containers.empty()) return result;
+   config::Config::Blocks boxBlocks;
+   containers[0].getBlocks("FloatingBox", boxBlocks, 0, 100);
+   for (const auto& b : boxBlocks)
+      result.emplace_back(b);
+   return result;
+}
+
 struct ModelParams {
    std::string pdfReconstructionModel;
    std::string pdfRefillingModel;
@@ -218,6 +252,10 @@ struct ModelParams {
    bool        useSimpleMassExchange;
    real_t      cellConversionThreshold;
    real_t      cellConversionForceThreshold;
+   // true  → Bogner & Rüde (2013) per-cell gas/liquid/interface state selection for FormerMO cells.
+   // false → legacy uniform reconstruction: every uncovered cell becomes an interface cell
+   //         (no fill=1 over-promotion band; the all-interface path that never drifted/NaN'd).
+   bool        useBognerReconstruction;
 
    ModelParams(const config::Config::BlockHandle& b)
       : pdfReconstructionModel      { b.getParameter< std::string >("pdfReconstructionModel") }
@@ -227,6 +265,7 @@ struct ModelParams {
       , useSimpleMassExchange       { b.getParameter< bool >       ("useSimpleMassExchange") }
       , cellConversionThreshold     { b.getParameter< real_t >     ("cellConversionThreshold") }
       , cellConversionForceThreshold{ b.getParameter< real_t >     ("cellConversionForceThreshold") }
+      , useBognerReconstruction     { b.getParameter< bool >       ("useBognerReconstruction", true) }
    {}
 };
 
@@ -386,6 +425,7 @@ struct SimulationParams {
    std::vector< PillarParams >          pillars;
    std::vector< CylinderPillarParams >  cylinderPillars;
    std::vector< FloatingSphereParams >  floatingSpheres;
+   std::vector< FloatingBoxParams >     floatingBoxes;
    ModelParams       model;
    EvaluationParams  evaluation;
    VTKParams         vtk;
@@ -403,6 +443,7 @@ struct SimulationParams {
       , pillars          { parsePillars(cfg) }
       , cylinderPillars  { parseCylinderPillars(cfg) }
       , floatingSpheres  { parseFloatingSpheres(cfg) }
+      , floatingBoxes    { parseFloatingBoxes(cfg) }
       , model        { cfg->getOneBlock("ModelParameters") }
       , evaluation   { cfg->getOneBlock("EvaluationParameters") }
       , vtk          { cfg->getOneBlock("VTK") }

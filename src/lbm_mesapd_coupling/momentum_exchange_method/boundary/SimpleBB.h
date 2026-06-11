@@ -158,13 +158,34 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
 
    real_t pdf_old = pdfField_->get( x, y, z, Stencil_T::idx[dir] );
 
-   // Diagnostic: detect NaN/Inf PDFs in fluid cells so we can trace the origin of LBM field corruption.
-   // This fires before the bounce-back writes the NaN back into the obstacle cell, letting us see
-   // which fluid cell was already corrupt when SimpleBB tried to read it.
+   // Dry-link guard for free-surface coupling: a cell on the fluid side of this obstacle link may be
+   // a GAS cell (e.g. at the waterline of a floating particle), which carries no valid PDF — its value
+   // can be NaN/Inf. Performing momentum exchange across such a link would (a) write the garbage back
+   // into the obstacle cell and (b) inject it into the hydrodynamic force on the particle (forceMEM
+   // below), producing a NaN particle force / invalid quaternion. Physically, an air cell exerts no
+   // momentum on the particle, so we skip the link entirely. NOTE: in a fully submerged setup this can
+   // never trigger (all obstacle-adjacent cells are liquid/interface); it is specific to particles at
+   // the free surface. Genuine corruption of a *liquid/interface* PDF is caught separately by the
+   // checkPdfNaN scanner, which is not silenced by this guard.
    if( !std::isfinite(pdf_old) ) {
-      WALBERLA_LOG_WARNING( "[SimpleBB] NaN/Inf pdf_old at fluid cell (" << x << "," << y << "," << z
-         << ") -> obstacle (" << nx << "," << ny << "," << nz << ") dir=" << dir
-         << " pdf=" << pdf_old );
+      // TEMP DIAGNOSTIC (remove after verifying): log the flag of the dry-link fluid cell. The domain
+      // mask is liquid|interface, so this cell can never be gas — the expectation is that it is a
+      // drained INTERFACE cell (ρ→0). Throttled to the first 30 hits per rank to avoid flooding.
+      static uint_t dryLinkLogCount = uint_t(0);
+      if( dryLinkLogCount < uint_t(30) ) {
+         const auto fl = flagField_->get(x, y, z);
+         std::string flagStr;
+         for( const char* name : { "liquid", "interface", "gas" } ) {
+            const field::FlagUID uid(name);
+            if( flagField_->flagExists(uid) && field::isFlagSet(fl, flagField_->getFlag(uid)) )
+               flagStr += std::string(name) + " ";
+         }
+         WALBERLA_LOG_WARNING("[DRY-LINK] non-finite pdf_old at cell (" << x << "," << y << "," << z
+            << ") flags=[ " << flagStr << "] rawFlag=" << uint_t(fl) << " pdf_old=" << pdf_old);
+         ++dryLinkLogCount;
+      }
+      // Expected for a free-surface particle; skip the link (air / drained cell exerts no momentum).
+      return;
    }
 
    // apply bounce back scheme

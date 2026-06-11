@@ -78,6 +78,12 @@ struct SimulationObjects
    shared_ptr< mesa_pd::domain::BlockForestDomain >            mesapdDomain;
    std::function< void() >                                     syncCall;
    uint_t                                                      numParticles;
+   // floaterUIDs[fi] = UID of floating sphere fi (matches simParams->floatingSpheres[fi]).
+   // floaterBoxUIDs[bi] = UID of floating box bi (matches simParams->floatingBoxes[bi]).
+   // Both populated by setupParticles via an indexed creation loop + allReduce(SUM) so that every
+   // rank holds the correct UID for every floater regardless of which rank owns each particle.
+   std::vector< walberla::id_t >                               floaterUIDs;
+   std::vector< walberla::id_t >                               floaterBoxUIDs;
     
    // Boundary and flags ----------------------------------------------------------------------------------------------
    shared_ptr< AntidunesBoundaryHandling_T > antidunesBoundaryHandling;

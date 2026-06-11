@@ -1,0 +1,211 @@
+// box_pillar_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// Log-between-pillars test: a 2×2×6 aspect-ratio box (Lx=6, Lz=6, Ly=18)
+// wedged directly between the two cylinder pillars.
+// The 2×2 cross-section (XZ face) faces the Y direction; the long axis (Ly=18)
+// runs along Y and is LONGER than the pillar gap (14 LU) — the log is physically
+// held in Y by contact forces from both pillar surfaces simultaneously.
+//
+// Stability analysis (Scribanti):
+//
+//   Roll about Y-axis (Bogner instability — the log rolls like a millstone):
+//     Box 6 × 18 × 6 LU  (halfExtents <3, 9, 3>),  ρ_P / ρ_f = 0.5
+//     Draft d = hz = 3 LU,  KB = 1.5,  KG = 3
+//     BM = Lx² / (12·d) = 36 / 36 = 1.0 LU
+//     GM = 1.5 + 1.0 − 3.0 = −0.5 LU < 0  →  UNSTABLE, rolls to ~45° stable eq.
+//     e-folding time τ ≈ 11 000 steps; reaches 45° from 5° in ~24 000 steps.
+//
+//   Tilt about X-axis (inclination of the long axis):
+//     BM = Ly² / (12·d) = 324 / 36 = 9.0 LU
+//     GM = 1.5 + 9.0 − 3.0 = +7.5 LU > 0  →  STABLE (long axis stays horizontal).
+//
+// Starting position and dynamics:
+//   Centre at (10, 30, 56): far upstream of the pillars (at x≈64).
+//   z=56 = absoluteLiquidHeight → 50 % submerged = equilibrium.
+//   Log floats freely downstream at v=0.02.  Contact begins when the log's
+//   +X face reaches the pillar XY footprint at x≈56 (~2 300 steps after release).
+//   At that point both pillar surfaces simultaneously push the log back in -X,
+//   while Y contact forces from both pillars balance — log is jammed against the
+//   upstream faces of the two pillars.  Y extent [21, 39] overlaps each pillar
+//   surface by 2 LU so the log cannot squeeze through in Y either.
+//   initialTiltAngleDeg=5 about Y: log is nearly upright at impact (≈6°),
+//   then rolls toward 45° as it sits jammed (~24 000 steps from release).
+//   settlingSteps=300: contact line stabilises at x=10 before release.
+//
+// Geometry:
+//   Y extent [21, 39]: 2 LU overlap with each pillar surface → wedged in Y
+//   X extent [7, 13] at t=0; log jams at x≈53–56 against upstream pillar faces.
+//
+// Cylinder pillars:
+//   Pillar 1: center (64, 15, 90), r=8  →  surface at y=23
+//   Pillar 2: center (64, 45, 90), r=8  →  surface at y=37
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 15, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 64, 45, 90 >;
+      radius 8;
+   }
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // Log-between-pillars: edgeLength 6×18×6 (hx=hz=3, hy=9), ratio 2:2:6.
+      // 2×2 XZ face faces Y; long axis (Ly=18) exceeds the 14-LU pillar gap.
+      // Starts at x=10 (far upstream); swept by flow, jams against both pillar
+      // upstream faces at x≈56 after ~2300 steps.  Y extent [21, 39] overlaps
+      // each pillar surface by 2 LU — cannot squeeze through in Y.
+      // GM = −0.5 LU (rolling about Y) → rolls to ~45° once jammed (~24 000 steps).
+      // GM = +7.5 LU (inclination about X) → long axis stays horizontal.
+      // initialTiltAngleDeg=5 about Y seeds the rolling instability.
+      position             < 10, 30, 56 >;
+      halfExtents          < 3, 9, 3 >;
+      densityRatio         0.5;
+      settlingSteps        300;
+      initialTiltAngleDeg  5;   // 5° about Y; reaches 45° in ~24 000 steps (τ≈11000, g=1e-7)
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 15, 0 >; max < 64, 15, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 45, 0 >; max < 64, 45, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Y-midplane slab (y=29-30), X=0 face slice, full XY volume up to z=150.
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

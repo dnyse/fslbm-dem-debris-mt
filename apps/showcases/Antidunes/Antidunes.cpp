@@ -138,14 +138,21 @@ int main(int argc, char** argv)
    // sphere-interior layer, uncovered first as the sphere oscillates at the free surface.
    //   Run 1 (no sweeps):   NaN at t=581 in cells (8.5,29.5,60.5) and (8.5,34.5,56.5)
    //   Run 2 (with sweeps): NaN at t=577 in cell  (7.5,27.5,56.5)
-   // Re-enable by uncommenting the block below and the three trackWatchCells / checkPdfNaN calls.
-   //
-   // const std::vector< Vector3< real_t > > watchCells = {
-   //    Vector3< real_t >(real_t(8.5), real_t(29.5), real_t(60.5)),   // run-1 NaN cell 1
-   //    Vector3< real_t >(real_t(8.5), real_t(34.5), real_t(56.5)),   // run-1 NaN cell 2 / run-2 obstacle
-   //    Vector3< real_t >(real_t(7.5), real_t(27.5), real_t(56.5)),   // run-2 NaN cell (flag=liquid at crash)
-   // };
-   // constexpr uint_t WATCH_FREQ = 50;  // periodic; dense tracking: || t >= uint_c(560)
+   // NaN-trace instrumentation (ENABLED).
+   //   * checkPdfNaN after each PDF-touching phase: locates the first NaN, dumps its 3x3x3
+   //     neighbourhood (flag/rho/fill = the real contact-line config), and aborts cleanly.
+   //   * trackWatchCells: per-step rho/fill/flag history of the watched cells. The coords below are
+   //     a first guess on the giant-sphere contact ring (surface z=56, sphere drifts in x); after
+   //     run 1 reports the exact NaN cell, set watchCells to that world coord and rerun for history.
+   const std::vector< Vector3< real_t > > watchCells = {
+      Vector3< real_t >(real_t(40.5), real_t(30.5), real_t(56.5)),   // near sphere centre at the waterline
+      Vector3< real_t >(real_t(20.5), real_t(30.5), real_t(56.5)),   // contact ring -x
+      Vector3< real_t >(real_t(60.5), real_t(30.5), real_t(56.5)),   // contact ring +x
+      Vector3< real_t >(real_t(40.5), real_t(10.5), real_t(56.5)),   // contact ring -y
+      Vector3< real_t >(real_t(40.5), real_t(50.5), real_t(56.5)),   // contact ring +y
+   };
+   constexpr uint_t WATCH_FREQ      = 1000;        // periodic sampling (lightweight)
+   constexpr uint_t WATCH_DENSE_FROM = 1000000000; // per-step dense tracking effectively off; lower it to debug a crash
 
    WALBERLA_LOG_INFO_ON_ROOT("beginTimeStep: " << simObjs->beginTimeStep << " / " << simParams->physics.timesteps);
    // ----------------------------------------------------------------------------------------------------------------------------------
@@ -153,21 +160,25 @@ int main(int argc, char** argv)
    {
       releaseSettledFloatingSpheres(simParams, simObjs, t);
 
+      const bool watchNow = (t % WATCH_FREQ == uint_c(0)) || (t >= WATCH_DENSE_FROM);
+
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] FSLBM step");
       timeloopFSLBM->singleStep(timingPool, true);
-      // if (checkPdfNaN(simObjs, "timeloopFSLBM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopFSLBM at t=" << t);
-      // if (t % WATCH_FREQ == uint_c(0) || t >= uint_c(560)) trackWatchCells(simObjs, "post-FSLBM", t, watchCells);
+      if (watchNow) trackWatchCells(simObjs, "post-FSLBM", t, watchCells);
+      if (watchNow) checkClosedInterfaceLayer(simObjs, "post-FSLBM", t);
+      if (watchNow && checkPdfNaN(simObjs, "timeloopFSLBM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopFSLBM at t=" << t);
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] DEM sub-cycles");
       particleKernels.reduceAndAvgHydroForces(timingPool, t==0);
       particleKernels.doDEMSubCycles(timingPool, simParams->particle.numSubCycles);
       particleKernels.resetHydroForces(timingPool);
-      // if (t % WATCH_FREQ == uint_c(0) || t >= uint_c(560)) trackWatchCells(simObjs, "post-DEM", t, watchCells);
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] LBM-DEM coupling");
       timeloopAfterDEM->singleStep(timingPool, true);
-      // if (checkPdfNaN(simObjs, "timeloopAfterDEM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopAfterDEM at t=" << t);
-      // if (t % WATCH_FREQ == uint_c(0) || t >= uint_c(560)) trackWatchCells(simObjs, "post-AfterDEM", t, watchCells);
+      if (watchNow) trackWatchCells(simObjs, "post-AfterDEM", t, watchCells);
+      if (watchNow) checkClosedInterfaceLayer(simObjs, "post-AfterDEM", t);
+      if (watchNow) logFloaterLinkBalance(simObjs, "post-AfterDEM", t);
+      if (watchNow && checkPdfNaN(simObjs, "timeloopAfterDEM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopAfterDEM at t=" << t);
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] Evaluators");
       timeloopEval->singleStep(timingPool, true);

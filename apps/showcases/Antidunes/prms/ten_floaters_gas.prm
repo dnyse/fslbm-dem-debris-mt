@@ -1,0 +1,266 @@
+// ten_floaters_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// Ten floating spheres of varying radii (4–10 LU) dropped from the gas phase.
+// All start above the free surface (absoluteLiquidHeight ≈ 56 LU) with staggered
+// z offsets so they hit the water at different times, creating a cascade.
+//
+// Placement rules:
+//   • settlingSteps=0: spheres start with no contact line; it grows naturally
+//     as each sphere descends through the free surface.
+//   • Positions verified to clear both cylinder pillars (x=64, y=15 and y=45,
+//     r=8) and all NoSlip domain walls.
+//   • X is periodic; Y walls are NoSlip at y=0 and y=60.
+//   • Sphere bottom (z - radius) is at least 5 LU above the free surface.
+//
+// Sphere summary (XY positions chosen to avoid pillar exclusion zones):
+//   Row front (y≈8):   r=4 @ x=15,  r=6 @ x=38,  r=7 @ x=92, r=5 @ x=115
+//   Row centre (y=30): r=8 @ x=20,  r=10 @ x=50, r=9 @ x=100
+//   Row back  (y≈50):  r=5 @ x=20,  r=7 @ x=88,  r=6 @ x=110
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// Cylinder pillars — same geometry as two_cylinder_floater_gas.prm.
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 15, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 64, 45, 90 >;
+      radius 8;
+   }
+}
+
+FloatingSpheres
+{
+   // ── Front row  y≈8  (safely below pillar 1 at y=15) ──────────────────────
+
+   FloatingSphere
+   {
+      // r=4, front-left.  Bottom at z=61 (5 LU above surface).
+      position     < 15, 8, 65 >;
+      radius       4;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      // r=6, front-left-centre.  Bottom at z=66 (10 LU above surface).
+      position     < 38, 8, 72 >;
+      radius       6;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      // r=7, front-right-centre.  Bottom at z=71 (15 LU above surface).
+      // x=92 keeps XY clearance to pillar 1 (dist≈28.9 LU > r+8=15).
+      position     < 92, 8, 78 >;
+      radius       7;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      // r=5, front-right.  Bottom at z=63 (7 LU above surface).
+      position     < 115, 8, 68 >;
+      radius       5;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+
+   // ── Centre row  y=30  (midway between both pillars at y=15 and y=45) ──────
+   // Pillars are 15 LU away in Y from y=30; all radii ≤10 clear the
+   // pillar exclusion zone (dist to pillar ≥ 20.5 LU > r+8 for all three).
+
+   FloatingSphere
+   {
+      // r=8, centre-left.  Bottom at z=66 (10 LU above surface).
+      position     < 20, 30, 74 >;
+      radius       8;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      // r=10, centre.  Bottom at z=72 (16 LU above surface).  Largest sphere.
+      // XY dist to each pillar ≈ 20.5 LU > r+8=18 (2.5 LU margin).
+      position     < 50, 30, 82 >;
+      radius       10;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      // r=9, centre-right.  Bottom at z=71 (15 LU above surface).
+      position     < 100, 30, 80 >;
+      radius       9;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+
+   // ── Back row  y≈50  (safely above pillar 2 at y=45) ─────────────────────
+
+   FloatingSphere
+   {
+      // r=5, back-left.  Bottom at z=61 (5 LU above surface).
+      position     < 20, 52, 66 >;
+      radius       5;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      // r=7, back-right-centre.  Bottom at z=63 (7 LU above surface).
+      // y=50 gives 10 LU to the y=60 NoSlip wall (> radius).
+      position     < 88, 50, 70 >;
+      radius       7;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      // r=6, back-right.  Bottom at z=70 (14 LU above surface).
+      position     < 110, 52, 76 >;
+      radius       6;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 15, 0 >; max < 64, 15, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 45, 0 >; max < 64, 45, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Y-midplane slab, X=0 face slice, full XY volume up to z=150.
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

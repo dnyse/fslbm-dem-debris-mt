@@ -388,8 +388,16 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       createCylinder(*simObjs->particleStorage, pillar.center, pillar.radius);
    }
 
-   for (const auto& fsp : simParams->floatingSpheres)
+   // Indexed loop so each sphere's UID is captured at the correct index fi.
+   // The owning rank (the one whose subdomain contains pos) creates the particle and records its UID.
+   // allReduceInplace(SUM) broadcasts each UID to all other ranks (no double-counting because only
+   // one rank owns each position).  ParticleKernels uses simObjs->floaterUIDs directly instead of
+   // trying to infer the mapping from local particle ordering, which breaks for multiple spheres
+   // distributed across different ranks.
+   simObjs->floaterUIDs.assign(simParams->floatingSpheres.size(), walberla::id_t(0));
+   for (size_t fi = 0; fi < simParams->floatingSpheres.size(); ++fi)
    {
+      const auto& fsp = simParams->floatingSpheres[fi];
       const mesa_pd::Vec3 pos(fsp.position[0], fsp.position[1], fsp.position[2]);
       if (simObjs->mesapdDomain->isContainedInProcessSubdomain(
             uint_c(mpi::MPIManager::instance()->rank()), pos))
@@ -405,22 +413,85 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          // fill-level distribution around the contact line before the sphere starts moving.
          if (fsp.settlingSteps > 0)
             mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
+         simObjs->floaterUIDs[fi] = p->getUid();
       }
       WALBERLA_LOG_INFO_ON_ROOT("Created floating sphere: radius=" << fsp.radius
          << " densityRatio=" << fsp.densityRatio << " position=" << pos
          << " settlingSteps=" << fsp.settlingSteps);
    }
+   mpi::allReduceInplace(simObjs->floaterUIDs, mpi::SUM);
+
+   // Floating boxes (type 3) — same indexed-UID pattern as floating spheres.
+   // interactionRadius = circumscribed-sphere half-diagonal so getParticleCellBB produces a
+   // conservative but correct cell bounding box for the shape-generic MEM cell test.
+   // FloatingBox is freely rotating; the base Box::updateMassAndInertia sets the correct
+   // slice-based V_sub estimate in computeSubmergedVolumesBox() stays valid.
+   simObjs->floaterBoxUIDs.assign(simParams->floatingBoxes.size(), walberla::id_t(0));
+   for (size_t bi = 0; bi < simParams->floatingBoxes.size(); ++bi)
+   {
+      const auto& fbp = simParams->floatingBoxes[bi];
+      const mesa_pd::Vec3 pos(fbp.position[0], fbp.position[1], fbp.position[2]);
+      const mesa_pd::Vec3 edge(real_t(2) * fbp.halfExtents[0],
+                               real_t(2) * fbp.halfExtents[1],
+                               real_t(2) * fbp.halfExtents[2]);
+      const real_t halfDiag = std::sqrt(fbp.halfExtents[0] * fbp.halfExtents[0] +
+                                        fbp.halfExtents[1] * fbp.halfExtents[1] +
+                                        fbp.halfExtents[2] * fbp.halfExtents[2]);
+      if (simObjs->mesapdDomain->isContainedInProcessSubdomain(
+            uint_c(mpi::MPIManager::instance()->rank()), pos))
+      {
+         auto p = simObjs->particleStorage->create(false);
+         p->setPosition(pos);
+         p->setBaseShape(std::make_shared< FloatingBox >(edge));
+         p->getBaseShapeRef()->updateMassAndInertia(fbp.densityRatio);
+         p->setOwner(mpi::MPIManager::instance()->rank());
+         p->setType(3);
+         p->setInteractionRadius(halfDiag);
+         if (std::abs(fbp.initialTiltAngleDeg) > real_t(1e-10))
+         {
+            const real_t angle = fbp.initialTiltAngleDeg * math::pi / real_t(180);
+            // Rotate about Y-axis (body axis v in Bogner's diagram)
+            p->setRotation(mesa_pd::Rot3(mesa_pd::Vec3(0, 1, 0), angle));
+         }
+         if (fbp.settlingSteps > 0)
+            mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
+         simObjs->floaterBoxUIDs[bi] = p->getUid();
+      }
+      WALBERLA_LOG_INFO_ON_ROOT("Created floating box: halfExtents=" << fbp.halfExtents
+         << " densityRatio=" << fbp.densityRatio << " position=" << pos
+         << " settlingSteps=" << fbp.settlingSteps
+         << " initialTiltAngleDeg=" << fbp.initialTiltAngleDeg);
+   }
+   mpi::allReduceInplace(simObjs->floaterBoxUIDs, mpi::SUM);
 
    // choose particle sync algorithm -----------------------------------------------------
-   // blockSyncExtension must be >= the largest floating sphere radius so that SyncNextNeighbors
-   // ghost-copies the sphere to every block whose interior it physically overlaps. Without this,
-   // cells inside the sphere on a neighboring block are not mapped as MovingObstacle, which creates
-   // LBM PDF instabilities (NaN torque / quaternion corruption) for spheres larger than ~2.5 LU.
+   // blockSyncExtension must be >= the largest floater extent so that SyncNextNeighbors
+   // ghost-copies each floater to every block its body physically overlaps.
+   // For spheres: extent = radius. For boxes: extent = circumscribed half-diagonal.
    real_t blockSyncExtension = real_c(2.5);
    for (const auto& fsp : simParams->floatingSpheres)
       blockSyncExtension = std::max(blockSyncExtension, fsp.radius);
+   for (const auto& fbp : simParams->floatingBoxes)
+   {
+      const real_t halfDiag = std::sqrt(fbp.halfExtents[0] * fbp.halfExtents[0] +
+                                        fbp.halfExtents[1] * fbp.halfExtents[1] +
+                                        fbp.halfExtents[2] * fbp.halfExtents[2]);
+      blockSyncExtension = std::max(blockSyncExtension, halfDiag);
+   }
    WALBERLA_LOG_INFO_ON_ROOT("blockSyncExtension = " << blockSyncExtension);
-   const real_t maxParticleDiameter   = simParams->computed.avgParticleDiameter * real_c(1.1);  // 1.1 for lubrication correction
+   // maxParticleDiameter determines which sync algorithm is safe (SyncNextNeighbors vs
+   // SyncGhostOwners). Use 2×circumscribed radius for each floater type so that particles
+   // large enough to span 2+ blocks always get SyncGhostOwners.
+   real_t maxParticleDiameter = simParams->computed.avgParticleDiameter * real_c(1.1);
+   for (const auto& fsp : simParams->floatingSpheres)
+      maxParticleDiameter = std::max(maxParticleDiameter, fsp.radius * real_c(2));
+   for (const auto& fbp : simParams->floatingBoxes)
+   {
+      const real_t halfDiag = std::sqrt(fbp.halfExtents[0] * fbp.halfExtents[0] +
+                                        fbp.halfExtents[1] * fbp.halfExtents[1] +
+                                        fbp.halfExtents[2] * fbp.halfExtents[2]);
+      maxParticleDiameter = std::max(maxParticleDiameter, halfDiag * real_c(2));
+   }
 
    if (maxParticleDiameter < real_c(2) * real_c(simParams->blockForest.cellsPerBlock.min()) - blockSyncExtension) {
       WALBERLA_LOG_INFO_ON_ROOT("Using SyncNextNeighbors for particles");
@@ -461,9 +532,12 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
 void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simParams, const std::shared_ptr< SimulationObjects >& simObjs)
 {
    WALBERLA_LOG_INFO_ON_ROOT("mapParticlesOntoCells");
-   auto sphereSelector = [](const size_t particleIdx, const auto& ac)
+   // Select all floaters: type 1 = floating sphere, type 3 = floating box.
+   // Fixed obstacles (pillars, walls) are mapped separately as static NoSlip/FreeSlip.
+   auto floaterSelector = [](const size_t particleIdx, const auto& ac)
    {
-      return ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
+      const uint_t t = ac.getType(particleIdx);
+      return t == uint_t(1) || t == uint_t(3);
    };
 
    // map particles onto LBM domain (this is for initilization. iterations happen in timeloopAfterParticles)
@@ -471,7 +545,7 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
       // sets noSlip flag (in flagField through boundaryhandling) for all cells inside the particle
       lbm_mesapd_coupling::ParticleMappingKernel< AntidunesBoundaryHandling_T::BoundaryHandling_T >
          kernel(simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID());
-      simObjs->particleStorage->forEachParticle(false, sphereSelector, *simObjs->particleAccessor,
+      simObjs->particleStorage->forEachParticle(false, floaterSelector, *simObjs->particleAccessor,
                                              kernel, *simObjs->particleAccessor,
                                              AntidunesBoundaryHandling_T::noSlipFlagID);
    }
@@ -479,15 +553,15 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
       // same as above but it also stores the UID of the particle in particleFieldID (but no hydro forces are computed here)
       lbm_mesapd_coupling::MovingParticleMappingKernel< AntidunesBoundaryHandling_T::BoundaryHandling_T >
          kernel(simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simObjs->particleFieldID);
-      simObjs->particleStorage->forEachParticle(false, sphereSelector, *simObjs->particleAccessor,
+      simObjs->particleStorage->forEachParticle(false, floaterSelector, *simObjs->particleAccessor,
                                              kernel, *simObjs->particleAccessor,
                                              AntidunesBoundaryHandling_T::movingObstacleFlagID);
    }
 }
 
-// Called every timestep: releases any floating sphere whose settlingSteps have elapsed.
-// During the settling phase the sphere is held FIXED so the FSLBM can establish a stable
-// fill-level / normal field around the contact line before the sphere starts moving.
+// Called every timestep: releases any floating sphere or box whose settlingSteps have elapsed.
+// During the settling phase the floater is held FIXED so the FSLBM can establish a stable
+// fill-level / normal field around the contact line before the particle starts moving.
 void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams >& simParams,
                                    const std::shared_ptr< SimulationObjects >&       simObjs,
                                    const uint_t currentStep)
@@ -499,13 +573,29 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
       simObjs->particleStorage->forEachParticle(
          false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
          [](const size_t idx, auto& ac) {
-            if (ac.getType(idx) == uint_t(1)) // type 1 = floating sphere
+            if (ac.getType(idx) == uint_t(1))
                mesa_pd::data::particle_flags::unset(ac.getFlagsRef(idx),
                                                     mesa_pd::data::particle_flags::FIXED);
          },
          *simObjs->particleAccessor);
 
       WALBERLA_LOG_INFO_ON_ROOT("Released floating sphere(s) from settling phase at step " << currentStep);
+   }
+
+   for (const auto& fbp : simParams->floatingBoxes)
+   {
+      if (fbp.settlingSteps == uint_t(0) || currentStep != fbp.settlingSteps) continue;
+
+      simObjs->particleStorage->forEachParticle(
+         false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
+         [](const size_t idx, auto& ac) {
+            if (ac.getType(idx) == uint_t(3))
+               mesa_pd::data::particle_flags::unset(ac.getFlagsRef(idx),
+                                                    mesa_pd::data::particle_flags::FIXED);
+         },
+         *simObjs->particleAccessor);
+
+      WALBERLA_LOG_INFO_ON_ROOT("Released floating box(es) from settling phase at step " << currentStep);
    }
 }
 
@@ -738,36 +828,72 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
    {
       const auto* pdfField  = blockIt->getData< const PdfField_T >(simObjs->pdfFieldID);
       const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
       const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
       const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+      const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      const FlagUID formerMOuid("former moving obstacle");
+      const flag_t formerMOFlag = flagField->flagExists(formerMOuid) ? flagField->getFlag(formerMOuid) : flag_t(0);
       const auto& aabb = blockIt->getAABB();
+
+      // short label for a cell, for the neighbourhood dump on NaN detection
+      auto classify = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) -> std::string {
+         const flag_t fl = flagField->get(cx, cy, cz);
+         if ((fl & obstacleMask) != flag_t(0))                        return "OBST";
+         if (isFlagSet(fl, interfaceFlag))                            return "INTF";
+         if (isFlagSet(fl, liquidFlag))                               return "LIQ ";
+         if (isFlagSet(fl, gasFlag))                                  return "GAS ";
+         if (formerMOFlag != flag_t(0) && isFlagSet(fl, formerMOFlag))return "fMO ";
+         return "??? ";
+      };
 
       bool blockDone = false;
       for (cell_idx_t iz = 0; iz < cell_idx_c(pdfField->zSize()) && !blockDone; ++iz)
       for (cell_idx_t iy = 0; iy < cell_idx_c(pdfField->ySize()) && !blockDone; ++iy)
       for (cell_idx_t ix = 0; ix < cell_idx_c(pdfField->xSize()) && !blockDone; ++ix)
       {
-         // only check fluid-carrying cells
+         // Only liquid/interface cells are fatal: a NaN there is genuine corruption. NaN PDFs in gas
+         // cells at the obstacle waterline are expected (and harmless — SimpleBB skips those dry links);
+         // they are NOT scanned here. (The confirmation that they exist was done; see git history.)
          if (!flagField->isFlagSet(ix, iy, iz, liquidFlag) &&
              !flagField->isFlagSet(ix, iy, iz, interfaceFlag)) continue;
 
          for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f)
          {
             const real_t val = pdfField->get(ix, iy, iz, f);
-            if (!std::isfinite(val))
-            {
-               const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
-               const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
-               const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
-               WALBERLA_LOG_WARNING("[NaN-SCAN t=" << t << " after=" << location
-                  << "] block-local=(" << ix << "," << iy << "," << iz << ")"
-                  << " world=(" << wx << "," << wy << "," << wz << ")"
-                  << " f[" << f << "]=" << val
-                  << " flag=" << (flagField->isFlagSet(ix,iy,iz,interfaceFlag) ? "interface" : "liquid"));
-               localNaN = true;
-               blockDone = true;
-               break;
-            }
+            if (std::isfinite(val)) continue;
+
+            const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+            const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+            const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+            WALBERLA_LOG_WARNING("[NaN-SCAN t=" << t << " after=" << location << "] FATAL fluid-cell NaN"
+               << " block-local=(" << ix << "," << iy << "," << iz << ")"
+               << " world=(" << wx << "," << wy << "," << wz << ")"
+               << " f[" << f << "]=" << val << " flag=" << classify(ix, iy, iz));
+
+            // Dump the 3x3x3 neighbourhood: per cell  [flag rho fill]  — the config at the failure.
+            WALBERLA_LOG_WARNING("[NaN-SCAN t=" << t << "] 3x3x3 neighbourhood  [flag rho fill]:");
+            for (int ddz = -1; ddz <= 1; ++ddz)
+               for (int ddy = -1; ddy <= 1; ++ddy)
+               {
+                  std::ostringstream row;
+                  row << std::scientific << std::setprecision(3);
+                  for (int ddx = -1; ddx <= 1; ++ddx)
+                  {
+                     const cell_idx_t cx = ix + cell_idx_c(ddx);
+                     const cell_idx_t cy = iy + cell_idx_c(ddy);
+                     const cell_idx_t cz = iz + cell_idx_c(ddz);
+                     real_t r = real_t(0);
+                     for (uint_t ff = 0; ff < PdfField_T::Stencil::Size; ++ff) r += pdfField->get(cx, cy, cz, ff);
+                     row << "[" << classify(cx, cy, cz) << " " << r << " " << fillField->get(cx, cy, cz) << "]  ";
+                  }
+                  WALBERLA_LOG_WARNING("   dz=" << ddz << " dy=" << ddy << "  (dx=-1,0,+1):  " << row.str());
+               }
+
+            localNaN = true;
+            blockDone = true;
+            break;
          }
       }
    }
@@ -776,6 +902,199 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
    uint_t globalNaN = localNaN ? uint_t(1) : uint_t(0);
    mpi::allReduceInplace< uint_t >(globalNaN, mpi::SUM);
    return globalNaN > uint_t(0);
+}
+
+// Verify the "closed interface layer" invariant: in FSLBM a liquid cell may NEVER be a (D3Q27)
+// neighbour of a gas cell — they must always be separated by an interface cell. A violation is a
+// "hole" in the interface layer (the Fig. 4.12a configuration). This scans every liquid cell for a
+// gas neighbour, counts the holes, and logs the first one's location + its 3x3x3 neighbourhood.
+// Does NOT abort — it is meant to reveal whether/when the invariant breaks relative to the NaN.
+// Returns the global number of holes found.
+uint_t checkClosedInterfaceLayer(const std::shared_ptr< SimulationObjects >& simObjs,
+                                 const char* const location, const uint_t t)
+{
+   uint_t localHoles = uint_t(0);
+   bool   loggedFirst = false;
+
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+      const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      const auto& aabb = blockIt->getAABB();
+
+      auto classify = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) -> std::string {
+         const flag_t fl = flagField->get(cx, cy, cz);
+         if ((fl & obstacleMask) != flag_t(0)) return "OBST";
+         if (isFlagSet(fl, interfaceFlag))     return "INTF";
+         if (isFlagSet(fl, liquidFlag))        return "LIQ ";
+         if (isFlagSet(fl, gasFlag))           return "GAS ";
+         return "??? ";
+      };
+
+      for (cell_idx_t iz = 0; iz < cell_idx_c(flagField->zSize()); ++iz)
+      for (cell_idx_t iy = 0; iy < cell_idx_c(flagField->ySize()); ++iy)
+      for (cell_idx_t ix = 0; ix < cell_idx_c(flagField->xSize()); ++ix)
+      {
+         if (!flagField->isFlagSet(ix, iy, iz, liquidFlag)) continue; // only liquid cells
+
+         for (int ddz = -1; ddz <= 1; ++ddz)
+         for (int ddy = -1; ddy <= 1; ++ddy)
+         for (int ddx = -1; ddx <= 1; ++ddx)
+         {
+            if (ddx == 0 && ddy == 0 && ddz == 0) continue;
+            if (!flagField->isFlagSet(ix + cell_idx_c(ddx), iy + cell_idx_c(ddy), iz + cell_idx_c(ddz), gasFlag))
+               continue;
+
+            ++localHoles;
+            if (!loggedFirst)
+            {
+               loggedFirst = true;
+               const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+               const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+               const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+               WALBERLA_LOG_WARNING("[LAYER-CHECK t=" << t << " after=" << location
+                  << "] HOLE: liquid cell block-local=(" << ix << "," << iy << "," << iz << ") world=(" << wx
+                  << "," << wy << "," << wz << ") has a GAS neighbour at offset (" << ddx << "," << ddy << ","
+                  << ddz << "). Closed-interface-layer invariant broken.");
+               for (int ez = -1; ez <= 1; ++ez)
+                  for (int ey = -1; ey <= 1; ++ey)
+                  {
+                     std::ostringstream row;
+                     row << std::scientific << std::setprecision(3);
+                     for (int ex = -1; ex <= 1; ++ex)
+                        row << "[" << classify(ix + cell_idx_c(ex), iy + cell_idx_c(ey), iz + cell_idx_c(ez)) << " fill="
+                            << fillField->get(ix + cell_idx_c(ex), iy + cell_idx_c(ey), iz + cell_idx_c(ez)) << "]  ";
+                     WALBERLA_LOG_WARNING("   dz=" << ez << " dy=" << ey << "  (dx=-1,0,+1):  " << row.str());
+                  }
+            }
+            ddz = ddy = ddx = 2; // stop scanning neighbours of this liquid cell once a hole is found
+         }
+      }
+   }
+
+   uint_t globalHoles = localHoles;
+   mpi::allReduceInplace< uint_t >(globalHoles, mpi::SUM);
+   if (globalHoles > uint_t(0))
+      WALBERLA_LOG_WARNING_ON_ROOT("[LAYER-CHECK t=" << t << " after=" << location << "] total holes (liquid–gas adjacencies) = "
+                                   << globalHoles);
+   return globalHoles;
+}
+
+// Measure the azimuthal asymmetry of each floater's wetted vs. dry surface — the diagnostic for the
+// lateral drift introduced by the SimpleBB dry-link guard.
+//
+// Rationale: the MEM bounce-back integrates the hydrodynamic force only over WET links (fluid-side
+// cell carries a valid PDF). The guard SKIPS dry links (gas / NaN fluid-side cell at the waterline)
+// — both the force contribution AND the bounce-back reflection. For a floating sphere the dry set is
+// the cap above the waterline; if it is azimuthally SYMMETRIC its horizontal components cancel and
+// the net hydrodynamic force is purely vertical. If the dry set is LOPSIDED (because waterline cells
+// collapse to gas asymmetrically — e.g. driven by the streamwise flow under liquid promotion), the
+// wetted-surface force integral acquires a net HORIZONTAL component → the sphere drifts sideways.
+// The all-interface reconstruction never starves cells to gas at the contact line, so its dry set
+// stays symmetric and no drift appears — exactly the difference the user observed.
+//
+// For each floater we scan its obstacle cells (particleField == floater UID) and, over the D3Q27
+// fluid neighbours, accumulate the outward link offsets split into WET (liquid/interface) and DRY
+// (gas) sets. The horizontal magnitude of the DRY-set vector is the lateral-bias signal. Reduced to
+// root and logged; does not abort.
+void logFloaterLinkBalance(const std::shared_ptr< SimulationObjects >& simObjs,
+                           const char* const location, const uint_t t)
+{
+   const uint_t nF = uint_c(simObjs->floaterUIDs.size());
+   if (nF == uint_t(0)) return;
+
+   std::vector< uint_t > nWet(nF, uint_t(0)), nDry(nF, uint_t(0));
+   std::vector< real_t > sumWet(nF * 3, real_t(0)), sumDry(nF * 3, real_t(0));
+   std::vector< real_t > pos(nF * 3, real_t(0)), vel(nF * 3, real_t(0));
+
+   // --- link balance from the fields ---
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto* flagField     = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* particleField = blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(simObjs->particleFieldID);
+      const auto gasFlag = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+
+      for (cell_idx_t iz = 0; iz < cell_idx_c(flagField->zSize()); ++iz)
+      for (cell_idx_t iy = 0; iy < cell_idx_c(flagField->ySize()); ++iy)
+      for (cell_idx_t ix = 0; ix < cell_idx_c(flagField->xSize()); ++ix)
+      {
+         const walberla::id_t uid = particleField->get(ix, iy, iz);
+         if (uid == simObjs->particleAccessor->getInvalidUid()) continue; // only obstacle cells
+
+         // map this cell's UID to a floater index (skip bed/plane particles)
+         uint_t fi = nF;
+         for (uint_t k = 0; k < nF; ++k) if (simObjs->floaterUIDs[k] == uid) { fi = k; break; }
+         if (fi == nF) continue;
+
+         for (int ddz = -1; ddz <= 1; ++ddz)
+         for (int ddy = -1; ddy <= 1; ++ddy)
+         for (int ddx = -1; ddx <= 1; ++ddx)
+         {
+            if (ddx == 0 && ddy == 0 && ddz == 0) continue;
+            const cell_idx_t jx = ix + cell_idx_c(ddx), jy = iy + cell_idx_c(ddy), jz = iz + cell_idx_c(ddz);
+            // neighbour must be a fluid cell (not another obstacle cell of the same/other body)
+            if (particleField->get(jx, jy, jz) != simObjs->particleAccessor->getInvalidUid()) continue;
+
+            if (flagField->isFlagSet(jx, jy, jz, gasFlag)) // dry link (gas-side; would be skipped by the guard)
+            {
+               ++nDry[fi];
+               sumDry[fi * 3 + 0] += real_c(ddx); sumDry[fi * 3 + 1] += real_c(ddy); sumDry[fi * 3 + 2] += real_c(ddz);
+            }
+            else // wet link (liquid/interface — carries the force)
+            {
+               ++nWet[fi];
+               sumWet[fi * 3 + 0] += real_c(ddx); sumWet[fi * 3 + 1] += real_c(ddy); sumWet[fi * 3 + 2] += real_c(ddz);
+            }
+         }
+      }
+   }
+
+   // --- position / velocity of each floater (owner contributes; ghosts skipped) ---
+   for (uint_t i = uint_t(0); i < simObjs->particleAccessor->size(); ++i)
+   {
+      if (isSet(simObjs->particleAccessor->getFlags(i), mesa_pd::data::particle_flags::GHOST)) continue;
+      const walberla::id_t uid = simObjs->particleAccessor->getUid(i);
+      for (uint_t k = 0; k < nF; ++k)
+         if (simObjs->floaterUIDs[k] == uid)
+         {
+            const auto p = simObjs->particleAccessor->getPosition(i);
+            const auto v = simObjs->particleAccessor->getLinearVelocity(i);
+            for (uint_t c = 0; c < 3; ++c) { pos[k * 3 + c] = p[c]; vel[k * 3 + c] = v[c]; }
+            break;
+         }
+   }
+
+   mpi::reduceInplace< uint_t >(nWet, mpi::SUM);
+   mpi::reduceInplace< uint_t >(nDry, mpi::SUM);
+   mpi::reduceInplace< real_t >(sumWet, mpi::SUM);
+   mpi::reduceInplace< real_t >(sumDry, mpi::SUM);
+   mpi::reduceInplace< real_t >(pos, mpi::SUM);
+   mpi::reduceInplace< real_t >(vel, mpi::SUM);
+
+   WALBERLA_ROOT_SECTION()
+   {
+      for (uint_t k = 0; k < nF; ++k)
+      {
+         const real_t dryH = std::sqrt(sumDry[k * 3] * sumDry[k * 3] + sumDry[k * 3 + 1] * sumDry[k * 3 + 1]);
+         const real_t dryZ = std::abs(sumDry[k * 3 + 2]);
+         // The cap has thousands of links, so the absolute horizontal residual is meaningless; the
+         // tilt of the dry cap is |dryXY| relative to its vertical extent |dryZ|. A symmetric cap
+         // has ratio ~0; a strongly one-sided cap (lateral wetted-force bias) climbs toward 1.
+         const real_t tilt = (dryZ > real_t(0)) ? dryH / dryZ : real_t(0);
+         WALBERLA_LOG_INFO("[LINK-BALANCE t=" << t << " after=" << location << "] floater " << k
+            << " uid=" << simObjs->floaterUIDs[k]
+            << " | pos=(" << pos[k * 3] << "," << pos[k * 3 + 1] << "," << pos[k * 3 + 2] << ")"
+            << " velXY=(" << vel[k * 3] << "," << vel[k * 3 + 1] << ")"
+            << " | wet=" << nWet[k] << " dry=" << nDry[k]
+            << " | dryVec=(" << sumDry[k * 3] << "," << sumDry[k * 3 + 1] << "," << sumDry[k * 3 + 2] << ")"
+            << " tilt(|dryXY|/|dryZ|)=" << tilt
+            << ((tilt > real_t(0.5)) ? "   <-- STRONGLY ONE-SIDED DRY CAP (lateral force bias)" : ""));
+      }
+   }
 }
 
 } // namespace antidunes

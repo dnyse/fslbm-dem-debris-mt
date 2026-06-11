@@ -71,7 +71,52 @@ void CurvatureSweepFiniteDifferences< Stencil_T, FlagField_T, ScalarField_T, Vec
 
             if (normalFieldIt->sqrLength() < real_c(1e-14))
             {
-               WALBERLA_LOG_WARNING("Invalid normal detected in CurvatureSweep.")
+               // Diagnostic: locate this invalid-normal interface cell and report whether it sits on a
+               // contact line (i.e. has solid/obstacle cells in its D3Q27 neighbourhood). A non-zero
+               // obstacle-neighbour count means the degenerate normal is at the particle/free-surface
+               // junction — the under-resolved, wetting-disabled contact line.
+               // Count obstacle and gas neighbours and accumulate the direction toward the obstacle.
+               // A degenerate (zero-length) normal at a contact line means the fill gradient vanished:
+               // with wetting disabled the obstacle cells do not contribute a wetting normal, so an
+               // interface cell wedged against the solid with FEW gas neighbours has no fill contrast
+               // to define a surface direction. Its curvature is then left at 0 → NO surface-tension
+               // (Laplace-pressure) force at that contact-line cell. As the sphere moves, the set of
+               // such drop-out cells is azimuthally uneven, so the missing surface tension is itself a
+               // lateral-asymmetry source — complementary to the SimpleBB dry-link skip (see
+               // logFloaterLinkBalance in the Antidunes showcase). obstacleDir points from this cell
+               // toward the bulk of the solid (≈ inward); -obstacleDir is the outward surface side
+               // where the surface tension is being dropped.
+               uint_t obstacleNeighbors = uint_c(0);
+               Vector3< real_t > obstacleDir(real_c(0));
+               for (auto d = Stencil_T::beginNoCenter(); d != Stencil_T::end(); ++d)
+                  if (isPartOfMaskSet(flagFieldIt.neighbor(*d), obstacleFlagMask))
+                  {
+                     ++obstacleNeighbors;
+                     obstacleDir += Vector3< real_t >(real_c(d.cx()), real_c(d.cy()), real_c(d.cz()));
+                  }
+
+               const bool selfObstacle = isPartOfMaskSet(flagFieldIt, obstacleFlagMask);
+
+               const cell_idx_t lx = flagFieldIt.x();
+               const cell_idx_t ly = flagFieldIt.y();
+               const cell_idx_t lz = flagFieldIt.z();
+
+               // block-local -> global cell (uniform grid: dx = block extent / inner cell count)
+               const auto&  aabb = block->getAABB();
+               const real_t dx   = aabb.xSize() / real_c(flagField->xSize());
+               const cell_idx_t gx = cell_idx_c(std::lround(aabb.xMin() / dx)) + lx;
+               const cell_idx_t gy = cell_idx_c(std::lround(aabb.yMin() / dx)) + ly;
+               const cell_idx_t gz = cell_idx_c(std::lround(aabb.zMin() / dx)) + lz;
+
+               WALBERLA_LOG_WARNING(
+                  "Invalid normal in CurvatureSweep at INTERFACE cell: block-local ("
+                  << lx << ", " << ly << ", " << lz << "), global (" << gx << ", " << gy << ", " << gz
+                  << ") | obstacle neighbours (D3Q27): " << obstacleNeighbors
+                  << (obstacleNeighbors > uint_c(0) ? "  --> CONTACT LINE (touches obstacle)"
+                                                    : "  --> no obstacle nearby")
+                  << (selfObstacle ? " | NOTE: cell also flagged obstacle" : "")
+                  << " | obstacleDir (toward solid) = " << obstacleDir
+                  << " | |normal|^2 = " << normalFieldIt->sqrLength())
                continue;
             }
 

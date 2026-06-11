@@ -169,6 +169,38 @@ class AntidunesBoundaryHandling
          BoundaryHandling_T* const handling = block->getData< BoundaryHandling_T >(handlingID_);
          // reset "near boundary" flags
          handling->refresh();
+
+         // Guard against a STALE "near boundary" flag on gas cells.
+         // BoundaryHandling::refresh() only updates the near-boundary flag on DOMAIN (liquid/interface)
+         // cells. When an interface cell that was marked near-boundary converts to GAS
+         // (CellConversionSweep), refresh() skips it (it is no longer a domain cell), so the
+         // near-boundary flag is left set. The boundary treat-loop would then process that gas cell and
+         // SimpleBB would read its invalid (-nan) PDF — the "dry-link" NaN. Here we detect
+         // (gas && nearBoundary), warn, and clear the flag BEFORE the treat-loop runs, so the gas cell
+         // is never treated. This removes the cause (the stale flag) rather than catching the symptom
+         // downstream in SimpleBB.
+         {
+            auto* const flagField         = handling->getFlagField();
+            const auto  nearBoundaryFlag  = handling->getNearBoundaryFlag();
+            const auto  gasFlag           = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+            static uint_t staleNearBoundaryLogCount = uint_t(0);
+            for (auto it = flagField->begin(); it != flagField->end(); ++it)
+            {
+               if (field::isFlagSet(*it, gasFlag) && field::isFlagSet(*it, nearBoundaryFlag))
+               {
+                  if (staleNearBoundaryLogCount < uint_t(30))
+                  {
+                     WALBERLA_LOG_WARNING("[STALE-NEARBOUNDARY] gas cell ("
+                        << it.x() << "," << it.y() << "," << it.z()
+                        << ") still carries the near-boundary flag after an interface->gas conversion; "
+                           "clearing it (prevents SimpleBB from reading a gas-cell -nan PDF)");
+                     ++staleNearBoundaryLogCount;
+                  }
+                  field::removeFlag(it, nearBoundaryFlag);
+               }
+            }
+         }
+
          (*handling)();
       }
 

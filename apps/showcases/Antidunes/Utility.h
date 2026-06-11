@@ -190,6 +190,20 @@ public:
    }
 };
 
+// FloatingBox is a freely rotating mesa_pd Box — translation AND rotation are fully free.
+// The base Box::updateMassAndInertia computes the correct uniform-box inertia tensor:
+//   I_x = m/12 * (Ly² + Lz²),  I_y = m/12 * (Lx² + Lz²),  I_z = m/12 * (Lx² + Ly²).
+// Contact detection (Box×HalfSpace, Box×CylindricalBoundary) accounts for the current rotation
+// via the R^T body-frame transform. The submerged-volume estimate in computeSubmergedVolumesBox()
+// integrates the fill field over the box transformed into its body frame, so it is EXACT for any
+// tilt angle (not an axis-aligned / small-angle approximation). Orientation is written to VTK
+// ("floaterBox" output, "rotation" 3x3 tensor) for rendering the oriented solid in ParaView.
+class FloatingBox : public mesa_pd::data::Box {
+public:
+   explicit FloatingBox(const mesa_pd::Vec3& edgeLength) : Box(edgeLength) {}
+   // Inherits Box::updateMassAndInertia — no rotation lock.
+};
+
 inline auto createBox(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center, const mesa_pd::Vec3& edgeLength)
 {
    auto p0 = ps.create(true);

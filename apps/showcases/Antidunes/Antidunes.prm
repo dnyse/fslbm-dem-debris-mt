@@ -99,6 +99,10 @@ ModelParameters
    useSimpleMassExchange         false;
    cellConversionThreshold       1e-2;
    cellConversionForceThreshold  1e-1;
+   // FormerMO (uncovered particle cell) reconstruction:
+   //   true  = Bogner & Rüde (2013) per-cell gas/liquid/interface state selection.
+   //   false = uniform all-interface reconstruction (no fill=1 over-promotion band).
+   useBognerReconstruction       true;
 }
 
 EvaluationParameters
