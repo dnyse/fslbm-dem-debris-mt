@@ -75,6 +75,10 @@ class BoundaryBlockDataHandling
       lbm_mesapd_coupling::ParticleField_T* const particleField =
          block->getData< lbm_mesapd_coupling::ParticleField_T >(boundary_->getParticleFieldID());
 
+      // fill-level field, used to fill-weight the MovingObstacle (SimpleBB) momentum-exchange force at the
+      // free surface (three-phase MEM, Bogner & Rüde 2013 Eq. 5.9) — see the fillLevelFct below.
+      ScalarField_T* const fillField = block->getData< ScalarField_T >(boundary_->getFillFieldID());
+
       auto interfaceFlag = flag_t(flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID));
       auto liquidFlag    = flag_t(flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID));
 
@@ -92,10 +96,15 @@ class BoundaryBlockDataHandling
                                              flagField, interfaceFlag, real_c(1.0));
       typename B::Outlet_T outlet(B::outletBoundaryID, B::outletFlagID, pdfField, flagField, domainMask);
       typename B::FreeSlip_T freeSlip(B::freeSlipBoundaryID, B::freeSlipFlagID, pdfField, flagField, domainMask);
+      // φ(x_b) accessor for the three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9): scales the
+      // SimpleBB momentum-exchange force by the near-boundary cell's fill level so interface cells at a
+      // floater's waterline do not inject a phantom full-liquid buoyant force.
+      std::function< real_t(const Cell&) > fillLevelFct = [fillField](const Cell& c) { return fillField->get(c); };
+
       typename B::MovingObstacle_T curvedLinear(B::movingObstacleBoundaryID, B::movingObstacleFlagID, pdfField,
                                                 flagField, particleField, boundary_->getParticleAccessor(), domainMask,
                                                 *boundary_->getBlockForest(), *block,
-                                                boundary_->getHydrostaticDensityFct());
+                                                boundary_->getHydrostaticDensityFct(), fillLevelFct);
 
       return new BoundaryHandling_T("Boundary Handling", flagField, domainMask, noslip, ubb, ubbInflow, pressure,
                                     pressureOutflow, outlet, freeSlip, curvedLinear);

@@ -1,3 +1,20 @@
+// two_cylinder_floater_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE normal-sized floating SPHERE (radius 8 LU, densityRatio 0.5) released upstream
+// of TWO cylinder pillars and swept downstream by the +X flow into them — the
+// single-body clogging analog of twenty_floaters_pillar_gas.prm.
+//
+//   • X periodic, Y NoSlip walls; flow advects in +X at U = 0.02.
+//   • Pillars at (64,15,90) and (64,45,90), r=8 → inter-pillar gap y∈[23,37] (14 LU).
+//   • Sphere starts at (15,30,58): upstream (x=15), centred on the gap (y=30), ~2 LU
+//     above the free surface (z≈56) → ~half submerged. Diameter 16 > the 14-LU gap →
+//     it jams between the piers after ~2500 steps of drift.
+//   • settlingSteps 0: starts ~half submerged (no gas→liquid plunge) → released from t=0.
+//   • densityRatio 0.5 → 50%-submerged equilibrium.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
 BlockForestParameters
 {
    cellsPerBlock                 < 32, 20, 30 >;
@@ -71,22 +88,12 @@ FloatingSpheres
 {
    FloatingSphere
    {
-      // "Above the water" start: sphere centre at z=70, so the sphere bottom is at z=62.
-      // The free surface is at absoluteLiquidHeight ≈ 56, so the sphere starts 6 LU above it,
-      // fully in the gas phase.
-      //
-      // Physics: in gas the sphere feels gravity but negligible upward buoyancy (gas density
-      // << liquid density in LBM).  Net downward force: gravity ~ 0.5 × V × g ≈ 0.011 LU force.
-      // Sphere mass ≈ 1072 LU → acceleration ≈ 1e-5 LU/step².
-      // Time to fall 6 LU from bottom to surface ≈ sqrt(2×6/1e-5) ≈ 1095 steps.
-      //
-      // When the sphere contacts the surface, the ObstacleFillLevelSweep (enabled by our
-      // CurvatureModel fix) correctly populates fill levels around the sphere-surface contact
-      // circle so that normals are well-conditioned as the sphere descends into the liquid.
-      //
-      // settlingSteps=0: no settling needed; the sphere starts with no contact line and the
-      // contact grows naturally as it sinks through the free surface.
-      position     < 15, 30, 70 >;
+      // Normal sphere r=8, densityRatio 0.5. Start (15,30,58): upstream of the pillars
+      // (x=15), centred on the inter-pillar gap (y=30), ~2 LU above the surface (z≈56) →
+      // ~half submerged. Starts near equilibrium (no plunge), so settlingSteps 0: released
+      // from t=0 to drift in +X and jam in the 14-LU gap (sphere diameter 16 > gap).
+      // V_sub via the wide-disk plane-fit.
+      position     < 15, 30, 58 >;
       radius       8;
       densityRatio 0.5;
       settlingSteps 0;
@@ -102,6 +109,7 @@ ModelParameters
    useSimpleMassExchange         false;
    cellConversionThreshold       1e-2;
    cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
 }
 
 EvaluationParameters

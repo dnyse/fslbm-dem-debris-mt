@@ -1,15 +1,17 @@
 // giant_sphere_drop_gas.prm
 // ─────────────────────────────────────────────────────────────────────────────
-// Free-settling test: ONE giant floating sphere (radius 20 LU), NO pillars, dropped
-// from rest well above the free surface into STILL water, to observe where it comes
-// to rest and verify the 50%-submerged buoyancy equilibrium.
+// Free-settling test: ONE floating sphere (radius 15 LU), NO pillars, dropped from
+// rest just above the free surface into STILL water, to observe where it comes to
+// rest and verify the 50%-submerged buoyancy equilibrium.
 //
 // Differences vs. giant_sphere_gas.prm:
 //   • No CylinderPillars / no Cylinder BodyBC  → clean, obstacle-free tank.
-//   • Sphere RELEASED FROM REST (own velocity = 0) from high above the surface:
-//     centre z = 100 (was 76) → bottom at z=80, i.e. 24 LU ABOVE the surface
-//     (surface ≈ z=56). Held fixed for settlingSteps while the hydrostatic column
-//     relaxes, then released to free-fall, impact, and settle.
+//   • X AND Y periodic (no side walls) → no wall interaction with the floater.
+//   • Sphere RELEASED FROM REST (own velocity = 0) from a LOW drop point:
+//     centre z = 80 → bottom at z=65, i.e. ~9 LU above the surface (≈ z=56) → gentle
+//     entry (a high drop from z=100 with r=20 plunged deep and broke the free-surface
+//     reconstruction → NaN). Held fixed for settlingSteps while the hydrostatic column
+//     relaxes, then released to settle.
 //
 // IMPORTANT — why targetMeanVelocityMagnitude is NOT set to 0:
 //   U = targetMeanVelocityMagnitude is the MASTER velocity scale of the whole
@@ -38,7 +40,7 @@
 BlockForestParameters
 {
    cellsPerBlock                 < 32, 20, 30 >;
-   periodicity                   < 1, 0, 0 >;
+   periodicity                   < 1, 0, 0 >;   // X and Y periodic (no side walls); only top/bottom are walls
    loadSnapshot                  false;
    storeSnapshot                 true;
    snapshotFrequency             10000;
@@ -56,7 +58,8 @@ DomainParameters
 
 PIDParameters
 {
-   targetMeanVelocityMagnitude 0.02;    // master velocity scale — must stay > 0 (see header)
+   targetMeanVelocityMagnitude 0.02;        // master velocity scale: gravity = (U/Fr)²/h. 1e-6 made
+                                            // g ≈ 2.5e-14 → sphere frozen mid-air; 0.02 → real g ≈ 1e-5.
    proportionalGain            2e-4;
    derivativeGain              1e-6;
    integralGain                2e-4;
@@ -93,14 +96,14 @@ FloatingSpheres
 {
    FloatingSphere
    {
-      // Giant sphere: radius=20 LU. Centre at (30,30,100): bottom at z=80, i.e. 24 LU
-      // above the surface (z≈56). Held fixed for settlingSteps, then released from rest
-      // to free-fall and settle to the 50%-submerged equilibrium at z≈56.
-      // Y extent [10,50] — 10 LU clearance from each NoSlip wall.
-      position     < 30, 30, 100 >;
-      radius       20;
+      // Sphere: radius=15 LU (a bit smaller than 20 → gentler plunge / smaller entrained cavity).
+      // Centre at (30,30,80): bottom at z=65, i.e. ~9 LU above the surface (z≈56) → a low, gentle
+      // drop. Held fixed for settlingSteps, then released to settle to the 50%-submerged equilibrium.
+      // Y is periodic now, so no wall-clearance constraint.
+      position     < 30, 30, 80 >;
+      radius       15;
       densityRatio 0.5;
-      settlingSteps 500;
+      settlingSteps 500;    // brief hold for the hydrostatic column to relax before release
    }
 }
 
@@ -133,8 +136,7 @@ BoundaryParameters
 {
    Border { direction T;  walldistance -1; NoSlip{} }
    Border { direction B;  walldistance -1; NoSlip{} }
-   Border { direction N;  walldistance -1; NoSlip{} }
-   Border { direction S;  walldistance -1; NoSlip{} }
+   // N/S (y) borders removed: Y is now periodic (see BlockForestParameters.periodicity).
 }
 
 MeshOutputParameters

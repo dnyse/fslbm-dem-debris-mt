@@ -92,13 +92,23 @@ struct PhysicsParams {
    real_t Re;
    real_t Fr;
    real_t We;
+   // When true, the U-derived LBM units (viscosity, relaxationRate, gravity, surfaceTension) use the
+   // fixed reference values instead of being computed from targetMeanVelocityMagnitude. This lets the
+   // mean velocity be set to 0 (still water / no flow forcing) while keeping valid physical constants.
+   bool   useHardcodedUnits;
+   // Optional damping knob: when > 0, sets the LBM relaxation rate directly (and derives the matching
+   // viscosity), overriding the value above. Lets a still-water settle test (U=0) be made more viscous
+   // — e.g. so a tumbling cube/log damps to rest instead of coasting in near-inviscid water. 0 = off.
+   real_t relaxationRateOverride;
 
    PhysicsParams(const config::Config::BlockHandle& b)
-      : enableWetting { b.getParameter< bool >  ("enableWetting") }
-      , timesteps     { b.getParameter< uint_t >("timesteps") }
-      , Re            { b.getParameter< real_t >("Re") }
-      , Fr            { b.getParameter< real_t >("Fr") }
-      , We            { b.getParameter< real_t >("We") }
+      : enableWetting          { b.getParameter< bool >  ("enableWetting") }
+      , timesteps              { b.getParameter< uint_t >("timesteps") }
+      , Re                     { b.getParameter< real_t >("Re") }
+      , Fr                     { b.getParameter< real_t >("Fr") }
+      , We                     { b.getParameter< real_t >("We") }
+      , useHardcodedUnits      { b.getParameter< bool >  ("useHardcodedUnits", false) }
+      , relaxationRateOverride { b.getParameter< real_t >("relaxationRateOverride", real_c(0)) }
    {}
 };
 
@@ -220,6 +230,10 @@ struct FloatingBoxParams {
    real_t            densityRatio;
    uint_t            settlingSteps;      // same semantics as FloatingSphereParams::settlingSteps
    real_t            initialTiltAngleDeg; // initial rotation about the Y-axis (degrees); 0 = upright
+   real_t            comOffsetZ;          // signed body-frame z-offset of the centre of mass from the
+                                          // geometric centroid (LU). Negative = COM BELOW centroid →
+                                          // pendulum righting torque (raises GM, prevents tumbling).
+                                          // 0 = uniform-density box (COM at centroid).
 
    FloatingBoxParams(const config::Config::BlockHandle& b)
    {
@@ -228,6 +242,7 @@ struct FloatingBoxParams {
       densityRatio         = b.getParameter< real_t >           ("densityRatio");
       settlingSteps        = b.getParameter< uint_t >           ("settlingSteps", uint_t(0));
       initialTiltAngleDeg  = b.getParameter< real_t >           ("initialTiltAngleDeg", real_t(0));
+      comOffsetZ           = b.getParameter< real_t >           ("comOffsetZ", real_t(0));
    }
 };
 
@@ -344,10 +359,31 @@ struct ComputedParams {
       particleFixingHeight = particle.fixingHeightFactor * avgParticleDiameter;
 
       const real_t U  = pid.targetMeanVelocityMagnitude;
-      viscosity      = U * liquidHeight / physics.Re;                            // 0.000214026
-      relaxationRate = real_c(1) / (real_c(3) * viscosity + real_c(0.5));        // 1.99743
-      gravity        = (U / physics.Fr) * (U / physics.Fr) / liquidHeight;       // 7.02618e-06
-      surfaceTension = real_c(1) * U * U * liquidHeight / physics.We;            // 0.000849592
+      if (physics.useHardcodedUnits)
+      {
+         // Fixed reference units (the values the dynamic formulas below produce at the default config:
+         // U=0.02, Re=3100, Fr=1.31, We=15.6188). Use these to run with targetMeanVelocityMagnitude=0
+         // (still water) without zeroing viscosity/gravity/surface tension.
+         viscosity      = real_c(0.000214026);
+         relaxationRate = real_c(1.99743);
+         gravity        = real_c(7.02618e-06);
+         surfaceTension = real_c(0.000849592);
+      }
+      else
+      {
+         viscosity      = U * liquidHeight / physics.Re;                         // 0.000214026
+         relaxationRate = real_c(1) / (real_c(3) * viscosity + real_c(0.5));     // 1.99743
+         gravity        = (U / physics.Fr) * (U / physics.Fr) / liquidHeight;    // 7.02618e-06
+         surfaceTension = real_c(1) * U * U * liquidHeight / physics.We;         // 0.000849592
+      }
+
+      // Damping override: set the relaxation rate directly and derive the matching viscosity
+      // (ν = (1/ω − 0.5)/3). Lower ω → more viscous → more damping. 0 = keep the value above.
+      if (physics.relaxationRateOverride > real_c(0))
+      {
+         relaxationRate = physics.relaxationRateOverride;
+         viscosity      = (real_c(1) / relaxationRate - real_c(0.5)) / real_c(3);
+      }
 
       const real_t viscosity_SI = real_c(1.0016e-6);  // kinemtic viscosity of water at 20°C at 1 bar
       dx_SI = real_c(1) / particleScalingFactor;

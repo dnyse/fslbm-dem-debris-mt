@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=antidunes-bed
 #SBATCH --partition=singlenode
+#SBATCH --constraint=el9
 #SBATCH --nodes=1
 #SBATCH --ntasks=9
 #SBATCH --time=01:00:00

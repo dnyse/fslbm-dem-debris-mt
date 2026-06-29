@@ -154,12 +154,15 @@ public:
       return operator()(idx2, idx1, bx, hs, ac);
    }
 
-   // Box vs CylindricalBoundary (solid exterior) — AABB approach, approximation for small rotations.
-   // Finds the closest point on the AABB to the cylinder axis, then checks whether the radial
-   // distance from that point to the axis is less than the cylinder radius.
+   // Box vs CylindricalBoundary (solid exterior) — ROTATION-AWARE. Works in the box BODY frame so it
+   // is correct for any orientation (the previous version used a world-axis-aligned bounding box and
+   // silently let a rotated box pierce the cylinder). The cylinder centre/axis are transformed by Rᵀ,
+   // the closest point on the oriented box is found by clamping to the half-extents, the radial
+   // distance to the (infinite) cylinder axis gives the penetration, and the normal/contact point are
+   // transformed back to world.
    //   penetrationDepth = radial_dist - cylinder_radius  (< 0 → penetrating)
-   //   contactNormal points radially outward from the cylinder axis toward the box
-   //   contactPoint = closest point on the AABB surface (on the box, nearest the cylinder)
+   //   contactNormal points radially outward from the cylinder axis toward the box (world frame)
+   //   contactPoint = closest point on the box surface, world frame
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Box& bx,
@@ -171,32 +174,63 @@ public:
 
       const mesa_pd::Vec3& c         = ac.getPosition(idx1);
       const mesa_pd::Vec3& cylCenter = ac.getPosition(idx2);
-      const mesa_pd::Vec3& axis      = cb.getAxis();
+      const mesa_pd::Mat3  R         = ac.getRotation(idx1).getMatrix(); // body → world
+      const mesa_pd::Mat3  Rt        = R.getTranspose();                 // world → body
 
-      // AABB extents (valid for identity-rotation FloatingBox)
-      const mesa_pd::Vec3 half   = bx.getEdgeLength() * real_t(0.5);
-      const mesa_pd::Vec3 boxMin = c - half;
-      const mesa_pd::Vec3 boxMax = c + half;
+      const mesa_pd::Vec3 half = bx.getEdgeLength() * real_t(0.5);
 
-      // Closest point on AABB to the cylinder center (in world frame)
-      const mesa_pd::Vec3 closest(
-         std::clamp(cylCenter[0], boxMin[0], boxMax[0]),
-         std::clamp(cylCenter[1], boxMin[1], boxMax[1]),
-         std::clamp(cylCenter[2], boxMin[2], boxMax[2]));
+      // Cylinder axis as a LINE in the box body frame (cylinder is infinite along its axis).
+      mesa_pd::Vec3 d  = Rt * cb.getAxis();
+      const real_t  dl = d.length();
+      d = (dl > real_t(1e-10)) ? d / dl : mesa_pd::Vec3(real_t(0), real_t(0), real_t(1));
+      const mesa_pd::Vec3 a0 = Rt * (cylCenter - c); // a point on the axis (the cylinder centre), body frame
 
-      // Radial vector from cylinder center to closest point, perpendicular to axis
-      const mesa_pd::Vec3 vec    = closest - cylCenter;
-      const mesa_pd::Vec3 radial = vec - (vec * axis) * axis;
-      const real_t dist = radial.length();
+      // Closest point on the oriented box to the INFINITE axis line: project the current estimate onto
+      // the line, clamp the nearest line point into the box, refine once. (Using the far cylinder centre
+      // directly would bias the clamp toward the wrong box corner for a rotated/elongated box.)
+      mesa_pd::Vec3 boxPt(real_t(0), real_t(0), real_t(0));
+      for (int it = 0; it < 2; ++it)
+      {
+         const real_t        t  = (boxPt - a0) * d;
+         const mesa_pd::Vec3 lp = a0 + t * d; // nearest line point to the current box estimate
+         boxPt = mesa_pd::Vec3(std::clamp(lp[0], -half[0], half[0]),
+                               std::clamp(lp[1], -half[1], half[1]),
+                               std::clamp(lp[2], -half[2], half[2]));
+      }
 
-      const real_t penetrationDepth = dist - cb.getRadius();
+      // Perpendicular distance from boxPt to the axis line.
+      const mesa_pd::Vec3 vec    = boxPt - a0;
+      const mesa_pd::Vec3 radial = vec - (vec * d) * d;
+      const real_t        dist   = radial.length();
+
+      real_t penetrationDepth = dist - cb.getRadius();
       if (penetrationDepth < getContactThreshold())
       {
+         // SAFETY: a body large enough to ENVELOP the thin pillar (axis inside the box) yields a
+         // near-radius penetration with a degenerate normal, which the spring-dashpot turns into a
+         // catastrophic force that blows up the coupled fluid (global NaN). Bound the reported overlap
+         // so the contact stays a finite restoring push, and warn so the pathological geometry is visible.
+         const real_t maxOverlap = real_t(1.5);
+         if (penetrationDepth < -maxOverlap)
+         {
+            static uint_t envelopLogCount = uint_t(0);
+            if (envelopLogCount < uint_t(20))
+            {
+               WALBERLA_LOG_WARNING("[BOX-CYL-ENVELOP] box uid=" << ac.getUid(idx1)
+                  << " deeply overlaps/envelops cylinder uid=" << ac.getUid(idx2)
+                  << " (raw penetration=" << penetrationDepth << ", dist-to-axis=" << dist
+                  << ") — clamping overlap to " << -maxOverlap
+                  << "; the box is likely too large for this pillar geometry.");
+               ++envelopLogCount;
+            }
+            penetrationDepth = -maxOverlap;
+         }
          getPenetrationDepth() = penetrationDepth;
-         getContactNormal() = (dist > real_t(1e-10))
-                                 ? radial / dist
-                                 : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
-         getContactPoint()  = closest;
+         const mesa_pd::Vec3 nBody = (dist > real_t(1e-6))
+                                        ? radial / dist
+                                        : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+         getContactNormal() = R * nBody;     // body → world
+         getContactPoint()  = c + R * boxPt; // body → world
          return true;
       }
       return false;
@@ -338,6 +372,18 @@ public:
       buoyancyCenterOffset_ = off;
    }
 
+   void setComOffsetZ(const std::unordered_map< walberla::id_t, real_t >* com) {
+      comOffsetZ_ = com;
+   }
+
+   // Wire up the step counter + eval frequency so the per-box force breakdown can be logged once
+   // per eval step (the counter is owned by the enclosing ParticleKernels and advances once per step).
+   void setStepInfo(const uint_t* stepCounter) { stepCounter_ = stepCounter; }
+
+   // Set once per sub-cycle by doDEMSubCycles; true only on the first sub-cycle of an eval step, so
+   // every floater (any count) logs its force breakdown exactly once per eval step.
+   void setLogForces(bool logForces) { logForces_ = logForces; }
+
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx, ParticleAccessor_T& ac){
       // Buoyancy acts only in Z because the hydrostatic MEM contribution is only in Z.
@@ -366,6 +412,26 @@ public:
 
       auto hydro_force  = ac.getHydrodynamicForce(idx);
       auto hydro_torque = ac.getHydrodynamicTorque(idx);
+      const Vector3< real_t > hydroForceRaw = hydro_force; // pre-scaling value, kept for the verification log
+
+      // Submersion-scaled hydrodynamic force (generalises the old binary vSub==0 airborne guard).
+      // The MEM (SimpleBB) builds the force as if every near-boundary cell were full liquid (ρ≈1),
+      // but a partially-emerged floater only pushes on a real fluid column over its SUBMERGED part.
+      // The emerged part's "force" is a phantom: cells the floater just vacated are reconstructed/
+      // refilled to liquid density, and a locally raised/dammed surface (pillar hump, displaced
+      // water) is under-counted by the flat hydrostatic reference ρ_hyd(z)=1+3·a_z·(z−h_liquid).
+      // Both leak a spurious upward impulse that can exceed the floater's weight and launch it
+      // ballistically up into the gas (nine.log: airborne sphere F_hydro_z≈+0.021 vs weight 0.011).
+      // Scaling F_hydro and the torque by the geometric submerged fraction V_sub/V_full removes the
+      // leak smoothly: fully submerged → ×1 (unchanged), fully emerged → ×0 (the old guard), and
+      // partially emerged → proportional. V_sub itself is read off the LIVE local waterline
+      // (computeFloaterBuoyancy), so this is correct on raised/dammed/wake surfaces too.
+      real_t submFrac = real_t(1);
+      if (isFloater) {
+         submFrac = (vFull > real_t(0)) ? std::clamp(vSub / vFull, real_t(0), real_t(1)) : real_t(0);
+         hydro_force  *= submFrac;
+         hydro_torque *= submFrac;
+      }
 
       if (!std::isfinite(hydro_force[0]) || !std::isfinite(hydro_force[1]) || !std::isfinite(hydro_force[2]))
          WALBERLA_LOG_WARNING("[AddExternalForces] NaN/Inf hydrodynamic force on uid=" << ac.getUid(idx)
@@ -373,6 +439,28 @@ public:
       if (!std::isfinite(hydro_torque[0]) || !std::isfinite(hydro_torque[1]) || !std::isfinite(hydro_torque[2]))
          WALBERLA_LOG_WARNING("[AddExternalForces] NaN/Inf hydrodynamic torque on uid=" << ac.getUid(idx)
             << " pos=" << ac.getPosition(idx));
+
+      // Per-floater force breakdown, once per eval step (doDEMSubCycles sets logForces_ on sub-cycle 0,
+      // so every sphere AND the box log exactly once). ac.getForce(idx) here = contact + lubrication
+      // accumulated THIS sub-cycle (ComputeContacts runs before AddExternalForces); hydro_force and
+      // bodyForce are the MEM and buoyancy/gravity/driving parts about to be added. This shows why
+      // equal-density floaters end at different depths: compare F_buoy+grav (model), F_hydro (flow),
+      // and F_contact (sphere-sphere pile / pillar / wall) per floater.
+      if (logForces_ && isFloater)
+      {
+         const auto fContact = ac.getForce(idx);
+         WALBERLA_LOG_INFO((ptype == uint_t(3) ? "[BoxForces]" : "[FloaterForces]")
+            << " uid=" << ac.getUid(idx) << " step=" << (stepCounter_ ? *stepCounter_ : uint_t(0))
+            << "  subm=" << (vFull > real_t(0) ? real_t(100) * vSub / vFull : real_t(0)) << "%"
+            << "  F_buoy+grav_z=" << bodyForce[2] << " (>0 up)"
+            << "  F_drive_xy=(" << bodyForce[0] << "," << bodyForce[1] << ")"
+            << "  F_hydro=(" << hydro_force[0] << "," << hydro_force[1] << "," << hydro_force[2] << ")"
+            << "  [submScale=" << submFrac << " applied to F_hydro_raw=("
+            << hydroForceRaw[0] << "," << hydroForceRaw[1] << "," << hydroForceRaw[2] << ")]"
+            << "  F_contact+lub=(" << fContact[0] << "," << fContact[1] << "," << fContact[2] << ")"
+            << "  vel=" << ac.getLinearVelocity(idx)
+            << "  pos=" << ac.getPosition(idx));
+      }
 
       mesa_pd::addForceAtomic(idx, ac, hydro_force + bodyForce);
 
@@ -396,6 +484,26 @@ public:
                                              lever[0] * Fbuoy[1] - lever[1] * Fbuoy[0]);
          }
       }
+
+      // Lowered centre of mass (pendulum righting torque). Gravity acts at the true COM, which a
+      // comOffsetZ < 0 places BELOW the geometric centroid (= the box's rotation centre). When the
+      // box tilts, this offset swings out to the side, so the weight produces a restoring moment
+      // (COM − centroid) × F_grav that raises the metacentric height and keeps the box upright —
+      // the configurable fix for the GM<0 rolling of a uniform-density log/cube. comOffsetZ = 0
+      // reproduces the uniform box exactly (no torque).
+      if (isFloater && comOffsetZ_)
+      {
+         auto ito = comOffsetZ_->find(ac.getUid(idx)); // map holds only nonzero offsets (guarded at build)
+         if (ito != comOffsetZ_->end())
+         {
+            const mesa_pd::Mat3& R = ac.getRotation(idx).getMatrix();                     // body → world
+            const Vector3< real_t > leverG = R * Vector3< real_t >(real_t(0), real_t(0), ito->second); // COM − centroid (world)
+            const Vector3< real_t > Fgrav(real_t(0), real_t(0), rho * vFull * (*acceleration_)[2]);     // weight (down: a_z<0)
+            totalTorque += Vector3< real_t >(leverG[1] * Fgrav[2] - leverG[2] * Fgrav[1],
+                                             leverG[2] * Fgrav[0] - leverG[0] * Fgrav[2],
+                                             leverG[0] * Fgrav[1] - leverG[1] * Fgrav[0]);
+         }
+      }
       mesa_pd::addTorqueAtomic(idx, ac, totalTorque);
    }
 
@@ -405,6 +513,11 @@ private:
    real_t                                                   particleDensityRatio_;
    const std::unordered_map< walberla::id_t, real_t >*     submergedVolumes_;
    const std::unordered_map< walberla::id_t, Vector3< real_t > >* buoyancyCenterOffset_;
+   const std::unordered_map< walberla::id_t, real_t >*     comOffsetZ_ = nullptr; // per-box COM offset below centroid
+
+   // For the per-floater force-breakdown log.
+   const uint_t* stepCounter_ = nullptr; // step number, for the log only
+   bool          logForces_   = false;   // set true by doDEMSubCycles on the first sub-cycle of an eval step
 };
 
 
@@ -461,7 +574,12 @@ public:
       floaterBoxUIDs_ = simObjs->floaterBoxUIDs;
       floaterBoxHalfExtents_.resize(nB);
       for (size_t bi = 0; bi < nB; ++bi)
+      {
          floaterBoxHalfExtents_[bi] = simParams->floatingBoxes[bi].halfExtents;
+         // Per-box COM offset below the centroid (constant); keyed by UID for the righting torque.
+         if (std::abs(simParams->floatingBoxes[bi].comOffsetZ) > real_t(0))
+            boxComOffsetZ_[floaterBoxUIDs_[bi]] = simParams->floatingBoxes[bi].comOffsetZ;
+      }
 
       // Self-identify the buoyancy sampling mode in the log (answers "did this run use the ring?").
       WALBERLA_LOG_INFO_ON_ROOT("[FloaterBuoyancy] sphere V_sub sampling: floaterRingBand=" << ringBand_
@@ -499,15 +617,25 @@ public:
 
    template< typename TP >
    void doDEMSubCycles(timing::TimingPool<TP> & tp, uint_t numSubCycles = uint_t(1)){
+      // One increment per LBM step, independent of whether spheres/boxes are present. The per-shape
+      // submerged-volume functions early-return when their list is empty, so the counter must not be
+      // gated on them (otherwise a box-only run never advances and every eval log fires each step).
+      ++stepCounter_;
       // Submerged volumes computed once per LBM step (fill field is constant during DEM sub-cycles).
       // Both functions write into the same submergedVolumes_ map (keyed by UID).
       computeSubmergedVolumes();
       computeSubmergedVolumesBox();
       addExternalForces.setSubmergedVolumes(&submergedVolumes_);
       addExternalForces.setBuoyancyCenterOffset(&buoyancyCenterOffset_);
+      addExternalForces.setComOffsetZ(&boxComOffsetZ_);
+      addExternalForces.setStepInfo(&stepCounter_);
 
+      const bool logForcesThisStep = (stepCounter_ % evalFrequency_ == uint_t(0));
       for (auto subCycle = uint_t(0); subCycle < numSubCycles; ++subCycle)
       {
+         // Log the per-floater force breakdown once per eval step (only on the first sub-cycle).
+         addExternalForces.setLogForces(logForcesThisStep && subCycle == uint_t(0));
+
          // velocity verlet pre-force (update positions) --------------------------------
          tp["MESAPD: VelocityVerletPreForceUpdate"].start();
          particleStorage->forEachParticle(useOpenMP,
@@ -654,8 +782,33 @@ public:
       // fill (≈0 or ≈1), so averaging any of them gives the correct answer even when
       // multiple ranks contribute.  Pillars, NoSlip walls, and other obstacles are
       // excluded by the fluidMask check — we keep looking past them automatically.
-      constexpr size_t stride = 9;
+      //   [9]   aboveSum  — Σ φ of non-obstacle cells in the slab just ABOVE the sphere top (cavity probe)
+      //   [10]  aboveCount— number of such cells (cavity probe)
+      // Cavity probe: liquid sitting on top of the sphere means the gas around its surface is an
+      // enclosed cavity, not the real free surface → it is submerged. This is the reference-free
+      // replacement for the old fixed absoluteLiquidHeight bound.
+      constexpr size_t stride = 11;
       std::vector< real_t > accum(nF * stride, real_t(0));
+
+      // De-contamination of touching/clustered floaters: a sampled cell belongs to the floater whose
+      // SURFACE it is nearest. nearerOtherFloater(p, fi, myDistErr) returns true if some OTHER floater's
+      // surface is closer to p than fi's is (by myDistErr = |dist_to_fi_surface|), so the cell is the
+      // neighbour's — skip it for fi. Without this, a neighbour's waterline pollutes fi's plane-fit (the
+      // ten-sphere "localSurfaceZ scattered 26..80" symptom). X is the only periodic axis (min-image in X).
+      const real_t domainXSize = blockForest_->getDomain().xSize();
+      auto nearerOtherFloater = [&](const Vector3< real_t >& p, size_t fi, real_t myDistErr) -> bool {
+         for (size_t fj = 0; fj < nF; ++fj)
+         {
+            if (fj == fi) continue;
+            real_t ddx = p[0] - cenX[fj];
+            ddx -= domainXSize * std::round(ddx / domainXSize); // periodic minimal image in X
+            const real_t ddy = p[1] - cenY[fj];
+            const real_t ddz = p[2] - cenZ[fj];
+            const real_t distFj = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            if (std::abs(distFj - floaterRadii_[fj]) < myDistErr) return true;
+         }
+         return false;
+      };
 
       for (auto& iblock : *blockForest_)
       {
@@ -673,9 +826,11 @@ public:
 
          for (size_t fi = 0; fi < nF; ++fi)
          {
-            const real_t r        = floaterRadii_[fi];
-            const int    pad      = static_cast< int >(std::ceil(r)) + 2;
-            const real_t ringBand = ringBand_; // contact-ring half-width (prm: floaterRingBand; large ⇒ old full-box)
+            const real_t r         = floaterRadii_[fi];
+            const real_t planeLatR = real_t(1.8) * r;   // lateral reach of the surface plane-fit: sample the
+                                                        // surrounding surface OUT TO 1.8r so it reaches past
+                                                        // any crater/gas-moat the sphere digs.
+            const int    pad       = static_cast< int >(std::ceil(planeLatR)) + 2;
 
             Vector3< real_t > c(cenX[fi], cenY[fi], cenZ[fi]);
             blockForest_->mapToPeriodicDomain(c);
@@ -702,37 +857,52 @@ public:
 
                const auto cellFlag = flagField->get(localCell[0], localCell[1], localCell[2]);
 
-               // Fallback channel: accumulate fill of non-obstacle cells in the upper
-               // half of the bounding box (z ≥ sphere centre).  Pillars, NoSlip walls,
-               // and any other obstacle cells are skipped by the fluidMask guard, so
-               // the search automatically continues past them.  Multiple ranks may each
-               // contribute cells; since all valid cells have the same fill (≈0 or ≈1)
-               // in the fallback case, averaging across ranks is correct.
-               if (isPartOfMaskSet(cellFlag, fluidMask) && samplePos[2] >= c[2])
-               {
-                  accum[fi * stride + 7] += fillField->get(localCell[0], localCell[1], localCell[2]);
-                  accum[fi * stride + 8] += real_t(1);
-               }
-
-               // Plane-fitting channel: only interface cells have valid normals.
-               if (!isFlagSet(cellFlag, interfaceFlag)) continue;
-
-               // Contact-ring restriction: keep only interface cells on the sphere SURFACE.
-               // Distance is computed from the loop offsets relative to the (periodic-mapped)
-               // centre c, so it is periodic-safe (no wrap across the seam). Excludes the
-               // far-field surface that would otherwise bias the plane under waves.
+               // Offsets of this cell from the (periodic-mapped) sphere centre (periodic-safe; no seam wrap).
                const real_t offX  = real_t(dx) + real_t(0.5) - (c[0] - real_t(cxi));
                const real_t offY  = real_t(dy) + real_t(0.5) - (c[1] - real_t(cyi));
                const real_t offZ  = real_t(dz) + real_t(0.5) - (c[2] - real_t(czi));
                const real_t distC = std::sqrt(offX * offX + offY * offY + offZ * offZ);
-               if (std::abs(distC - r) > ringBand) continue;
+
+               if (isPartOfMaskSet(cellFlag, fluidMask))
+               {
+                  // Fallback channel: average fill of non-obstacle cells in the upper half (z ≥ centre).
+                  if (samplePos[2] >= c[2])
+                  {
+                     accum[fi * stride + 7] += fillField->get(localCell[0], localCell[1], localCell[2]);
+                     accum[fi * stride + 8] += real_t(1);
+                  }
+                  // Cavity probe: average fill in the slab JUST ABOVE the sphere top (offZ in (r, r+4],
+                  // within the top disk). Liquid here = water sits on top of the sphere = the gas around
+                  // its surface is an enclosed (numerical) cavity, not the real free surface → submerged.
+                  // A normally floating sphere has its top in the atmosphere, so this stays gas → no false
+                  // trigger. Reference-free replacement for the old fixed absoluteLiquidHeight bound.
+                  const real_t lateral = std::sqrt(offX * offX + offY * offY);
+                  if (offZ > r && offZ <= r + real_t(4) && lateral < r
+                      && !nearerOtherFloater(samplePos, fi, offZ - r))
+                  {
+                     accum[fi * stride + 9]  += fillField->get(localCell[0], localCell[1], localCell[2]);
+                     accum[fi * stride + 10] += real_t(1);
+                  }
+               }
+
+               // Plane-fitting channel: fit the free surface over a WIDE lateral disk (radius planeLatR)
+               // around the sphere axis — reaching PAST any crater/gas-moat the sphere digs — so the fitted
+               // waterline tracks the undisturbed surrounding level instead of the depressed moat. Keep only
+               // interface cells with an UPWARD normal (n_z>0): crater/cavity walls point sideways/down and
+               // would drag the plane into the moat. (Wider than the old contact ring → can bias under
+               // strong waves, but correct for a calm floating body.)
+               if (!isFlagSet(cellFlag, interfaceFlag)) continue;
+               const real_t lateralP = std::sqrt(offX * offX + offY * offY);
+               if (lateralP > planeLatR) continue;
+               // De-contaminate: drop cells that are nearer a neighbouring floater's surface.
+               if (nearerOtherFloater(samplePos, fi, std::abs(distC - r))) continue;
 
                const real_t phi = fillField->get(localCell[0], localCell[1], localCell[2]);
                const real_t w   = phi * (real_t(1) - phi);
                if (w < real_t(1e-6)) continue;
 
                const Vector3< real_t >& n = normalField->get(localCell[0], localCell[1], localCell[2]);
-               if (n.sqrLength() < real_t(1e-10)) continue;
+               if (n.sqrLength() < real_t(1e-10) || n[2] <= real_t(0)) continue; // upward free-surface only
 
                accum[fi * stride + 0] += w;
                accum[fi * stride + 1] += w * n[0];
@@ -754,72 +924,66 @@ public:
          const real_t vFull = (real_t(4) / real_t(3)) * math::pi * r * r * r;
 
          const Vector3< real_t > C(cenX[fi], cenY[fi], cenZ[fi]);
-         const real_t wTot  = accum[fi * stride + 0];
+         const real_t wTot    = accum[fi * stride + 0];
+         const real_t fillCnt = accum[fi * stride + 8];
+         const real_t avgFill = (fillCnt > real_t(0)) ? (accum[fi * stride + 7] / fillCnt) : real_t(0);
          real_t h_cap;
+         real_t localSurfaceZ = C[2]; // reported below; refined to the fitted waterline when one exists
+         Vector3< real_t > fittedNormal(real_t(0)); // free-surface normal used for the plane-fit (0 = none)
+         real_t normalCoherence = real_t(0);        // |Σw n̂|/Σw ∈ [0,1]; low ⇒ normals cancel (cavity / neighbour contamination)
 
-         // --- Live LOCAL free-surface height at the sphere ---
-         // accum[..+6]/wTot is the gradient-weighted mean z of the interface cells sitting on the
-         // sphere SURFACE (the contact ring), i.e. the actual waterline AROUND the sphere. Because the
-         // sphere dams the driven flow and displaces water, this local waterline is a crater/ridge that
-         // sits well above (or below) the undisturbed mean level absoluteLiquidHeight. Using it instead
-         // of the fixed mean makes submersion (and the bound below) self-consistent with the deformed
-         // surface, so a sphere floating in a raised/dimpled surface still reports ~densityRatio×100%.
-         // Falls back to the fixed mean only when no contact ring is found (fully submerged/emerged),
-         // where that flat global value is the correct cavity-proof bound.
-         const real_t localSurfaceZ =
-            (wTot > real_t(1e-6)) ? (accum[fi * stride + 6] / wTot) : surfaceHeight_;
-         // surfRef = max(fixed, local) keeps the bound CAVITY-PROOF: a hugging gas pocket drags the
-         // local estimate down toward the centre, but the max holds the reference at the far-field
-         // level so a deeply-submerged sphere still reads fully submerged (the original sink fix),
-         // while still following a genuinely risen/displaced surface.
-         const real_t surfRef = std::max(surfaceHeight_, localSurfaceZ);
-
-         // --- Local free-surface bound (robust to gas cavities / spurious interface cells) ---
-         // BUG FIX: the old local-fill fallback under-reported V_sub when a deeply-submerged sphere sat
-         // in an entrained gas cavity (it averaged the surrounding cells, which were partly gas), so the
-         // buoyancy collapsed and the sphere stayed sunk. Using the surface height instead:
-         //   sphere top  (C_z + r) <= surface  ->  fully submerged (h_cap = 2r), ignore any local gas
-         //   sphere bottom (C_z - r) >= surface ->  fully emerged (h_cap = 0)
-         // Only a sphere that genuinely STRADDLES the surface uses the local contact-line plane-fit
-         // (which captures a tilted / wavy waterline).
-         const real_t topZ = C[2] + r;
-         const real_t botZ = C[2] - r;
-
-         if (topZ <= surfRef)
+         // --- REFERENCE-FREE submerged depth: read the waterline locally, no absoluteLiquidHeight ---
+         // The free surface is wherever the fill field transitions, sampled around THIS sphere:
+         //   • contact ring present (wTot>0): the surface crosses the sphere -> plane-fit the local
+         //     waterline from the ring interface cells. h_signed = n̂·(x̄−C) is the signed distance of
+         //     the centre below that plane; the clamp covers the just-submerged / just-emerged ends too.
+         //   • no ring: the sphere is fully in one phase -> the average fill φ̄ of the surrounding
+         //     non-obstacle cells decides (φ̄>0.5 liquid -> submerged 2r, else gas -> emerged 0).
+         // No flat global surface is assumed, so this holds in deformed/chaotic surfaces (piles,
+         // pillars, wakes) where a fixed reference is simply wrong. TRADE-OFF vs the old code: the
+         // fixed-surface "cavity-proof" override is gone — a gas pocket hugging a deeply-submerged
+         // sphere can again under-report V_sub (we revisit that locally if it shows up).
+         if (wTot > real_t(1e-6))
          {
-            h_cap = real_t(2) * r; // fully below the surface -> fully submerged (cavity-proof)
-         }
-         else if (botZ >= surfRef)
-         {
-            h_cap = real_t(0);     // entirely above the surface
-         }
-         else if (wTot < real_t(1e-6))
-         {
-            // Straddling but no contact ring found -> geometric cap from the flat global surface.
-            h_cap = std::clamp(surfRef - botZ, real_t(0), real_t(2) * r);
-         }
-         else
-         {
-            // Straddling WITH a contact ring -> plane-fit (handles a tilted / locally wavy waterline).
             const Vector3< real_t > nSum(accum[fi*stride+1], accum[fi*stride+2], accum[fi*stride+3]);
             const Vector3< real_t > xBar(accum[fi*stride+4] / wTot,
                                          accum[fi*stride+5] / wTot,
                                          accum[fi*stride+6] / wTot);
+            localSurfaceZ   = xBar[2];
+            normalCoherence = nSum.length() / wTot; // 1 ⇒ all ring normals aligned; →0 ⇒ they cancel
 
             if (nSum.sqrLength() < real_t(1e-10))
             {
-               // Weighted normals cancelled -> fall back to the vertical distance to the centroid.
-               const real_t h_vertical = xBar[2] - C[2];
-               h_cap = std::clamp(r + h_vertical, real_t(0), real_t(2) * r);
+               // Weighted normals cancelled (e.g. an enclosing cavity ring) -> no clean waterline
+               // direction; decide by the surrounding fill instead.
+               h_cap = (avgFill > real_t(0.5)) ? real_t(2) * r : real_t(0);
             }
             else
             {
                // n̂ points liquid->gas; h_signed > 0 when centre C is below the surface.
-               const Vector3< real_t > nHat = nSum / nSum.length();
-               const real_t h_signed = nHat * (xBar - C);
+               const Vector3< real_t > nHat     = nSum / nSum.length();
+               fittedNormal = nHat;
+               const real_t            h_signed = nHat * (xBar - C);
                h_cap = std::clamp(r + h_signed, real_t(0), real_t(2) * r);
             }
          }
+         else
+         {
+            // No contact ring -> the sphere is fully in one phase -> the surrounding fill decides.
+            h_cap = (avgFill > real_t(0.5)) ? real_t(2) * r : real_t(0);
+         }
+
+         // CAVITY BLEND (reference-free, SMOOTH): blend the plane-fit h_cap toward fully-submerged (2r)
+         // as the slab just ABOVE the sphere top fills with liquid. avgFillAbove is the mean fill of
+         // those "ceiling" cells (gas→0, liquid→1, interface→partial; obstacle cells excluded). Water
+         // overhead ⇒ the gas around the sphere is an enclosed cavity ⇒ submerged. A smoothstep over
+         // [0.3, 0.7] keeps the buoyancy force CONTINUOUS — the old hard >0.5 snap kicked the heave into
+         // a growing oscillation that broke the free-surface solver.
+         const real_t aboveCnt     = accum[fi * stride + 10];           // # ceiling cells checked
+         const real_t avgFillAbove = (aboveCnt > real_t(0)) ? (accum[fi * stride + 9] / aboveCnt) : real_t(0);
+         const real_t tCav = std::clamp((avgFillAbove - real_t(0.3)) / real_t(0.4), real_t(0), real_t(1));
+         const real_t wCav = tCav * tCav * (real_t(3) - real_t(2) * tCav); // smoothstep weight ∈ [0,1]
+         h_cap = (real_t(1) - wCav) * h_cap + wCav * (real_t(2) * r);
 
          const real_t vSub = math::pi * h_cap * h_cap * (real_t(3) * r - h_cap) / real_t(3);
 
@@ -842,12 +1006,18 @@ public:
                << "  submersion=" << real_t(100) * vSub / vFull << "%"
                << "  netF_z(buoy+grav,excl.hydro)=" << netForceZ << " (>0 up, <0 down)"
                << "  centreZ=" << C[2]
-               << "  localSurfaceZ=" << localSurfaceZ << " (live; fixed mean=" << surfaceHeight_ << ")"
+               << "  localSurfaceZ=" << localSurfaceZ
+               << (wTot > real_t(1e-6) ? " (plane-fit)" : " (no ring)")
+               << "  avgFill=" << avgFill
+               << "  avgFillAbove=" << avgFillAbove << " (cellsAbove=" << aboveCnt << ", cavityBlend=" << wCav << ")"
+               << "  fitNormal=(" << fittedNormal[0] << "," << fittedNormal[1] << "," << fittedNormal[2] << ")"
+               << (fittedNormal[2] < real_t(0) ? " (n_z<0 DOWN!)" : "")
+               << "  normalCoherence=" << normalCoherence
                << "  centreDepthBelowSurface=" << centreDepth << " LU"
+               << "  (oldFixedRef=" << surfaceHeight_ << ", now unused for force)"
                << "  (expect submersion ~densityRatio×100% and centreDepth~0 at equilibrium)");
          }
       }
-      ++stepCounter_;
    }
 
    // Computes the submerged volume of every floating box (type 3) once per LBM step.
@@ -912,8 +1082,6 @@ public:
       std::vector< real_t > acc(nB * stride, real_t(0));
       std::vector< real_t > fluidCnt(nB, real_t(0)); // # non-obstacle shell cells (fallback denominator)
 
-      const real_t band = ringBand_ + real_t(2); // shell thickness (cells) outside the box surface
-
       for (auto& iblock : *blockForest_)
       {
          auto* fillField   = iblock.getData< ScalarField_T >(fillFieldID_);
@@ -930,6 +1098,9 @@ public:
             const real_t hx = floaterBoxHalfExtents_[bi][0];
             const real_t hy = floaterBoxHalfExtents_[bi][1];
             const real_t hz = floaterBoxHalfExtents_[bi][2];
+            // Wide lateral reach so the surface plane-fit samples PAST any crater/gas-moat the box digs,
+            // anchoring the fitted waterline to the undisturbed surrounding surface (mirrors the sphere).
+            const real_t band = real_t(0.8) * std::max({hx, hy, hz}) + real_t(2);
 
             mesa_pd::Mat3 R;
             for (uint_t r = 0; r < 3; ++r)
@@ -986,7 +1157,7 @@ public:
                if (w < real_t(1e-6)) continue;
 
                const Vector3< real_t >& n = normalField->get(localCell[0], localCell[1], localCell[2]);
-               if (n.sqrLength() < real_t(1e-10)) continue;
+               if (n.sqrLength() < real_t(1e-10) || n[2] <= real_t(0)) continue; // upward free-surface only
 
                acc[bi * stride + 0] += w;
                acc[bi * stride + 1] += w * n[0];
@@ -1024,44 +1195,29 @@ public:
 
          const real_t wTot = acc[bi * stride + 0];
 
-         // Geometric world-space half-height of the rotated box (NO shell band).
-         const Vector3< real_t > axx = R * Vector3< real_t >(hx, real_t(0), real_t(0));
-         const Vector3< real_t > ayy = R * Vector3< real_t >(real_t(0), hy, real_t(0));
-         const Vector3< real_t > azz = R * Vector3< real_t >(real_t(0), real_t(0), hz);
-         const real_t boxHalfZ = std::abs(axx[2]) + std::abs(ayy[2]) + std::abs(azz[2]);
-         const real_t topZ = pos[2] + boxHalfZ;
-         const real_t botZ = pos[2] - boxHalfZ;
-
-         // Live local waterline at the box: gradient-weighted mean z of the shell interface cells,
-         // falling back to the fixed mean surface height. surfRef = max(fixed, local) is CAVITY-PROOF:
-         // an entrained gas pocket hugging a deeply-submerged box drags the local estimate down toward
-         // the box centre, but the max keeps the reference at the far-field level so the box still reads
-         // fully submerged. Mirrors the floating-sphere fix that stopped the sink-to-floor.
+         // Live local waterline at the box (REFERENCE-FREE, for the log): gradient-weighted mean z of the
+         // shell interface cells. The plane-fit + clip below uses the FULL fitted plane (level AND tilt);
+         // the clip naturally covers fully-submerged (all box points below the plane → vFull) and
+         // fully-emerged (all above → 0), so no fixed absoluteLiquidHeight bound is needed.
          const real_t localSurfaceZ =
-            (wTot > real_t(1e-6)) ? (acc[bi * stride + 6] / wTot) : surfaceHeight_;
-         const real_t surfRef = std::max(surfaceHeight_, localSurfaceZ);
+            (wTot > real_t(1e-6)) ? (acc[bi * stride + 6] / wTot) : pos[2];
+         Vector3< real_t > fittedNormal(real_t(0)); // fitted free-surface normal (for the log)
+         real_t            normalCoherence = real_t(0);
 
          real_t            vSub = real_t(0);
          Vector3< real_t > cbOff(real_t(0));
 
-         if (topZ <= surfRef)
+         if (wTot > real_t(1e-6))
          {
-            vSub  = vFull;                        // fully below the surface -> fully submerged (cavity-proof)
-            cbOff = Vector3< real_t >(real_t(0)); // B at geometric centre -> no righting lever
-         }
-         else if (botZ >= surfRef)
-         {
-            vSub  = real_t(0);                    // entirely above the surface
-            cbOff = Vector3< real_t >(real_t(0));
-         }
-         else if (wTot > real_t(1e-6))
-         {
-            // Straddling WITH interface cells -> plane-fit + clip (handles a tilted / wavy waterline).
-            // n̂ points liquid→gas; degenerate (cancelled) normals fall back to vertical (horizontal surface).
+            // Plane-fit the surrounding surface (wide shell, upward normals only), then clip the rotated
+            // box against that plane. n̂ points liquid→gas; degenerate (cancelled) normals fall back to
+            // vertical (horizontal surface).
             const Vector3< real_t > nSum(acc[bi*stride+1], acc[bi*stride+2], acc[bi*stride+3]);
+            normalCoherence = nSum.length() / wTot;
             const Vector3< real_t > nHat = (nSum.sqrLength() > real_t(1e-10))
                                               ? nSum / nSum.length()
                                               : Vector3< real_t >(real_t(0), real_t(0), real_t(1));
+            fittedNormal = nHat;
             const Vector3< real_t > xBar(acc[bi*stride+4] / wTot,
                                          acc[bi*stride+5] / wTot,
                                          acc[bi*stride+6] / wTot);
@@ -1110,9 +1266,14 @@ public:
                << "  tiltY=" << tiltDeg << "°"
                << "  V_sub=" << vSub << " / " << vFull << " LU³"
                << "  centreZ=" << pos[2]
-               << "  localSurfaceZ=" << localSurfaceZ << " (live; fixed mean=" << surfaceHeight_ << ")"
+               << "  localSurfaceZ=" << localSurfaceZ << (wTot > real_t(1e-6) ? " (plane-fit)" : " (no surf)")
+               << "  fitNormal=(" << fittedNormal[0] << "," << fittedNormal[1] << "," << fittedNormal[2] << ")"
+               << (fittedNormal[2] < real_t(0) ? " (n_z<0 DOWN!)" : "")
+               << "  normalCoherence=" << normalCoherence
                << "  B-G offset=(" << cbOff[0] << "," << cbOff[1] << "," << cbOff[2] << ")"
-               << "  |B-G|_horiz=" << std::sqrt(cbOff[0] * cbOff[0] + cbOff[1] * cbOff[1]));
+               << "  |B-G|_horiz=" << std::sqrt(cbOff[0] * cbOff[0] + cbOff[1] * cbOff[1])
+               << "  comOffsetZ=" << (boxComOffsetZ_.count(floaterBoxUIDs_[bi])
+                                         ? boxComOffsetZ_.at(floaterBoxUIDs_[bi]) : real_t(0)));
          }
       }
    }
@@ -1134,6 +1295,7 @@ private:
    std::vector< Vector3< real_t > >                   floaterBoxHalfExtents_; // indexed by floaterBoxUIDs_
    std::unordered_map< walberla::id_t, real_t >       submergedVolumes_;    // keyed by UID; populated by both compute* methods
    std::unordered_map< walberla::id_t, Vector3< real_t > > buoyancyCenterOffset_; // box C_b − C_com (world frame); box-only, for righting torque
+   std::unordered_map< walberla::id_t, real_t >       boxComOffsetZ_;       // per-box COM offset below centroid (body z, const); for the pendulum righting torque
 
    // kernels — declaration order must match initializer-list order to avoid -Wreorder
    mesa_pd::kernel::VelocityVerletPreForceUpdate vvIntegratorPreForce;

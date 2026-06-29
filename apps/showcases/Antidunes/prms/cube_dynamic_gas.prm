@@ -1,0 +1,170 @@
+// cube_dynamic_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// DYNAMIC equilibration — reproduces Bogner & Rüde (2013) thesis §5.3, "Equilibration of
+// floating cubes" (Fig. 5.7–5.10). A 2D cube of density ρs = 0.5 is represented (as in Bogner)
+// by a CUBOID 2s × s × s that rotates ONLY about its longitudinal axis; here s = 16, so the box
+// is 16 × 32 × 16 with the long (32) edge along Y (the roll axis).
+//
+// The box starts HALF-IMMERSED and heeled just 2.86° from the upright (face-up) orientation —
+// which is UNSTABLE for ρ=0.5 (GM<0). Because the water is made VISCOUS (τ = 1/1.9, i.e. ω = 1.9,
+// Bogner's value), the rotation DAMPS OUT and the box converges to its STABLE orientation at
+// 45° (edge-down). The settled heel angle (expect ≈45°) validates the coupling's righting moment.
+//
+//   • The equilibrium angle is GEOMETRIC (45° for ρ=0.5) and independent of g — so this is a clean
+//     validation regardless of the gravity scale.
+//   • NOTE: our gravity (≈7.0e-6) is ~100× weaker than Bogner's (7.5e-4), so the settle is SLOWER.
+//     timesteps is raised to 150000; if still too sluggish, ask for a gravity override.
+//   • targetMeanVelocityMagnitude 0 (still water) + useHardcodedUnits (valid g / surface tension).
+//   • relaxationRateOverride 1.9 → viscous water (ν≈0.0088) so motions cease. comOffsetZ 0 (uniform).
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              150000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;          // valid gravity / surface tension while U = 0
+   relaxationRateOverride 1.9;           // Bogner's τ=1/1.9 → viscous water so the roll damps to rest
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // Bogner cuboid 16 × 32 × 16 (2s×s×s, s=16), long edge along Y = the roll axis. Centre (64,30,56)
+      // = ON the waterline → starts HALF-IMMERSED (densityRatio 0.5). initialTiltAngleDeg 2.86: heeled
+      // just off the unstable upright; the viscous water lets it roll into and settle at the stable 45°.
+      position             < 64, 30, 56 >;
+      halfExtents          < 8, 16, 8 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+      initialTiltAngleDeg  2.86;
+      comOffsetZ           0;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

@@ -524,6 +524,19 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
    // initialize BCs from config (NoSlip top/bottom, CellInterval pillar defined in Antidunes.prm)
    simObjs->antidunesBoundaryHandling->initFromConfig(simParams->cfgPtr->getOneBlock("BoundaryParameters"));
 
+   // Auto NoSlip walls on non-periodic LATERAL faces (X = E/W, Y = N/S), so the walls always stay
+   // consistent with BlockForestParameters.periodicity — no manual prm sync. A non-periodic face with
+   // NO boundary condition has undefined PDFs → NaN (the exact y-boundary NaN seen when periodicity was
+   // <1,0,0> but the N/S walls had been removed). Periodic faces are left wrapped (no wall). The prm
+   // still declares top/bottom (Z, never periodic); re-adding an existing wall here is idempotent.
+   {
+      auto&       bh = *simObjs->antidunesBoundaryHandling;
+      const auto& bf = *simObjs->blockForest;
+      const cell_idx_t wd = cell_idx_c(-1);
+      if (!bf.isXPeriodic()) { bh.setNoSlipAtBorder(stencil::W, wd); bh.setNoSlipAtBorder(stencil::E, wd); }
+      if (!bf.isYPeriodic()) { bh.setNoSlipAtBorder(stencil::N, wd); bh.setNoSlipAtBorder(stencil::S, wd); }
+   }
+
    // store the flagField and flagInfo handles in simObjs (only for convenience)
    simObjs->flagFieldID = simObjs->antidunesBoundaryHandling->getFlagFieldID();
    simObjs->flagInfo    = simObjs->antidunesBoundaryHandling->getFlagInfo();
@@ -566,36 +579,45 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
                                    const std::shared_ptr< SimulationObjects >&       simObjs,
                                    const uint_t currentStep)
 {
-   for (const auto& fsp : simParams->floatingSpheres)
+   // Release each floater INDIVIDUALLY by UID. The old code matched on type only, so the first
+   // sphere reaching its settlingSteps unset FIXED on EVERY type-1 sphere — staggered release
+   // schedules (rows dropped at 30k/40k/50k) all fired at once. floaterUIDs[i] ↔ floatingSpheres[i].
+   for (size_t i = 0; i < simParams->floatingSpheres.size(); ++i)
    {
+      const auto& fsp = simParams->floatingSpheres[i];
       if (fsp.settlingSteps == uint_t(0) || currentStep != fsp.settlingSteps) continue;
+      const walberla::id_t uid = simObjs->floaterUIDs[i];
 
       simObjs->particleStorage->forEachParticle(
          false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
-         [](const size_t idx, auto& ac) {
-            if (ac.getType(idx) == uint_t(1))
+         [uid](const size_t idx, auto& ac) {
+            if (ac.getUid(idx) == uid)
                mesa_pd::data::particle_flags::unset(ac.getFlagsRef(idx),
                                                     mesa_pd::data::particle_flags::FIXED);
          },
          *simObjs->particleAccessor);
 
-      WALBERLA_LOG_INFO_ON_ROOT("Released floating sphere(s) from settling phase at step " << currentStep);
+      WALBERLA_LOG_INFO_ON_ROOT("Released floating sphere uid=" << uid << " (index " << i
+                                << ") from settling phase at step " << currentStep);
    }
 
-   for (const auto& fbp : simParams->floatingBoxes)
+   for (size_t i = 0; i < simParams->floatingBoxes.size(); ++i)
    {
+      const auto& fbp = simParams->floatingBoxes[i];
       if (fbp.settlingSteps == uint_t(0) || currentStep != fbp.settlingSteps) continue;
+      const walberla::id_t uid = simObjs->floaterBoxUIDs[i];
 
       simObjs->particleStorage->forEachParticle(
          false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
-         [](const size_t idx, auto& ac) {
-            if (ac.getType(idx) == uint_t(3))
+         [uid](const size_t idx, auto& ac) {
+            if (ac.getUid(idx) == uid)
                mesa_pd::data::particle_flags::unset(ac.getFlagsRef(idx),
                                                     mesa_pd::data::particle_flags::FIXED);
          },
          *simObjs->particleAccessor);
 
-      WALBERLA_LOG_INFO_ON_ROOT("Released floating box(es) from settling phase at step " << currentStep);
+      WALBERLA_LOG_INFO_ON_ROOT("Released floating box uid=" << uid << " (index " << i
+                                << ") from settling phase at step " << currentStep);
    }
 }
 

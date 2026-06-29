@@ -297,14 +297,15 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       if (!hasLiquid) { if (inner) ++convGas_; return bognerGas; }
       if (!hasGas && !hasUnknown)
       {
-         // VERIFICATION of the under-resolved-waterline over-promotion hypothesis:
-         // this cell qualifies as bulk liquid only on the 1-cell (D3Q27) stencil. Re-scan a 2-cell
-         // radius — if the free surface (gas or interface) sits at distance 2, the cell is physically
-         // at the waterline and is being OVER-PROMOTED to liquid (fill forced to 1) even though it is
-         // within two cells of air. With adequate resolution an interface cell would sit at distance 1
-         // (→ hasGas true → classified interface), so this print firing IS the resolution-driven
-         // mismatch. It is invariant-legal (gas is >1 cell away → no liquid–gas adjacency, hence
-         // checkClosedInterfaceLayer reports 0 holes) but physically wrong.
+         // DIAGNOSTIC — under-resolved-waterline detector (NOT an over-promotion). This cell qualifies
+         // as bulk liquid on the 1-cell (D3Q27) stencil (no gas/unknown neighbour at distance 1), so it
+         // is assigned the safe INTERFACE fallback (`return bognerInterface` below) and its fill is
+         // seeded from its interface neighbours — it is NOT forced to liquid/φ=1. Re-scan a 2-cell
+         // radius: if the free surface (gas or interface) sits at distance 2, the cell is physically at
+         // the waterline; with finer resolution an interface cell would sit at distance 1 (→ hasGas true
+         // → classified interface directly). So this firing only flags the resolution-driven proximity
+         // of the reconstruction to the surface; it is invariant-legal (gas is >1 cell away → no
+         // liquid–gas adjacency, hence checkClosedInterfaceLayer reports 0 holes).
          const cell_idx_t gl = cell_idx_c(flagField->nrOfGhostLayers());
          bool gasAt2 = false, intfAt2 = false;
          for (int dz = -2; dz <= 2; ++dz)
@@ -320,15 +321,24 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
                }
          if (gasAt2 || intfAt2)
          {
-            const auto&  aabb = block->getAABB();
-            const real_t cdx  = aabb.xSize() / real_c(xs);
-            WALBERLA_LOG_WARNING("[OVERPROMOTE-CHECK] FormerMO cell block-local (" << cx << ", " << cy << ", " << cz
-               << ") world≈(" << (aabb.xMin() + (real_c(cx) + real_t(0.5)) * cdx) << ", "
-               << (aabb.yMin() + (real_c(cy) + real_t(0.5)) * cdx) << ", "
-               << (aabb.zMin() + (real_c(cz) + real_t(0.5)) * cdx)
-               << ") promoted to LIQUID (fill→1), but the free surface is at distance 2:"
-               << (gasAt2 ? " GAS" : "") << (intfAt2 ? " INTERFACE" : "")
-               << "  --> under-resolved waterline OVER-PROMOTION (should be interface).");
+            // Throttled: fires for every near-waterline reconstructed cell every step (tens of thousands
+            // of lines). Keep a short sample per rank plus a periodic count so the log stays usable.
+            static uint_t waterlineProximityLogCount = uint_t(0);
+            ++waterlineProximityLogCount;
+            if (waterlineProximityLogCount <= uint_t(20) || (waterlineProximityLogCount % uint_t(5000) == uint_t(0)))
+            {
+               const auto&  aabb = block->getAABB();
+               const real_t cdx  = aabb.xSize() / real_c(xs);
+               WALBERLA_LOG_WARNING("[WATERLINE-PROXIMITY] (#" << waterlineProximityLogCount << ") FormerMO cell block-local ("
+                  << cx << ", " << cy << ", " << cz
+                  << ") world≈(" << (aabb.xMin() + (real_c(cx) + real_t(0.5)) * cdx) << ", "
+                  << (aabb.yMin() + (real_c(cy) + real_t(0.5)) * cdx) << ", "
+                  << (aabb.zMin() + (real_c(cz) + real_t(0.5)) * cdx)
+                  << ") reconstructed as INTERFACE (bulk-liquid on the D3Q27 stencil) but the free surface is at distance 2:"
+                  << (gasAt2 ? " GAS" : "") << (intfAt2 ? " INTERFACE" : "")
+                  << "  --> under-resolved waterline (finer resolution would classify it interface directly;"
+                     " cell fill is seeded from neighbours, NOT forced to 1).");
+            }
          }
          if (inner) ++convLiquid_;
          return bognerInterface;
@@ -377,6 +387,69 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             size_t particleIdx = ac_->uidToIdx(particleField->get(x, y, z));
             WALBERLA_ASSERT_UNEQUAL(particleIdx, ac_->getInvalidIdx(), "Index of particle is invalid!");
             (*reconstructor_)(block, x, y, z, pdfField, particleIdx, *ac_);
+
+            // [RECON-DENSITY-CHECK] VERIFY the fill-blind over-density hypothesis with real numbers.
+            // EquilibriumReconstructor just set this freed cell to ρ = unweighted mean of its domain
+            // (liquid+interface) neighbours' getDensity — and interface cells report ρ≈1 no matter how
+            // EMPTY they are (their partial volume lives in the fill field φ, which the reconstructor
+            // ignores). Here we recompute that unweighted ρ AND the fill-weighted ρ = Σφρ/Σφ that the
+            // proposed fix would use. If the cell sits at the waterline (low-φ interface neighbours) the
+            // two diverge sharply → the assigned ρ≈1 is the phantom-force source the MEM then reads.
+            if constexpr (!std::is_void_v< ScalarField_T >)
+            if (fillField != nullptr)
+            {
+               const real_t rhoAssigned = pdfField->getDensity(x, y, z);
+               real_t sumRho     = real_t(0);
+               real_t sumPhiRho  = real_t(0);
+               real_t sumPhi     = real_t(0);
+               real_t minIntfPhi = real_t(1);
+               uint_t nDom  = uint_t(0);
+               uint_t nIntf = uint_t(0);
+               uint_t nLiq  = uint_t(0);
+               for (int dz = -1; dz <= 1; ++dz)
+                  for (int dy = -1; dy <= 1; ++dy)
+                     for (int dx = -1; dx <= 1; ++dx)
+                     {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        const cell_idx_t nx = x + cell_idx_c(dx);
+                        const cell_idx_t ny = y + cell_idx_c(dy);
+                        const cell_idx_t nz = z + cell_idx_c(dz);
+                        if (!boundaryHandling->isDomain(Cell(nx, ny, nz))) continue;
+                        const real_t rn = pdfField->getDensity(nx, ny, nz);
+                        const real_t pn = fillField->get(nx, ny, nz);
+                        sumRho += rn;
+                        sumPhiRho += pn * rn;
+                        sumPhi += pn;
+                        ++nDom;
+                        if (isFlagSet(flagField->get(nx, ny, nz), bognerInterface)) { ++nIntf; if (pn < minIntfPhi) minIntfPhi = pn; }
+                        if (isFlagSet(flagField->get(nx, ny, nz), bognerLiquid)) ++nLiq;
+                     }
+               const real_t rhoUnw = (nDom > uint_t(0)) ? sumRho / real_c(nDom) : real_t(1);
+               const real_t rhoW   = (sumPhi > real_t(1e-6)) ? sumPhiRho / sumPhi : real_t(0);
+               // Smoking gun: high density was assigned, but the fill-weighted value is much lower AND
+               // the neighbourhood is dominated by partially-empty interface cells (i.e. the waterline).
+               if (rhoAssigned > real_t(0.8) && rhoW < real_t(0.6) && nIntf > nLiq)
+               {
+                  static uint_t reconDensLogCount = uint_t(0);
+                  ++reconDensLogCount;
+                  if (reconDensLogCount <= uint_t(20) || (reconDensLogCount % uint_t(5000) == uint_t(0)))
+                  {
+                     const auto&  aabb = block->getAABB();
+                     const real_t cdx  = aabb.xSize() / real_c(flagField->xSize());
+                     WALBERLA_LOG_WARNING("[RECON-DENSITY-CHECK] (#" << reconDensLogCount << ") world≈("
+                        << (aabb.xMin() + (real_c(x) + real_t(0.5)) * cdx) << ","
+                        << (aabb.yMin() + (real_c(y) + real_t(0.5)) * cdx) << ","
+                        << (aabb.zMin() + (real_c(z) + real_t(0.5)) * cdx) << ")"
+                        << "  rhoAssigned=" << rhoAssigned << "  rhoUnweighted=" << rhoUnw
+                        << "  rhoFillWeighted=" << rhoW << "  domainNbrs=" << nDom
+                        << "  interfaceNbrs=" << nIntf << " (minPhi=" << minIntfPhi << ")"
+                        << "  liquidNbrs=" << nLiq
+                        << "  --> FILL-BLIND OVER-DENSITY: reconstructor assigned ρ≈1 at the waterline;"
+                           " the fill-weighted ρ would be " << rhoW << " (the phantom-force source).");
+                  }
+               }
+            }
+
             if (conserveMomentumWhenRestoring_ && pdfField->isInInnerPart(Cell(x, y, z)))
             {
                Vector3< real_t > force      = pdfField->getMomentumDensity(x, y, z);

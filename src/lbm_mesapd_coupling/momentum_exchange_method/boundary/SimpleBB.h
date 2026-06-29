@@ -41,6 +41,8 @@
 
 #include "stencil/Directions.h"
 
+#include <algorithm>
+
 namespace walberla {
 namespace lbm_mesapd_coupling {
 
@@ -73,7 +75,8 @@ public:
    inline SimpleBB( const BoundaryUID & boundaryUID, const FlagUID & uid, PDFField_T * const pdfField, const FlagField_T * const flagField,
                     ParticleField_T * const particleField, const shared_ptr<ParticleAccessor_T>& ac,
                     const flag_t domain, const StructuredBlockStorage & blockStorage, const IBlock & block,
-                    std::function<real_t(const Vector3<real_t>&)> hydrostaticDensityFct = nullptr );
+                    std::function<real_t(const Vector3<real_t>&)> hydrostaticDensityFct = nullptr,
+                    std::function<real_t(const Cell&)> fillLevelFct = nullptr );
 
    void pushFlags( std::vector< FlagUID >& uids ) const { uids.push_back( uid_ ); }
 
@@ -113,6 +116,13 @@ private:
 
    std::function<real_t(const Vector3<real_t>&)> hydrostaticDensityFct_;
 
+   // Optional fill-level (φ) accessor for the three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9).
+   // Returns the free-surface fill level of a given cell (1 = full liquid, 0 = gas). When set, the
+   // hydrodynamic force from each obstacle link is scaled by φ of the near-boundary cell, so interface
+   // cells at a floating particle's waterline do not inject a phantom (full-liquid) buoyant force. Left
+   // null for non-free-surface couplings, in which case the standard (Eq. 5.6) force is used unchanged.
+   std::function<real_t(const Cell&)> fillLevelFct_;
+
    real_t lengthScalingFactor_;
    real_t forceScalingFactor_;
 
@@ -123,9 +133,10 @@ template< typename LatticeModel_T, typename FlagField_T, typename ParticleAccess
 inline SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::SimpleBB( const BoundaryUID & boundaryUID, const FlagUID & uid, PDFField_T * const pdfField, const FlagField_T * const flagField,
                                                                               ParticleField_T * const particleField, const shared_ptr<ParticleAccessor_T>& ac,
                                                                               const flag_t domain, const StructuredBlockStorage & blockStorage, const IBlock & block,
-                                                                              std::function<real_t(const Vector3<real_t>&)> hydrostaticDensityFct):
+                                                                              std::function<real_t(const Vector3<real_t>&)> hydrostaticDensityFct,
+                                                                              std::function<real_t(const Cell&)> fillLevelFct):
 Boundary<flag_t>( boundaryUID ), uid_( uid ), pdfField_( pdfField ), flagField_( flagField ), particleField_( particleField ), ac_( ac ), domainMask_(domain),
-blockStorage_( blockStorage ), block_( block ), hydrostaticDensityFct_(hydrostaticDensityFct)
+blockStorage_( blockStorage ), block_( block ), hydrostaticDensityFct_(hydrostaticDensityFct), fillLevelFct_(fillLevelFct)
 {
    WALBERLA_ASSERT_NOT_NULLPTR( pdfField_ );
    WALBERLA_ASSERT_NOT_NULLPTR( flagField_ );
@@ -273,6 +284,47 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
                           real_c( stencil::cy[dir] ) * forceMEM - correction * boundaryVelocity[1],
                           real_c( stencil::cz[dir] ) * forceMEM - correction * boundaryVelocity[2] );
 
+   // Three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9). The bounce-back force above (Eq. 5.6)
+   // treats the near-boundary cell as full liquid (ρ≈1) regardless of its actual fill — but at a floating
+   // particle's waterline that cell is an INTERFACE cell that is mostly gas. Counting it at full weight
+   // injects a phantom buoyant force that holds floaters too high. Scaling the link's momentum exchange by
+   // the boundary cell's fill level φ(x_b) makes an almost-empty interface cell contribute proportionally
+   // less, recovering Eq. 5.9's liquid term c_q·φ·[f̃+f]. φ is clamped to [0,1] (free-surface dynamics can
+   // briefly push it slightly outside). IMPORTANT: only the force returned to the particle is weighted — the
+   // bounce-back PDF written back into the fluid (above) is untouched, so the free-surface LBM is unaffected.
+   if( fillLevelFct_ )
+   {
+      const real_t fillRaw    = fillLevelFct_( nearBoundaryCell );
+      const real_t fillWeight = std::clamp( fillRaw, real_c(0), real_c(1) );
+
+      // TEMP DIAGNOSTIC (remove after verifying the fill-weighting): this branch is ONLY reached when a
+      // fill-level accessor was wired in (i.e. the Eq. 5.9 fix is compiled in), so any line below is itself
+      // proof the fix is live. We log the cells whose force is actually changed by the weighting (fillWeight
+      // noticeably below 1), reporting the cell type, the raw/clamped fill, and the z-force before vs after
+      // weighting (pre-dx-scaling). This shows which cell types + φ values carry the phantom buoyant force.
+      // Throttled to the first 60 hits per rank to avoid flooding.
+      if( fillWeight < real_c(0.99) )
+      {
+         static uint_t fillWeightLogCount = uint_t(0);
+         if( fillWeightLogCount < uint_t(60) )
+         {
+            const auto fl = flagField_->get(x, y, z);
+            std::string flagStr;
+            for( const char* name : { "liquid", "interface", "gas" } ) {
+               const field::FlagUID flagUID(name);
+               if( flagField_->flagExists(flagUID) && field::isFlagSet(fl, flagField_->getFlag(flagUID)) )
+                  flagStr += std::string(name) + " ";
+            }
+            WALBERLA_LOG_INFO("[FILL-WEIGHT] cell (" << x << "," << y << "," << z << ") flags=[ " << flagStr
+               << "] phiRaw=" << fillRaw << " weight=" << fillWeight << " dir=" << uint_t(dir)
+               << " forceZ: " << force[2] << " -> " << (force[2] * fillWeight)
+               << " (forceMEM=" << forceMEM << ")");
+            ++fillWeightLogCount;
+         }
+      }
+
+      force *= fillWeight;
+   }
 
    force *= forceScalingFactor_;
 

@@ -111,6 +111,11 @@ FloatingBoxes
       densityRatio         0.5;
       settlingSteps        500;
       initialTiltAngleDeg  5;
+      // Lower the centre of mass below the centroid so the log does NOT roll over.
+      // Half-submerged, rolling about Y: draft d=6 → KB=3, BM=L²/(12d)=12²/72=2, KG=6 (uniform) →
+      // GM = KB+BM−KG = −1 (rolls). comOffsetZ=−3 drops the COM 3 LU → KG=3 → GM = +2 (stable):
+      // the 5° seed damps out instead of capsizing. Set to 0 to recover the rolling instability.
+      comOffsetZ           -3;
    }
 }
 

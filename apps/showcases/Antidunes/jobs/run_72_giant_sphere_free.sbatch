@@ -1,6 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=antidunes-giant-sphere-free
 #SBATCH --partition=singlenode
+#SBATCH --constraint=el9
 #SBATCH --nodes=1
 #SBATCH --ntasks=72
 #SBATCH --time=02:00:00
@@ -25,4 +26,4 @@ done
 "$REPO/apps/showcases/Antidunes/antidunes.sh" \
     --build --jobs "$(nproc)" \
     --run --np 72 \
-    --prm "$REPO/apps/showcases/Antidunes/prms/giant_sphere_free_gas.prm"
+    --prm "$REPO/apps/showcases/Antidunes/prms/giant_sphere_drop_gas.prm"

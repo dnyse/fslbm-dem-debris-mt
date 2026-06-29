@@ -1,0 +1,170 @@
+// box_drop_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// ONE floating LOG aligned with Y: a box elongated in Y (halfExtents <5,20,5> →
+// 10 × 40 × 10 LU, long axis along Y), NO pillars, dropped from rest just above the
+// free surface into (near-)still water to verify the 50%-submerged equilibrium for
+// an elongated body (the box V_sub path), the log analog of the sphere drop test.
+//
+//   • X periodic, Y NoSlip walls (auto-added from periodicity); log y∈[10,50] keeps 10 LU clearance.
+//   • Long axis (Ly=40) runs along Y; 10×10 cross-section faces the flow (periodic X).
+//   • Centre z = 70 → bottom at z=65, ~9 LU above the surface (≈ z=56) → gentle entry.
+//   • densityRatio 0.5 → 50%-submerged equilibrium. Held fixed for settlingSteps, released.
+//   • U = 0.02 (master velocity scale → real gravity ≈ 1e-5); the log advects in periodic X.
+//
+// Floatation stability (Scribanti, half-submerged draft d = hz = 5):
+//   • Inclination about X (long axis pitch): BM = Ly²/(12d) = 1600/60 = 26.7 LU
+//       GM = KB + BM − KG = 2.5 + 26.7 − 5 = +24.2 ≫ 0 → STABLE: long axis stays horizontal.
+//   • Roll about Y (rolls like a millstone): BM = Lx²/(12d) = 100/60 = 1.67 LU
+//       GM = 2.5 + 1.67 − 5 = −0.83 < 0 → UNSTABLE: a square-section log rolls toward a
+//       corner-down (~45°) orientation. (A lowered COM — the comOffsetZ knob — would right it.)
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;   // X periodic; Y non-periodic → N/S NoSlip walls
+                                                // are auto-added from periodicity (setupBoundaryHandling)
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;        // master velocity scale: gravity = (U/Fr)²/h ≈ 1e-5
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // Y-aligned log: halfExtents <5,20,5> → 10 × 40 × 10 LU, long axis along Y.
+      // Centre (30,30,70): bottom at z=65, ~9 LU above the surface → gentle drop, then
+      // settle to 50% submerged. y∈[10,50] keeps 10 LU clearance from the N/S walls.
+      // initialTiltAngleDeg 0: starts horizontal; stays level in pitch (GM_X ≫ 0) but
+      // rolls about its long axis (GM_Y < 0) toward ~45° — see header stability note.
+      position             < 30, 30, 70 >;
+      halfExtents          < 5, 20, 5 >;
+      densityRatio         0.5;
+      settlingSteps        500;
+      initialTiltAngleDeg  0;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   // N/S (y) borders removed: Y is periodic.
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

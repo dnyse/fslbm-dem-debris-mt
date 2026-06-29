@@ -21,8 +21,10 @@ BED_NP=72
 PRM="$SCRIPT_DIR/Antidunes.prm"
 BED_PRM="$SCRIPT_DIR/BedGeneration.prm"
 CONDA_ENV="walberla"
+CONDA_PY_VERSION="3.11"
+CONDA_PKGS=("pystencils~=1.3" "lbmpy~=1.3" "jinja2")
 DO_SYNC=false
-REMOTE="fritz.scvl"
+REMOTE="fritz.iwia"
 REMOTE_PATH="~/mt-dennys/"
 
 # ── usage ─────────────────────────────────────────────────────────────────────
@@ -121,17 +123,29 @@ fi
 # ── module loading (supercomputer only) ───────────────────────────────────────
 if $LOAD_MODULES; then
     log "Loading modules"
-    module load gcc/14.2.0
-    module load openmpi/4.1.3-gcc14.2.0
-    module load cmake
-    module load python
+    module load gcc/11.5.0
+    module load openmpi/4.1.3-gcc11.5.0
+    module load cmake/3.31.8
+    module load python/3.13-miniforge
 
     log "Activating conda environment: $CONDA_ENV"
     # conda activate does not work in non-interactive shells without this
     CONDA_BASE="$(conda info --base 2>/dev/null)"
     # shellcheck source=/dev/null
     source "$CONDA_BASE/etc/profile.d/conda.sh"
-    conda activate "$CONDA_ENV"
+
+    # Create the env on first use if it doesn't exist yet (activation is the test).
+    if ! conda activate "$CONDA_ENV" 2>/dev/null; then
+        log "Conda env '$CONDA_ENV' not found — creating it (python=$CONDA_PY_VERSION)"
+        # Shared module installs (e.g. NHR miniforge) keep their pkgs/envs dirs
+        # read-only; point conda at writable dirs in $HOME so create can proceed.
+        conda config --add pkgs_dirs "$HOME/.conda/pkgs" 2>/dev/null || true
+        conda config --add envs_dirs "$HOME/.conda/envs" 2>/dev/null || true
+        conda create -y -n "$CONDA_ENV" "python=$CONDA_PY_VERSION"
+        conda activate "$CONDA_ENV"
+        log "Installing Python packages: ${CONDA_PKGS[*]}"
+        pip install "${CONDA_PKGS[@]}"
+    fi
 else
     log "Skipping module load (--local)"
     # If a conda env is already active, honour it; otherwise use the system Python.

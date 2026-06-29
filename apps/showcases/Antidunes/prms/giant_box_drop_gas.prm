@@ -95,6 +95,11 @@ FloatingBoxes
       densityRatio        0.5;
       settlingSteps       500;
       initialTiltAngleDeg 15;   // seed a tilt about the Y-axis so the buoyancy moment is non-zero
+      // Lower the centre of mass below the geometric centroid so the box does NOT tumble.
+      // Half-submerged cube: draft d=12 → KB=d/2=6, BM=L²/(12d)=24²/144=4, KG=12 (uniform) →
+      // GM = KB+BM−KG = −2 (unstable, capsizes). comOffsetZ=−4 drops the COM 4 LU → KG=8 →
+      // GM = +2 (stable): the seeded 15° tilt rights itself instead of tumbling.
+      comOffsetZ          -4;
    }
 }
 

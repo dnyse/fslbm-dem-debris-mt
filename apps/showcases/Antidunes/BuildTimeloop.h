@@ -42,6 +42,8 @@
 #include "lbm/free_surface/dynamics/StreamReconstructAdvectSweep.h"
 #include "lbm/free_surface/surface_geometry/CurvatureSweep.h"
 #include "lbm/free_surface/surface_geometry/NormalSweep.h"
+#include "lbm/free_surface/surface_geometry/ObstacleFillLevelSweep.h"
+#include "lbm/free_surface/surface_geometry/ObstacleNormalSweep.h"
 #include "lbm/free_surface/surface_geometry/SmoothingSweep.h"
 #include "lbm/free_surface/surface_geometry/Utility.h"
 
@@ -263,31 +265,30 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
 {
    WALBERLA_LOG_INFO_ON_ROOT("addSweepSurfaceGeometry");
 
-   // ObstacleNormalSweep and ObstacleFillLevelSweep are commented out (originally borrowed from the
-   // wetting module). They are a coupled pair: ObstacleFillLevelSweep writes fictitious fill values
-   // into obstacle cells of smoothFillField; NormalSweep's includeObstacleNeighbors reads them.
-   // Without ObstacleFillLevelSweep, obstacle cells have fill=0 (indistinguishable from gas), so
-   // includeObstacleNeighbors must also be false — otherwise obstacle cells corrupt the gradient stencil.
-   //
-   // Re-enable both together if wetting / contact-angle effects at obstacle surfaces are needed:
-   //
-   // walberla::free_surface::ObstacleNormalSweep< CommunicationStencil_T, FlagField_T, VectorField_T >
-   //    obstacleNormalSweep(simObjs->obstacleNormalFieldID, simObjs->flagFieldID,
-   //                        walberla::free_surface::flagIDs::interfaceFlagID,
-   //                        walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs,
-   //                        simObjs->flagInfo.getObstacleIDSet(), false, true, true);
-   // timeloop->add() << Sweep(obstacleNormalSweep, "Sweep: obstacle normal computation")
-   //                 << AfterFunction(Communication_T(simObjs->blockForest, simObjs->obstacleNormalFieldID),
-   //                                  "Communication: after obstacle normal sweep");
-   //
-   // walberla::free_surface::ObstacleFillLevelSweep< CommunicationStencil_T, FlagField_T, ScalarField_T, VectorField_T >
-   //    obstacleFillLevelSweep(simObjs->smoothFillFieldID, simObjs->fillFieldID, simObjs->flagFieldID,
-   //                           simObjs->obstacleNormalFieldID,
-   //                           walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs,
-   //                           simObjs->flagInfo.getObstacleIDSet());
-   // timeloop->add() << Sweep(obstacleFillLevelSweep, "Sweep: obstacle fill level computation")
-   //                 << AfterFunction(Communication_T(simObjs->blockForest, simObjs->smoothFillFieldID),
-   //                                  "Communication: after obstacle fill level sweep");
+   // ObstacleNormalSweep + ObstacleFillLevelSweep — matches the sanctioned FiniteDifferenceMethod pipeline
+   // (FiniteDifferenceMethod::addSweeps in src/lbm/free_surface/surface_geometry/CurvatureModel.impl.h).
+   // They are required whenever an obstacle touches the free surface (moving particles, walls at the
+   // contact line) REGARDLESS of wetting: ObstacleNormalSweep computes the wall normal (obstacleNormalField);
+   // ObstacleFillLevelSweep reflects fill levels into obstacle cells so interface cells adjacent to the
+   // obstacle have a COMPLETE fill-level gradient stencil. Without them obstacle cells have fill=0
+   // → gradient ≈ 0 → zero normal → NaN cascade. ObstacleFillLevelSweep MUST run BEFORE the SmoothingSweep.
+   walberla::free_surface::ObstacleNormalSweep< CommunicationStencil_T, FlagField_T, VectorField_T >
+      obstacleNormalSweep(simObjs->obstacleNormalFieldID, simObjs->flagFieldID,
+                          walberla::free_surface::flagIDs::interfaceFlagID,
+                          walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs,
+                          simObjs->flagInfo.getObstacleIDSet(), false, true, true);
+   timeloop->add() << Sweep(obstacleNormalSweep, "Sweep: obstacle normal computation")
+                   << AfterFunction(Communication_T(simObjs->blockForest, simObjs->obstacleNormalFieldID),
+                                    "Communication: after obstacle normal sweep");
+
+   walberla::free_surface::ObstacleFillLevelSweep< CommunicationStencil_T, FlagField_T, ScalarField_T, VectorField_T >
+      obstacleFillLevelSweep(simObjs->smoothFillFieldID, simObjs->fillFieldID, simObjs->flagFieldID,
+                             simObjs->obstacleNormalFieldID,
+                             walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs,
+                             simObjs->flagInfo.getObstacleIDSet());
+   timeloop->add() << Sweep(obstacleFillLevelSweep, "Sweep: obstacle fill level computation")
+                   << AfterFunction(Communication_T(simObjs->blockForest, simObjs->smoothFillFieldID),
+                                    "Communication: after obstacle fill level sweep");
 
    // smooth fill level field for decreasing error in finite difference normal and curvature computation (see
    // dissertation of S. Bogner, 2017 (section 4.4.2.1))
@@ -304,14 +305,15 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
                    << AfterFunction(Communication_T(simObjs->blockForest, simObjs->smoothFillFieldID),
                                     "Communication: after smoothing sweep");
 
-   // compute interface normals (using smoothed fill level field)
-   // includeObstacleNeighbors=false: must match the commented-out ObstacleFillLevelSweep above.
-   // If ObstacleFillLevelSweep is not running, obstacle cells have fill=0 in smoothFillField,
-   // so including them would treat obstacle surfaces as gas → wrong normals near pillars/sphere.
+   // compute interface normals (using smoothed fill level field). With ObstacleNormalSweep +
+   // ObstacleFillLevelSweep running above, obstacle cells now carry meaningful fill, so we match the
+   // canonical FiniteDifferenceMethod flags (computeInInterfaceNeighbors, includeObstacleNeighbors,
+   // modifyNearObstacles, computeInGhostLayer) = (true, true, true, true): obstacle-adjacent interface
+   // cells get a complete gradient stencil instead of a degenerate (zero) normal at the contact line.
    walberla::free_surface::NormalSweep< CommunicationStencil_T, FlagField_T, ScalarField_T, VectorField_T > normalSweep(
       simObjs->normalFieldID, simObjs->smoothFillFieldID, simObjs->flagFieldID,
       walberla::free_surface::flagIDs::interfaceFlagID, walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs,
-      simObjs->flagInfo.getObstacleIDSet(), true, true, false, false);
+      simObjs->flagInfo.getObstacleIDSet(), true, true, true, true);
 
    timeloop->add() << Sweep(normalSweep, "Sweep: normal computation", StateSweep::fullFreeSurface)
                    << Sweep(EmptySweep(), "Empty sweep: normal")

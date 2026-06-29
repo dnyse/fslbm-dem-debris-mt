@@ -1,6 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=antidunes-box-drop
 #SBATCH --partition=singlenode
+#SBATCH --constraint=el9
 #SBATCH --nodes=1
 #SBATCH --ntasks=72
 #SBATCH --time=02:00:00
@@ -9,10 +10,9 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# build + run: box equilibrium / free-settling test.
-# One freely-rotating cube (edge 24 LU, ratio 0.5) released from rest above the surface with a
-# 15 deg tilt — observe rest depth in Z (~50% submersion) and the orientation it settles into
-# (centre-of-buoyancy righting/capsizing torque, Bogner & Ruede 2013 Fig. 5.4).
+# build + run: floating LOG equilibrium drop — a Y-aligned box (10x40x10 LU, halfExtents <5,20,5>),
+# densityRatio 0.5, dropped gently from z=70 into (near-)still periodic-X / walled-Y water; settles
+# to ~50% submerged with its long axis along Y (rolls about that axis, GM_Y<0).
 # domainSize <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 blocks
 REPO="$HOME/mt-dennys"
 BIN_DIR="$REPO/build/apps/showcases/Antidunes"
@@ -28,4 +28,4 @@ done
 "$REPO/apps/showcases/Antidunes/antidunes.sh" \
     --build --jobs "$(nproc)" \
     --run --np 72 \
-    --prm "$REPO/apps/showcases/Antidunes/prms/giant_box_drop_gas.prm"
+    --prm "$REPO/apps/showcases/Antidunes/prms/box_drop_gas.prm"

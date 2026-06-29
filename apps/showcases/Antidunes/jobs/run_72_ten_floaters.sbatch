@@ -1,6 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=antidunes-ten-floaters
 #SBATCH --partition=singlenode
+#SBATCH --constraint=el9
 #SBATCH --nodes=1
 #SBATCH --ntasks=72
 #SBATCH --time=02:00:00

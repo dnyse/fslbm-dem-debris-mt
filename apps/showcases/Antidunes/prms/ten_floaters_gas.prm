@@ -1,21 +1,22 @@
-// ten_floaters_gas.prm
+// giant_sphere_gas.prm
 // ─────────────────────────────────────────────────────────────────────────────
-// Ten floating spheres of varying radii (4–10 LU) dropped from the gas phase.
-// All start above the free surface (absoluteLiquidHeight ≈ 56 LU) with staggered
-// z offsets so they hit the water at different times, creating a cascade.
+// One giant floating sphere (radius 20 LU, diameter = 40 LU ≈ 2/3 domain width)
+// placed with its bottom at the free surface and released to sink to equilibrium.
 //
-// Placement rules:
-//   • settlingSteps=0: spheres start with no contact line; it grows naturally
-//     as each sphere descends through the free surface.
-//   • Positions verified to clear both cylinder pillars (x=64, y=15 and y=45,
-//     r=8) and all NoSlip domain walls.
-//   • X is periodic; Y walls are NoSlip at y=0 and y=60.
-//   • Sphere bottom (z - radius) is at least 5 LU above the free surface.
+// Physics:
+//   • densityRatio=0.5 → equilibrium at half-submerged, centre at z≈56 LU.
+//   • Starting at z=76 (bottom at z=56 = surface, 0% submerged) avoids the
+//     contact-line NaN that occurred when starting 9 LU above the surface
+//     (sphere entered surface at v≈0.013 LU/step → full contact ring formed
+//     simultaneously → CurvatureSweep invalid normals → NaN at step ~2000).
+//   • settlingSteps=500: contact line at z=56 establishes while sphere is fixed;
+//     on release the sphere sinks slowly to the 50% equilibrium depth.
 //
-// Sphere summary (XY positions chosen to avoid pillar exclusion zones):
-//   Row front (y≈8):   r=4 @ x=15,  r=6 @ x=38,  r=7 @ x=92, r=5 @ x=115
-//   Row centre (y=30): r=8 @ x=20,  r=10 @ x=50, r=9 @ x=100
-//   Row back  (y≈50):  r=5 @ x=20,  r=7 @ x=88,  r=6 @ x=110
+// Placement:
+//   • position (30, 30, 76): centred in Y (y=30 ± 20 → y=[10,50], 10 LU from
+//     each NoSlip wall), starts left-of-centre in X (X is periodic).
+//   • XY distance to pillar 1 (64,15,r=8): sqrt(34²+15²) ≈ 37.2 > r+8=28 ✓
+//   • XY distance to pillar 2 (64,45,r=8): sqrt(34²+15²) ≈ 37.2 > 28 ✓
 //
 // Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ ParticleParameters
 }
 
 // Cylinder pillars — same geometry as two_cylinder_floater_gas.prm.
+// Both pillars clear the sphere (XY clearance ≈ 37 LU > r_sphere+r_pillar=28).
 CylinderPillars
 {
    CylinderPillar
@@ -91,95 +93,77 @@ CylinderPillars
 
 FloatingSpheres
 {
-   // ── Front row  y≈8  (safely below pillar 1 at y=15) ──────────────────────
-
    FloatingSphere
    {
-      // r=4, front-left.  Bottom at z=61 (5 LU above surface).
-      position     < 15, 8, 65 >;
+      position     < 5, 8, 65 >;
       radius       4;
       densityRatio 0.5;
       settlingSteps 0;
    }
    FloatingSphere
    {
-      // r=6, front-left-centre.  Bottom at z=66 (10 LU above surface).
-      position     < 38, 8, 72 >;
+      position     < 16, 8, 72 >;
       radius       6;
       densityRatio 0.5;
       settlingSteps 0;
    }
    FloatingSphere
    {
-      // r=7, front-right-centre.  Bottom at z=71 (15 LU above surface).
-      // x=92 keeps XY clearance to pillar 1 (dist≈28.9 LU > r+8=15).
-      position     < 92, 8, 78 >;
+      position     < 30, 8, 78 >;
       radius       7;
       densityRatio 0.5;
       settlingSteps 0;
    }
    FloatingSphere
    {
-      // r=5, front-right.  Bottom at z=63 (7 LU above surface).
-      position     < 115, 8, 68 >;
+      position     < 43, 8, 68 >;
       radius       5;
       densityRatio 0.5;
       settlingSteps 0;
    }
 
-   // ── Centre row  y=30  (midway between both pillars at y=15 and y=45) ──────
-   // Pillars are 15 LU away in Y from y=30; all radii ≤10 clear the
-   // pillar exclusion zone (dist to pillar ≥ 20.5 LU > r+8 for all three).
-
    FloatingSphere
    {
-      // r=8, centre-left.  Bottom at z=66 (10 LU above surface).
-      position     < 20, 30, 74 >;
+      position     < 9, 30, 74 >;
       radius       8;
       densityRatio 0.5;
       settlingSteps 0;
    }
    FloatingSphere
    {
-      // r=10, centre.  Bottom at z=72 (16 LU above surface).  Largest sphere.
-      // XY dist to each pillar ≈ 20.5 LU > r+8=18 (2.5 LU margin).
-      position     < 50, 30, 82 >;
+      position     < 28, 30, 82 >;
       radius       10;
       densityRatio 0.5;
       settlingSteps 0;
    }
    FloatingSphere
    {
-      // r=9, centre-right.  Bottom at z=71 (15 LU above surface).
-      position     < 100, 30, 80 >;
+      position     < 48, 30, 80 >;
       radius       9;
       densityRatio 0.5;
       settlingSteps 0;
    }
 
-   // ── Back row  y≈50  (safely above pillar 2 at y=45) ─────────────────────
-
    FloatingSphere
    {
-      // r=5, back-left.  Bottom at z=61 (5 LU above surface).
-      position     < 20, 52, 66 >;
+      // r=5, shifted left
+      position     < 6, 52, 66 >;
       radius       5;
       densityRatio 0.5;
       settlingSteps 0;
    }
    FloatingSphere
    {
-      // r=7, back-right-centre.  Bottom at z=63 (7 LU above surface).
-      // y=50 gives 10 LU to the y=60 NoSlip wall (> radius).
-      position     < 88, 50, 70 >;
+      // r=7, shifted left
+      position     < 19, 50, 70 >;
       radius       7;
       densityRatio 0.5;
       settlingSteps 0;
    }
    FloatingSphere
    {
-      // r=6, back-right.  Bottom at z=70 (14 LU above surface).
-      position     < 110, 52, 76 >;
+      // r=6, shifted left
+      position     < 33, 52, 76 >;
       radius       6;
       densityRatio 0.5;
       settlingSteps 0;
@@ -242,7 +226,7 @@ VTK
          velocity;
       }
 
-      // Y-midplane slab, X=0 face slice, full XY volume up to z=150.
+      // Y-midplane slab (centred in 60-cell domain), X=0 face slice, full XY volume up to z=150.
       CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
       CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
       CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
