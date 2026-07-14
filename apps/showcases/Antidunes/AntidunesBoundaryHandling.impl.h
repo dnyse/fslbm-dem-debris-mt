@@ -99,7 +99,12 @@ class BoundaryBlockDataHandling
       // φ(x_b) accessor for the three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9): scales the
       // SimpleBB momentum-exchange force by the near-boundary cell's fill level so interface cells at a
       // floater's waterline do not inject a phantom full-liquid buoyant force.
-      std::function< real_t(const Cell&) > fillLevelFct = [fillField](const Cell& c) { return fillField->get(c); };
+      // Gated by ModelParameters.useFillWeighting: when false a null accessor is passed, so SimpleBB
+      // applies the raw two-phase MEM force (reference / ablation run) instead of the Eq. 5.9 weighting.
+      std::function< real_t(const Cell&) > fillLevelFct =
+         boundary_->getUseFillWeighting()
+            ? std::function< real_t(const Cell&) >([fillField](const Cell& c) { return fillField->get(c); })
+            : std::function< real_t(const Cell&) >(nullptr);
 
       typename B::MovingObstacle_T curvedLinear(B::movingObstacleBoundaryID, B::movingObstacleFlagID, pdfField,
                                                 flagField, particleField, boundary_->getParticleAccessor(), domainMask,
@@ -151,9 +156,10 @@ template< typename LatticeModel_T, typename FlagField_T, typename ScalarField_T,
 AntidunesBoundaryHandling< LatticeModel_T, FlagField_T, ScalarField_T, ParticleAccessor_T >::AntidunesBoundaryHandling(
    const std::shared_ptr< StructuredBlockForest >& blockForest, BlockDataID pdfFieldID, BlockDataID fillLevelID,
    BlockDataID particleFieldID, const shared_ptr< ParticleAccessor_T >& ac,
-   std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct)
+   std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct, bool useFillWeighting)
    : blockForest_(blockForest), pdfFieldID_(pdfFieldID), fillFieldID_(fillLevelID), particleFieldID_(particleFieldID),
-     ac_(ac), hydrostaticDensityFct_(std::move(hydrostaticDensityFct)), comm_(blockForest)
+     ac_(ac), hydrostaticDensityFct_(std::move(hydrostaticDensityFct)), useFillWeighting_(useFillWeighting),
+     comm_(blockForest)
 {
    // initialize obstacleIDs
    Set< FlagUID > obstacleIDs;

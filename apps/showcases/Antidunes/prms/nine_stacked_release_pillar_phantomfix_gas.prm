@@ -1,0 +1,194 @@
+// nine_stacked_release_pillar_phantomfix_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// Direct A/B partner of nine_stacked_release_pillar_gas.prm (baseline, no correction) and
+// nine_stacked_release_pillar_statich_gas.prm (staticReferenceHeightOverride 64.0) — IDENTICAL
+// 9-sphere stacked column drop into the two-pillar clogging gap, single variable changed:
+// usePhantomForceCorrection true (Option A: subtract the tapered, one-sided-clamped F_pred_z from
+// the vertical MEM force). H stays at the flat, undisturbed absoluteLiquidHeight (~56.02) — this
+// does NOT chase the local pile-up level the way staticReferenceHeightOverride or
+// useDynamicReferenceHeight do; it corrects the phantom force directly and self-disables past 50%
+// submersion (see ParticleKernels.h, changes.md).
+//
+// Motivation: the static-H=64 nine-sphere run saturated 4 of 9 spheres at 100% submersion
+// permanently (unbounded correction, no self-limiting mechanism), matching the single-sphere
+// static-H failure. The single-sphere phantomfix test settled at a stable ~70-78% instead of
+// saturating, because its correction is explicitly bounded/tapered. This tests whether that same
+// bounded behaviour holds up with nine interacting, stacked spheres instead of one.
+//
+// 9 floating spheres (radius 8, densityRatio 0.5) stacked as 3 rows × 3 in the Y–Z plane at x≈9,
+// all held FIXED and released TOGETHER at t=30000, falling as a cushioned column into the flow
+// and drifting toward the two pillars (64,15)/(64,45), r=8 → 14-LU gap (< sphere diameter 16 →
+// jamming).
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// Two cylinder pillars — same geometry as the other pillar configs.
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 15, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 64, 45, 90 >;
+      radius 8;
+   }
+}
+
+FloatingSpheres
+{
+   // All nine released TOGETHER at t=30000 → the column falls as a stack, lower rows
+   // cushioning the upper ones (see header). Bottom row enters the water first.
+   // ── Bottom row (z=66) ───────────────────────────────────────────────────────
+   FloatingSphere { position < 9, 12, 66 >;  radius 8; densityRatio 0.5; settlingSteps 30000; }
+   FloatingSphere { position < 9, 30, 66 >;  radius 8; densityRatio 0.5; settlingSteps 30000; }
+   FloatingSphere { position < 9, 48, 66 >;  radius 8; densityRatio 0.5; settlingSteps 30000; }
+
+   // ── Middle row (z=84) ───────────────────────────────────────────────────────
+   FloatingSphere { position < 9, 12, 84 >;  radius 8; densityRatio 0.5; settlingSteps 30000; }
+   FloatingSphere { position < 9, 30, 84 >;  radius 8; densityRatio 0.5; settlingSteps 30000; }
+   FloatingSphere { position < 9, 48, 84 >;  radius 8; densityRatio 0.5; settlingSteps 30000; }
+
+   // ── Top row (z=102) ─────────────────────────────────────────────────────────
+   FloatingSphere { position < 9, 12, 102 >; radius 8; densityRatio 0.5; settlingSteps 30000; }
+   FloatingSphere { position < 9, 30, 102 >; radius 8; densityRatio 0.5; settlingSteps 30000; }
+   FloatingSphere { position < 9, 48, 102 >; radius 8; densityRatio 0.5; settlingSteps 30000; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePhantomForceCorrection     true;   // Option A: subtract tapered F_pred_z from vertical MEM force (the fix under test)
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 15, 0 >; max < 64, 15, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 45, 0 >; max < 64, 45, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Y-midplane slab (centred in 60-cell domain), X=0 face slice, full XY volume up to z=150.
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

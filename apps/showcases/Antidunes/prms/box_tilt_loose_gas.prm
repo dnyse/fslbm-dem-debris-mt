@@ -1,0 +1,171 @@
+// box_tilt_loose_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// ROTATION-EQUILIBRIUM test with ANALYTICAL buoyancy. One floating CUBE (edge 26,
+// halfExtents <13,13,13>, densityRatio 0.5) in STILL water. LOOSE companion to
+// box_tilt_pinned_gas.prm: BOTH translation and rotation are FREE (pinPosition false). It should
+// still roll toward edge-down (45°) but may also drift/self-propel while tumbling — the contrast
+// with the pinned run shows what pinning the translation removes.
+//
+// Expected result: a uniform half-submerged cube is UNSTABLE face-up (0°, GM<0) and STABLE
+// edge-down (45°, GM≈+0.24·L). Started at a small 10° perturbation, it should roll and come
+// to rest at tiltY ≈ 45°. Watch [BoxBuoyancy] tiltY converge to ~45°.
+//
+// Buoyancy method: useAnalyticBoxBuoyancy true → exact OBB∩plane 6-tetrahedron clip drives the
+// V_sub and the B−G righting lever. The [BoxBuoyancy] log also prints the 12³ sampling estimate
+// as a cross-check (xcheck V_sub: analytic=… sampling=… diff=…%), which should agree to <~1%.
+//
+//   • targetMeanVelocityMagnitude 0  → no driving flow (still water).
+//   • useHardcodedUnits true → constants keep reference values while U = 0.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         75000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // Cube edge 26. Started NEAR face-up (initialTiltAngleDeg 10) so the small perturbation
+      // triggers the roll toward the STABLE edge-down (45°) orientation. Centre (64,30,62):
+      // ~half-submerged. pinPosition true → translation held, rotation free. comOffsetZ 0 → uniform.
+      position             < 64, 30, 62 >;
+      halfExtents          < 13, 13, 13 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+      initialTiltAngleDeg  10;
+      comOffsetZ           0;
+      pinPosition          false;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticBoxBuoyancy        true;   // exact OBB∩plane clip (this test's whole point); false = 12³ sampling
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

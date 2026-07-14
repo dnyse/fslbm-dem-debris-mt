@@ -234,6 +234,16 @@ struct FloatingBoxParams {
                                           // geometric centroid (LU). Negative = COM BELOW centroid →
                                           // pendulum righting torque (raises GM, prevents tumbling).
                                           // 0 = uniform-density box (COM at centroid).
+   bool              pinPosition;         // true → the box's TRANSLATION is held at `position` for the
+                                          // whole run while ROTATION stays free (translational DOFs
+                                          // pinned each DEM sub-cycle; not the FIXED flag, which would
+                                          // also freeze rotation). Use to observe the free-floating
+                                          // equilibrium tilt in isolation. false → normal dynamics.
+   Vector3< real_t > pinAxes;             // per-axis pin mask (only used when pinPosition true): a nonzero
+                                          // component pins that world axis to `position`, a zero leaves it
+                                          // FREE. Default <1,1,1> = pin all three (rigid hold). <1,1,0>
+                                          // pins x,y but lets z float, so the box finds its own buoyant
+                                          // depth (≈50% submerged) while not drifting laterally.
 
    FloatingBoxParams(const config::Config::BlockHandle& b)
    {
@@ -243,6 +253,8 @@ struct FloatingBoxParams {
       settlingSteps        = b.getParameter< uint_t >           ("settlingSteps", uint_t(0));
       initialTiltAngleDeg  = b.getParameter< real_t >           ("initialTiltAngleDeg", real_t(0));
       comOffsetZ           = b.getParameter< real_t >           ("comOffsetZ", real_t(0));
+      pinPosition          = b.getParameter< bool >             ("pinPosition", false);
+      pinAxes              = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
    }
 };
 
@@ -255,6 +267,51 @@ inline std::vector< FloatingBoxParams > parseFloatingBoxes(const shared_ptr< con
    config::Config::Blocks boxBlocks;
    containers[0].getBlocks("FloatingBox", boxBlocks, 0, 100);
    for (const auto& b : boxBlocks)
+      result.emplace_back(b);
+   return result;
+}
+
+// Floating cylinder ("log", type 4): a finite solid mesa_pd Cylinder, fully two-way coupled like
+// the floating box. The shape's axis is the BODY z-axis; `axis` gives its initial WORLD direction
+// (default <0,1,0> = spanwise log lying across the flow). All box knobs carry over 1:1.
+struct FloatingCylinderParams {
+   Vector3< real_t > position;
+   real_t            radius;
+   real_t            length;              // full axis length; halfLength = length / 2
+   Vector3< real_t > axis;                // initial world direction of the cylinder axis (normalised on parse)
+   real_t            densityRatio;
+   uint_t            settlingSteps;       // same semantics as FloatingSphereParams::settlingSteps
+   real_t            initialTiltAngleDeg; // extra rotation about the world Y-axis, applied AFTER axis alignment
+   real_t            comOffsetZ;          // signed body-frame offset of the COM below the centroid (same as box)
+   bool              pinPosition;         // hold TRANSLATION at `position`, rotation free (same as box)
+   Vector3< real_t > pinAxes;             // per-axis pin mask (same as box)
+
+   FloatingCylinderParams(const config::Config::BlockHandle& b)
+   {
+      position             = b.getParameter< Vector3< real_t > >("position");
+      radius               = b.getParameter< real_t >           ("radius");
+      length               = b.getParameter< real_t >           ("length");
+      axis                 = b.getParameter< Vector3< real_t > >("axis", Vector3< real_t >(real_t(0), real_t(1), real_t(0)));
+      densityRatio         = b.getParameter< real_t >           ("densityRatio");
+      settlingSteps        = b.getParameter< uint_t >           ("settlingSteps", uint_t(0));
+      initialTiltAngleDeg  = b.getParameter< real_t >           ("initialTiltAngleDeg", real_t(0));
+      comOffsetZ           = b.getParameter< real_t >           ("comOffsetZ", real_t(0));
+      pinPosition          = b.getParameter< bool >             ("pinPosition", false);
+      pinAxes              = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
+      WALBERLA_CHECK_GREATER(axis.length(), real_t(1e-10), "FloatingCylinder axis must be nonzero!");
+      axis = axis.getNormalized();
+   }
+};
+
+inline std::vector< FloatingCylinderParams > parseFloatingCylinders(const shared_ptr< config::Config >& cfg)
+{
+   std::vector< FloatingCylinderParams > result;
+   config::Config::Blocks containers;
+   cfg->getBlocks("FloatingCylinders", containers, 0, 1);
+   if (containers.empty()) return result;
+   config::Config::Blocks cylinderBlocks;
+   containers[0].getBlocks("FloatingCylinder", cylinderBlocks, 0, 100);
+   for (const auto& b : cylinderBlocks)
       result.emplace_back(b);
    return result;
 }
@@ -272,6 +329,72 @@ struct ModelParams {
    //         (no fill=1 over-promotion band; the all-interface path that never drifted/NaN'd).
    bool        useBognerReconstruction;
 
+   // true  → φ(x_b) fill-weighting of the MovingObstacle (SimpleBB) MEM force (Bogner & Rüde 2013,
+   //         Eq. 5.9): interface cells at a floater's waterline contribute proportionally less force,
+   //         suppressing the phantom full-liquid buoyant lift.
+   // false → pass a null fill accessor so the raw two-phase MEM force is used (reference / ablation).
+   bool        useFillWeighting;
+
+   // true  → re-seed each FormerMO cell to the depth-consistent hydrostatic density
+   //         ρ_hyd(z) = 1 + 3·a_z·(z − H) instead of the EquilibriumReconstructor's fill-blind
+   //         unweighted mean (interface cells report ρ≈1 however empty they are). Kills the ρ≈1
+   //         over-density at a moving floater's waterline that the MEM otherwise reads as phantom
+   //         upward lift. Robust to negative contact-line fill drift (uses no φ). Off by default.
+   bool        useHydrostaticReconstruction;
+
+   // true  → floating-box submerged volume & centre of buoyancy computed ANALYTICALLY by clipping the
+   //         oriented box against the fitted free-surface plane (exact 6-tetrahedron OBB∩half-space
+   //         clip; no discretisation error, rotation-exact).
+   // false → legacy 12³ point-sampling clip of the box against the same plane (default; kept as the
+   //         reference and for cross-checking the analytical result).
+   bool        useAnalyticBoxBuoyancy;
+
+   // true  → subtract the analytic phantom force F_pred_z = ΔP·A_proj·taper (the double-counted pile-up
+   //         head, validated live to ratio ≈ 1) from the VERTICAL MEM force on each floating sphere,
+   //         downstream of the fluid (particle side only, no PDF feedback). Removes the spurious waterline
+   //         levitation while leaving horizontal drag and the dynamic vertical fluctuations intact
+   //         (Option A). Self-disables where there is no pile-up (Δh→0 ⇒ F_pred→0).
+   // false → no correction (default; reproduces the pre-fix behaviour).
+   bool        usePhantomForceCorrection;
+
+   // true  → the MEM hydrostatic reference height H (used by SimpleBB's rhoHydStat, force-side only —
+   //         never touches the fluid/PDF fields) is tracked LIVE instead of held at the flat
+   //         absoluteLiquidHeight: each step, the local waterline (localSurfaceZ) of every floater with a
+   //         clean fitted ring is averaged and EMA-blended (α=0.2) into a single shared reference height.
+   //         Cancels the uncancelled pile-up head at its source (exact, no A_proj/taper geometry needed),
+   //         but is a purely STATIC/offset correction — it cannot remove a genuinely velocity-dependent
+   //         (dynamic suction) residual, and moves only the WHOLE force curve, not its slope.
+   // false → static flat H = absoluteLiquidHeight (default; legacy behaviour).
+   bool        useDynamicReferenceHeight;
+
+   // >= 0 → replace the STATIC MEM reference height H (SimpleBB's rhoHydStat, the hydrostatic
+   //        reconstruction target, and the PhantomDecomp flatRef) with this absolute z value [LU]
+   //        instead of the flat absoluteLiquidHeight. Diagnostic ablation only: shifting H adds a
+   //        CONSTANT density offset Δρ = 3·|a_z|·ΔH to the subtracted reference — closed (fully
+   //        submerged) bodies should feel nothing, while a floater straddling the surface takes an
+   //        unbalanced Δp·A_proj on its open wetted cap. Does NOT touch the fluid initialisation.
+   // <  0 → disabled (default; H = absoluteLiquidHeight).
+   real_t      staticReferenceHeightOverride;
+
+   // Lateral reach of the free-surface plane-fit used for a sphere floater's own localSurfaceZ AND
+   // (when useDynamicReferenceHeight is on) the dynamic-H ambient-waterline target, as a MULTIPLE of
+   // the floater's radius: planeLatR = floaterPlaneFitRadiusFactor * r. Default 1.8 reaches past a
+   // calmly-floating body's own crater/gas-moat, but NOT past the splash/wave thrown up by a fast
+   // impact — the fitted "ambient" surface is still contaminated by the floater's own disturbance
+   // during a drop-through-surface transient (see changes.md, dynamic-H self-pollution). Raise this
+   // for scenarios with a violent entry.
+   real_t      floaterPlaneFitRadiusFactor;
+
+   // true  → the per-floater VTK point outputs ("floater", "floaterBox", "floaterCylinder") carry two
+   //         extra fields, "planeOrigin" and "planeNormal", visualizing the fitted free-surface plane
+   //         each floater's buoyancy is actually computed from (see BuildTimeloop.h / changes.md for the
+   //         ParaView recipe: Clip by the per-vertex signed distance to this plane to colour the
+   //         submerged part of the solid separately from the emerged part). Diagnostic only, never read
+   //         back into the physics; negligible IO cost (2 extra Vector3 per floater per VTK write).
+   // false → the two fields are omitted (default; keeps the point-data schema unchanged from before this
+   //         diagnostic existed).
+   bool        writeFloaterPlaneVTK;
+
    ModelParams(const config::Config::BlockHandle& b)
       : pdfReconstructionModel      { b.getParameter< std::string >("pdfReconstructionModel") }
       , pdfRefillingModel           { b.getParameter< std::string >("pdfRefillingModel") }
@@ -281,6 +404,14 @@ struct ModelParams {
       , cellConversionThreshold     { b.getParameter< real_t >     ("cellConversionThreshold") }
       , cellConversionForceThreshold{ b.getParameter< real_t >     ("cellConversionForceThreshold") }
       , useBognerReconstruction     { b.getParameter< bool >       ("useBognerReconstruction", true) }
+      , useFillWeighting            { b.getParameter< bool >       ("useFillWeighting", true) }
+      , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
+      , useAnalyticBoxBuoyancy      { b.getParameter< bool >       ("useAnalyticBoxBuoyancy", false) }
+      , usePhantomForceCorrection   { b.getParameter< bool >       ("usePhantomForceCorrection", false) }
+      , useDynamicReferenceHeight   { b.getParameter< bool >       ("useDynamicReferenceHeight", false) }
+      , staticReferenceHeightOverride{ b.getParameter< real_t >    ("staticReferenceHeightOverride", real_t(-1)) }
+      , floaterPlaneFitRadiusFactor  { b.getParameter< real_t >    ("floaterPlaneFitRadiusFactor", real_t(1.8)) }
+      , writeFloaterPlaneVTK         { b.getParameter< bool >      ("writeFloaterPlaneVTK", false) }
    {}
 };
 
@@ -462,12 +593,21 @@ struct SimulationParams {
    std::vector< CylinderPillarParams >  cylinderPillars;
    std::vector< FloatingSphereParams >  floatingSpheres;
    std::vector< FloatingBoxParams >     floatingBoxes;
+   std::vector< FloatingCylinderParams > floatingCylinders;
    ModelParams       model;
    EvaluationParams  evaluation;
    VTKParams         vtk;
 
    // computed params ----------
    ComputedParams    computed;
+
+   // Effective STATIC MEM reference height H: the flat still-water level, unless
+   // ModelParameters.staticReferenceHeightOverride (>= 0) replaces it (diagnostic ablation).
+   real_t staticReferenceHeight() const
+   {
+      return model.staticReferenceHeightOverride >= real_t(0) ? model.staticReferenceHeightOverride
+                                                              : computed.absoluteLiquidHeight;
+   }
 
    SimulationParams(const shared_ptr< config::Config >& cfg)
       : cfgPtr       { cfg }
@@ -480,6 +620,7 @@ struct SimulationParams {
       , cylinderPillars  { parseCylinderPillars(cfg) }
       , floatingSpheres  { parseFloatingSpheres(cfg) }
       , floatingBoxes    { parseFloatingBoxes(cfg) }
+      , floatingCylinders{ parseFloatingCylinders(cfg) }
       , model        { cfg->getOneBlock("ModelParameters") }
       , evaluation   { cfg->getOneBlock("EvaluationParameters") }
       , vtk          { cfg->getOneBlock("VTK") }

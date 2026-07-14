@@ -7,4 +7,5 @@ target_sources( walberla_mesa_pd
         ConvexPolyhedron.h
         HalfSpace.h
         Box.h
+        Cylinder.h
 )

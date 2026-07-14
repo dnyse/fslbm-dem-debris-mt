@@ -1,0 +1,200 @@
+// sphere_drop_two_pillars_statich_pillar_gas.prm — static H set to the OBSERVED pillar pile-up level.
+// ─────────────────────────────────────────────────────────────────────────────
+// Same two-pillar CLOGGING scenario as sphere_drop_two_pillars_gas.prm (pillar gap 14 LU < sphere
+// diameter 20 LU — the sphere cannot pass through, only wedges). Instead of chasing the waterline
+// live (dynamic-H, which self-polluted once the sphere started disturbing its own ring — see
+// dynamic.log) or leaving H at the flat, UNDISTURBED absoluteLiquidHeight (~56.02, which ignores the
+// pillar-caused pile-up entirely — see phantom.log RUN A), this pins H to a single CONSTANT chosen to
+// match what the ambient pillar pile-up actually settles to for THIS geometry.
+//
+// That number comes straight from dynamic.log's own [DynamicH] target log, restricted to the window
+// BEFORE the sphere started disturbing its own ring (steps 12000-50000, post-rampup / pre-self-
+// pollution): mean 63.9 (range 61.5-68.2); the pure pre-contact plateau (sphere still dry, steps
+// >=10000) alone averages 64.8. staticReferenceHeightOverride is set to 64.0 — an empirically
+// grounded flat reference for this specific pillar geometry, not the domain-wide absoluteLiquidHeight
+// and not a live-tracked value.
+//
+// This isolates: does simply moving H to the right CONSTANT (no live tracking, no taper/geometry
+// correction) already fix most of the "sphere ends up too high/too low" problem, before spending any
+// more effort on dynamic-H's self-pollution or the wide-net plane-fit's own blending risk (a wide net
+// averages across whatever surface features fall inside it, including a steep drop, without knowing
+// they're different regimes — see changes.md).
+//
+// usePhantomForceCorrection and useDynamicReferenceHeight both stay OFF (defaults) — this is a
+// single-variable test of the static reference height alone.
+//
+// timesteps raised to 100000 (30000 held + 70000 free) to match the wide-net dynamic-H run, for a
+// fair side-by-side comparison of where each settles.
+//
+// Geometry (undisturbed waterline z≈56.02; pillar pile-up brings the LOCAL level to ≈64):
+//   • Sphere centre (30,30,78): bottom at z=68, ~4 LU above the piled-up local level at start.
+//   • Pillars at (64,15,r=8) and (64,45,r=8).
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;   // 30000 held + 70000 free-floating after release (was 30000+30000)
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// Cylinder pillars — same geometry as the baseline. Clear gap (30 − 8 − 8 = 14 LU) < sphere diameter
+// (20 LU): the sphere cannot pass through, only wedge against both — the clogging scenario under test.
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 15, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 64, 45, 90 >;
+      radius 8;
+   }
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // Normal sphere: radius=10 LU, too large for the 14 LU pillar gap (models a clogging body).
+      // densityRatio 0.5. settlingSteps=30000: held FIXED while flow develops and the pillar pile-up
+      // forms, then released to drift downstream and jam against the pillars.
+      position     < 30, 30, 78 >;
+      radius       10;
+      densityRatio 0.5;
+      settlingSteps 30000;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePhantomForceCorrection     false;  // isolated: static-H-near-pillar alone
+   useDynamicReferenceHeight     false;  // isolated: NOT combined with dynamic-H
+   staticReferenceHeightOverride 64.0;   // the fix under test — see file header for how this was picked
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 15, 0 >; max < 64, 15, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 45, 0 >; max < 64, 45, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

@@ -1,0 +1,160 @@
+// sphere_held_submerged_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC PHANTOM-FORCE TEST A — fully submerged, held fixed, still water.
+//
+// A sphere (r=8) is pinned at the centre of the liquid and NEVER released
+// (settlingSteps huge), in quiescent water (U=0, useHardcodedUnits true). The only
+// thing we read is the steady MEM [FloaterForces] F_hydro_z once the field relaxes
+// to hydrostatic rest. For a FULLY submerged body the atmospheric/reference pressure
+// acts all around and cancels in the MEM sum, so a correct scheme gives F_hydro_z ≈ 0.
+//   • F_hydro_z ≈ 0  → the hydrostatic-pressure subtraction is clean (point 2 OK).
+//   • F_hydro_z > 0  → static hydrostatic-staircase error (Bogner & Rüde point 2).
+// Paired with sphere_held_partial_gas.prm (50% submerged) this isolates whether the
+// phantom is the missing gas pressure on the emerged cap (point 1, partial-only) or
+// the hydrostatic staircase (point 2, both depths).
+//
+// Geometry: waterline z=56.0, floor z=33.1 (liquid depth ≈23). Sphere centre z=45
+// → spans z=[37,53]: ~4 LU above the floor, ~3 LU below the surface → fully in bulk
+// liquid, clear of both boundaries.  φ-weighting ON (current design), submFrac OFF.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         15000;             // short — only need the field to relax to hydrostatic rest
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep gravity/viscosity/σ valid at U=0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   // Fully submerged, held fixed forever (settlingSteps >> timesteps → never released).
+   FloatingSphere { position < 64, 30, 45 >; radius 8; densityRatio 0.5; settlingSteps 100000000; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;    // current design (φ-weighting on)
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;          // frequent F_hydro readings to watch it settle
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

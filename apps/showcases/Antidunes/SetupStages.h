@@ -33,6 +33,7 @@
 
 #include "lbm/field/AddToStorage.h"
 
+#include "mesa_pd/data/shape/Cylinder.h"
 #include "mesa_pd/data/shape/Sphere.h"
 #include "mesa_pd/domain/BlockForestDataHandling.h"
 #include "mesa_pd/kernel/ParticleSelector.h"
@@ -453,16 +454,73 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
             // Rotate about Y-axis (body axis v in Bogner's diagram)
             p->setRotation(mesa_pd::Rot3(mesa_pd::Vec3(0, 1, 0), angle));
          }
-         if (fbp.settlingSteps > 0)
+         // pinPosition holds only the TRANSLATIONAL DOFs (done each DEM sub-cycle in ParticleKernels);
+         // it must NOT set the FIXED flag, which would also freeze rotation. settlingSteps still uses
+         // FIXED (full freeze) but is mutually exclusive with pinPosition.
+         if (fbp.settlingSteps > 0 && !fbp.pinPosition)
             mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
          simObjs->floaterBoxUIDs[bi] = p->getUid();
       }
       WALBERLA_LOG_INFO_ON_ROOT("Created floating box: halfExtents=" << fbp.halfExtents
          << " densityRatio=" << fbp.densityRatio << " position=" << pos
          << " settlingSteps=" << fbp.settlingSteps
-         << " initialTiltAngleDeg=" << fbp.initialTiltAngleDeg);
+         << " initialTiltAngleDeg=" << fbp.initialTiltAngleDeg
+         << " pinPosition=" << (fbp.pinPosition ? "true" : "false"));
    }
    mpi::allReduceInplace(simObjs->floaterBoxUIDs, mpi::SUM);
+
+   // Floating cylinders / logs (type 4) — same indexed-UID pattern as spheres and boxes.
+   // The mesa_pd Cylinder's axis is its BODY z-axis; the initial rotation aligns body-z with the
+   // requested world `axis` (default <0,1,0> = spanwise log), then applies the optional extra tilt
+   // about the world Y-axis. interactionRadius = circumscribed-sphere radius sqrt(r² + (L/2)²).
+   simObjs->floaterCylinderUIDs.assign(simParams->floatingCylinders.size(), walberla::id_t(0));
+   for (size_t ci = 0; ci < simParams->floatingCylinders.size(); ++ci)
+   {
+      const auto& fcp = simParams->floatingCylinders[ci];
+      const mesa_pd::Vec3 pos(fcp.position[0], fcp.position[1], fcp.position[2]);
+      const real_t halfLength = real_t(0.5) * fcp.length;
+      const real_t circumR    = std::sqrt(fcp.radius * fcp.radius + halfLength * halfLength);
+
+      // Align body-z with fcp.axis: rotate about (ez × axis) by acos(ez·axis); antiparallel → flip
+      // about x. Then compose the world-Y tilt on top.
+      mesa_pd::Rot3 rot;
+      const mesa_pd::Vec3 ez(real_t(0), real_t(0), real_t(1));
+      const real_t cosA = ez * fcp.axis;
+      if (cosA < real_t(1) - real_t(1e-10))
+      {
+         const mesa_pd::Vec3 rotAxis = (cosA > real_t(-1) + real_t(1e-10))
+                                          ? (ez % fcp.axis).getNormalized()
+                                          : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+         rot.rotate(rotAxis, std::acos(std::clamp(cosA, real_t(-1), real_t(1))));
+      }
+      if (std::abs(fcp.initialTiltAngleDeg) > real_t(1e-10))
+         rot.rotate(mesa_pd::Vec3(real_t(0), real_t(1), real_t(0)), fcp.initialTiltAngleDeg * math::pi / real_t(180));
+
+      if (simObjs->mesapdDomain->isContainedInProcessSubdomain(
+            uint_c(mpi::MPIManager::instance()->rank()), pos))
+      {
+         auto p = simObjs->particleStorage->create(false);
+         p->setPosition(pos);
+         p->setBaseShape(std::make_shared< mesa_pd::data::Cylinder >(fcp.radius, fcp.length));
+         p->getBaseShapeRef()->updateMassAndInertia(fcp.densityRatio);
+         p->setOwner(mpi::MPIManager::instance()->rank());
+         p->setType(4);
+         p->setInteractionRadius(circumR);
+         p->setRotation(rot);
+         // Same settling semantics as boxes: FIXED (full freeze) unless pinPosition holds the
+         // translational DOFs instead (rotation free, applied each DEM sub-cycle in ParticleKernels).
+         if (fcp.settlingSteps > 0 && !fcp.pinPosition)
+            mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
+         simObjs->floaterCylinderUIDs[ci] = p->getUid();
+      }
+      WALBERLA_LOG_INFO_ON_ROOT("Created floating cylinder: radius=" << fcp.radius
+         << " length=" << fcp.length << " axis=" << fcp.axis
+         << " densityRatio=" << fcp.densityRatio << " position=" << pos
+         << " settlingSteps=" << fcp.settlingSteps
+         << " initialTiltAngleDeg=" << fcp.initialTiltAngleDeg
+         << " pinPosition=" << (fcp.pinPosition ? "true" : "false"));
+   }
+   mpi::allReduceInplace(simObjs->floaterCylinderUIDs, mpi::SUM);
 
    // choose particle sync algorithm -----------------------------------------------------
    // blockSyncExtension must be >= the largest floater extent so that SyncNextNeighbors
@@ -478,6 +536,12 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
                                         fbp.halfExtents[2] * fbp.halfExtents[2]);
       blockSyncExtension = std::max(blockSyncExtension, halfDiag);
    }
+   for (const auto& fcp : simParams->floatingCylinders)
+   {
+      const real_t circumR = std::sqrt(fcp.radius * fcp.radius +
+                                       real_t(0.25) * fcp.length * fcp.length);
+      blockSyncExtension = std::max(blockSyncExtension, circumR);
+   }
    WALBERLA_LOG_INFO_ON_ROOT("blockSyncExtension = " << blockSyncExtension);
    // maxParticleDiameter determines which sync algorithm is safe (SyncNextNeighbors vs
    // SyncGhostOwners). Use 2×circumscribed radius for each floater type so that particles
@@ -491,6 +555,12 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
                                         fbp.halfExtents[1] * fbp.halfExtents[1] +
                                         fbp.halfExtents[2] * fbp.halfExtents[2]);
       maxParticleDiameter = std::max(maxParticleDiameter, halfDiag * real_c(2));
+   }
+   for (const auto& fcp : simParams->floatingCylinders)
+   {
+      const real_t circumR = std::sqrt(fcp.radius * fcp.radius +
+                                       real_t(0.25) * fcp.length * fcp.length);
+      maxParticleDiameter = std::max(maxParticleDiameter, circumR * real_c(2));
    }
 
    if (maxParticleDiameter < real_c(2) * real_c(simParams->blockForest.cellsPerBlock.min()) - blockSyncExtension) {
@@ -517,9 +587,34 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
 void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simParams, const std::shared_ptr< SimulationObjects >& simObjs)
 {
    WALBERLA_LOG_INFO_ON_ROOT("setupBoundaryHandling");
+
+   // Live MEM reference height (ModelParameters.useDynamicReferenceHeight): seed to the flat still-water
+   // level; ParticleKernels' computeSubmergedVolumes() EMA-updates it every step from the floaters' fitted
+   // local waterlines when the toggle is on. Force-side only (SimpleBB's rhoHydStat never touches the
+   // fluid), so this is safe regardless of the toggle — when off, the pointer is simply never written to
+   // and the static-height functor overload below is used instead.
+   simObjs->memReferenceHeight = std::make_shared< real_t >(simParams->staticReferenceHeight());
+
+   // Per-floater buoyancy plane-fit (diagnostic/VTK only — see SimulationObjects.h). Populated every
+   // step by ParticleKernels; empty here, just needs a backing map before the first VTK write.
+   simObjs->floaterPlaneOrigin = std::make_shared< std::unordered_map< walberla::id_t, Vector3< real_t > > >();
+   simObjs->floaterPlaneNormal = std::make_shared< std::unordered_map< walberla::id_t, Vector3< real_t > > >();
+   WALBERLA_LOG_INFO_ON_ROOT("[MEM reference height] "
+      << (simParams->model.useDynamicReferenceHeight
+             ? "DYNAMIC (live, EMA-tracked from floaters' fitted local waterlines)"
+             : "STATIC (flat H=" + std::to_string(simParams->staticReferenceHeight())
+                  + (simParams->model.staticReferenceHeightOverride >= real_t(0)
+                        ? ", OVERRIDDEN via staticReferenceHeightOverride — flat absoluteLiquidHeight would be "
+                             + std::to_string(simParams->computed.absoluteLiquidHeight)
+                        : " = absoluteLiquidHeight") + ")"));
+
    simObjs->antidunesBoundaryHandling = std::make_shared< AntidunesBoundaryHandling_T >(
       simObjs->blockForest, simObjs->pdfFieldID, simObjs->fillFieldID, simObjs->particleFieldID,
-      simObjs->particleAccessor, HydrostaticDensityFtor(simObjs->acceleration, simParams->computed.absoluteLiquidHeight));
+      simObjs->particleAccessor,
+      simParams->model.useDynamicReferenceHeight
+         ? HydrostaticDensityFtor(simObjs->acceleration, simObjs->memReferenceHeight)
+         : HydrostaticDensityFtor(simObjs->acceleration, simParams->staticReferenceHeight()),
+      simParams->model.useFillWeighting);
 
    // initialize BCs from config (NoSlip top/bottom, CellInterval pillar defined in Antidunes.prm)
    simObjs->antidunesBoundaryHandling->initFromConfig(simParams->cfgPtr->getOneBlock("BoundaryParameters"));
@@ -545,12 +640,12 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
 void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simParams, const std::shared_ptr< SimulationObjects >& simObjs)
 {
    WALBERLA_LOG_INFO_ON_ROOT("mapParticlesOntoCells");
-   // Select all floaters: type 1 = floating sphere, type 3 = floating box.
+   // Select all floaters: type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder.
    // Fixed obstacles (pillars, walls) are mapped separately as static NoSlip/FreeSlip.
    auto floaterSelector = [](const size_t particleIdx, const auto& ac)
    {
       const uint_t t = ac.getType(particleIdx);
-      return t == uint_t(1) || t == uint_t(3);
+      return t == uint_t(1) || t == uint_t(3) || t == uint_t(4);
    };
 
    // map particles onto LBM domain (this is for initilization. iterations happen in timeloopAfterParticles)
@@ -617,6 +712,25 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
          *simObjs->particleAccessor);
 
       WALBERLA_LOG_INFO_ON_ROOT("Released floating box uid=" << uid << " (index " << i
+                                << ") from settling phase at step " << currentStep);
+   }
+
+   for (size_t i = 0; i < simParams->floatingCylinders.size(); ++i)
+   {
+      const auto& fcp = simParams->floatingCylinders[i];
+      if (fcp.settlingSteps == uint_t(0) || currentStep != fcp.settlingSteps) continue;
+      const walberla::id_t uid = simObjs->floaterCylinderUIDs[i];
+
+      simObjs->particleStorage->forEachParticle(
+         false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
+         [uid](const size_t idx, auto& ac) {
+            if (ac.getUid(idx) == uid)
+               mesa_pd::data::particle_flags::unset(ac.getFlagsRef(idx),
+                                                    mesa_pd::data::particle_flags::FIXED);
+         },
+         *simObjs->particleAccessor);
+
+      WALBERLA_LOG_INFO_ON_ROOT("Released floating cylinder uid=" << uid << " (index " << i
                                 << ") from settling phase at step " << currentStep);
    }
 }

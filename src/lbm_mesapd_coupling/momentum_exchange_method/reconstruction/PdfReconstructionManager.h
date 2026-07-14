@@ -40,7 +40,9 @@
 
 #include "mesa_pd/data/IAccessor.h"
 
+#include <array>
 #include <functional>
+#include <sstream>
 
 namespace walberla
 {
@@ -118,12 +120,17 @@ class PdfReconstructionManager
                                    bool conserveMomentumWhenRestoring, const FlagUID& liquidFlagUID,
                                    const FlagUID& gasFlagUID, const FlagUID& interfaceFlagUID,
                                    const BlockDataID& fillFieldID, const bool useBognerStateSelection = true,
-                                   const bool optimizeForSmallObstacleFraction = false)
+                                   const bool optimizeForSmallObstacleFraction = false,
+                                   const bool useHydrostaticReconstruction = false,
+                                   const real_t hydrostaticAccelerationZ = real_t(0),
+                                   const real_t absoluteLiquidHeight = real_t(0))
       : blockStorage_(blockStorage), pdfFieldID_(pdfFieldID), boundaryHandlingID_(boundaryHandlingID),
         particleFieldID_(particleFieldID), ac_(ac), reconstructor_(reconstructor), formerObstacle_(formerObstacle),
         fluid_(fluid), conserveMomentumWhenRestoring_(conserveMomentumWhenRestoring),
         optimizeForSmallObstacleFraction_(optimizeForSmallObstacleFraction),
         useBognerStateSelection_(useBognerStateSelection),
+        useHydrostaticReconstruction_(useHydrostaticReconstruction),
+        hydrostaticAccelerationZ_(hydrostaticAccelerationZ), absoluteLiquidHeight_(absoluteLiquidHeight),
         liquidFlagUID_(liquidFlagUID), gasFlagUID_(gasFlagUID), interfaceFlagUID_(interfaceFlagUID),
         fillFieldID_(fillFieldID)
    {}
@@ -142,7 +149,32 @@ class PdfReconstructionManager
          << "gas(A)=" << c[0] << " liquid(B)=" << c[1]
          << " interface-unknown(C)=" << c[2] << " interface-surface(D)=" << c[3]
          << " | total=" << (c[0] + c[1] + c[2] + c[3]));
+
+      // Phantom-force investigation: how many unknowns, and how clustered are they?
+      std::vector< uint_t > u    = { formerMoTotal_, formerMoWithUnknownNbr_, unknownNbrSum_ };
+      std::vector< uint_t > umax = { unknownNbrMax_ };
+      std::vector< uint_t > hist(unknownNbrHist_.begin(), unknownNbrHist_.end());
+      walberla::mpi::reduceInplace(u, walberla::mpi::SUM);
+      walberla::mpi::reduceInplace(umax, walberla::mpi::MAX);
+      walberla::mpi::reduceInplace(hist, walberla::mpi::SUM);
+      WALBERLA_ROOT_SECTION()
+      {
+         const uint_t tot     = u[0];
+         const real_t pctWith = (tot > uint_t(0)) ? real_t(100) * real_c(u[1]) / real_c(tot) : real_t(0);
+         const real_t meanNbr = (tot > uint_t(0)) ? real_c(u[2]) / real_c(tot) : real_t(0);
+         std::ostringstream histStr;
+         for (uint_t k = uint_t(0); k < hist.size(); ++k)
+            if (hist[k] > uint_t(0)) histStr << " " << k << ":" << hist[k];
+         WALBERLA_LOG_INFO_ON_ROOT("[FORMERMO-UNKNOWNS t=" << t << "] total unknown (FormerMO) cells=" << tot
+            << " | with >=1 unknown neighbour=" << u[1] << " (" << pctWith << "%)"
+            << " | mean unknown-neighbours/cell=" << meanNbr
+            << " | max=" << umax[0]
+            << " | hist[#unknownNbr:count]=" << histStr.str());
+      }
+
       convGas_ = convLiquid_ = convIntfUnknown_ = convIntfSurface_ = uint_t(0);
+      formerMoTotal_ = formerMoWithUnknownNbr_ = unknownNbrSum_ = unknownNbrMax_ = uint_t(0);
+      unknownNbrHist_.fill(uint_t(0));
    }
 
  private:
@@ -195,6 +227,17 @@ class PdfReconstructionManager
 
    // Bogner state selection
    const bool useBognerStateSelection_;
+   // Depth-consistent (hydrostatic) reconstruction density. The EquilibriumReconstructor seeds a freed
+   // cell with the UNWEIGHTED mean of its domain neighbours' density, which is fill-blind: interface
+   // cells report ρ≈1 however empty they are, so a cell uncovered AT or ABOVE the waterline is assigned
+   // a full-liquid ρ≈1 while the correct hydrostatic value ρ_hyd(z) = 1 + 3·a_z·(z − H) is < 1 there.
+   // The MEM then reads ρ − ρ_hyd > 0 → spurious upward (phantom) lift. When enabled we re-seed the cell
+   // to ρ_hyd(z) (a_z = hydrostaticAccelerationZ_ < 0, H = absoluteLiquidHeight_). This uses no fill
+   // field, so it is robust to the negative contact-line fill drift that makes Σφ-weighting degenerate.
+   // Off by default → identical to the legacy path when unset.
+   const bool useHydrostaticReconstruction_ = false;
+   const real_t hydrostaticAccelerationZ_   = real_t(0); // a_z (≤ 0); same value fed to HydrostaticDensityFtor
+   const real_t absoluteLiquidHeight_       = real_t(0); // H: undisturbed free-surface height in lattice units
    const FlagUID liquidFlagUID_;
    const FlagUID gasFlagUID_;
    const FlagUID interfaceFlagUID_;
@@ -208,6 +251,18 @@ class PdfReconstructionManager
    uint_t convLiquid_      = uint_t(0); // branch B: !hasGas && !hasUnknown  → liquid
    uint_t convIntfUnknown_ = uint_t(0); // branch C: !hasGas &&  hasUnknown  → interface (fallback)
    uint_t convIntfSurface_ = uint_t(0); // branch D:  hasGas                 → interface (real surface)
+
+   // Unknown-neighbour diagnostics (phantom-force investigation). For every inner FormerMO cell we
+   // count how many of its 26 D3Q27 neighbours are themselves still-unknown FormerMO cells — i.e.
+   // cells whose PDFs are *also* being reconstructed this same pass. This tells us whether the
+   // unknowns are isolated (a reconstructed cell leans on well-defined fluid/gas neighbours) or
+   // clustered (it leans on neighbours that are themselves unknown → reconstruction error compounds,
+   // the suspected phantom-force amplifier). Flushed together with the conversion counts.
+   uint_t formerMoTotal_          = uint_t(0); // total inner FormerMO cells classified this period
+   uint_t formerMoWithUnknownNbr_ = uint_t(0); // of those, how many have >=1 unknown FormerMO neighbour
+   uint_t unknownNbrSum_          = uint_t(0); // sum of unknown-neighbour counts (→ mean per cell)
+   uint_t unknownNbrMax_          = uint_t(0); // largest unknown-neighbour count seen on any cell
+   std::array< uint_t, 27 > unknownNbrHist_ = {}; // histogram indexed by #unknown neighbours (0..26)
 };
 
 template< typename PdfField_T, typename BoundaryHandling_T, typename ParticleAccessor_T, typename Reconstructor_T,
@@ -233,6 +288,25 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
    WALBERLA_ASSERT_NOT_NULLPTR(boundaryHandling);
    WALBERLA_ASSERT_NOT_NULLPTR(flagField);
    WALBERLA_ASSERT_NOT_NULLPTR(particleField);
+
+   // Depth-consistent reconstruction (useHydrostaticReconstruction_): after the reconstructor sets a
+   // freed cell to PURE equilibrium at the fill-blind mean neighbour density, re-seed it to the
+   // hydrostatic density ρ_hyd(z) = 1 + 3·a_z·(z − H) at the cell centre. f_i^eq ∝ ρ at fixed u, so
+   // scaling every PDF by ρ_hyd/ρ_assigned yields f_i^eq(ρ_hyd, u_particle) with the velocity preserved
+   // exactly. In the bulk ρ_assigned ≈ ρ_hyd → near-no-op; at/above the waterline it removes the ρ≈1
+   // over-density that the MEM reads as phantom lift. Uses no fill field → robust to the negative
+   // contact-line fill drift that made Σφ-weighting degenerate. Call right after the reconstructor.
+   auto reseedHydrostatic = [&](const cell_idx_t x, const cell_idx_t y, const cell_idx_t z) {
+      if (!useHydrostaticReconstruction_) return;
+      const real_t rhoAssigned = pdfField->getDensity(x, y, z);
+      if (rhoAssigned <= real_t(1e-6)) return;
+      const Vector3< real_t > c = blockStorage_->getBlockLocalCellCenter(*block, Cell(x, y, z));
+      const real_t rhoHyd = real_t(1) + real_t(3) * hydrostaticAccelerationZ_ * (c[2] - absoluteLiquidHeight_);
+      if (rhoHyd <= real_t(0)) return; // above the column where the linear profile underflows: leave as-is
+      const real_t scale = rhoHyd / rhoAssigned;
+      for (uint_t fIdx = uint_t(0); fIdx < pdfField->fSize(); ++fIdx)
+         pdfField->get(x, y, z, fIdx) *= scale;
+   };
 
    WALBERLA_ASSERT_EQUAL(particleField->xyzSize(), flagField->xyzSize());
 
@@ -277,6 +351,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       bool hasLiquid  = false;
       bool hasGas     = false;
       bool hasUnknown = false;
+      uint_t unknownNbr = uint_t(0); // # of D3Q27 neighbours that are themselves unknown (FormerMO)
       for (int dz = -1; dz <= 1; ++dz)
          for (int dy = -1; dy <= 1; ++dy)
             for (int dx = -1; dx <= 1; ++dx)
@@ -285,7 +360,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
                const flag_t nf = flagField->get(cx + dx, cy + dy, cz + dz);
                if (isFlagSet(nf, bognerLiquid) || isFlagSet(nf, bognerInterface)) hasLiquid = true;
                if (isFlagSet(nf, bognerGas) || isFlagSet(nf, bognerInterface)) hasGas = true;
-               if (isFlagSet(nf, formerObstacle)) hasUnknown = true;
+               if (isFlagSet(nf, formerObstacle)) { hasUnknown = true; ++unknownNbr; }
             }
       // inner-cell guard for the conversion counters: a FormerMO cell in a ghost layer is a
       // duplicate of another rank's inner cell, so only inner cells are tallied.
@@ -293,6 +368,16 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       const cell_idx_t ys = cell_idx_c(flagField->ySize());
       const cell_idx_t zs = cell_idx_c(flagField->zSize());
       const bool inner = (cx >= 0 && cx < xs && cy >= 0 && cy < ys && cz >= 0 && cz < zs);
+
+      // Unknown-neighbour tally (independent of the gas/liquid/interface branch chosen below).
+      if (inner)
+      {
+         ++formerMoTotal_;
+         unknownNbrSum_ += unknownNbr;
+         if (unknownNbr > uint_t(0)) ++formerMoWithUnknownNbr_;
+         if (unknownNbr > unknownNbrMax_) unknownNbrMax_ = unknownNbr;
+         ++unknownNbrHist_[unknownNbr]; // unknownNbr ∈ [0,26]
+      }
 
       if (!hasLiquid) { if (inner) ++convGas_; return bognerGas; }
       if (!hasGas && !hasUnknown)
@@ -371,6 +456,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             cellInterval, if (isFlagSet(flagField->get(x, y, z), formerObstacle) &&
                               ac_->uidToIdx(particleField->get(x, y, z)) == idx) {
                (*reconstructor_)(block, x, y, z, pdfField, idx, *ac_);
+               reseedHydrostatic(x, y, z);
                if (conserveMomentumWhenRestoring_ && pdfField->isInInnerPart(Cell(x, y, z)))
                {
                   Vector3< real_t > force      = pdfField->getMomentumDensity(x, y, z);
@@ -387,6 +473,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             size_t particleIdx = ac_->uidToIdx(particleField->get(x, y, z));
             WALBERLA_ASSERT_UNEQUAL(particleIdx, ac_->getInvalidIdx(), "Index of particle is invalid!");
             (*reconstructor_)(block, x, y, z, pdfField, particleIdx, *ac_);
+            reseedHydrostatic(x, y, z);
 
             // [RECON-DENSITY-CHECK] VERIFY the fill-blind over-density hypothesis with real numbers.
             // EquilibriumReconstructor just set this freed cell to ρ = unweighted mean of its domain
@@ -426,6 +513,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
                      }
                const real_t rhoUnw = (nDom > uint_t(0)) ? sumRho / real_c(nDom) : real_t(1);
                const real_t rhoW   = (sumPhi > real_t(1e-6)) ? sumPhiRho / sumPhi : real_t(0);
+
                // Smoking gun: high density was assigned, but the fill-weighted value is much lower AND
                // the neighbourhood is dominated by partially-empty interface cells (i.e. the waterline).
                if (rhoAssigned > real_t(0.8) && rhoW < real_t(0.6) && nIntf > nLiq)
@@ -546,7 +634,10 @@ shared_ptr< PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAc
                                       bool conserveMomentumWhenRestoring, const FlagUID& liquidFlagUID,
                                       const FlagUID& gasFlagUID, const FlagUID& interfaceFlagUID,
                                       const BlockDataID& fillFieldID, const bool useBognerStateSelection = true,
-                                      const bool optimizeForSmallObstacleFraction = false)
+                                      const bool optimizeForSmallObstacleFraction = false,
+                                      const bool useHydrostaticReconstruction = false,
+                                      const real_t hydrostaticAccelerationZ = real_t(0),
+                                      const real_t absoluteLiquidHeight = real_t(0))
 {
    using RM_T = PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_T,
                                           EquilibriumReconstructor< BoundaryHandling_T >, ScalarField_T >;
@@ -554,7 +645,8 @@ shared_ptr< PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAc
                                    fluid,
                                    makeEquilibriumReconstructor< BoundaryHandling_T >(blockStorage, boundaryHandlingID),
                                    conserveMomentumWhenRestoring, liquidFlagUID, gasFlagUID, interfaceFlagUID,
-                                   fillFieldID, useBognerStateSelection, optimizeForSmallObstacleFraction));
+                                   fillFieldID, useBognerStateSelection, optimizeForSmallObstacleFraction,
+                                   useHydrostaticReconstruction, hydrostaticAccelerationZ, absoluteLiquidHeight));
 }
 
 } // namespace lbm_mesapd_coupling

@@ -95,16 +95,27 @@ class VectorFieldFlattenedHandling : public field::BlockDataHandling< VectorFiel
 
 class HydrostaticDensityFtor {
 public:
+   // Static reference height (legacy / useDynamicReferenceHeight=false): a fixed constant for the whole run.
    HydrostaticDensityFtor(const std::shared_ptr< Vector3 < real_t > >& acceleration, const real_t absoluteLiquidHeight) :
-   acceleration_(acceleration), absoluteLiquidHeight_(absoluteLiquidHeight) {}
+   acceleration_(acceleration), absoluteLiquidHeight_(absoluteLiquidHeight), dynamicHeight_(nullptr) {}
+
+   // Live reference height (useDynamicReferenceHeight=true): re-read every call from a shared_ptr that
+   // ParticleKernels' computeSubmergedVolumes() EMA-updates each step from the floaters' fitted local
+   // waterlines. Force-side only (see SimpleBB.h: rhoHydStat feeds only forceMEM, never the fluid field),
+   // so updating it here has no PDF/reconstruction feedback.
+   HydrostaticDensityFtor(const std::shared_ptr< Vector3 < real_t > >& acceleration,
+                          const std::shared_ptr< real_t >& dynamicHeight) :
+   acceleration_(acceleration), absoluteLiquidHeight_(real_t(0)), dynamicHeight_(dynamicHeight) {}
 
    real_t operator()(const Vector3<real_t>& pos){
-      return real_c(1) + real_c(3) * (*acceleration_)[2] * (pos[2] - absoluteLiquidHeight_);
+      const real_t H = dynamicHeight_ ? *dynamicHeight_ : absoluteLiquidHeight_;
+      return real_c(1) + real_c(3) * (*acceleration_)[2] * (pos[2] - H);
    }
-   
+
 private:
    const std::shared_ptr< Vector3 < real_t > > acceleration_;
    const real_t absoluteLiquidHeight_ ;
+   const std::shared_ptr< real_t >             dynamicHeight_; // null = use the static absoluteLiquidHeight_
 };
 
 // function describing the global initialization profile

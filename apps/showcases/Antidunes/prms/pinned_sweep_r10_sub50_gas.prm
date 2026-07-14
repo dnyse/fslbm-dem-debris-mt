@@ -1,0 +1,203 @@
+// pinned_sweep_r10_sub50_gas.prm  —  PHANTOM-FORMULA VALIDATION SWEEP (RADIUS axis (large))
+// Pinned sphere r=10 at x=53,y=30,z=63.0 (~~50% submerged) in the two-pillar pile-up.
+// Reads live [PhantomDecomp] F_pred_z vs measured [FloaterForces] F_hydro_z; ratio should ≈ 1.
+// F_pred = ΔP·A_proj, A_proj∝r² — this sweep tests the r² law and the A_proj(submersion) shape.
+// ─────────────────────────────────────────────────────────────────────────────
+// PINNED-SPHERE-AT-PILLAR probe — isolates the phantom by removing BOTH confounds that scrambled
+// every prior run: the sphere is held FIXED (no motion feedback) and the MEM reference is the plain
+// static flat H (no moving reference). Two pillars + full flow (U=0.02) so the pile-up develops.
+// We read F_hydro_z at a KNOWN, stationary configuration: is it ~0 (clean coupling) or a residual?
+// A residual that is steady/large ⇒ artifact or real wake force; ~0 ⇒ the free-run trouble was pure
+// motion/feedback. Variant: HALF-submerged (centre z=64 ≈ pile-up surface), φ fill-weighting ON.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One NORMAL-size floating sphere (radius 10 LU) starting ~5 LU above the free
+// surface, held FIXED for 30000 timesteps, then released ("dropped"). Two
+// cylindrical pillars stand in the flow; water piles up in front of them, so the
+// sphere is started high enough to clear that hump on release.
+//
+// Purpose:
+//   • The hydro-force submersion scaling is DISABLED in ParticleKernels.h, so the
+//     raw MEM force (phantom impulse included) reaches the sphere.
+//   • PdfReconstructionManager logs [FORMERMO-CONVERT] (how the uncovered cells are
+//     classified) and [FORMERMO-UNKNOWNS] (how many unknown cells, and how many of
+//     their neighbours are themselves unknown) every evaluationFrequency steps.
+//   This gives a quantitative picture of how many unknowns Bogner's algorithm faces
+//   and how clustered they are — input for a later plan to combat them.
+//
+// Geometry (waterline ≈ z=63 = absoluteLiquidHeight):
+//   • Sphere centre (30,30,78): bottom at z=68 (≈5 LU above waterline), centred in
+//     Y (y=30 ± 10 → y=[20,40], 20 LU from each NoSlip wall).
+//   • Pillars at (64,15,r=8) and (64,45,r=8). XY clearance from the sphere start:
+//     sqrt(34²+15²) ≈ 37.2 > r_sphere+r_pillar = 18 ✓ (no false contact at start).
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         40000;   // PINNED whole run: flow + pile-up develop, read steady F_hydro on the tail
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// Cylinder pillars — same geometry as giant_sphere_gas.prm / two_cylinder_floater_gas.prm.
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 15, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 64, 45, 90 >;
+      radius 8;
+   }
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // PINNED probe (settlingSteps ≫ timesteps ⇒ never released ⇒ held FIXED the whole run).
+      // Placed at the phantom hot-spot: x=53 (≈10 LU upstream of the pillars at x=64), y=30
+      // (centred between the two pillars, 15 LU from each; horiz. clearance to a pillar =
+      // sqrt(11²+15²)=18.6 > r_sph+r_pil=18 ✓). HALF-submerged variant: centre z=64 ≈ the dammed
+      // pile-up surface (flat level ~56, pillar pile-up ~64) → ~50% submerged. We DON'T let it
+      // move — we just read F_hydro_z at this fixed, known configuration (no motion feedback, no
+      // moving reference), to see whether the vertical force is ~0 (clean) or a residual.
+      position     < 53, 30, 63.0 >;
+      radius       10;
+      densityRatio 0.5;
+      settlingSteps 100000000;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;   // per-cell Bogner state selection (the path under study)
+   useFillWeighting              true;   // φ fill-weighting ON (default); OFF in the _nofw variant
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 15, 0 >; max < 64, 15, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 45, 0 >; max < 64, 45, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Y-midplane slab (centred in 60-cell domain), X=0 face slice, full XY volume up to z=150.
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

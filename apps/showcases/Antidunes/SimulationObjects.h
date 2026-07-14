@@ -33,6 +33,8 @@
 #include "DataCols.h"
 #include "PIDController.h"
 
+#include <unordered_map>
+
 namespace walberla {
 namespace antidunes {
 
@@ -80,10 +82,12 @@ struct SimulationObjects
    uint_t                                                      numParticles;
    // floaterUIDs[fi] = UID of floating sphere fi (matches simParams->floatingSpheres[fi]).
    // floaterBoxUIDs[bi] = UID of floating box bi (matches simParams->floatingBoxes[bi]).
-   // Both populated by setupParticles via an indexed creation loop + allReduce(SUM) so that every
+   // floaterCylinderUIDs[ci] = UID of floating cylinder ci (matches simParams->floatingCylinders[ci]).
+   // All populated by setupParticles via an indexed creation loop + allReduce(SUM) so that every
    // rank holds the correct UID for every floater regardless of which rank owns each particle.
    std::vector< walberla::id_t >                               floaterUIDs;
    std::vector< walberla::id_t >                               floaterBoxUIDs;
+   std::vector< walberla::id_t >                               floaterCylinderUIDs;
     
    // Boundary and flags ----------------------------------------------------------------------------------------------
    shared_ptr< AntidunesBoundaryHandling_T > antidunesBoundaryHandling;
@@ -102,7 +106,24 @@ struct SimulationObjects
    shared_ptr< Vector3< real_t > >  acceleration;
    shared_ptr< Vector3< real_t > >  meanVelocity;
    shared_ptr< real_t >             totalFluidMass;
-   
+
+   // Live MEM hydrostatic reference height (ModelParameters.useDynamicReferenceHeight). Seeded to the flat
+   // absoluteLiquidHeight and EMA-updated from floaters' fitted local waterlines in ParticleKernels'
+   // computeSubmergedVolumes(). Read fresh per boundary link by HydrostaticDensityFtor — force-side only,
+   // never touches the fluid/PDF fields (see SimpleBB.h: rhoHydStat only modifies local pdf copies used for
+   // forceMEM, after the field write). Null / unused when the toggle is off (static flat H).
+   shared_ptr< real_t >             memReferenceHeight;
+
+   // Per-floater free-surface plane fit used for the buoyancy/submerged-volume calculation, keyed by
+   // particle UID. Populated every step by ParticleKernels' computeSubmergedVolumes() (spheres) and
+   // computeSubmergedVolumesBox() (box/cylinder floaters). Diagnostic/visualization only (VTK output
+   // in BuildTimeloop.h, identifier "floaterPlane") — never read back into the physics. floaterPlaneOrigin
+   // is a point on the fitted plane (xBar); floaterPlaneNormal is the fitted free-surface normal
+   // (liquid->gas). A floater with no entry, or a zero-length normal, had no clean plane fit this step
+   // (fully submerged/emerged -> nothing meaningful to draw).
+   shared_ptr< std::unordered_map< walberla::id_t, Vector3< real_t > > > floaterPlaneOrigin;
+   shared_ptr< std::unordered_map< walberla::id_t, Vector3< real_t > > > floaterPlaneNormal;
+
    shared_ptr< DataCols >           dataCols;
 };
 

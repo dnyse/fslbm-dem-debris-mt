@@ -52,6 +52,7 @@
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/Reconstructor.h"
 
 #include "mesa_pd/data/shape/Box.h"
+#include "mesa_pd/data/shape/Cylinder.h"
 #include "mesa_pd/data/shape/CylindricalBoundary.h"
 #include "mesa_pd/vtk/OutputSelector.h"
 #include "mesa_pd/vtk/ParticleVtkOutput.h"
@@ -107,6 +108,48 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
    // particleFieldVTKOutput->setSamplingResolution(simParams->vtk.samplingResolution);
    // timeloop->addFuncBeforeTimeStep(vtk::writeFiles(particleFieldVTKOutput), "VTK: particle field data");
 
+   // Per-floater buoyancy plane-fit output selectors (shared by the sphere/box/cylinder floater VTK
+   // blocks below). Read simObjs->floaterPlaneOrigin/floaterPlaneNormal — populated every step by
+   // ParticleKernels' computeSubmergedVolumes()/computeSubmergedVolumesBox() (see SimulationObjects.h).
+   // A floater with no clean plane fit this step (fully submerged/emerged) reads back (0,0,0) for both —
+   // a zero-length "planeNormal" is the signal there's nothing to draw for that floater this frame.
+   //
+   // ParaView recipe (see changes.md): on the point data (before or after Glyph — a Glyph copies point
+   // data onto every vertex of the glyph, unchanged), add a Calculator computing
+   //   signedDist = planeNormal_X*(coordsX-planeOrigin_X) + planeNormal_Y*(coordsY-planeOrigin_Y)
+   //              + planeNormal_Z*(coordsZ-planeOrigin_Z)
+   // on the GLYPHED sphere/box/cylinder (so "coords" varies per vertex across the solid's surface) —
+   // this recomputes the true fitted plane freshly every frame, no manual per-timestep numbers needed.
+   // Then Filters > Clip, Clip Type = Scalar, Scalars = signedDist, Value = 0: splits the solid into
+   // submerged (signedDist < 0) vs emerged (signedDist > 0) pieces automatically, colour each separately.
+   // For the plane itself as a visible patch: Calculator with "Coordinate Results" checked, Result =
+   // planeOrigin (repositions the point to the fitted plane's actual location, not the floater centre),
+   // then Glyph that point (Glyph Type = Plane or 2D Disc, Orientation Array = planeNormal).
+   struct SelectFloaterPlaneOrigin
+   {
+      using return_type = mesa_pd::Vec3;
+      const std::unordered_map< walberla::id_t, Vector3< real_t > >* map_;
+      explicit SelectFloaterPlaneOrigin(const std::unordered_map< walberla::id_t, Vector3< real_t > >* m) : map_(m) {}
+      return_type operator()(const mesa_pd::data::Particle& p) const
+      {
+         if (!map_) return mesa_pd::Vec3(real_t(0));
+         auto it = map_->find(p.getUid());
+         return (it != map_->end()) ? it->second : mesa_pd::Vec3(real_t(0));
+      }
+   };
+   struct SelectFloaterPlaneNormal
+   {
+      using return_type = mesa_pd::Vec3;
+      const std::unordered_map< walberla::id_t, Vector3< real_t > >* map_;
+      explicit SelectFloaterPlaneNormal(const std::unordered_map< walberla::id_t, Vector3< real_t > >* m) : map_(m) {}
+      return_type operator()(const mesa_pd::data::Particle& p) const
+      {
+         if (!map_) return mesa_pd::Vec3(real_t(0));
+         auto it = map_->find(p.getUid());
+         return (it != map_->end()) ? it->second : mesa_pd::Vec3(real_t(0));
+      }
+   };
+
    // particles (sediment spheres) -----------------------------------------
    auto particlePointData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
    particlePointData->addOutput< mesa_pd::data::SelectParticleInteractionRadius >("radius");
@@ -128,6 +171,13 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       auto floaterPointData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
       floaterPointData->addOutput< mesa_pd::data::SelectParticleInteractionRadius >("radius");
       floaterPointData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      if (simParams->model.writeFloaterPlaneVTK)
+      {
+         floaterPointData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(
+                                         SelectFloaterPlaneOrigin(simObjs->floaterPlaneOrigin.get())));
+         floaterPointData->addOutput("planeNormal", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneNormal > >(
+                                         SelectFloaterPlaneNormal(simObjs->floaterPlaneNormal.get())));
+      }
       floaterPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
          return pIt->getType() == uint_t(1) && !isSet(pIt->getFlags(), GHOST);
@@ -183,6 +233,13 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       boxFloaterData->addOutput< SelectBoxEdgeLength >("edgeLength");
       boxFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
       boxFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      if (simParams->model.writeFloaterPlaneVTK)
+      {
+         boxFloaterData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(
+                                       SelectFloaterPlaneOrigin(simObjs->floaterPlaneOrigin.get())));
+         boxFloaterData->addOutput("planeNormal", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneNormal > >(
+                                       SelectFloaterPlaneNormal(simObjs->floaterPlaneNormal.get())));
+      }
       boxFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
          return pIt->getType() == uint_t(3) && !isSet(pIt->getFlags(), GHOST);
@@ -191,6 +248,76 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
          boxFloaterData, "floaterBox", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
          std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
       timeloop->addFuncBeforeTimeStep(vtk::writeFiles(boxFloaterVTKOutput), "VTK: floating box data");
+   }
+
+   // floating cylinders / logs (type 4) -----------------------------------
+   // One point per floating cylinder with glyphScale = (2r, L, 2r), the body→world rotation
+   // tensor, and velocity. ParaView recipe: Glyph Type = Cylinder scaled by glyphScale (Scale by
+   // Components), then Tensor Glyph using "rotation" (Extract Eigenvalues OFF) — NO manual
+   // Transform/Rotate-X-90 step needed, unlike an earlier version of this export.
+   //
+   // Axis-convention fix: ParaView's built-in Cylinder glyph source has its OWN long axis along
+   // its local Y, but mesa_pd's Cylinder shape defines its axis along its own local Z. Exporting
+   // the plain body→world rotation R (transposed for ParaView's column-major Tensor Glyph, as the
+   // box does) applies R as if the glyph's long axis were already Z, so the glyph's Y-axis (a
+   // RADIAL direction of the real cylinder, not its axis) gets mapped to wherever the real axis
+   // points — the glyph renders standing on the wrong axis (e.g. a horizontal log rendering as a
+   // short vertical post). Confirmed visually: a manual ParaView Transform (Rotate X=90, plus a
+   // compensating Translate since Transform rotates about the world origin, not the glyph's own
+   // centre) was needed to fix a single frame — not viable across an animation where the glyph
+   // moves every step. Fixed here instead by pre-composing R with Rx(+90°) (the fixed rotation
+   // that maps "glyph-local Y is the axis" onto "body-local Z is the axis") BEFORE transposing:
+   // exported = (R · Rx(+90°))ᵀ = Rx(-90°) · Rᵀ. Tensor Glyph applies this to the glyph's OWN
+   // local geometry before translating to the point position, so — unlike the manual ParaView
+   // Transform — this rotates correctly about the glyph's own centre at every timestep, no
+   // per-frame compensation needed.
+   if (!simParams->floatingCylinders.empty())
+   {
+      WALBERLA_LOG_INFO_ON_ROOT("AddOutputFloatingCylinders")
+
+      struct SelectCylinderGlyphScale
+      {
+         using return_type = mesa_pd::Vec3;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const auto* shape = dynamic_cast< const mesa_pd::data::Cylinder* >(p.getBaseShape().get());
+            if (!shape) return mesa_pd::Vec3(real_t(0));
+            return mesa_pd::Vec3(real_t(2) * shape->getRadius(), shape->getHeight(),
+                                 real_t(2) * shape->getRadius());
+         }
+      };
+      struct SelectParticleRotationMatrix
+      {
+         using return_type = std::array< real_t, 9 >;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const mesa_pd::Mat3 R = p.getRotation().getMatrix();
+            // (R * Rx(+90))^T = Rx(-90) * R^T — see comment above for the derivation.
+            return { R(0, 0),  R(1, 0),  R(2, 0),
+                     R(0, 2),  R(1, 2),  R(2, 2),
+                    -R(0, 1), -R(1, 1), -R(2, 1) };
+         }
+      };
+
+      auto cylinderFloaterData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
+      cylinderFloaterData->addOutput< SelectCylinderGlyphScale >("glyphScale");
+      cylinderFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
+      cylinderFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      if (simParams->model.writeFloaterPlaneVTK)
+      {
+         cylinderFloaterData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(
+                                            SelectFloaterPlaneOrigin(simObjs->floaterPlaneOrigin.get())));
+         cylinderFloaterData->addOutput("planeNormal", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneNormal > >(
+                                            SelectFloaterPlaneNormal(simObjs->floaterPlaneNormal.get())));
+      }
+      cylinderFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
+         using namespace walberla::mesa_pd::data::particle_flags;
+         return pIt->getType() == uint_t(4) && !isSet(pIt->getFlags(), GHOST);
+      });
+      auto cylinderFloaterVTKOutput = vtk::createVTKOutput_PointData(
+         cylinderFloaterData, "floaterCylinder", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
+         std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
+      timeloop->addFuncBeforeTimeStep(vtk::writeFiles(cylinderFloaterVTKOutput), "VTK: floating cylinder data");
    }
 
    // Box pillar VTK — one point per pillar at box center with edgeLength attribute.
@@ -543,15 +670,16 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    // TODO: maybe put this FlagUID in the antidunesBoundaryHandling
    const FlagUID FormerMO_Flag("former moving obstacle");
 
-   // Map every sphere (bed type 0 + floating type 1) AND every floating box (type 3) as a moving
-   // obstacle, so the box is a full two-way-coupled floater — blocks the fluid, receives a MEM
-   // hydrodynamic force via SimpleBB, and has its vacated cells reconstructed — exactly like a sphere.
+   // Map every sphere (bed type 0 + floating type 1) AND every floating box (type 3) / floating
+   // cylinder (type 4) as a moving obstacle, so each is a full two-way-coupled floater — blocks the
+   // fluid, receives a MEM hydrodynamic force via SimpleBB, and has its vacated cells reconstructed.
    // Fixed pillars (type 2) are deliberately excluded here; they are mapped separately as static
    // NoSlip/FreeSlip (see SetupStages). Must stay consistent with `floaterSelector` in SetupStages.
    auto movingObstacleSelector = [](const size_t particleIdx, const auto& ac) {
-      const bool isSphere      = ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
-      const bool isFloatingBox = ac.getType(particleIdx) == uint_t(3);
-      return isSphere || isFloatingBox;
+      const bool isSphere           = ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
+      const bool isFloatingBox      = ac.getType(particleIdx) == uint_t(3);
+      const bool isFloatingCylinder = ac.getType(particleIdx) == uint_t(4);
+      return isSphere || isFloatingBox || isFloatingCylinder;
    };
 
    // sweep for mapping particles into the LBM cells
@@ -621,7 +749,11 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
          walberla::free_surface::flagIDs::gasFlagID,
          walberla::free_surface::flagIDs::interfaceFlagID,
          simObjs->fillFieldID,
-         simParams->model.useBognerReconstruction);
+         simParams->model.useBognerReconstruction,
+         /* optimizeForSmallObstacleFraction */ false,
+         simParams->model.useHydrostaticReconstruction,
+         (*simObjs->acceleration)[2],                    // a_z (= -gravity), same value HydrostaticDensityFtor uses
+         simParams->staticReferenceHeight());            // flat static reference H (same as SimpleBB)
 
    const uint_t convLogFreq = simParams->evaluation.evaluationFrequency;
 

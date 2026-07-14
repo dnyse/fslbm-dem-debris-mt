@@ -1,0 +1,161 @@
+// sphere_held_partial_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC PHANTOM-FORCE TEST B — ~50% submerged, held fixed, still water.
+//
+// Identical to sphere_held_submerged_gas.prm EXCEPT the sphere centre is at the
+// waterline (z=56) so it is ~50% submerged: lower half in liquid, upper half (the
+// "cap") exposed to the constant-pressure gas. The sphere is pinned and never
+// released; we read the steady MEM [FloaterForces] F_hydro_z at hydrostatic rest.
+//
+// At rest the true dynamic force is zero, so any F_hydro_z is phantom. Compared with
+// the fully-submerged test this isolates the mechanism:
+//   • submerged ≈ 0  AND  partial > 0  → MISSING GAS PRESSURE on the emerged cap
+//                                         (point 1: gas exerts no down-force, the
+//                                         up/down balance breaks for a partial body).
+//   • both > 0                          → hydrostatic-staircase error (point 2).
+//   • both ≈ 0                          → no static phantom (it is purely dynamic).
+//
+// Geometry: waterline z=56.0. Sphere centre z=56, r=8 → spans z=[48,64]: submerged
+// z=[48,56] (≈50%), emerged z=[56,64].  φ-weighting ON (current design), submFrac OFF.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         15000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   // ~50% submerged, held fixed forever (settlingSteps >> timesteps → never released).
+   FloatingSphere { position < 64, 30, 56 >; radius 8; densityRatio 0.5; settlingSteps 100000000; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

@@ -27,6 +27,7 @@
 #include <mesa_pd/common/ParticleFunctions.h>
 
 #include <mesa_pd/data/shape/Box.h>
+#include <mesa_pd/data/shape/Cylinder.h>
 #include <mesa_pd/data/shape/CylindricalBoundary.h>
 #include <mesa_pd/data/shape/Ellipsoid.h>
 #include <mesa_pd/data/shape/HalfSpace.h>
@@ -71,6 +72,14 @@ bool isPointInsideEllipsoidBF(const Vec3& pointBF,
 {
    return ( (pointBF[0] * pointBF[0])/(semiAxes[0] * semiAxes[0]) + (pointBF[1] * pointBF[1])/(semiAxes[1] * semiAxes[1])
             + (pointBF[2] * pointBF[2])/(semiAxes[2] * semiAxes[2]) <= 1_r );
+}
+
+inline
+bool isPointInsideCylinderBF(const Vec3& pointBF,
+                             const real_t radius, const real_t height )
+{
+   return (pointBF[0] * pointBF[0] + pointBF[1] * pointBF[1] <= radius * radius) &&
+          (std::fabs(pointBF[2]) <= real_t(0.5) * height);
 }
 
 inline
@@ -131,6 +140,14 @@ struct ContainsPointFunctor
       static_assert(std::is_base_of_v<mesa_pd::data::IAccessor, ParticleAccessor_T>, "Provide a valid accessor as template");
 
       return isPointInsideBoxBF(mesa_pd::transformPositionFromWFtoBF(particleIdx, ac, point), box.getEdgeLength());
+   }
+
+   template<typename ParticleAccessor_T>
+   bool operator()(const size_t particleIdx, const mesa_pd::data::Cylinder& cylinder, const ParticleAccessor_T& ac, const Vector3<real_t>& point )
+   {
+      static_assert(std::is_base_of_v<mesa_pd::data::IAccessor, ParticleAccessor_T>, "Provide a valid accessor as template");
+
+      return isPointInsideCylinderBF(mesa_pd::transformPositionFromWFtoBF(particleIdx, ac, point), cylinder.getRadius(), cylinder.getHeight());
    }
 
    template<typename ParticleAccessor_T>

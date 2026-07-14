@@ -83,7 +83,8 @@ class AntidunesBoundaryHandling
    AntidunesBoundaryHandling(const std::shared_ptr< StructuredBlockForest >& blockForest, BlockDataID pdfFieldID,
                              BlockDataID fillLevelID, BlockDataID particleFieldID,
                              const shared_ptr< ParticleAccessor_T >& ac,
-                             std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct);
+                             std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct,
+                             bool useFillWeighting = true);
 
    // initialize fluid field from config file using (quotes indicate the string to be used in the file):
    // - "CellInterval" (see src/geometry/initializer/BoundaryFromCellInterval.h)
@@ -158,6 +159,7 @@ class AntidunesBoundaryHandling
    {
       return hydrostaticDensityFct_;
    }
+   inline bool getUseFillWeighting() const { return useFillWeighting_; }
 
    // executes standard waLBerla boundary handling
    class ExecuteBoundaryHandling
@@ -224,6 +226,7 @@ class AntidunesBoundaryHandling
    BlockDataID particleFieldID_;
    shared_ptr< ParticleAccessor_T > ac_;
    std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct_;
+   bool useFillWeighting_;
 
    BlockDataID handlingID_;
 
