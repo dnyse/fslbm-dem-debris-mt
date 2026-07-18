@@ -1,0 +1,206 @@
+// box_stillwater_showcase_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// VISUALIZATION SHOWCASE: turns on the new per-floater buoyancy-plane VTK export
+// (`ModelParameters.writeFloaterPlaneVTK`, added in BuildTimeloop.h — the
+// `planeOrigin`/`planeNormal` point-data channels on the `floaterBox` VTK writer,
+// wired since the analytic-clip work but not yet enabled by ANY existing prm) on a
+// clean, minimal still-water box scenario, so the fitted free-surface plane and the
+// submerged-volume clip can be watched settling in ParaView.
+//
+// Same scenario as cube_stillwater_gas.prm (proven safe — see below), plus:
+//   • useAnalyticBoxBuoyancy true — selects the exact OBB∩plane clip (clipBoxAnalytic)
+//     for the FORCE, not just the cross-check. This matters for the showcase: the
+//     exported (planeOrigin, planeNormal) is exactly the plane clipBoxAnalytic cuts
+//     against (ParticleKernels.h ~1910-1917), so a ParaView Clip against that exported
+//     plane reproduces the submerged volume bit-for-bit. With the legacy 12³ sampling
+//     method selected instead, the visualized clip only matches the analytic
+//     CROSS-CHECK value (typically agreeing to a few percent), not the sampled value
+//     actually driving the force — analytic avoids that caveat entirely.
+//   • writeFloaterPlaneVTK true — emits the plane data every VTK.fluid_field.writeFrequency
+//     steps (BuildTimeloop.h reuses that same frequency for the floater/box/cylinder
+//     point-data writers, so no separate VTK{} config is needed).
+//
+// pinPosition true, pinAxes <1,1,0>: X and Y translation are held at `position` every DEM
+// sub-cycle, Z is left FREE — the box finds its own buoyant depth by sinking/rising in
+// place, with no lateral drift to chase with the camera (a fully free run visibly
+// wanders side to side while settling, which isn't interesting for this showcase; only
+// the vertical settling and the plane/clip response to it are). Rotation is also left
+// entirely free (pinPosition only ever holds translation, never rotation — see
+// SimulationParams.h FloatingBoxParams::pinPosition), so the box still tilts/rocks
+// naturally, it just can't carry that motion sideways.
+//
+// Why this doesn't hit the earlier "pinning x,y BACKFIRES" failure (changes.md): that
+// case pinned translation on a box started 10° OFF its stable tilt, which needed a large
+// righting ROTATION (90°→147°→…) — pinning removed the sway-coupling that damps roll,
+// so it spun forever instead of settling. Here the box starts AT its stable edge-down
+// orientation (initialTiltAngleDeg 45, GM>0), so there is no righting rotation to damp in
+// the first place — only a small vertical settle — so the XY pin is safe.
+//
+// ParaView recipe (see changes.md and the comment above BuildTimeloop.h's
+// SelectFloaterPlaneOrigin): Glyph the floaterBox point (Glyph Type = Box, scale by
+// edgeLength, Tensor Glyph using "rotation"), add a Calculator computing
+//   signedDist = planeNormal_X*(coordsX-planeOrigin_X) + planeNormal_Y*(coordsY-planeOrigin_Y)
+//              + planeNormal_Z*(coordsZ-planeOrigin_Z)
+// on the glyphed box, then Filters > Clip (Scalar, Scalars=signedDist, Value=0) to split
+// submerged vs emerged. For the plane itself: Calculator with "Coordinate Results" =
+// planeOrigin, then Glyph (Plane/2D Disc, Orientation Array = planeNormal).
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         30000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // Cube edge 26 (halfExtents 13×13×13), started EDGE-DOWN (initialTiltAngleDeg 45) —
+      // its stable orientation. X,Y pinned (see header) so it settles straight down to
+      // half-submerged in place. Centre (64,30,62): partly submerged at t=0.
+      position             < 64, 30, 62 >;
+      halfExtents          < 13, 13, 13 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+      initialTiltAngleDeg  45;
+      comOffsetZ           0;
+      pinPosition          true;   // hold X,Y; Z free -> settles in place, no XY drift
+      pinAxes              < 1, 1, 0 >;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticBoxBuoyancy        true;   // exact clip drives the force -> plane export matches it exactly
+   writeFloaterPlaneVTK          true;   // the showcase switch: emit planeOrigin/planeNormal to VTK
+   boxPlaneFitBandFactor         2.0;    // widened from the 0.8 default (see changes.md) -- test whether
+                                         // the late-time low bias in the fitted plane (observed ~0.5-1.5 LU
+                                         // below the true 56.024 waterline once the box stops moving)
+                                         // shrinks once the fit reaches further past the box's own local
+                                         // disturbance (12.4 -> 28 LU past the box surface for this cube)
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

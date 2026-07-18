@@ -1,0 +1,262 @@
+// mixed_floaters_single_pillar_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// ALL-SHAPE, SINGLE-PILLAR interaction test — part of the floater/pillar interaction
+// test suite (see also: sphere_pillar_*, box_pillar_*, cylinder_pillar_*). Where
+// mixed_floaters_two_pillars_gas.prm exercises one of each shape jamming/piling up
+// against a two-pillar gap, this run puts TWO of EACH shape (2 spheres, 2 boxes,
+// 2 log cylinders — 6 floaters total) around a SINGLE pillar, so every shape not
+// only contacts the pillar but also has a same-shape and cross-shape neighbour to
+// interact with as they drift and glance past on either side.
+//
+// SCALED-UP variant: every floater is 2x the linear size of the original version
+// (sphere radius 5->10, box halfExtents <3,3,3>-><6,6,6>, log radius 3->6 &
+// length 10->20) and the pillar radius is 1.5x (8->12). The whole layout was
+// re-solved from scratch for this pass — none of the original positions still
+// apply, since doubling every floater roughly doubles its reach too. See the
+// clearance numbers below (all independently re-verified, not just scaled by 2).
+//
+// Layout (flow +X, pillar at x=64): floaters are staged in a 3-column x 2-row grid
+// upstream of the pillar — column = shape (spheres x=0, boxes x=24, logs x=44),
+// row = side (y=13 "south" / y=47 "north" of the pillar, which sits on the channel
+// centreline y=30). All start positions are checked pairwise (and against the
+// pillar) to have zero overlap at t=0 (worst-case clearance noted per pair; box
+// reach is bounded by its half-diagonal 6*sqrt(3)=10.39 LU, conservative for the
+// small +-5 deg tilt):
+//   • Same-row, adjacent-column pairs: sphere(r=10) + box(halfDiag=10.39) -> need
+//     >=20.39 LU, have 24 LU (clearance 3.61); box(halfDiag=10.39) + log(r=6) ->
+//     need >=16.39 LU, have 20 LU (clearance 3.61). Clear.
+//   • Cross-row pairs (34 LU apart in Y, same column): sphere needs >=20 (clearance
+//     14); box needs >=20.78 (clearance 13.2); the two logs are coaxial (same x,
+//     same axis direction) so any positive Y-gap clears them regardless of radius
+//     -- gap is 14 LU. Clear.
+//   • Nearest floater to the pillar (the two logs at x=44): each log's Y-extent is
+//     20 LU (half-length 10), so its NEAREST end sits only 4 LU closer to the
+//     centreline than its centre -- e.g. top-row log spans y=[3,23], nearest point
+//     to pillar y=30 is y=23. Distance from (44,23) to pillar centre (64,30) =
+//     sqrt(20^2+7^2) = 21.19 LU vs. r_pillar+r_log = 18 LU -> clearance 3.19 LU.
+//     This is the tightest margin in the whole layout (by design: the log's own
+//     length is what brings it closest to the pillar, not its column's x-offset).
+//   • Wall clearance (domain Y=60, walled N/S): the widest floater at each row
+//     (box half-diagonal 10.39) sits 2.61 LU clear of the nearest wall (y=13-10.39
+//     and 60-47-10.39). Clear but tight -- do not shrink the +-17 row offset further.
+//
+// Geometry (absoluteLiquidHeight = 56.024; all floaters densityRatio 0.5, centred
+// at z=56 for a 50% submerged start — exact for the circularly-symmetric shapes,
+// and for the upright/near-upright boxes):
+//   • Pillar: center (64, 30, 90), radius 12, axis along Z.
+//   • Spheres (radius 10): (0, 13, 56) and (0, 47, 56).
+//   • Boxes (cube halfExtents <6,6,6>): (24, 13, 56) tilt +5°, (24, 47, 56) tilt -5°
+//     about Y (opposite seed tilts, as in mixed_floaters_two_pillars_gas.prm, so the
+//     pair is visually distinguishable and each explores its own roll direction).
+//   • Logs (radius 6, length 20, axis <0,1,0>): (44, 13, 56) and (44, 47, 56).
+//
+// Watch: [FloaterForces] (spheres), [BoxForces] (boxes), [CylForces] (logs);
+// F_contact≠0 marks pillar grazes and any floater-floater collisions as the six
+// bodies fan out on either side of the single pillar and potentially re-converge
+// downstream.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         80000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 30, 90 >;
+      radius 12;
+   }
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      position     < 0, 13, 56 >;
+      radius       10;
+      densityRatio 0.5;
+      settlingSteps 500;
+   }
+   FloatingSphere
+   {
+      position     < 0, 47, 56 >;
+      radius       10;
+      densityRatio 0.5;
+      settlingSteps 500;
+   }
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      position             < 24, 13, 56 >;
+      halfExtents          < 6, 6, 6 >;
+      densityRatio         0.5;
+      settlingSteps        500;
+      initialTiltAngleDeg  5;
+   }
+   FloatingBox
+   {
+      position             < 24, 47, 56 >;
+      halfExtents          < 6, 6, 6 >;
+      densityRatio         0.5;
+      settlingSteps        500;
+      initialTiltAngleDeg  -5;
+   }
+}
+
+FloatingCylinders
+{
+   FloatingCylinder
+   {
+      position             < 44, 13, 56 >;
+      radius               6;
+      length               20;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.5;
+      settlingSteps        500;
+   }
+   FloatingCylinder
+   {
+      position             < 44, 47, 56 >;
+      radius               6;
+      length               20;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.5;
+      settlingSteps        500;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 30, 0 >; max < 64, 30, 180 >; radius 12; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Y-midplane slab (centred in 60-cell domain), X=0 face slice, full XY volume up to z=150.
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

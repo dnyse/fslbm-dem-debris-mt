@@ -1,0 +1,191 @@
+// sphere_sphere_collision_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// FLOATER×FLOATER head-on collision test (still water) — complements the
+// floater×pillar suite (sphere_pillar_*, box_pillar_*, cylinder_pillar_*,
+// mixed_floaters_*) by isolating a direct floater-floater contact instead of a
+// floater-pillar one. No flow forcing (PID target 0, same still-water domain as
+// box_stillwater_showcase_gas.prm/cube_stillwater_gas.prm) and no pillars at all
+// — the only thing that moves the two spheres is the INITIAL VELOCITY each is
+// given at creation (new `FloatingSphere.initialVelocity` parameter, wired into
+// SetupStages.h's sphere-creation loop via mesa_pd's setLinearVelocity), aimed
+// straight at each other so the collision itself (not any flow-driven drift) is
+// what's being observed.
+//
+// Geometry (absoluteLiquidHeight = 56.024; domain centre x=64):
+//   • Sphere A: radius 6, position (44, 30, 56.024), initialVelocity ( 0.05, 0, 0).
+//   • Sphere B: radius 6, position (84, 30, 56.024), initialVelocity (-0.05, 0, 0).
+//   • Both densityRatio 0.5 -> centred exactly at the free surface (50% submerged,
+//     circularly symmetric so this holds exactly), settlingSteps 0 (fully
+//     submerged-at-rest start needs no settling phase; the horizontal velocity
+//     doesn't disturb the vertical equilibrium).
+//   • Symmetric about x=64, 40 LU apart, closing at a combined 0.1 LU/step. Gap
+//     between surfaces at t=0: 40 - 2*6 = 28 LU > 0 -> clear, no initial overlap.
+//     Each sphere covers 14 LU (half the gap) at 0.05 LU/step -> first contact
+//     expected around t ~ 280 steps (ignoring hydrodynamic drag deceleration,
+//     which will push this out somewhat in practice).
+//
+// Expected outcome: the two spheres close, DEM contact fires at ParticleKernels.h's
+// Sphere×Sphere path (frictionCoefficient 0.5, restitutionCoefficient 0.97 from
+// ParticleParameters) at x~64, y=30, then rebound apart; hydrodynamic drag in the
+// still water bleeds off the rebound velocity over subsequent steps until both
+// come to rest again, symmetric about the centreline. Watch [FloaterForces] for
+// the F_contact spike at the collision instant and the post-collision velocity
+// sign flip in the checkpoint/eval output.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         15000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // Approaches from -x side, symmetric about the domain centreline x=64.
+      position        < 44, 30, 56.024 >;
+      radius           6;
+      densityRatio     0.5;
+      settlingSteps    0;
+      initialVelocity  < 0.05, 0, 0 >;
+   }
+   FloatingSphere
+   {
+      // Approaches from +x side, mirror of sphere A.
+      position        < 84, 30, 56.024 >;
+      radius           6;
+      densityRatio     0.5;
+      settlingSteps    0;
+      initialVelocity  < -0.05, 0, 0 >;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Y-midplane slab (centred in 60-cell domain), X=0 face slice, full XY volume up to z=150.
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

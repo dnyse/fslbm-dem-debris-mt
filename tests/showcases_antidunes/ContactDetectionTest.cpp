@@ -14,18 +14,35 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file ContactDetectionTest.cpp
-//! Unit tests for walberla::antidunes::SolidCylinderContactDetection, covering every shape pair it
-//! can be asked to resolve: the 5 pairs it customises (Sphere x Cylinder "floating log", Sphere x
-//! CylindricalBoundary "pillar", Box x HalfSpace "wall/floor", Box x CylindricalBoundary, Cylinder x
-//! CylindricalBoundary) with hand-traced expected values; the 2 pairs it inherits as exact analytic
-//! overloads (Sphere x Sphere, Sphere x Box) exercised through this class specifically to confirm
-//! `using GeneralContactDetection::operator();` doesn't shadow them; and the 3 pairs with NO custom
-//! override that fall through to the inherited GJK/EPA path (Box x Box, Cylinder x Box, Cylinder x
-//! Cylinder) using simple axis-aligned geometry where the correct penetration is unambiguous from
-//! basic separating-axis geometry, with the sign convention/numerical noise confirmed by an
-//! instrumented run rather than assumed. testCylinderPillarBruteForceCrossCheck additionally
-//! verifies the fixed-point closest-point search independently, via dense surface sampling that
-//! never calls the algorithm under test.
+//! Unit tests for walberla::antidunes::SolidCylinderContactDetection. Covers the full matrix every
+//! floater shape (Sphere, Box, Cylinder) can be asked to resolve against: every floater x floater
+//! pair, every floater x HalfSpace ("wall/floor") pair, and every floater x CylindricalBoundary
+//! ("pillar") pair -- 12 physically-meaningful pairs in total (HalfSpace/CylindricalBoundary never
+//! contact each other or themselves, since both are static). Each pair gets a positive contact case
+//! plus a no-contact negative control; pairs with their own swapped-argument overload (the 5 custom
+//! ones below, plus the GJK/EPA and pillar ones) additionally assert order-invariance.
+//!
+//! Breakdown by resolution path:
+//! - 6 CUSTOM overloads (hand-traced expected values): Sphere x Cylinder "floating log", Sphere x
+//!   CylindricalBoundary, Box x HalfSpace, Box x CylindricalBoundary, Cylinder x CylindricalBoundary,
+//!   Cylinder x HalfSpace. The last one was ADDED after testCylinderHalfSpaceContact's derivation
+//!   surfaced that this pair, when left to fall through to GeneralContactDetection's generic
+//!   HalfSpace-vs-anything template, returned contactNormal = -wallNormal (into the wall) -- the
+//!   opposite sign from every other HalfSpace pair (Sphere and Box both give +wallNormal, matching
+//!   detectSphereHalfSpaceCollision's proven-correct-in-production convention). Fixed in
+//!   ParticleKernels.h by giving Cylinder x HalfSpace its own overload using the identical
+//!   support()-based formula as Box x HalfSpace.
+//! - 3 pairs INHERITED as exact analytic overloads (Sphere x Sphere, Sphere x Box, Sphere x
+//!   HalfSpace), exercised through THIS class specifically to confirm
+//!   `using GeneralContactDetection::operator();` doesn't shadow them. Sphere x HalfSpace was
+//!   missing from an earlier version of this coverage list -- an actual gap, not a stylistic
+//!   omission, since AnalyticContactDetection provides it the same way as the other two.
+//! - 3 pairs with NO custom/analytic override, falling through to the inherited GJK/EPA path: Box x
+//!   Box, Cylinder x Box, Cylinder x Cylinder -- simple axis-aligned geometry, unambiguous from
+//!   separating-axis theorem, sign convention confirmed by an instrumented run.
+//!
+//! testCylinderPillarBruteForceCrossCheck additionally verifies the fixed-point closest-point search
+//! independently, via dense surface sampling that never calls the algorithm under test.
 //======================================================================================================================
 
 // SimulationObjects.h (pulled in transitively by ParticleKernels.h) uses blockforest::SimpleCommunication
@@ -93,6 +110,23 @@ void testSphereSphereContact()
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), dir * shift * real_t(0.5));
 }
 
+void testSphereSphereNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto s0 = ps->create();
+   s0->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   const Vec3 dir = Vec3(real_t(1), real_t(2), real_t(3)).getNormalized();
+   auto s1 = ps->create();
+   s1->setPosition(dir * real_t(1.5)); // separation: 1.5 - (0.5+0.5) = 0.5 > 0
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.5));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, sphereShape, ac));
+}
+
 void testSphereBoxContact()
 {
    // Hand-traced against analytic::detectSphereBoxCollision (AnalyticCollisionFunctions.h): sphere
@@ -121,6 +155,24 @@ void testSphereBoxContact()
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), real_t(-0.1));
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), Vec3(real_t(1), real_t(0), real_t(0)));
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(0.5), real_t(0), real_t(0)));
+}
+
+void testSphereBoxNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(5), real_t(0), real_t(0))); // well clear
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   box->setRotation(mesa_pd::Rot3());
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.6));
+   const mesa_pd::data::Box    boxShape(Vec3(real_t(1), real_t(1), real_t(1)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, boxShape, ac));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -222,6 +274,59 @@ void testCylinderBoxContact()
    // truth for general convex shapes, and pybullet's own cylinder approximation adds further noise
    // to any off-axis component specifically for cylinder-involving pairs.
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactPoint()[0], real_t(0.45), real_t(1e-3));
+}
+
+void testCylinderBoxNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   cyl->setRotation(mesa_pd::Rot3());
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(3), real_t(0), real_t(0))); // well clear: 0.5+0.5 < 3
+   box->setRotation(mesa_pd::Rot3());
+
+   const mesa_pd::data::Cylinder cylShape(real_t(0.5), real_t(2));
+   const mesa_pd::data::Box      boxShape(Vec3(real_t(1), real_t(1), real_t(1)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, cylShape, boxShape, ac));
+}
+
+void testCylinderBoxSwappedOrder()
+{
+   // Unlike the custom overloads (whose "reverse" version hands off to the identical formula with
+   // idx1/idx2 swapped by construction), this pair falls through to GeneralContactDetection's
+   // GJK/EPA path, which internally re-orders by particle UID before computing anything (see
+   // GeneralContactDetection::operator(), the "ensure idx2's UID > idx1's UID" check) -- so calling
+   // with either argument order must converge on the exact SAME underlying computation, not just an
+   // equivalent one. That's what this test actually verifies, for the one GJK/EPA-fallback pair
+   // that didn't have a swap check yet (Box x Box and Cylinder x Cylinder use identical shapes on
+   // both sides, so a swap test there wouldn't exercise anything a mixed-shape pair doesn't already
+   // cover more thoroughly).
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   cyl->setRotation(mesa_pd::Rot3());
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(0.9), real_t(0), real_t(0)));
+   box->setRotation(mesa_pd::Rot3());
+
+   const mesa_pd::data::Cylinder cylShape(real_t(0.5), real_t(2));
+   const mesa_pd::data::Box      boxShape(Vec3(real_t(1), real_t(1), real_t(1)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, cylShape, boxShape, ac));
+
+   SolidCylinderContactDetection scd2;
+   WALBERLA_CHECK(scd2(1, 0, boxShape, cylShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), scd2.getPenetrationDepth());
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), scd2.getContactNormal());
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), scd2.getContactPoint());
 }
 
 void testCylinderCylinderContact()
@@ -352,6 +457,24 @@ void testSphereInsideCylinderEnvelopBranch()
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(-0.15), real_t(0), real_t(0)));
 }
 
+void testSphereCylinderNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(3), real_t(0), real_t(0))); // separation: 3-(1+1)=1 > 0
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   cyl->setRotation(mesa_pd::Rot3());
+
+   const mesa_pd::data::Sphere   sphereShape(real_t(1));
+   const mesa_pd::data::Cylinder cylShape(real_t(1), real_t(4));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, cylShape, ac));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Sphere (idx0, "sphere floater") x CylindricalBoundary (idx1, "pillar")
 // ---------------------------------------------------------------------------------------------
@@ -401,6 +524,63 @@ void testSphereCylindricalBoundaryNoContact()
 
    SolidCylinderContactDetection scd;
    WALBERLA_CHECK(!scd(0, 1, sphereShape, pillarShape, ac));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sphere (idx0, "sphere floater") x HalfSpace (idx1, "wall/floor") -- inherited unchanged from
+// AnalyticContactDetection (detectSphereHalfSpaceCollision), same rationale as testSphereSphereContact
+// / testSphereBoxContact: exercised through THIS class to confirm it isn't shadowed by the custom
+// overloads above, not because the math itself is new. This pair was previously untested in this
+// file entirely -- see the file header note.
+// ---------------------------------------------------------------------------------------------
+
+void testSphereHalfSpaceContact()
+{
+   // Same wall geometry as testBoxHalfSpaceContactAxisAligned (position, normal) for direct
+   // cross-shape comparison. Expected values hand-traced from detectSphereHalfSpaceCollision
+   // (AnalyticCollisionFunctions.h): d = n.pos2 = 0, k = n.pos1 = 0.3,
+   // depth = k - r - d = 0.3 - 0.6 = -0.3, contactPoint = pos1 - (r+depth)*n = (0,0,0.3) - 0.3*(0,0,1)
+   // = (0,0,0), contactNormal = n (unchanged sign, "points away from the wall").
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(0), real_t(0), real_t(0.3)));
+   auto wall = ps->create();
+   wall->setPosition(Vec3(real_t(0), real_t(0), real_t(0))); // plane at z=0
+
+   const mesa_pd::data::Sphere    sphereShape(real_t(0.6));
+   const mesa_pd::data::HalfSpace wallShape(Vec3(real_t(0), real_t(0), real_t(1))); // normal points up, away from the wall
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, sphereShape, wallShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), real_t(-0.3));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(1)));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(0), real_t(0), real_t(0)));
+
+   // Swapped-argument overload must give the identical result.
+   SolidCylinderContactDetection scd2;
+   WALBERLA_CHECK(scd2(1, 0, wallShape, sphereShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), scd2.getPenetrationDepth());
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), scd2.getContactNormal());
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), scd2.getContactPoint());
+}
+
+void testSphereHalfSpaceNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(0), real_t(0), real_t(2))); // well clear of the wall
+   auto wall = ps->create();
+   wall->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Sphere    sphereShape(real_t(0.6));
+   const mesa_pd::data::HalfSpace wallShape(Vec3(real_t(0), real_t(0), real_t(1)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, wallShape, ac));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -658,6 +838,78 @@ void testCylinderPillarBruteForceCrossCheck()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(minDist, analyticDistToAxis, real_t(1e-3));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Cylinder (idx0, "floating log") x HalfSpace (idx1, "wall/floor") -- has its own overload in
+// SolidCylinderContactDetection (ParticleKernels.h), identical support()-based formula to Box x
+// HalfSpace above. Geometry below is chosen so the cylinder's flat end cap faces the wall (axis
+// parallel to the wall normal): Cylinder::support() explicitly returns the CAP CENTRE (not an
+// ambiguous rim point) whenever the search direction is purely axial, so this is a clean,
+// unambiguous case to hand-trace, not a degenerate one.
+//
+// This pair used to fall through to GeneralContactDetection's generic HalfSpace-vs-anything
+// template, which returns contactNormal = -wallNormal (into the wall) -- the opposite sign from
+// every other HalfSpace pair (Sphere and Box both give +wallNormal, matching
+// detectSphereHalfSpaceCollision's proven-correct-in-production convention -- see
+// testSphereHalfSpaceContact / testBoxHalfSpaceContactAxisAligned). Fixed by adding a dedicated
+// Cylinder x HalfSpace overload using the same formula as Box's; the expected values below reflect
+// the fixed, +wallNormal convention.
+// ---------------------------------------------------------------------------------------------
+
+void testCylinderHalfSpaceContact()
+{
+   // Cylinder axis = world z (identity rotation), radius 1, height 4 (halfLen 2), centred at
+   // (0,0,1) -> bottom cap centre at world (0,0,-1), 1 LU below the wall plane at z=0.
+   // Hand-traced from the fixed overload (same formula as Box x HalfSpace):
+   // deepest = c + R*cyl.support(-(R^T*n)) = (0,0,1) + cyl.support((0,0,-1));
+   // Cylinder::support((0,0,-1)) in body frame = (0,0,-2) (pure axial -> cap CENTRE, not a rim
+   // point) -> deepest = (0,0,-1); penetrationDepth = n.deepest - d = -1-0 = -1;
+   // contactNormal = n = (0,0,1); contactPoint = deepest - penetrationDepth*n = (0,0,-1)+(0,0,1)
+   // = (0,0,0) (on the wall plane, same convention as the Box case).
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(0), real_t(1)));
+   cyl->setRotation(mesa_pd::Rot3()); // identity: axis = world z
+   auto wall = ps->create();
+   wall->setPosition(Vec3(real_t(0), real_t(0), real_t(0))); // plane at z=0
+
+   const mesa_pd::data::Cylinder  cylShape(real_t(1), real_t(4)); // radius 1, height 4
+   const mesa_pd::data::HalfSpace wallShape(Vec3(real_t(0), real_t(0), real_t(1))); // normal points up, away from the wall
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, cylShape, wallShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), real_t(-1));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(1)));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(0), real_t(0), real_t(0)));
+
+   // Swapped-argument overload must give the identical result (the generic HalfSpace overloads
+   // always internally reorder so the half-space is geo1, regardless of call order).
+   SolidCylinderContactDetection scd2;
+   WALBERLA_CHECK(scd2(1, 0, wallShape, cylShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), scd2.getPenetrationDepth());
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), scd2.getContactNormal());
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), scd2.getContactPoint());
+}
+
+void testCylinderHalfSpaceNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(0), real_t(3))); // bottom cap at z=1, well clear of z=0
+   cyl->setRotation(mesa_pd::Rot3());
+   auto wall = ps->create();
+   wall->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Cylinder  cylShape(real_t(1), real_t(4));
+   const mesa_pd::data::HalfSpace wallShape(Vec3(real_t(0), real_t(0), real_t(1)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, cylShape, wallShape, ac));
+}
+
 } // namespace antidunes
 } // namespace walberla
 
@@ -669,17 +921,24 @@ int main(int argc, char** argv)
 
    using namespace walberla::antidunes;
    testSphereSphereContact();
+   testSphereSphereNoContact();
    testSphereBoxContact();
+   testSphereBoxNoContact();
    testBoxBoxContact();
    testBoxBoxNoContact();
    testCylinderBoxContact();
+   testCylinderBoxNoContact();
+   testCylinderBoxSwappedOrder();
    testCylinderCylinderContact();
    testCylinderCylinderNoContact();
    testSphereCylinderSideContact();
    testSphereCylinderRotationAware();
    testSphereInsideCylinderEnvelopBranch();
+   testSphereCylinderNoContact();
    testSphereCylindricalBoundaryContact();
    testSphereCylindricalBoundaryNoContact();
+   testSphereHalfSpaceContact();
+   testSphereHalfSpaceNoContact();
    testBoxHalfSpaceContactAxisAligned();
    testBoxHalfSpaceContactRotated();
    testBoxHalfSpaceNoContact();
@@ -689,6 +948,8 @@ int main(int argc, char** argv)
    testCylinderPillarContact();
    testCylinderPillarNoContact();
    testCylinderPillarBruteForceCrossCheck();
+   testCylinderHalfSpaceContact();
+   testCylinderHalfSpaceNoContact();
 
    return EXIT_SUCCESS;
 }

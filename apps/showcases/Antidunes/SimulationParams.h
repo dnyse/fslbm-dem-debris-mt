@@ -175,13 +175,26 @@ struct FloatingSphereParams {
    // to establish a stable fill-level distribution around the contact line before the sphere moves.
    // 0 = release immediately (default, correct for fully submerged start).
    uint_t            settlingSteps;
+   // Initial linear velocity (LU/timestep) imparted at creation, e.g. to drive two floaters
+   // together for a collision test. Default <0,0,0> = at rest (legacy behaviour). Only meaningful
+   // with settlingSteps 0 (a FIXED settling particle can't move regardless of velocity).
+   Vector3< real_t > initialVelocity;
+   // Same pin semantics as FloatingBoxParams::pinPosition/pinAxes: holds selected TRANSLATIONAL DOFs
+   // at `position` every DEM sub-cycle (rotation, if any, stays free — though a sphere's rotation has
+   // no visible effect on buoyancy). Use <1,1,0> to let a sphere find its own buoyant depth in place
+   // without drifting laterally, e.g. for a side-by-side different-density buoyancy comparison.
+   bool              pinPosition;
+   Vector3< real_t > pinAxes;
 
    FloatingSphereParams(const config::Config::BlockHandle& b)
    {
-      position      = b.getParameter< Vector3< real_t > >("position");
-      radius        = b.getParameter< real_t >           ("radius");
-      densityRatio  = b.getParameter< real_t >           ("densityRatio");
-      settlingSteps = b.getParameter< uint_t >           ("settlingSteps", uint_t(0));
+      position        = b.getParameter< Vector3< real_t > >("position");
+      radius          = b.getParameter< real_t >           ("radius");
+      densityRatio    = b.getParameter< real_t >           ("densityRatio");
+      settlingSteps   = b.getParameter< uint_t >           ("settlingSteps", uint_t(0));
+      initialVelocity = b.getParameter< Vector3< real_t > >("initialVelocity", Vector3< real_t >(real_t(0)));
+      pinPosition     = b.getParameter< bool >             ("pinPosition", false);
+      pinAxes         = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
    }
 };
 
@@ -385,6 +398,16 @@ struct ModelParams {
    // for scenarios with a violent entry.
    real_t      floaterPlaneFitRadiusFactor;
 
+   // Lateral reach of the free-surface plane-fit shell used for a BOX/CYLINDER floater's own
+   // submerged-volume clip (computeSubmergedVolumesBox()), as a MULTIPLE of the floater's own largest
+   // half-extent: band = boxPlaneFitBandFactor * max(halfExtents) + 2. Same purpose as
+   // floaterPlaneFitRadiusFactor above, but boxes/cylinders had this hardcoded to 0.8 (no prm knob)
+   // until this field was added. Default 0.8 keeps existing behaviour unchanged; raise it if the
+   // fitted plane still looks contaminated by the floater's own local disturbance (crater/meniscus)
+   // once the body has stopped moving — see changes.md for the box-stillwater-showcase investigation
+   // that motivated this.
+   real_t      boxPlaneFitBandFactor;
+
    // true  → the per-floater VTK point outputs ("floater", "floaterBox", "floaterCylinder") carry two
    //         extra fields, "planeOrigin" and "planeNormal", visualizing the fitted free-surface plane
    //         each floater's buoyancy is actually computed from (see BuildTimeloop.h / changes.md for the
@@ -411,6 +434,7 @@ struct ModelParams {
       , useDynamicReferenceHeight   { b.getParameter< bool >       ("useDynamicReferenceHeight", false) }
       , staticReferenceHeightOverride{ b.getParameter< real_t >    ("staticReferenceHeightOverride", real_t(-1)) }
       , floaterPlaneFitRadiusFactor  { b.getParameter< real_t >    ("floaterPlaneFitRadiusFactor", real_t(1.8)) }
+      , boxPlaneFitBandFactor        { b.getParameter< real_t >    ("boxPlaneFitBandFactor", real_t(0.8)) }
       , writeFloaterPlaneVTK         { b.getParameter< bool >      ("writeFloaterPlaneVTK", false) }
    {}
 };

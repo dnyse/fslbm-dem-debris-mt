@@ -4,7 +4,7 @@
 #SBATCH --constraint=el9
 #SBATCH --nodes=1
 #SBATCH --ntasks=72
-#SBATCH --time=04:00:00
+#SBATCH --time=01:30:00
 #SBATCH --output=sbatch-output/output/antidunes_statich_pillar_r15_%j.out
 #SBATCH --error=sbatch-output/error/antidunes_statich_pillar_r15_%j.err
 #SBATCH --mail-type=END,FAIL
@@ -15,6 +15,9 @@
 # Tests whether a bigger sphere's larger buoyancy margin (~r^3) relative to the static-H
 # correction's surface-area-scaling force (~r^2) resists the full-submersion runaway seen
 # at r=10, or whether it saturates the same way.
+# Rerun with writeFloaterPlaneVTK now turned on in the prm, so the fitted buoyancy plane
+# (planeOrigin/planeNormal on the "floater" VTK writer) can be watched as the sphere jams
+# against the pillars and the local pile-up forms.
 # domainSize <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 blocks
 REPO="$HOME/mt-dennys"
 BIN_DIR="$REPO/build/apps/showcases/Antidunes"

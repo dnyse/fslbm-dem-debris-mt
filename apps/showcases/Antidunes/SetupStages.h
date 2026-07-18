@@ -410,15 +410,20 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          p->setOwner(mpi::MPIManager::instance()->rank());
          p->setType(1);
          p->setInteractionRadius(fsp.radius);
+         p->setLinearVelocity(mesa_pd::Vec3(fsp.initialVelocity[0], fsp.initialVelocity[1], fsp.initialVelocity[2]));
          // Hold the sphere fixed during the settling phase so the FSLBM can establish a stable
          // fill-level distribution around the contact line before the sphere starts moving.
-         if (fsp.settlingSteps > 0)
+         // pinPosition holds only the TRANSLATIONAL DOFs (done each DEM sub-cycle in ParticleKernels);
+         // it must NOT set the FIXED flag too, same mutual-exclusion rule as boxes/cylinders.
+         if (fsp.settlingSteps > 0 && !fsp.pinPosition)
             mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
          simObjs->floaterUIDs[fi] = p->getUid();
       }
       WALBERLA_LOG_INFO_ON_ROOT("Created floating sphere: radius=" << fsp.radius
          << " densityRatio=" << fsp.densityRatio << " position=" << pos
-         << " settlingSteps=" << fsp.settlingSteps);
+         << " settlingSteps=" << fsp.settlingSteps
+         << " initialVelocity=" << fsp.initialVelocity
+         << " pinPosition=" << (fsp.pinPosition ? "true" : "false"));
    }
    mpi::allReduceInplace(simObjs->floaterUIDs, mpi::SUM);
 

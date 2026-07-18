@@ -73,8 +73,13 @@ namespace antidunes {
 // contactNormal/penetrationDepth convention as the analytic functions (asserted float-equal in
 // tests/mesa_pd/collision_detection/EPA.cpp). Analytic overloads (sphere-sphere, sphere-box,
 // sphere-halfspace, …) still win overload resolution, so the bed-sphere hot path is unchanged.
-// Cylinder×HalfSpace also comes from the base: its support()-based half-space overload is exact
-// for a finite cylinder (deepest rim point).
+// Cylinder×HalfSpace has its OWN overload below (same support()-based formula as Box×HalfSpace) —
+// it used to fall through to the base's generic HalfSpace-vs-anything template instead, but that
+// template's contactNormal comes out as -wallNormal (into the wall), the OPPOSITE sign from every
+// other HalfSpace pair in this class (Sphere and Box both give +wallNormal, out of the wall — see
+// detectSphereHalfSpaceCollision and the Box overload below). Discovered while writing
+// tests/showcases_antidunes/ContactDetectionTest.cpp testCylinderHalfSpaceContact; fixed here to
+// match the proven-correct Sphere/Box convention rather than left as a silent inconsistency.
 class SolidCylinderContactDetection : public mesa_pd::collision_detection::GeneralContactDetection
 {
 public:
@@ -163,6 +168,49 @@ public:
                    Accessor& ac)
    {
       return operator()(idx2, idx1, bx, hs, ac);
+   }
+
+   // Cylinder vs HalfSpace — identical formula/convention to Box vs HalfSpace above (Cylinder has
+   // its own exact support() too). Added as an explicit override instead of letting this pair fall
+   // through to GeneralContactDetection's generic HalfSpace-vs-anything template: that generic path
+   // returns contactNormal = -wallNormal (into the wall), the opposite sign from every other
+   // HalfSpace pair here. See the class-level comment above and
+   // tests/showcases_antidunes/ContactDetectionTest.cpp testCylinderHalfSpaceContact for the
+   // derivation that surfaced the mismatch.
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::Cylinder& cyl,
+                   const mesa_pd::data::HalfSpace& hs,
+                   Accessor& ac)
+   {
+      getIdx1() = idx1;
+      getIdx2() = idx2;
+
+      const mesa_pd::Vec3& c = ac.getPosition(idx1);
+      const mesa_pd::Vec3& n = hs.getNormal();
+      const real_t d = n * ac.getPosition(idx2); // plane displacement: n · pos_plane
+
+      const mesa_pd::Mat3& R      = ac.getRotation(idx1).getMatrix();
+      const mesa_pd::Vec3 deepest = c + R * cyl.support(-(R.getTranspose() * n));
+      const real_t penetrationDepth = n * deepest - d;
+
+      if (penetrationDepth < getContactThreshold())
+      {
+         getPenetrationDepth() = penetrationDepth;
+         getContactNormal()    = n;
+         getContactPoint()     = deepest - penetrationDepth * n;
+         return true;
+      }
+      return false;
+   }
+
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::HalfSpace& hs,
+                   const mesa_pd::data::Cylinder& cyl,
+                   Accessor& ac)
+   {
+      return operator()(idx2, idx1, cyl, hs, ac);
    }
 
    // Box vs CylindricalBoundary (solid exterior) — ROTATION-AWARE. Works in the box BODY frame so it
@@ -1000,6 +1048,13 @@ inline void clipCylinderAnalytic(real_t r, real_t halfLen, const mesa_pd::Mat3& 
    cbOff = (V > real_t(1e-12)) ? R * bodyOff : Vector3< real_t >(real_t(0));
 }
 
+// Volume of a spherical cap of height hCap cut from a sphere of radius r (caller clamps
+// hCap to [0, 2r]; hCap=0 -> empty, hCap=r -> exact hemisphere, hCap=2r -> full sphere).
+// Used by ParticleKernels::computeSubmergedVolumes() for the sphere floater's submerged volume.
+inline real_t sphereCapVolume(real_t r, real_t hCap)
+{
+   return math::pi * hCap * hCap * (real_t(3) * r - hCap) / real_t(3);
+}
 
 template< typename ParticleAccessor_T >
 class ParticleKernels{
@@ -1033,6 +1088,7 @@ public:
       , stepCounter_(uint_t(0))
       , ringBand_(simParams->particle.floaterRingBand)
       , planeFitRadiusFactor_(simParams->model.floaterPlaneFitRadiusFactor)
+      , boxPlaneFitBandFactor_(simParams->model.boxPlaneFitBandFactor)
       , surfaceHeight_(simParams->staticReferenceHeight())
       , acceleration_(simObjs->acceleration)
       , memReferenceHeight_(simObjs->memReferenceHeight)
@@ -1052,6 +1108,12 @@ public:
       {
          floaterRadii_[fi]     = simParams->floatingSpheres[fi].radius;
          floaterDensities_[fi] = simParams->floatingSpheres[fi].densityRatio;
+         // Translation-pinned spheres: same pin registration as boxes/cylinders below, keyed by UID.
+         if (simParams->floatingSpheres[fi].pinPosition)
+         {
+            pinnedBoxPositions_[floaterUIDs_[fi]] = simParams->floatingSpheres[fi].position;
+            pinnedBoxAxes_[floaterUIDs_[fi]]      = simParams->floatingSpheres[fi].pinAxes;
+         }
       }
 
       useAnalyticBoxBuoyancy_    = simParams->model.useAnalyticBoxBuoyancy;
@@ -1219,19 +1281,20 @@ public:
       }
    }
 
-   // Holds selected TRANSLATIONAL DOFs of every pinPosition box while leaving rotation free: for each
-   // world axis whose pin-mask component is nonzero, resets that position component to the pinned value
-   // and zeroes that velocity component after each sub-cycle integration; axes with a zero mask evolve
-   // normally. The box still accumulates hydrodynamic + buoyancy torque, so it rotates to its equilibrium
-   // tilt in place. Mask <1,1,1> = rigid hold; <1,1,0> pins x,y and lets z float (finds its own buoyant
-   // depth without lateral drift). No-op when no box requested pinning.
+   // Holds selected TRANSLATIONAL DOFs of every pinPosition floater (sphere, box, or cylinder) while
+   // leaving rotation free: for each world axis whose pin-mask component is nonzero, resets that
+   // position component to the pinned value and zeroes that velocity component after each sub-cycle
+   // integration; axes with a zero mask evolve normally. The floater still accumulates hydrodynamic +
+   // buoyancy torque, so a box/cylinder still rotates to its equilibrium tilt in place (a sphere's own
+   // rotation has no visible effect). Mask <1,1,1> = rigid hold; <1,1,0> pins x,y and lets z float
+   // (finds its own buoyant depth without lateral drift). No-op when no floater requested pinning.
    void pinBoxTranslations()
    {
       if (pinnedBoxPositions_.empty()) return;
       for (size_t idx = 0; idx < particleAccessor->size(); ++idx)
       {
          const uint_t pt = particleAccessor->getType(idx);
-         if (pt != uint_t(3) && pt != uint_t(4)) continue; // pinned boxes AND pinned cylinders
+         if (pt != uint_t(1) && pt != uint_t(3) && pt != uint_t(4)) continue; // pinned spheres, boxes, AND cylinders
          if (mesa_pd::data::particle_flags::isSet(
                 particleAccessor->getFlags(idx), mesa_pd::data::particle_flags::GHOST)) continue;
          const auto it = pinnedBoxPositions_.find(particleAccessor->getUid(idx));
@@ -1548,7 +1611,7 @@ public:
          const real_t wCav = tCav * tCav * (real_t(3) - real_t(2) * tCav); // smoothstep weight ∈ [0,1]
          h_cap = (real_t(1) - wCav) * h_cap + wCav * (real_t(2) * r);
 
-         const real_t vSub = math::pi * h_cap * h_cap * (real_t(3) * r - h_cap) / real_t(3);
+         const real_t vSub = sphereCapVolume(r, h_cap);
 
          submergedVolumes_[floaterUIDs_[fi]] = vSub;
 
@@ -1742,7 +1805,10 @@ public:
             const real_t hz = clipFloaters_[bi].halfExtents[2];
             // Wide lateral reach so the surface plane-fit samples PAST any crater/gas-moat the box digs,
             // anchoring the fitted waterline to the undisturbed surrounding surface (mirrors the sphere).
-            const real_t band = real_t(0.8) * std::max({hx, hy, hz}) + real_t(2);
+            // Configurable via prm ModelParameters.boxPlaneFitBandFactor (default 0.8, matching the old
+            // hardcoded value) — raise it if the fit still looks contaminated by the box's own local
+            // disturbance once the body has stopped moving.
+            const real_t band = boxPlaneFitBandFactor_ * std::max({hx, hy, hz}) + real_t(2);
 
             mesa_pd::Mat3 R;
             for (uint_t r = 0; r < 3; ++r)
@@ -2029,6 +2095,7 @@ private:
    uint_t                                             stepCounter_;
    real_t                                             ringBand_; // sphere V_sub contact-ring half-width (prm: floaterRingBand)
    real_t                                             planeFitRadiusFactor_; // sphere surface plane-fit lateral reach, in units of r (prm: floaterPlaneFitRadiusFactor)
+   real_t                                             boxPlaneFitBandFactor_; // box/cylinder plane-fit shell reach, in units of max(halfExtents) (prm: boxPlaneFitBandFactor)
    real_t                                             surfaceHeight_; // mean free-surface height (absoluteLiquidHeight); global V_sub bound
    std::shared_ptr< Vector3< real_t > >               acceleration_;  // body acceleration incl. gravity; for net-force logging
 

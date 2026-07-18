@@ -1,0 +1,209 @@
+// box_density_showcase_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// BUOYANCY SHOWCASE (box): three identical 1x2x1 cuboids (halfExtents <6,12,6> ->
+// edges 12 x 24 x 12), LONG edge along Y -- lying flat on the water surface with
+// its long axis horizontal, matching the floating-cylinder logs' own default axis
+// convention (axis <0,1,0>) rather than standing the long edge upright. Differ
+// only in densityRatio (0.25 / 0.5 / 0.75); pinned in X,Y so each settles straight
+// down/up in place without lateral drift.
+//
+// This reproduces the classic three-different-density floating-box validation
+// figure (small initial heel -> each density settles to its OWN equilibrium roll
+// angle): the cross-section perpendicular to the long Y axis is a 12x12 SQUARE
+// (halfExtents x = z = 6), and initialTiltAngleDeg rotates about world Y -- i.e.
+// about the box's own long axis here, rolling that square cross-section. Despite
+// the square's symmetric mass distribution, this roll is NOT physically inert:
+// the WATERPLANE shape at the current roll angle (flat-face-down vs. corner-down/
+// "diamond") differs, so the metacentric height GM genuinely depends on roll angle
+// here. A small initialTiltAngleDeg 2.86 (about 0.05 rad) seeds which way each box
+// rolls; comOffsetZ stays at its default 0 (uniform density, no artificial
+// ballast) so the resulting equilibrium roll angle is driven purely by each
+// density's own GM at that submersion -- exactly the effect the reference figure
+// (three boxes, three densities, three different final tilts, one balanced
+// corner-down) demonstrates.
+//
+// Layout (domain centreline y=30; absoluteLiquidHeight ~56.024):
+//   • densityRatio 0.25: position (32, 30, 56)
+//   • densityRatio 0.50: position (64, 30, 56)
+//   • densityRatio 0.75: position (96, 30, 56)
+//   32 LU apart in X; box footprint is 12 (X) x 24 (Y) (halfExtents x=6, y=12), so
+//   X-neighbour clearance (32 LU apart vs. 12 LU combined half-extents) is clear by
+//   a wide margin. The Y-extent (span y=[18,42], half-length 12) leaves 18 LU to
+//   each N/S wall
+//   are clear by a wide margin.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         75000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // 1x2x1 cuboid (halfExtents 6x12x6 -> edges 12x24x12), long edge on Y (horizontal).
+      position             < 32, 30, 56 >;
+      halfExtents          < 6, 12, 6 >;
+      densityRatio         0.25;
+      settlingSteps        0;
+      initialTiltAngleDeg  2.86;   // small roll seed about the long (Y) axis
+      comOffsetZ           0;
+      pinPosition          true;
+      pinAxes              < 1, 1, 0 >;
+   }
+   FloatingBox
+   {
+      position             < 64, 30, 56 >;
+      halfExtents          < 6, 12, 6 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+      initialTiltAngleDeg  2.86;
+      comOffsetZ           0;
+      pinPosition          true;
+      pinAxes              < 1, 1, 0 >;
+   }
+   FloatingBox
+   {
+      position             < 96, 30, 56 >;
+      halfExtents          < 6, 12, 6 >;
+      densityRatio         0.75;
+      settlingSteps        0;
+      initialTiltAngleDeg  2.86;
+      comOffsetZ           0;
+      pinPosition          true;
+      pinAxes              < 1, 1, 0 >;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticBoxBuoyancy        true;   // exact clip drives the force -> plane export matches it exactly
+   boxPlaneFitBandFactor         2.0;    // widened reach (see changes.md box-stillwater-showcase investigation)
+   writeFloaterPlaneVTK          true;   // emit planeOrigin/planeNormal for each box
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

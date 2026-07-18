@@ -1,0 +1,38 @@
+#!/bin/bash -l
+#SBATCH --job-name=antidunes-box-density-showcase
+#SBATCH --partition=singlenode
+#SBATCH --constraint=el9
+#SBATCH --nodes=1
+#SBATCH --ntasks=72
+#SBATCH --time=01:30:00
+#SBATCH --output=sbatch-output/output/antidunes_box_density_showcase_%j.out
+#SBATCH --error=sbatch-output/error/antidunes_box_density_showcase_%j.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=dennys.huber@fau.de
+
+# build + run: buoyancy + small-angle stability showcase -- three identical 1x2x1
+# tall cuboids (halfExtents 6x6x12), densityRatio 0.25/0.5/0.75, started upright
+# with only a small 2.86 deg heel (naval-architecture small-angle stability test,
+# no artificial comOffsetZ ballast), pinned in X,Y so each settles/rights (or not)
+# in place. writeFloaterPlaneVTK + useAnalyticBoxBuoyancy on for the exact plane.
+# domainSize <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 blocks
+REPO="$HOME/mt-dennys"
+BIN_DIR="$REPO/build/apps/showcases/Antidunes"
+
+"$REPO/apps/showcases/Antidunes/antidunes.sh" \
+    --build --jobs "$(nproc)" \
+    --run --np 72 \
+    --prm "$REPO/apps/showcases/Antidunes/prms/box_density_showcase_gas.prm"
+
+# archive this run's own output so the next job doesn't overwrite it
+STAMP="$(date +%Y%m%d_%H%M%S)"
+# if $HPCVAULT is set, archive to persistent vault storage; otherwise the local build dir
+if [[ -n "$HPCVAULT" ]]; then
+    ARCHIVE_DIR="$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_$STAMP"
+else
+    ARCHIVE_DIR="$BIN_DIR/archive/$STAMP"
+fi
+mkdir -p "$ARCHIVE_DIR"
+for dir in vtk-out eval snapshots; do
+    [[ -d "$BIN_DIR/$dir" ]] && mv "$BIN_DIR/$dir" "$ARCHIVE_DIR/$dir"
+done

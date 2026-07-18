@@ -11,6 +11,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LOAD_MODULES=true
 DO_CONFIGURE=false
 DO_BUILD=false
+DO_TESTS=false
 DO_BED=false
 DO_RUN=false
 FRESH=false
@@ -35,9 +36,11 @@ Usage: $(basename "$0") [OPTIONS]
 Steps (pick one or more, or use --all):
   --configure       CMake configure
   --build           Build Antidunes + BedGeneration targets
+  --tests           Build + run the Antidunes contact/geometry unit tests (ctest, single-process,
+                    no mpirun needed) -- ANTIDUNES_ContactDetection + ANTIDUNES_ClipAnalyticGeometry
   --bed             Run BedGeneration (generates spheres_out.dat)
   --run             Run Antidunes main simulation
-  --all             configure + build + bed + run
+  --all             configure + build + tests + bed + run
   --sync            rsync repo to remote (excludes build/ and dotfiles)
 
 Environment:
@@ -69,6 +72,9 @@ Examples:
   # Supercomputer — build only, 32 jobs
   ./antidunes.sh --configure --build --jobs 32
 
+  # Supercomputer — build and run the contact/geometry unit tests (fast, no allocation needed)
+  ./antidunes.sh --configure --build --tests --jobs 32
+
   # Supercomputer — rerun with different prm, skip rebuild
   ./antidunes.sh --run --prm myparams.prm --np 72
 EOF
@@ -82,9 +88,10 @@ while [[ $# -gt 0 ]]; do
         --local)       LOAD_MODULES=false ;;
         --configure)   DO_CONFIGURE=true ;;
         --build)       DO_BUILD=true ;;
+        --tests)       DO_TESTS=true ;;
         --bed)         DO_BED=true ;;
         --run)         DO_RUN=true ;;
-        --all)         DO_CONFIGURE=true; DO_BUILD=true; DO_BED=true; DO_RUN=true ;;
+        --all)         DO_CONFIGURE=true; DO_BUILD=true; DO_TESTS=true; DO_BED=true; DO_RUN=true ;;
         --fresh)       FRESH=true ;;
         --build-dir)   BUILD_DIR="$2"; shift ;;
         --jobs)        JOBS="$2"; shift ;;
@@ -186,6 +193,15 @@ if $DO_BUILD; then
 
     log "Building BedGeneration (jobs: $JOBS)"
     cmake --build "$BUILD_DIR" --target BedGeneration -- -j"$JOBS"
+fi
+
+# ── contact/geometry unit tests ───────────────────────────────────────────────
+if $DO_TESTS; then
+    log "Building Antidunes unit tests (jobs: $JOBS)"
+    cmake --build "$BUILD_DIR" --target ANTIDUNES_ContactDetection ANTIDUNES_ClipAnalyticGeometry -- -j"$JOBS"
+
+    log "Running Antidunes unit tests (ctest, single-process)"
+    ctest --test-dir "$BUILD_DIR" -R ANTIDUNES_ --output-on-failure
 fi
 
 # ── bed generation ────────────────────────────────────────────────────────────

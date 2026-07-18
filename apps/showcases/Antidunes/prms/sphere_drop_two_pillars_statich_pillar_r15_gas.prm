@@ -125,6 +125,9 @@ ModelParameters
    usePhantomForceCorrection     false;  // isolated: static-H-near-pillar alone
    useDynamicReferenceHeight     false;  // isolated: NOT combined with dynamic-H
    staticReferenceHeightOverride 64.0;   // unchanged from the r=10 test — see file header
+   writeFloaterPlaneVTK          true;   // emit planeOrigin/planeNormal on the "floater" VTK writer,
+                                         // so the fitted plane can be watched against the pillar pile-up
+                                         // and the sphere's submersion as it jams (added for this rerun).
 }
 
 EvaluationParameters

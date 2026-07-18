@@ -314,9 +314,11 @@ void testCylinderConservationIdentity()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sphere submerged-cap formula (documented closed form, ParticleKernels.h ~line 1551) -- sanity
-// checks against INDEPENDENTLY known volumes (hemisphere, full sphere, empty), not a re-derivation
-// of the formula itself. This is pre-existing math, not new this project, so it's a lighter check.
+// Sphere submerged-cap formula -- calls the actual production function sphereCapVolume()
+// (ParticleKernels.h, used by computeSubmergedVolumes()), not a re-derivation of it, and checks
+// it against INDEPENDENTLY known volumes (hemisphere, full sphere, empty). The clamp of hSigned
+// to a valid hCap in [0,2r] mirrors what computeSubmergedVolumes() itself does before calling
+// sphereCapVolume() -- it's the caller's responsibility, not part of the formula under test.
 // ---------------------------------------------------------------------------------------------
 
 void testSphereCapFormula()
@@ -325,7 +327,7 @@ void testSphereCapFormula()
    const real_t fullSphereVol = math::pi * real_t(4) / real_t(3) * r * r * r;
    auto capVolume = [&](real_t hSigned) {
       const real_t hCap = std::clamp(r + hSigned, real_t(0), real_t(2) * r);
-      return math::pi * hCap * hCap * (real_t(3) * r - hCap) / real_t(3);
+      return sphereCapVolume(r, hCap);
    };
 
    WALBERLA_CHECK_FLOAT_EQUAL(capVolume(real_t(-1.5)), real_t(0));                 // fully above -> empty

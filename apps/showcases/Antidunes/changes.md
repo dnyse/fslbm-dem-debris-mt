@@ -2,6 +2,84 @@
 
 ---
 
+## Mixed single-pillar test scaled up: floaters ×2, pillar ×1.5 (2026-07-16)
+
+**`prms/mixed_floaters_single_pillar_gas.prm` resized** — sphere radius 5→10, box `halfExtents`
+`<3,3,3>`→`<6,6,6>`, log radius/length 3/10→6/20, pillar radius 8→12 (`CylinderPillars` and the
+matching `BodyBC` obstacle radius). Doubling every floater's linear size roughly doubles its reach
+too, so the old column/row layout would have collided at t=0 — the whole 3-column × 2-row layout
+was **re-solved from scratch** (not scaled by the same 2×) and every pairwise + floater–pillar
+clearance re-verified numerically (box reach conservatively bounded by its half-diagonal
+`6√3 ≈ 10.39` regardless of the small ±5° tilt):
+
+- New columns: sphere x=0, box x=24, log x=44 (was 20/30/40); rows at y=13/47 (was 15/45).
+- Tightest margin in the new layout is the log↔pillar clearance (≈3.19 LU) — the log's own 20 LU
+  length brings its nearer end closer to the pillar's centreline than its column offset alone
+  would suggest (nearest endpoint sits only `length/2 = 10` LU closer to y=30 than the log's own
+  centre). Wall clearance is also tight (≈2.61 LU from the N/S no-slip walls) — do not shrink the
+  ±17-ish row half-spacing further without rechecking both numbers.
+- Header comment in the prm rewritten with the full clearance derivation so future resizes don't
+  have to re-derive it from scratch.
+
+## Floater initial velocity + still-water sphere–sphere collision test (2026-07-16)
+
+**New `FloatingSphereParams::initialVelocity`** (`SimulationParams.h`, default `<0,0,0>`,
+backward-compatible) — a linear velocity imparted at creation via `mesa_pd`'s
+`setLinearVelocity`, wired into the sphere-creation loop in `SetupStages.h`. General mechanism,
+not test-specific: only `FloatingSphereParams` has it so far — `FloatingBoxParams` /
+`FloatingCylinderParams` would need the same field + `setLinearVelocity` call added to their own
+creation loops (`SetupStages.h` ~line 444 / ~line 502) if a box–box or log–log collision test is
+wanted later.
+
+**New `prms/sphere_sphere_collision_gas.prm` + `jobs/run_72_sphere_sphere_collision.sbatch`** —
+still water (no pillars, `targetMeanVelocityMagnitude 0`), two spheres (r=6) 40 LU apart on the
+domain centreline given opposing `initialVelocity <±0.05,0,0>` so they close and collide head-on
+near x=64 (domain centre) instead of relying on flow-driven drift. Gap between surfaces at t=0 is
+28 LU (clear); first contact expected ≈280 steps in, ignoring hydrodynamic drag deceleration.
+
+## Buoyancy-plane VTK showcase: `box_stillwater_showcase_gas.prm` (2026-07-16)
+
+**New prm+job pair** exercising `ModelParameters.writeFloaterPlaneVTK` for the first time in any
+prm (confirmed via grep beforehand — the flag existed and was wired in `BuildTimeloop.h` but no
+prm had ever turned it on) together with `useAnalyticBoxBuoyancy true`, so the exported
+`planeOrigin`/`planeNormal` VTK fields are *exactly* the plane the analytic clip (`clipBoxAnalytic`)
+cuts against, with no sampling-vs-analytic cross-check mismatch to explain away in the
+visualization.
+
+- Same still-water single-cube scenario as `cube_stillwater_gas.prm` (edge 26, released
+  `initialTiltAngleDeg 45` — its stable, edge-down orientation), but **X/Y translation pinned**
+  (`pinPosition true; pinAxes <1,1,0>`) after observing the un-pinned box visibly wander side to
+  side while settling. This is safe here — unlike the earlier-documented "pinning x,y BACKFIRES"
+  failure mode (further down this log) — because that failure was specific to a box needing a
+  large *righting rotation* from an unstable start; this box already starts at its stable tilt and
+  only needs to settle vertically, so pinning XY removes the distracting lateral drift without
+  killing any roll-damping the body actually needs.
+- `jobs/run_72_box_stillwater_showcase.sbatch` follows the standard template.
+
+## Floater×pillar interaction test suite (2026-07-16)
+
+**7 new isolated single-interaction prm/sbatch pairs**, filling gaps in interaction coverage that
+the existing two-pillar jam/clog tests didn't isolate (one case per shape × {glancing contact,
+clean gap-pass negative control}, plus rotation/oblique contact where physically meaningful — a
+sphere has no rotation case since it's rotationally symmetric):
+
+- `sphere_pillar_glance_gas.prm` / `sphere_pillar_gap_pass_gas.prm`
+- `box_pillar_glance_gas.prm` / `box_pillar_gap_pass_gas.prm` / `box_pillar_corner_gas.prm`
+  (corner-first contact: redesigned head-on, Δy=0, after realizing `initialTiltAngleDeg` rotates
+  about world Y only and doesn't change a box's Y-extent, so a lateral/offset approach would have
+  looked identical tilted or not — the tilt-induced increase in X-reach only shows up head-on)
+- `cylinder_pillar_gap_pass_gas.prm` / `cylinder_pillar_oblique_gas.prm` (45°-yawed log axis,
+  still horizontal so it floats normally — the general skew-axis case for
+  `SolidCylinderContactDetection`'s fixed-point iteration, deliberately not a vertical-buoy log,
+  which would be a different, unvalidated flotation mode)
+
+**New `prms/mixed_floaters_single_pillar_gas.prm`** — 2 of each shape (6 floaters total) around a
+single pillar, all start positions analytically checked pairwise + against the pillar for zero
+overlap at t=0 (see the 2026-07-16 resize entry above for the current, post-scale-up numbers).
+
+**8 matching sbatch scripts** added under `jobs/`, all following the established template
+(`run_72_sphere_pillar_glance.sbatch`, …, `run_72_mixed_floaters_single_pillar.sbatch`).
+
 ## Static-H ablation: `staticReferenceHeightOverride` (2026-07-10)
 
 **New prm knob `ModelParameters.staticReferenceHeightOverride`** (default −1 = disabled). If ≥ 0 it
