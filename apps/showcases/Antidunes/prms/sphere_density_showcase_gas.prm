@@ -87,6 +87,7 @@ FloatingSpheres
       settlingSteps 0;
       pinPosition  true;
       pinAxes      < 1, 1, 0 >;
+      pinRotation  true;
    }
    FloatingSphere
    {
@@ -96,6 +97,7 @@ FloatingSpheres
       settlingSteps 0;
       pinPosition  true;
       pinAxes      < 1, 1, 0 >;
+      pinRotation  true;
    }
    FloatingSphere
    {
@@ -105,6 +107,7 @@ FloatingSpheres
       settlingSteps 0;
       pinPosition  true;
       pinAxes      < 1, 1, 0 >;
+      pinRotation  true;
    }
 }
 

@@ -149,6 +149,20 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
          return (it != map_->end()) ? it->second : mesa_pd::Vec3(real_t(0));
       }
    };
+   // densityRatio (ρ_solid/ρ_fluid) for coloring in ParaView. Not stored directly on the particle —
+   // recovered exactly from mass/volume, since updateMassAndInertia(density) at creation set
+   // mass = getVolume() * density (SimulationParams' densityRatio IS that density, as ρ_fluid = 1 in
+   // lattice units). Shape-generic: works unchanged for sphere/box/cylinder floaters alike.
+   struct SelectFloaterDensityRatio
+   {
+      using return_type = real_t;
+      return_type operator()(const mesa_pd::data::Particle& p) const
+      {
+         const auto& shape = p.getBaseShape();
+         if (!shape || shape->getVolume() < real_t(1e-12)) return real_t(0);
+         return shape->getMass() / shape->getVolume();
+      }
+   };
 
    // particles (sediment spheres) -----------------------------------------
    auto particlePointData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
@@ -171,6 +185,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       auto floaterPointData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
       floaterPointData->addOutput< mesa_pd::data::SelectParticleInteractionRadius >("radius");
       floaterPointData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      floaterPointData->addOutput< SelectFloaterDensityRatio >("densityRatio");
       if (simParams->model.writeFloaterPlaneVTK)
       {
          floaterPointData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(
@@ -233,6 +248,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       boxFloaterData->addOutput< SelectBoxEdgeLength >("edgeLength");
       boxFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
       boxFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      boxFloaterData->addOutput< SelectFloaterDensityRatio >("densityRatio");
       if (simParams->model.writeFloaterPlaneVTK)
       {
          boxFloaterData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(
@@ -303,6 +319,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       cylinderFloaterData->addOutput< SelectCylinderGlyphScale >("glyphScale");
       cylinderFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
       cylinderFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      cylinderFloaterData->addOutput< SelectFloaterDensityRatio >("densityRatio");
       if (simParams->model.writeFloaterPlaneVTK)
       {
          cylinderFloaterData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(

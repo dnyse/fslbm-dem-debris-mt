@@ -74,6 +74,84 @@ namespace lbm_mesapd_coupling
  */
 //**************************************************************************************************************************************
 
+//! Result of classifying a freshly-uncovered ("formerObstacle") cell's D3Q27 neighbourhood in the
+//! Bogner & Rüde state-selection reconstruction.
+enum class BognerNeighbourhoodState { Gas, Liquid, Interface };
+
+//**************************************************************************************************************************************
+/*!\brief Pure decision logic for the Bogner state-selection classifier (bognerTargetFlag).
+ *
+ * Given only whether the D3Q27 neighbourhood contains a REAL gas cell, a REAL liquid cell, and/or
+ * an unresolved ("formerObstacle") neighbour, decide the target state for the cell itself:
+ *  - hasGas && !hasLiquid && !hasUnknown -> Gas       (provably bulk gas, fully resolved)
+ *  - hasGas && !hasLiquid &&  hasUnknown -> Interface (an unresolved neighbour could still become
+ *                                                       liquid later in the same reconstruction pass)
+ *  - hasLiquid && !hasGas && !hasUnknown -> Liquid   (provably bulk liquid, fully resolved)
+ *  - hasLiquid && !hasGas &&  hasUnknown -> Interface (an unresolved neighbour could still become
+ *                                                       gas later in the same reconstruction pass)
+ *  - hasGas && hasLiquid                -> Interface (genuine mixed/free-surface neighbourhood)
+ *  - !hasGas && !hasLiquid               -> Interface (neither real phase reachable within one
+ *                                                       cell -- e.g. only interface/unresolved
+ *                                                       neighbours; safest fallback)
+ *
+ * The gas and liquid branches are symmetric on purpose: an unresolved same-pass neighbour is exactly
+ * as dangerous from the gas side as from the liquid side -- promoting to gas now, only for the
+ * neighbour to resolve to liquid a few cells later in the same pass, produces the same illegal
+ * direct liquid/gas contact as the mirror-image case, just discovered from the other side.
+ *
+ * hasGas/hasLiquid must be computed from REAL bognerGas/bognerLiquid flags only -- an interface
+ * neighbour must NOT be counted toward either. Interface cells are the legal buffer between liquid
+ * and gas (a liquid cell next to an interface cell is an ordinary free surface), so counting them
+ * as gas-equivalent enforces nothing beyond what checking real gas alone already guarantees, while
+ * causing a self-propagating misclassification in densely packed, actively-jittering particle beds
+ * (one interface cell seeded near a contact point makes its neighbour's hasGas true next pass, and
+ * so on outward through the narrow gaps between particles, with no real gas anywhere nearby).
+ */
+//**************************************************************************************************************************************
+inline BognerNeighbourhoodState classifyFormerObstacleNeighbourhood(bool hasGas, bool hasLiquid, bool hasUnknown)
+{
+   if (hasGas && !hasLiquid) return hasUnknown ? BognerNeighbourhoodState::Interface : BognerNeighbourhoodState::Gas;
+   if (hasLiquid && !hasGas) return hasUnknown ? BognerNeighbourhoodState::Interface : BognerNeighbourhoodState::Liquid;
+   // hasGas && hasLiquid, or neither -> interface in both cases.
+   return BognerNeighbourhoodState::Interface;
+}
+
+//**************************************************************************************************************************************
+/*!\brief Scans a cell's D3Q27 neighbourhood and classifies it (bognerTargetFlag's actual per-cell
+ * logic, factored out so it can be driven by a literal neighbourhood -- e.g. in tests -- as well as
+ * by a real FlagField).
+ *
+ * getNeighbourFlag(dx, dy, dz) must return the flag at the given offset from the centre cell for
+ * every (dx, dy, dz) in {-1,0,1}^3 except (0,0,0) (the centre itself is never queried). Flag_T only
+ * needs to support isFlagSet(value, testFlag) (field::isFlagSet, an integer bitmask test) -- the
+ * real production flag_t (BoundaryHandling_T::flag_t) and a small test-local flag type both work.
+ *
+ * hasGas/hasLiquid/hasUnknown/unknownNbr are written back to the caller (needed for the per-branch
+ * conversion counters and the same-pass-race warning, which need the raw booleans, not just the
+ * final Gas/Liquid/Interface classification).
+ */
+//**************************************************************************************************************************************
+template< typename Flag_T, typename NeighbourFlagGetter >
+inline BognerNeighbourhoodState classifyFormerObstacleCell(NeighbourFlagGetter getNeighbourFlag,
+                                                             Flag_T bognerLiquid, Flag_T bognerGas,
+                                                             Flag_T formerObstacle, bool& hasGasOut,
+                                                             bool& hasLiquidOut, bool& hasUnknownOut,
+                                                             uint_t& unknownNbrOut)
+{
+   hasGasOut = false; hasLiquidOut = false; hasUnknownOut = false; unknownNbrOut = uint_t(0);
+   for (int dz = -1; dz <= 1; ++dz)
+      for (int dy = -1; dy <= 1; ++dy)
+         for (int dx = -1; dx <= 1; ++dx)
+         {
+            if (dx == 0 && dy == 0 && dz == 0) continue; // skip centre
+            const Flag_T nf = getNeighbourFlag(dx, dy, dz);
+            if (isFlagSet(nf, bognerLiquid))   hasLiquidOut = true;
+            if (isFlagSet(nf, bognerGas))      hasGasOut    = true;
+            if (isFlagSet(nf, formerObstacle)) { hasUnknownOut = true; ++unknownNbrOut; }
+         }
+   return classifyFormerObstacleNeighbourhood(hasGasOut, hasLiquidOut, hasUnknownOut);
+}
+
 // ScalarField_T (defaulted to void) is the fill-level field type, used only by the Bogner
 // state-selection path to seed the volume fraction φ of freshly converted cells
 // (Bogner & Rüde 2013, §5.2). For the non-Bogner path it stays void and all fill code is
@@ -143,12 +221,13 @@ class PdfReconstructionManager
    // the true number of physical cells converted, not duplicated across block ghost layers.
    void logAndResetConversionCounts(const uint_t t)
    {
-      std::vector< uint_t > c = { convGas_, convLiquid_, convIntfUnknown_, convIntfSurface_ };
+      std::vector< uint_t > c = { convGas_, convLiquid_, convIntfUnknown_, convIntfUnknownGas_, convIntfSurface_, convIntfUnresolved_ };
       walberla::mpi::reduceInplace(c, walberla::mpi::SUM);
       WALBERLA_LOG_INFO_ON_ROOT("[FORMERMO-CONVERT t=" << t << "] cells converted since last report: "
          << "gas(A)=" << c[0] << " liquid(B)=" << c[1]
-         << " interface-unknown(C)=" << c[2] << " interface-surface(D)=" << c[3]
-         << " | total=" << (c[0] + c[1] + c[2] + c[3]));
+         << " interface-unknown(C)=" << c[2] << " interface-unknown-gas(A')=" << c[3] << " interface-surface(D)=" << c[4]
+         << " interface-unresolved(E)=" << c[5]
+         << " | total=" << (c[0] + c[1] + c[2] + c[3] + c[4] + c[5]));
 
       // Phantom-force investigation: how many unknowns, and how clustered are they?
       std::vector< uint_t > u    = { formerMoTotal_, formerMoWithUnknownNbr_, unknownNbrSum_ };
@@ -172,7 +251,7 @@ class PdfReconstructionManager
             << " | hist[#unknownNbr:count]=" << histStr.str());
       }
 
-      convGas_ = convLiquid_ = convIntfUnknown_ = convIntfSurface_ = uint_t(0);
+      convGas_ = convLiquid_ = convIntfUnknown_ = convIntfUnknownGas_ = convIntfSurface_ = convIntfUnresolved_ = uint_t(0);
       formerMoTotal_ = formerMoWithUnknownNbr_ = unknownNbrSum_ = unknownNbrMax_ = uint_t(0);
       unknownNbrHist_.fill(uint_t(0));
    }
@@ -247,10 +326,12 @@ class PdfReconstructionManager
    // contact_ring_crash_analysis.md §5.3). Accumulated over inner cells across blocks; flushed by
    // logAndResetConversionCounts. Mutable-free: operator() is non-const, the counting lambda
    // captures `this`.
-   uint_t convGas_         = uint_t(0); // branch A: !hasLiquid              → gas
-   uint_t convLiquid_      = uint_t(0); // branch B: !hasGas && !hasUnknown  → liquid
-   uint_t convIntfUnknown_ = uint_t(0); // branch C: !hasGas &&  hasUnknown  → interface (fallback)
-   uint_t convIntfSurface_ = uint_t(0); // branch D:  hasGas                 → interface (real surface)
+   uint_t convGas_            = uint_t(0); // branch A:  hasGas && !hasLiquid && !hasUnknown → gas
+   uint_t convIntfUnknownGas_ = uint_t(0); // branch A': hasGas && !hasLiquid &&  hasUnknown → interface (fallback, symmetric to C)
+   uint_t convLiquid_         = uint_t(0); // branch B:  hasLiquid && !hasGas && !hasUnknown → liquid
+   uint_t convIntfUnknown_    = uint_t(0); // branch C:  hasLiquid && !hasGas &&  hasUnknown → interface (fallback)
+   uint_t convIntfSurface_    = uint_t(0); // branch D:  hasGas &&  hasLiquid                → interface (real surface)
+   uint_t convIntfUnresolved_ = uint_t(0); // branch E: !hasGas && !hasLiquid                → interface (fallback, no real fluid neighbour yet)
 
    // Unknown-neighbour diagnostics (phantom-force investigation). For every inner FormerMO cell we
    // count how many of its 26 D3Q27 neighbours are themselves still-unknown FormerMO cells — i.e.
@@ -343,25 +424,38 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
    // directly adjacent to gas, violating the FSLBM invariant (liquid must never be a stencil
    // neighbour of gas) and producing NaNs.
    //
-   // A cell is only promoted to `liquid` when the neighbourhood provably contains no gas AND no
-   // still-unclassified FormerMO neighbour (those are converted in the same pass and may yet
-   // become gas). If either is present we fall back to the safe `interface` buffer, which the
-   // free-surface sweeps promote to liquid on their own once it is genuinely enclosed.
+   // hasGas/hasLiquid count ONLY real bognerGas/bognerLiquid neighbours — an interface neighbour
+   // counts toward NEITHER. Interface cells are the legal buffer between liquid and gas (a liquid
+   // cell sitting next to an interface cell is exactly what a normal free surface looks like), so
+   // there is nothing to protect by treating "interface nearby" as gas-equivalent. Counting it that
+   // way (as an earlier version of this code did) causes a self-propagating misclassification in
+   // densely packed, actively-jittering particle beds: one interface cell seeded near a contact
+   // point makes its neighbour's hasGas true on the next FormerMO pass, which makes THAT cell
+   // interface too, and so on outward through the narrow gaps between packed particles — with no
+   // real gas anywhere nearby. Confirmed empirically: buried floating cylinders in
+   // cylinder_sedimentation_showcase_gas.prm showed persistent locally-fitted "interface" cells and
+   // oscillating (17-86%) submersion 30+ LU below the true free surface (~55 LU), long after
+   // settling into the packed bed (see changes.md).
+   //
+   // A cell is only promoted to `liquid` when the neighbourhood provably contains real liquid, no
+   // real gas, AND no still-unclassified FormerMO neighbour (those are converted in the same pass
+   // and may yet become gas). If neither real gas nor real liquid is found at all (only interface
+   // and/or unresolved FormerMO neighbours — e.g. a cell whose entire 1-cell neighbourhood has
+   // itself just been through this same classifier), neither promotion is provably safe, so it
+   // falls back to the safe `interface` buffer; the ordinary free-surface conversion sweep resolves
+   // it later once a real liquid/gas neighbour actually becomes reachable.
    auto bognerTargetFlag = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) -> flag_t {
-      bool hasLiquid  = false;
-      bool hasGas     = false;
-      bool hasUnknown = false;
-      uint_t unknownNbr = uint_t(0); // # of D3Q27 neighbours that are themselves unknown (FormerMO)
-      for (int dz = -1; dz <= 1; ++dz)
-         for (int dy = -1; dy <= 1; ++dy)
-            for (int dx = -1; dx <= 1; ++dx)
-            {
-               if (dx == 0 && dy == 0 && dz == 0) continue; // skip centre
-               const flag_t nf = flagField->get(cx + dx, cy + dy, cz + dz);
-               if (isFlagSet(nf, bognerLiquid) || isFlagSet(nf, bognerInterface)) hasLiquid = true;
-               if (isFlagSet(nf, bognerGas) || isFlagSet(nf, bognerInterface)) hasGas = true;
-               if (isFlagSet(nf, formerObstacle)) { hasUnknown = true; ++unknownNbr; }
-            }
+      // Scan + decision both live in classifyFormerObstacleCell()/classifyFormerObstacleNeighbourhood()
+      // (top of this file) as pure, directly unit-tested functions
+      // (tests/showcases_antidunes/BognerStateClassificationTest.cpp) — this lambda only supplies
+      // the real field access and attaches the side effects (per-branch counters, the same-pass-race
+      // warning) that need cx/cy/cz/inner and can't live in the pure functions themselves.
+      bool hasLiquid, hasGas, hasUnknown;
+      uint_t unknownNbr;
+      const BognerNeighbourhoodState state = classifyFormerObstacleCell(
+         [&](int dx, int dy, int dz) { return flagField->get(cx + dx, cy + dy, cz + dz); }, bognerLiquid,
+         bognerGas, formerObstacle, hasGas, hasLiquid, hasUnknown, unknownNbr);
+
       // inner-cell guard for the conversion counters: a FormerMO cell in a ghost layer is a
       // duplicate of another rank's inner cell, so only inner cells are tallied.
       const cell_idx_t xs = cell_idx_c(flagField->xSize());
@@ -379,68 +473,85 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
          ++unknownNbrHist_[unknownNbr]; // unknownNbr ∈ [0,26]
       }
 
-      if (!hasLiquid) { if (inner) ++convGas_; return bognerGas; }
-      if (!hasGas && !hasUnknown)
+      switch (state)
       {
-         // DIAGNOSTIC — under-resolved-waterline detector (NOT an over-promotion). This cell qualifies
-         // as bulk liquid on the 1-cell (D3Q27) stencil (no gas/unknown neighbour at distance 1), so it
-         // is assigned the safe INTERFACE fallback (`return bognerInterface` below) and its fill is
-         // seeded from its interface neighbours — it is NOT forced to liquid/φ=1. Re-scan a 2-cell
-         // radius: if the free surface (gas or interface) sits at distance 2, the cell is physically at
-         // the waterline; with finer resolution an interface cell would sit at distance 1 (→ hasGas true
-         // → classified interface directly). So this firing only flags the resolution-driven proximity
-         // of the reconstruction to the surface; it is invariant-legal (gas is >1 cell away → no
-         // liquid–gas adjacency, hence checkClosedInterfaceLayer reports 0 holes).
-         const cell_idx_t gl = cell_idx_c(flagField->nrOfGhostLayers());
-         bool gasAt2 = false, intfAt2 = false;
-         for (int dz = -2; dz <= 2; ++dz)
-            for (int dy = -2; dy <= 2; ++dy)
-               for (int dx = -2; dx <= 2; ++dx)
-               {
-                  if (std::abs(dx) <= 1 && std::abs(dy) <= 1 && std::abs(dz) <= 1) continue; // D3Q27 already scanned
-                  const cell_idx_t nx = cx + cell_idx_c(dx), ny = cy + cell_idx_c(dy), nz = cz + cell_idx_c(dz);
-                  if (nx < -gl || nx >= xs + gl || ny < -gl || ny >= ys + gl || nz < -gl || nz >= zs + gl) continue;
-                  const flag_t nf = flagField->get(nx, ny, nz);
-                  if (isFlagSet(nf, bognerGas))       gasAt2  = true;
-                  if (isFlagSet(nf, bognerInterface)) intfAt2 = true;
-               }
-         if (gasAt2 || intfAt2)
+      case BognerNeighbourhoodState::Gas:
+         if (inner) ++convGas_;
+         return bognerGas;
+      case BognerNeighbourhoodState::Liquid:
+         // Provably real liquid nearby, no real gas, no unresolved neighbour -> genuinely bulk
+         // liquid. (Diagnostic under-resolved-waterline check removed with the old interface-only
+         // branch B: promoting to liquid here is now the intended, invariant-safe behaviour, not an
+         // over-promotion — the real gas/interface flags right next to this cell are what enforce
+         // the liquid-never-touches-gas invariant, not the choice made here.)
+         if (inner) ++convLiquid_;
+         return bognerLiquid;
+      case BognerNeighbourhoodState::Interface:
+         if (hasLiquid && !hasGas && hasUnknown)
          {
-            // Throttled: fires for every near-waterline reconstructed cell every step (tens of thousands
-            // of lines). Keep a short sample per rank plus a periodic count so the log stays usable.
-            static uint_t waterlineProximityLogCount = uint_t(0);
-            ++waterlineProximityLogCount;
-            if (waterlineProximityLogCount <= uint_t(20) || (waterlineProximityLogCount % uint_t(5000) == uint_t(0)))
+            // Would qualify as bulk liquid, but an unclassified FormerMO neighbour could still
+            // become gas this pass — downgrade to the safe interface buffer instead of liquid.
+            WALBERLA_LOG_WARNING("Bogner state selection: cell ("
+                                 << cx << ", " << cy << ", " << cz
+                                 << ") has " << unknownNbr << " unclassified FormerMO neighbour(s); falling back to "
+                                    "interface instead of liquid to preserve the liquid/gas separation invariant.");
+            if (inner) ++convIntfUnknown_;
+         }
+         else if (hasGas && !hasLiquid && hasUnknown)
+         {
+            // Symmetric case: would qualify as bulk gas, but an unclassified FormerMO neighbour could
+            // still become liquid this pass — downgrade to the safe interface buffer instead of gas.
+            WALBERLA_LOG_WARNING("Bogner state selection: cell ("
+                                 << cx << ", " << cy << ", " << cz
+                                 << ") has " << unknownNbr << " unclassified FormerMO neighbour(s); falling back to "
+                                    "interface instead of gas to preserve the liquid/gas separation invariant.");
+            if (inner) ++convIntfUnknownGas_;
+         }
+         else if (hasGas && hasLiquid) { if (inner) ++convIntfSurface_; }
+         else
+         {
+            // Neither a real gas nor a real liquid neighbour within one cell (branch E).
+            if (inner) ++convIntfUnresolved_;
+
+            // DIAGNOSTIC (never changes behaviour, throttled like the FormerMO-neighbour warning
+            // above): look a few cells further up than the 1-cell stencil this classifier is
+            // limited to. If there is real LIQUID directly overhead with no GAS in between, this
+            // cell is sitting under a genuine water column -- i.e. very likely actually fully
+            // submerged -- and only landed in this ambiguous fallback because its immediate
+            // neighbourhood happens to be entirely interface/unresolved cells. That is exactly the
+            // interface-contagion pattern the hasGas/hasLiquid fix above targets (see the class
+            // comment): confirms at a glance whether THIS instance of the fallback is one of those
+            // "actually submerged, just locally under-resolved" cells, e.g. deep inside a densely
+            // packed, actively-jittering particle bed (cylinder_sedimentation_showcase_gas.prm).
+            constexpr cell_idx_t columnCheckDepth = cell_idx_t(8);
+            const cell_idx_t     gl = cell_idx_c(flagField->nrOfGhostLayers());
+            bool columnIsLiquid = false, columnHitsGas = false;
+            for (cell_idx_t k = 1; k <= columnCheckDepth; ++k)
             {
-               const auto&  aabb = block->getAABB();
-               const real_t cdx  = aabb.xSize() / real_c(xs);
-               WALBERLA_LOG_WARNING("[WATERLINE-PROXIMITY] (#" << waterlineProximityLogCount << ") FormerMO cell block-local ("
-                  << cx << ", " << cy << ", " << cz
-                  << ") world≈(" << (aabb.xMin() + (real_c(cx) + real_t(0.5)) * cdx) << ", "
-                  << (aabb.yMin() + (real_c(cy) + real_t(0.5)) * cdx) << ", "
-                  << (aabb.zMin() + (real_c(cz) + real_t(0.5)) * cdx)
-                  << ") reconstructed as INTERFACE (bulk-liquid on the D3Q27 stencil) but the free surface is at distance 2:"
-                  << (gasAt2 ? " GAS" : "") << (intfAt2 ? " INTERFACE" : "")
-                  << "  --> under-resolved waterline (finer resolution would classify it interface directly;"
-                     " cell fill is seeded from neighbours, NOT forced to 1).");
+               const cell_idx_t nz = cz + k;
+               if (nz >= zs + gl) break;
+               const flag_t nf = flagField->get(cx, cy, nz);
+               if (isFlagSet(nf, bognerGas)) { columnHitsGas = true; break; }
+               if (isFlagSet(nf, bognerLiquid)) { columnIsLiquid = true; break; }
+            }
+            if (columnIsLiquid && !columnHitsGas)
+            {
+               static uint_t fallbackSubmergedLogCount = uint_t(0);
+               ++fallbackSubmergedLogCount;
+               if (fallbackSubmergedLogCount <= uint_t(20) || (fallbackSubmergedLogCount % uint_t(5000) == uint_t(0)))
+               {
+                  WALBERLA_LOG_WARNING("[FORMERMO-FALLBACK-SUBMERGED] (#" << fallbackSubmergedLogCount
+                     << ") cell (" << cx << ", " << cy << ", " << cz << ") reconstructed as INTERFACE via the "
+                        "ambiguous fallback (no real gas/liquid within 1 cell), but a real LIQUID column was "
+                        "found directly overhead within " << columnCheckDepth << " cells with no GAS in "
+                        "between -- this cell is very likely genuinely fully submerged, not near any real "
+                        "free surface; only its immediate neighbourhood is itself interface/unresolved.");
+               }
             }
          }
-         if (inner) ++convLiquid_;
          return bognerInterface;
       }
-      if (!hasGas && hasUnknown)
-      {
-         // Would qualify as bulk liquid, but an unclassified FormerMO neighbour could still
-         // become gas this pass — downgrade to the safe interface buffer instead of liquid.
-         WALBERLA_LOG_WARNING("Bogner state selection: cell ("
-                              << cx << ", " << cy << ", " << cz
-                              << ") has an unclassified FormerMO neighbour; falling back to interface "
-                                 "instead of liquid to preserve the liquid/gas separation invariant.");
-         if (inner) ++convIntfUnknown_;
-         return bognerInterface;
-      }
-      if (inner) ++convIntfSurface_;
-      return bognerInterface;
+      WALBERLA_ABORT("unreachable: classifyFormerObstacleNeighbourhood returned an unhandled state");
    };
 
    // ---- Pass 1: reconstruct missing PDFs (inner domain only) ------------------

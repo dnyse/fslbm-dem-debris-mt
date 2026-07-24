@@ -1,0 +1,567 @@
+// contact_detection_showcase_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTACT-DETECTION SHOWCASE: 50 floaters (17 spheres, 17 boxes, 16 cylinders),
+// varied sizes and densities, suspended in the GAS region well above still water
+// (all start at z=90, ~34 LU above absoluteLiquidHeight~56.024, ~90 LU below the
+// domain top) and released from rest under gravity. No pillars, no flow forcing.
+// Inspired by the classic "particle impact and sedimentation at a free surface"
+// benchmark scene (a suspended block of mixed particles dropped onto a free
+// surface) -- adapted here to a mixed SHAPE population instead of spheres alone,
+// so that as the whole grid free-falls, splashes down, and settles/floats, it
+// exercises every contact-detection pairing this project supports at once:
+//   sphere-sphere, sphere-box, sphere-cylinder    (all analytic, closed-form)
+//   box-box, box-cylinder, cylinder-cylinder      (GJK/EPA fallback)
+//   any floater-wall (half-space, rotation-aware) as they settle near the walls
+// (no pillars in this test, so the box/cylinder-pier fixed-point iteration is
+// NOT exercised here -- see the existing *_pillar_*.prm suite for that.)
+//
+// Sizes (small/medium/large, cycled per shape):
+//   Spheres:   radius 2.5 / 3.5 / 4.5
+//   Boxes:     cube halfExtents <1.5,1.5,1.5> / <2.5,2.5,2.5> / <3,3,3>
+//   Cylinders: radius 1.5 length 5 / radius 2 length 7 / radius 2.5 length 8
+//              (axis <0,1,0>, the standard spanwise-log orientation)
+// Densities cycle through {0.2, 0.35, 0.5, 0.65, 0.8} (shape, size, and density
+// all cycle at different strides so the grid is a genuine mix, not a repeating
+// block pattern).
+//
+// Layout: 10 columns (X) x 5 rows (Y), single Z layer at z=90, grid spacing 11 LU
+// in both X and Y. Verified programmatically (all 50*49/2=1225 pairs) against
+// each floater's ACTUAL assigned bounding radius (sphere: own radius; box:
+// half-diagonal; cylinder: circumscribed-sphere radius) -- zero overlaps,
+// minimum clearance 1.09 LU. Y wall clearance (domain Y=60, walled N/S): 2.80 LU
+// on both sides using the largest bounding radius (5.196, the largest box's
+// half-diagonal). X uses the periodic axis with generous margin (columns span
+// x=[10,109] inside the 128-wide domain). Z clearance above the free surface:
+// ~28.8 LU using the largest bounding radius -- comfortably clear at t=0, no
+// floater is in contact with the water or another floater at release.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         150000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      position     < 10, 8, 90 >;
+      radius       2.5;
+      densityRatio 0.2;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 43, 8, 90 >;
+      radius       3.5;
+      densityRatio 0.65;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 76, 8, 90 >;
+      radius       4.5;
+      densityRatio 0.35;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 109, 8, 90 >;
+      radius       2.5;
+      densityRatio 0.8;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 32, 19, 90 >;
+      radius       3.5;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 65, 19, 90 >;
+      radius       4.5;
+      densityRatio 0.2;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 98, 19, 90 >;
+      radius       2.5;
+      densityRatio 0.65;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 21, 30, 90 >;
+      radius       3.5;
+      densityRatio 0.35;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 54, 30, 90 >;
+      radius       4.5;
+      densityRatio 0.8;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 87, 30, 90 >;
+      radius       2.5;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 10, 41, 90 >;
+      radius       3.5;
+      densityRatio 0.2;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 43, 41, 90 >;
+      radius       4.5;
+      densityRatio 0.65;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 76, 41, 90 >;
+      radius       2.5;
+      densityRatio 0.35;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 109, 41, 90 >;
+      radius       3.5;
+      densityRatio 0.8;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 32, 52, 90 >;
+      radius       4.5;
+      densityRatio 0.5;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 65, 52, 90 >;
+      radius       2.5;
+      densityRatio 0.2;
+      settlingSteps 0;
+   }
+   FloatingSphere
+   {
+      position     < 98, 52, 90 >;
+      radius       3.5;
+      densityRatio 0.65;
+      settlingSteps 0;
+   }
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      position             < 21, 8, 90 >;
+      halfExtents          < 1.5, 1.5, 1.5 >;
+      densityRatio         0.35;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 54, 8, 90 >;
+      halfExtents          < 2.5, 2.5, 2.5 >;
+      densityRatio         0.8;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 87, 8, 90 >;
+      halfExtents          < 3, 3, 3 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 10, 19, 90 >;
+      halfExtents          < 1.5, 1.5, 1.5 >;
+      densityRatio         0.2;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 43, 19, 90 >;
+      halfExtents          < 2.5, 2.5, 2.5 >;
+      densityRatio         0.65;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 76, 19, 90 >;
+      halfExtents          < 3, 3, 3 >;
+      densityRatio         0.35;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 109, 19, 90 >;
+      halfExtents          < 1.5, 1.5, 1.5 >;
+      densityRatio         0.8;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 32, 30, 90 >;
+      halfExtents          < 2.5, 2.5, 2.5 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 65, 30, 90 >;
+      halfExtents          < 3, 3, 3 >;
+      densityRatio         0.2;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 98, 30, 90 >;
+      halfExtents          < 1.5, 1.5, 1.5 >;
+      densityRatio         0.65;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 21, 41, 90 >;
+      halfExtents          < 2.5, 2.5, 2.5 >;
+      densityRatio         0.35;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 54, 41, 90 >;
+      halfExtents          < 3, 3, 3 >;
+      densityRatio         0.8;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 87, 41, 90 >;
+      halfExtents          < 1.5, 1.5, 1.5 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 10, 52, 90 >;
+      halfExtents          < 2.5, 2.5, 2.5 >;
+      densityRatio         0.2;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 43, 52, 90 >;
+      halfExtents          < 3, 3, 3 >;
+      densityRatio         0.65;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 76, 52, 90 >;
+      halfExtents          < 1.5, 1.5, 1.5 >;
+      densityRatio         0.35;
+      settlingSteps        0;
+   }
+   FloatingBox
+   {
+      position             < 109, 52, 90 >;
+      halfExtents          < 2.5, 2.5, 2.5 >;
+      densityRatio         0.8;
+      settlingSteps        0;
+   }
+}
+
+FloatingCylinders
+{
+   FloatingCylinder
+   {
+      position             < 32, 8, 90 >;
+      radius               1.5;
+      length               5;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 65, 8, 90 >;
+      radius               2;
+      length               7;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.2;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 98, 8, 90 >;
+      radius               2.5;
+      length               8;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.65;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 21, 19, 90 >;
+      radius               1.5;
+      length               5;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.35;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 54, 19, 90 >;
+      radius               2;
+      length               7;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.8;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 87, 19, 90 >;
+      radius               2.5;
+      length               8;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 10, 30, 90 >;
+      radius               1.5;
+      length               5;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.2;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 43, 30, 90 >;
+      radius               2;
+      length               7;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.65;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 76, 30, 90 >;
+      radius               2.5;
+      length               8;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.35;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 109, 30, 90 >;
+      radius               1.5;
+      length               5;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.8;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 32, 41, 90 >;
+      radius               2;
+      length               7;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 65, 41, 90 >;
+      radius               2.5;
+      length               8;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.2;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 98, 41, 90 >;
+      radius               1.5;
+      length               5;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.65;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 21, 52, 90 >;
+      radius               2;
+      length               7;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.35;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 54, 52, 90 >;
+      radius               2.5;
+      length               8;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.8;
+      settlingSteps        0;
+   }
+   FloatingCylinder
+   {
+      position             < 87, 52, 90 >;
+      radius               1.5;
+      length               5;
+      axis                 < 0, 1, 0 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticBoxBuoyancy        true;
+   boxPlaneFitBandFactor         2.0;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

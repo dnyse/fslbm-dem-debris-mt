@@ -1,0 +1,185 @@
+// box_density_025_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// FEKKEN [2004] FLOATING-CUBE EQUILIBRATION — densityRatio 0.25, isolated run.
+// One of three single-box replicates (see also box_density_050_gas.prm,
+// box_density_075_gas.prm) of Fekken's classic rotational-equilibrium benchmark:
+// a cuboid 2s x s x s (s=16 here -> edges 32x16x16; ours uses halfExtents
+// <8,16,8> = edges 16x32x16, same three edge lengths, long axis on Y to match
+// this codebase's existing log/cylinder axis convention) is free to rotate ONLY
+// about its longitudinal axis, released from a small 2.86 deg heel off its
+// axis-aligned upright position, and should settle to a STABLE heel of 26.565 deg
+// from upright (Fekken's predicted value for densityRatio 0.25 and 0.75 -- 0.5 is
+// the special/marginal case that calibrates to 45 deg, see box_density_050_gas.prm).
+//
+// Split into three SEPARATE single-box simulations (rather than the earlier
+// combined box_density_showcase_gas.prm with all three side by side) so each
+// box's convergence can be read without any cross-domain interaction, and so the
+// domain can be made periodic in BOTH X and Y (periodicity <1,1,0>) -- no side
+// walls at all, only the Z floor/ceiling -- matching Fekken's intent of an
+// otherwise-unbounded basin rather than one where nearby walls could reflect
+// waves back at the box. The box sits at the domain centre (64,30,56); with no
+// side walls, position no longer needs to avoid anything.
+//
+// pinPosition true / pinAxes <1,1,0>: X,Y translation held (so the box settles
+// straight down/up in place, no lateral drift to chase); Z free (finds its own
+// buoyant depth). pinRotation true / pinRotationAxes <1,0,1>: only rotation about
+// Y (the box's longitudinal axis) is free -- matching Fekken's "rotates around
+// its longitudinal axis only" setup exactly; pitch (X) and yaw (Z) are pinned.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic — no side walls, only Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         300000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // 1x2x1 cuboid (halfExtents 8x16x8 -> edges 16x32x16), long edge on Y (horizontal).
+      // densityRatio 0.25 -> Fekken-predicted stable heel: 26.565 deg from upright.
+      position             < 64, 30, 56 >;
+      halfExtents          < 8, 16, 8 >;
+      densityRatio         0.25;
+      settlingSteps        0;
+      initialTiltAngleDeg  2.86;   // small seed heel (Fekken), about the free Y axis
+      comOffsetZ           0;
+      pinPosition          true;
+      pinAxes              < 1, 1, 0 >;
+      pinRotation           true;
+      pinRotationAxes      < 1, 0, 1 >;   // free roll about Y (XZ plane); pin pitch (X) and yaw (Z)
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticBoxBuoyancy        true;   // exact clip drives the force -> plane export matches it exactly
+   boxPlaneFitBandFactor         2.0;    // widened reach (see changes.md box-stillwater-showcase investigation)
+   writeFloaterPlaneVTK          true;   // emit planeOrigin/planeNormal for the box
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   // Only Z (top/bottom) walls — X and Y are periodic (see BlockForestParameters),
+   // so N/S borders are intentionally omitted; setupBoundaryHandling auto-skips
+   // adding walls on periodic faces.
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

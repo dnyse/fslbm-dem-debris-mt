@@ -185,6 +185,16 @@ struct FloatingSphereParams {
    // without drifting laterally, e.g. for a side-by-side different-density buoyancy comparison.
    bool              pinPosition;
    Vector3< real_t > pinAxes;
+   // Holds selected ROTATIONAL DOFs at zero angular velocity every DEM sub-cycle (world-frame axes,
+   // same mask convention as pinAxes): a nonzero pinRotationAxes component zeroes that world axis's
+   // angular velocity component every sub-cycle, so the body can never accumulate rotation about that
+   // axis; a zero component leaves it genuinely free. Independent of pinPosition/pinAxes. E.g.
+   // pinRotationAxes <1,0,1> with pinRotation true allows rotation about Y only (roll — rotating
+   // within the world XZ plane) while suppressing pitch (about X) and yaw (about Z). A sphere's own
+   // rotation has no visible effect on buoyancy, so this mainly exists for API symmetry with
+   // FloatingBoxParams/FloatingCylinderParams.
+   bool              pinRotation;
+   Vector3< real_t > pinRotationAxes;
 
    FloatingSphereParams(const config::Config::BlockHandle& b)
    {
@@ -195,6 +205,8 @@ struct FloatingSphereParams {
       initialVelocity = b.getParameter< Vector3< real_t > >("initialVelocity", Vector3< real_t >(real_t(0)));
       pinPosition     = b.getParameter< bool >             ("pinPosition", false);
       pinAxes         = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
+      pinRotation     = b.getParameter< bool >             ("pinRotation", false);
+      pinRotationAxes = b.getParameter< Vector3< real_t > >("pinRotationAxes", Vector3< real_t >(real_t(1)));
    }
 };
 
@@ -257,6 +269,19 @@ struct FloatingBoxParams {
                                           // FREE. Default <1,1,1> = pin all three (rigid hold). <1,1,0>
                                           // pins x,y but lets z float, so the box finds its own buoyant
                                           // depth (≈50% submerged) while not drifting laterally.
+   bool              pinRotation;         // true → selected ROTATIONAL DOFs are held at zero angular
+                                          // velocity every DEM sub-cycle (see pinRotationAxes). false →
+                                          // rotation fully free (normal dynamics).
+   Vector3< real_t > pinRotationAxes;     // per-axis rotation pin mask (only used when pinRotation true):
+                                          // a nonzero component zeroes that world axis's angular velocity
+                                          // every sub-cycle, so the box can never accumulate rotation
+                                          // about that axis; a zero component leaves it genuinely free.
+                                          // Default <1,1,1> = pin all rotation (rigid hold, like the old
+                                          // capture-and-freeze behaviour). <1,0,1> allows rotation about Y
+                                          // only (roll, within the world XZ plane) while suppressing pitch
+                                          // (X) and yaw (Z) — e.g. to let a 1x2x1 box roll toward its
+                                          // corner-down equilibrium without also picking up an incidental
+                                          // yaw from asymmetric contact/splash noise.
 
    FloatingBoxParams(const config::Config::BlockHandle& b)
    {
@@ -268,6 +293,8 @@ struct FloatingBoxParams {
       comOffsetZ           = b.getParameter< real_t >           ("comOffsetZ", real_t(0));
       pinPosition          = b.getParameter< bool >             ("pinPosition", false);
       pinAxes              = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
+      pinRotation          = b.getParameter< bool >             ("pinRotation", false);
+      pinRotationAxes      = b.getParameter< Vector3< real_t > >("pinRotationAxes", Vector3< real_t >(real_t(1)));
    }
 };
 
@@ -298,6 +325,8 @@ struct FloatingCylinderParams {
    real_t            comOffsetZ;          // signed body-frame offset of the COM below the centroid (same as box)
    bool              pinPosition;         // hold TRANSLATION at `position`, rotation free (same as box)
    Vector3< real_t > pinAxes;             // per-axis pin mask (same as box)
+   bool              pinRotation;         // per-axis rotation pin, zero angular velocity (same as box)
+   Vector3< real_t > pinRotationAxes;     // per-axis rotation pin mask (same as box)
 
    FloatingCylinderParams(const config::Config::BlockHandle& b)
    {
@@ -311,6 +340,8 @@ struct FloatingCylinderParams {
       comOffsetZ           = b.getParameter< real_t >           ("comOffsetZ", real_t(0));
       pinPosition          = b.getParameter< bool >             ("pinPosition", false);
       pinAxes              = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
+      pinRotation          = b.getParameter< bool >             ("pinRotation", false);
+      pinRotationAxes      = b.getParameter< Vector3< real_t > >("pinRotationAxes", Vector3< real_t >(real_t(1)));
       WALBERLA_CHECK_GREATER(axis.length(), real_t(1e-10), "FloatingCylinder axis must be nonzero!");
       axis = axis.getNormalized();
    }

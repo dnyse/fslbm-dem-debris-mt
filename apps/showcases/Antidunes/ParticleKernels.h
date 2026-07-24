@@ -1114,6 +1114,8 @@ public:
             pinnedBoxPositions_[floaterUIDs_[fi]] = simParams->floatingSpheres[fi].position;
             pinnedBoxAxes_[floaterUIDs_[fi]]      = simParams->floatingSpheres[fi].pinAxes;
          }
+         if (simParams->floatingSpheres[fi].pinRotation)
+            pinnedRotationAxes_[floaterUIDs_[fi]] = simParams->floatingSpheres[fi].pinRotationAxes;
       }
 
       useAnalyticBoxBuoyancy_    = simParams->model.useAnalyticBoxBuoyancy;
@@ -1137,6 +1139,8 @@ public:
             pinnedBoxPositions_[simObjs->floaterBoxUIDs[bi]] = fbp.position;
             pinnedBoxAxes_[simObjs->floaterBoxUIDs[bi]]      = fbp.pinAxes;
          }
+         if (fbp.pinRotation)
+            pinnedRotationAxes_[simObjs->floaterBoxUIDs[bi]] = fbp.pinRotationAxes;
       }
       for (size_t ci = 0; ci < simParams->floatingCylinders.size(); ++ci)
       {
@@ -1150,6 +1154,8 @@ public:
             pinnedBoxPositions_[simObjs->floaterCylinderUIDs[ci]] = fcp.position;
             pinnedBoxAxes_[simObjs->floaterCylinderUIDs[ci]]      = fcp.pinAxes;
          }
+         if (fcp.pinRotation)
+            pinnedRotationAxes_[simObjs->floaterCylinderUIDs[ci]] = fcp.pinRotationAxes;
       }
       WALBERLA_LOG_INFO_ON_ROOT("[BoxBuoyancy] V_sub method (box + cylinder): "
          << (useAnalyticBoxBuoyancy_ ? "ANALYTIC (box: OBB∩plane 6-tet clip; cylinder: disk∩plane closed form)"
@@ -1287,26 +1293,51 @@ public:
    // integration; axes with a zero mask evolve normally. The floater still accumulates hydrodynamic +
    // buoyancy torque, so a box/cylinder still rotates to its equilibrium tilt in place (a sphere's own
    // rotation has no visible effect). Mask <1,1,1> = rigid hold; <1,1,0> pins x,y and lets z float
-   // (finds its own buoyant depth without lateral drift). No-op when no floater requested pinning.
+   // (finds its own buoyant depth without lateral drift).
+   //
+   // Independently, every pinRotation floater has selected ROTATIONAL DOFs held too: for each world
+   // axis whose pinRotationAxes component is nonzero, that axis's ANGULAR velocity is zeroed every
+   // sub-cycle (never the rotation/orientation itself). Since VelocityVerletPreForceUpdate always
+   // integrates rotation from the angular velocity left over from the END of the previous sub-cycle,
+   // and that velocity is masked here BEFORE the next PreForceUpdate ever consumes it, a pinned axis's
+   // angular velocity is always exactly zero at the moment it would be used — so rotation about that
+   // axis never accumulates ANY component, even a tiny drifting one (this is exact, not an
+   // approximation). A free axis (zero mask) integrates normally. Mask <1,1,1> = no rotation at all
+   // (equivalent to the old capture-and-freeze behaviour); <1,0,1> allows rotation about Y only (roll,
+   // within the world XZ plane) while suppressing pitch (X) and yaw (Z).
    void pinBoxTranslations()
    {
-      if (pinnedBoxPositions_.empty()) return;
+      if (pinnedBoxPositions_.empty() && pinnedRotationAxes_.empty()) return;
       for (size_t idx = 0; idx < particleAccessor->size(); ++idx)
       {
          const uint_t pt = particleAccessor->getType(idx);
          if (pt != uint_t(1) && pt != uint_t(3) && pt != uint_t(4)) continue; // pinned spheres, boxes, AND cylinders
          if (mesa_pd::data::particle_flags::isSet(
                 particleAccessor->getFlags(idx), mesa_pd::data::particle_flags::GHOST)) continue;
-         const auto it = pinnedBoxPositions_.find(particleAccessor->getUid(idx));
-         if (it == pinnedBoxPositions_.end()) continue;
-         const Vector3< real_t >& target = it->second;
-         const Vector3< real_t >& mask   = pinnedBoxAxes_.at(particleAccessor->getUid(idx));
-         Vector3< real_t > pos = particleAccessor->getPosition(idx);
-         Vector3< real_t > vel = particleAccessor->getLinearVelocity(idx);
-         for (uint_t d = 0; d < uint_t(3); ++d)
-            if (std::abs(mask[d]) > real_t(0.5)) { pos[d] = target[d]; vel[d] = real_t(0); } // pin this axis; free axes untouched
-         particleAccessor->setPosition(idx, pos);
-         particleAccessor->setLinearVelocity(idx, vel);
+         const auto uid = particleAccessor->getUid(idx);
+
+         const auto it = pinnedBoxPositions_.find(uid);
+         if (it != pinnedBoxPositions_.end())
+         {
+            const Vector3< real_t >& target = it->second;
+            const Vector3< real_t >& mask   = pinnedBoxAxes_.at(uid);
+            Vector3< real_t > pos = particleAccessor->getPosition(idx);
+            Vector3< real_t > vel = particleAccessor->getLinearVelocity(idx);
+            for (uint_t d = 0; d < uint_t(3); ++d)
+               if (std::abs(mask[d]) > real_t(0.5)) { pos[d] = target[d]; vel[d] = real_t(0); } // pin this axis; free axes untouched
+            particleAccessor->setPosition(idx, pos);
+            particleAccessor->setLinearVelocity(idx, vel);
+         }
+
+         const auto rotIt = pinnedRotationAxes_.find(uid);
+         if (rotIt != pinnedRotationAxes_.end())
+         {
+            const Vector3< real_t >& rotMask = rotIt->second;
+            mesa_pd::Vec3 angVel = particleAccessor->getAngularVelocity(idx);
+            for (uint_t d = 0; d < uint_t(3); ++d)
+               if (std::abs(rotMask[d]) > real_t(0.5)) angVel[d] = real_t(0); // pin this axis; free axes untouched
+            particleAccessor->setAngularVelocity(idx, angVel);
+         }
       }
    }
 
@@ -1782,10 +1813,75 @@ public:
       // Independent of the box-interior fill (which becomes obstacle once the box is mapped as a moving
       // obstacle). Mirrors the floating-sphere method: weighted-average free-surface normal n̂ (from the
       // normal field) and weighted centroid x̄ over nearby interface cells; weight φ(1−φ) peaks at the
-      // φ≈0.5 waterline. Per box bi in `acc` (stride 8): [0]=wSum [1..3]=Σw·n̂ [4..6]=Σw·x [7]=Σφ (shell).
-      constexpr size_t stride = 8;
+      // φ≈0.5 waterline. Per box bi in `acc` (stride 10): [0]=wSum [1..3]=Σw·n̂ [4..6]=Σw·x [7]=Σφ (shell)
+      // [8]=aboveSum [9]=aboveCount (ceiling/cavity probe -- see below, ported from the sphere method).
+      constexpr size_t stride = 10;
       std::vector< real_t > acc(nB * stride, real_t(0));
       std::vector< real_t > fluidCnt(nB, real_t(0)); // # non-obstacle shell cells (fallback denominator)
+
+      // De-contamination of touching/nearby box/cylinder floaters — mirrors nearerOtherFloater() in
+      // computeSubmergedVolumes() (spheres), which was added for exactly this reason ("a neighbour's
+      // waterline pollutes fi's plane-fit"). No equivalent existed here: with boxPlaneFitBandFactor
+      // widened (to fix the single-box under-reach bias), a box's shell can reach 30+ LU past its own
+      // surface — easily overlapping a neighbour's shell in a multi-floater scene and dragging every
+      // fitted planeOrigin toward the group's shared centroid (confirmed: box_density_showcase_gas.prm's
+      // 3 boxes at x=32/64/96 all fitted planeOrigin_x within ~15-25 LU of the *group* centre, x≈64,
+      // instead of near their own pinned x).
+      //
+      // floaterSurfaceDistance(p, idx) computes the TRUE distance from world point p to floater idx's
+      // own ORIENTED surface (world->body via Rᵀ, then clamp to the shape's actual extent — per-axis for
+      // a box, radial+axial for a cylinder — exactly the same clamp used elsewhere in this file for
+      // cylinder contact detection). An earlier version of this guard approximated "own distance" with
+      // each floater's circumscribed BOUNDING SPHERE radius instead — much simpler, but a poor
+      // approximation for an elongated shape: a radius-8/half-length-12 cylinder's true lateral
+      // (radial) reach is only 8 LU, versus its bounding-sphere radius of ~14.4 LU. Confirmed with real
+      // data (cylinder_density_showcase_gas.prm, three cylinders lined up perpendicular to their own
+      // axis — exactly the direction the spherical approximation is worst): the bounding-sphere version
+      // cut contamination from ~15-26 LU down to ~4-11 LU, better but not eliminated. The exact clamp
+      // below removes the remaining approximation error entirely.
+      const real_t domainXSize = blockForest_->getDomain().xSize();
+      const real_t domainYSize = blockForest_->getDomain().ySize();
+      const bool   xPeriodic   = blockForest_->isXPeriodic();
+      const bool   yPeriodic   = blockForest_->isYPeriodic();
+      auto floaterSurfaceDistance = [&](const Vector3< real_t >& p, size_t idx) -> real_t {
+         const auto& cf = clipFloaters_[idx];
+         mesa_pd::Mat3 R;
+         for (uint_t r = 0; r < 3; ++r)
+            for (uint_t c = 0; c < 3; ++c)
+               R(r, c) = rotFlat[idx * 9 + r * 3 + c];
+
+         real_t ddx = p[0] - cenX[idx];
+         if (xPeriodic) ddx -= domainXSize * std::round(ddx / domainXSize);
+         real_t ddy = p[1] - cenY[idx];
+         if (yPeriodic) ddy -= domainYSize * std::round(ddy / domainYSize);
+         const real_t ddz = p[2] - cenZ[idx];
+
+         const mesa_pd::Vec3 local = R.getTranspose() * mesa_pd::Vec3(ddx, ddy, ddz); // world -> body frame
+         const Vector3< real_t >& h = cf.halfExtents;
+
+         mesa_pd::Vec3 clamped;
+         if (cf.isCylinder)
+         {
+            // halfExtents = (r, r, halfLength); clamp radially in xy, axially in z.
+            const real_t rho   = std::sqrt(local[0] * local[0] + local[1] * local[1]);
+            const real_t scale = (rho > real_t(1e-10)) ? std::min(real_t(1), h[0] / rho) : real_t(0);
+            clamped = mesa_pd::Vec3(local[0] * scale, local[1] * scale, std::clamp(local[2], -h[2], h[2]));
+         }
+         else
+         {
+            clamped = mesa_pd::Vec3(std::clamp(local[0], -h[0], h[0]), std::clamp(local[1], -h[1], h[1]),
+                                    std::clamp(local[2], -h[2], h[2]));
+         }
+         return (local - clamped).length(); // 0 if p projects inside the shape; else true distance to nearest surface point
+      };
+      auto nearerOtherBoxFloater = [&](const Vector3< real_t >& p, size_t bi, real_t myDistErr) -> bool {
+         for (size_t bj = 0; bj < nB; ++bj)
+         {
+            if (bj == bi) continue;
+            if (floaterSurfaceDistance(p, bj) < myDistErr) return true;
+         }
+         return false;
+      };
 
       for (auto& iblock : *blockForest_)
       {
@@ -1826,6 +1922,15 @@ public:
             const real_t AABB_hy = std::abs(axx[1]) + std::abs(ayy[1]) + std::abs(azz[1]) + band;
             const real_t AABB_hz = std::abs(axx[2]) + std::abs(ayy[2]) + std::abs(azz[2]) + band;
 
+            // Ceiling/cavity probe setup (ported from the floating-sphere method, ParticleKernels.h
+            // ~1520-1531): world-space top of the shape's TRUE (unpadded, no `band`) extent, and an
+            // isotropic lateral cutoff for "directly above" -- mirrors the sphere's `lateral < r`. Liquid
+            // found here means the local gas pocket the shape sits in is an enclosed cavity fed by real
+            // liquid overhead, not the true free surface -- the box/cylinder analogue of the sphere's
+            // cavity blend (see the vSub correction right before it is stored, below).
+            const real_t trueTopZ     = pos[2] + std::abs(axx[2]) + std::abs(ayy[2]) + std::abs(azz[2]);
+            const real_t ceilingReach = std::max({ hx, hy, hz });
+
             const int ixMin = static_cast< int >(std::floor(pos[0] - AABB_hx));
             const int ixMax = static_cast< int >(std::ceil (pos[0] + AABB_hx));
             const int iyMin = static_cast< int >(std::floor(pos[1] - AABB_hy));
@@ -1855,10 +1960,31 @@ public:
                {
                   acc[bi * stride + 7] += fillField->get(localCell[0], localCell[1], localCell[2]);
                   fluidCnt[bi]         += real_t(1);
+
+                  // Ceiling/cavity probe (mirrors the floating-sphere method, ParticleKernels.h
+                  // ~1520-1531): average fill of non-obstacle cells in the slab just ABOVE the shape's
+                  // own (true) top surface, within its own lateral footprint. Liquid here means the gas
+                  // pocket the shape sits in is fed by real liquid overhead -- an enclosed cavity, not
+                  // the true free surface -- so the shape is genuinely submerged regardless of what the
+                  // (possibly small-local-void-contaminated) plane-fit alone found.
+                  const real_t worldOffZ = samplePos[2] - trueTopZ;
+                  const real_t lateralXY = std::sqrt((samplePos[0] - pos[0]) * (samplePos[0] - pos[0]) +
+                                                      (samplePos[1] - pos[1]) * (samplePos[1] - pos[1]));
+                  if (worldOffZ > real_t(0) && worldOffZ <= real_t(4) && lateralXY < ceilingReach
+                      && !nearerOtherBoxFloater(samplePos, bi, worldOffZ))
+                  {
+                     acc[bi * stride + 8] += fillField->get(localCell[0], localCell[1], localCell[2]);
+                     acc[bi * stride + 9] += real_t(1);
+                  }
                }
 
                // Plane-fitting channel: only interface cells carry a valid normal.
                if (!isFlagSet(cellFlag, interfaceFlag)) continue;
+
+               // De-contaminate: drop cells nearer a neighbouring box/cylinder floater's own TRUE
+               // (oriented) surface than they are to bi's own — see floaterSurfaceDistance() above.
+               if (nearerOtherBoxFloater(samplePos, bi, floaterSurfaceDistance(samplePos, bi)))
+                  continue;
 
                const real_t phi = fillField->get(localCell[0], localCell[1], localCell[2]);
                const real_t w   = phi * (real_t(1) - phi);
@@ -1981,7 +2107,20 @@ public:
             // selected for the force instead), vSub above is vSubSample, not vSubAnalytic — the
             // visualized clip then matches the analytic cross-check value (typically within a few
             // percent per the logged xcheck diff), not bit-for-bit the sampled value actually used.
-            if (floaterPlaneOrigin_) (*floaterPlaneOrigin_)[clipFloaters_[bi].uid] = xBar;
+            //
+            // xBar itself is only a POINT satisfying the plane equation nHat·(x−xBar)=0 — any point on
+            // the same infinite plane is equally valid, so the raw weighted centroid (averaged over a
+            // wide shell, tens of LU across) can land anywhere along that plane, including far from the
+            // box in X/Y (confirmed with real data: box_density_025_gas.prm, a single PINNED box sitting
+            // still at (64,30) the whole run, still saw its exported planeOrigin wander >10 LU away in
+            // X/Y — harmless to vSub/torque here since nHat stayed ~vertical (only planeOrigin.z is
+            // physically live in that case), but confusing to look at in ParaView, where the rendered
+            // plane patch drifts off the box instead of staying centred under it). Re-anchor to the point
+            // on that SAME plane closest to the box's own centre (foot of the perpendicular from `pos`)
+            // purely for the exported value — mirrors the sphere path's own xBarCorrected above, which
+            // already anchors its diagnostic origin at the sphere's centre.
+            const Vector3< real_t > xBarForOutput = pos + nHat * (nHat * (xBar - pos));
+            if (floaterPlaneOrigin_) (*floaterPlaneOrigin_)[clipFloaters_[bi].uid] = xBarForOutput;
             if (floaterPlaneNormal_) (*floaterPlaneNormal_)[clipFloaters_[bi].uid] = nHat;
          }
          else
@@ -1995,6 +2134,27 @@ public:
             if (floaterPlaneOrigin_) floaterPlaneOrigin_->erase(clipFloaters_[bi].uid);
             if (floaterPlaneNormal_) floaterPlaneNormal_->erase(clipFloaters_[bi].uid);
          }
+
+         // CAVITY BLEND (ported from the floating-sphere method, ParticleKernels.h ~1633-1643): blend
+         // vSub toward fully-submerged (vFull) as the slab just above the shape's own top fills with
+         // liquid. Without this, a box/cylinder buried in a densely packed pile keeps whatever vSub the
+         // local plane-fit found -- and deep in a pile that plane-fit can lock onto a small local void
+         // between neighbouring particles instead of the true (much higher) free surface, even when the
+         // shape sits under genuinely bulk liquid. The sphere path has carried this correction since
+         // f6db0727 ("cavity-proof buoyancy"); it was never ported to the box/cylinder path, which is why
+         // packed cylinders/boxes can end up with submersion oscillating well below 100% (and a
+         // buoyancy force cancelling the MEM hydro force) even tens of LU under the real surface.
+         const real_t aboveCnt     = acc[bi * stride + 9];
+         const real_t avgFillAbove = (aboveCnt > real_t(0)) ? (acc[bi * stride + 8] / aboveCnt) : real_t(0);
+         const real_t tCav = std::clamp((avgFillAbove - real_t(0.3)) / real_t(0.4), real_t(0), real_t(1));
+         const real_t wCav = tCav * tCav * (real_t(3) - real_t(2) * tCav); // smoothstep weight ∈ [0,1]
+         vSub = (real_t(1) - wCav) * vSub + wCav * vFull;
+         // A fully-submerged centrally-symmetric shape (box or cylinder) has its submerged centroid at
+         // its own geometric centre, i.e. cbOff -> 0. Blend the (possibly unreliable, computed against
+         // the same contaminated plane-fit) lever arm toward that limit with the same weight, so the
+         // righting torque doesn't keep using a partial-submersion lever once vSub itself has been
+         // corrected toward "essentially fully submerged".
+         cbOff = (real_t(1) - wCav) * cbOff;
 
          vSub = std::clamp(vSub, real_t(0), vFull);
          submergedVolumes_[clipFloaters_[bi].uid] = vSub;
@@ -2017,6 +2177,7 @@ public:
                << "  fitNormal=(" << fittedNormal[0] << "," << fittedNormal[1] << "," << fittedNormal[2] << ")"
                << (fittedNormal[2] < real_t(0) ? " (n_z<0 DOWN!)" : "")
                << "  normalCoherence=" << normalCoherence
+               << "  avgFillAbove=" << avgFillAbove << " (cellsAbove=" << aboveCnt << ", cavityBlend=" << wCav << ")"
                << "  B-G offset=(" << cbOff[0] << "," << cbOff[1] << "," << cbOff[2] << ")"
                << "  |B-G|_horiz=" << std::sqrt(cbOff[0] * cbOff[0] + cbOff[1] * cbOff[1])
                << "  comOffsetZ=" << (boxComOffsetZ_.count(clipFloaters_[bi].uid)
@@ -2083,6 +2244,7 @@ private:
    bool                                               usePhantomForceCorrection_{ false }; // Option A: subtract F_pred_z from vertical MEM force
    std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxPositions_;  // boxes whose TRANSLATION is held (rotation free); UID → pinned world position
    std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxAxes_;       // UID → per-axis pin mask (nonzero = pin that axis, 0 = free)
+   std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedRotationAxes_; // UID → per-axis rotation pin mask (nonzero = zero that axis's angular velocity every sub-cycle, 0 = free)
 
    // kernels — declaration order must match initializer-list order to avoid -Wreorder
    mesa_pd::kernel::VelocityVerletPreForceUpdate vvIntegratorPreForce;

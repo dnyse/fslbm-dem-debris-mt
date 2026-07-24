@@ -12,7 +12,19 @@
 
 # build + run: ten floating spheres (r=4..10 LU) dropped from gas phase — staggered cascade.
 # domainSize <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 blocks
-REPO="$HOME/mt-dennys"
+# Resolve the repo root programmatically (mirrors antidunes.sh's own SCRIPT_DIR/REPO_ROOT
+# derivation) -- no hardcoded path, so this works across mirror clones (mt-dennys,
+# mt-dennys-mirror, mt-dennys-mirror2, ...) regardless of which one submitted the job. Jobs
+# are always submitted with `sbatch` from apps/showcases/Antidunes (same dir as antidunes.sh),
+# so SLURM_SUBMIT_DIR (guaranteed set by SLURM to that submission directory) sits 3 levels
+# below the repo root; fall back to deriving it from this script's own location (four levels
+# up from apps/showcases/Antidunes/jobs/) for direct/non-sbatch execution.
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    REPO="$(cd "$SLURM_SUBMIT_DIR/../../.." && pwd)"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    REPO="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+fi
 BIN_DIR="$REPO/build/apps/showcases/Antidunes"
 
 "$REPO/apps/showcases/Antidunes/antidunes.sh" \

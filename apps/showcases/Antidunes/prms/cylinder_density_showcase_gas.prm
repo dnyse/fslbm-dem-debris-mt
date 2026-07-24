@@ -91,6 +91,9 @@ FloatingCylinders
       comOffsetZ           0;
       pinPosition          true;
       pinAxes              < 1, 1, 0 >;
+      pinRotation          true;
+      pinRotationAxes      < 1, 0, 1 >;   // free "roll" about Y — physically inert here (circular
+                                          // cross-section), kept only for parity with the box test
    }
    FloatingCylinder
    {
@@ -103,6 +106,9 @@ FloatingCylinders
       comOffsetZ           0;
       pinPosition          true;
       pinAxes              < 1, 1, 0 >;
+      pinRotation          true;
+      pinRotationAxes      < 1, 0, 1 >;   // free "roll" about Y — physically inert here (circular
+                                          // cross-section), kept only for parity with the box test
    }
    FloatingCylinder
    {
@@ -115,6 +121,9 @@ FloatingCylinders
       comOffsetZ           0;
       pinPosition          true;
       pinAxes              < 1, 1, 0 >;
+      pinRotation          true;
+      pinRotationAxes      < 1, 0, 1 >;   // free "roll" about Y — physically inert here (circular
+                                          // cross-section), kept only for parity with the box test
    }
 }
 

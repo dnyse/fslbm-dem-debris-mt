@@ -5,6 +5,14 @@
 #
 ###################################################################################################
 
+# No codegen dependency (doesn't touch ParticleKernels.h) -- exercises the Bogner state-selection
+# classifier used by the free-surface/mesa_pd coupling directly, so it builds unconditionally.
+waLBerla_add_test_executable ( ANTIDUNES_BognerStateClassification BognerStateClassificationTest.cpp )
+target_link_libraries ( ANTIDUNES_BognerStateClassification
+      walberla::core walberla::domain_decomposition walberla::field walberla::lbm
+      walberla::mesa_pd walberla::lbm_mesapd_coupling )
+waLBerla_execute_test( NAME ANTIDUNES_BognerStateClassification )
+
 if ( WALBERLA_BUILD_WITH_CODEGEN )
 
    set( ANTIDUNES_SRC_DIR ${walberla_SOURCE_DIR}/apps/showcases/Antidunes )
