@@ -35,6 +35,8 @@
 #include <core/Environment.h>
 #include <core/mpi/MPIManager.h>
 
+#include <vector>
+
 namespace walberla {
 namespace lbm_mesapd_coupling {
 
@@ -212,6 +214,190 @@ void testCubeFormerObstacleNeighbourBlocksGasPromotion()
    WALBERLA_CHECK(classifyCube(cube) == BognerNeighbourhoodState::Interface);
 }
 
+// ---------------------------------------------------------------------------------------------
+// [WATERLINE-SHADOW] tests: computeRealPhaseComponents()/classifyViaWaterlineReachability() --
+// DIAGNOSTIC-ONLY functions (see PdfReconstructionManager.h) that check whether a genuine real
+// gas/liquid transition is reachable from an ambiguous cell via connectivity, not just "does the
+// block contain any real gas/liquid anywhere." A permeable cell (formerObstacle, interface, or a
+// particle-obstacle cell) never itself counts as evidence and never blocks the search -- only a
+// real bognerGas cell blocks a real-liquid search, and vice versa. This is what makes a floating
+// object sitting in open liquid NOT look like two separate liquid bodies, and a cluster of merely-
+// uncovered cells NOT look like a waterline by itself.
+//
+// A flat 3D grid (row-major, indexed [z][y][x]) stands in for a FlagField region; getFlag(x,y,z)
+// closes over it exactly like classifyCube's lambda above.
+// ---------------------------------------------------------------------------------------------
+
+constexpr MockFlag OBSTACLE = MockFlag(1) << 4; // a particle/wall cell -- mechanically just "not gas, not liquid"
+
+using Grid = std::vector< std::vector< std::vector< MockFlag > > >; // [z][y][x]
+
+Grid makeGrid(cell_idx_t xSize, cell_idx_t ySize, cell_idx_t zSize, MockFlag fill)
+{
+   return { size_t(zSize),
+            std::vector< std::vector< MockFlag > >(size_t(ySize), std::vector< MockFlag >(size_t(xSize), fill)) };
+}
+
+PhaseReachability computePhases(const Grid& grid, cell_idx_t xSize, cell_idx_t ySize, cell_idx_t zSize)
+{
+   return computeRealPhaseComponents(
+      [&](cell_idx_t x, cell_idx_t y, cell_idx_t z) { return grid[size_t(z)][size_t(y)][size_t(x)]; },
+      cell_idx_t(0), xSize - cell_idx_t(1), cell_idx_t(0), ySize - cell_idx_t(1), cell_idx_t(0),
+      zSize - cell_idx_t(1), LIQUID, GAS);
+}
+
+void testComponentsSingleLiquidSingleGasSimpleSurface()
+{
+   // z=0..2 real liquid, z=3 a single formerObstacle "surface" cell, z=4..6 real gas. The surface
+   // cell genuinely borders both real phases (through the permeable layer, not directly) -> a
+   // true local surface.
+   const cell_idx_t xSize = 3, ySize = 3, zSize = 7;
+   Grid grid = makeGrid(xSize, ySize, zSize, LIQUID);
+   for (cell_idx_t y = 0; y < ySize; ++y)
+      for (cell_idx_t x = 0; x < xSize; ++x)
+      {
+         grid[3][size_t(y)][size_t(x)] = FORMER_OBSTACLE;
+         grid[4][size_t(y)][size_t(x)] = GAS;
+         grid[5][size_t(y)][size_t(x)] = GAS;
+         grid[6][size_t(y)][size_t(x)] = GAS;
+      }
+
+   const PhaseReachability pr = computePhases(grid, xSize, ySize, zSize);
+   WALBERLA_CHECK_EQUAL(pr.totalGasComponents, uint_t(1));
+   WALBERLA_CHECK_EQUAL(pr.totalLiquidComponents, uint_t(1));
+   WALBERLA_CHECK(pr.gasConfidentlyReachable(1, 1, 3));
+   WALBERLA_CHECK(pr.liquidConfidentlyReachable(1, 1, 3));
+   WALBERLA_CHECK(!pr.gasInconclusive(1, 1, 3));
+   WALBERLA_CHECK(!pr.liquidInconclusive(1, 1, 3));
+   WALBERLA_CHECK(classifyViaWaterlineReachability(true, false, true, false) ==
+                  WaterlineVerdict::StillAmbiguousSurfaceNearby);
+}
+
+void testComponentsObstacleDoesNotSplitLiquid()
+{
+   // A full-cross-section obstacle "wall" sitting inside an otherwise all-liquid domain, with one
+   // formerObstacle cell in the middle of the wall (the cell under test). Without the permeability
+   // rule this wall would look like a hard separator between the liquid on either side; with it,
+   // both sides are recognised as the SAME connected body of liquid -- the direct regression test
+   // for "an obstacle interrupting the waterline must not look like a second surface."
+   const cell_idx_t xSize = 5, ySize = 5, zSize = 5;
+   Grid grid = makeGrid(xSize, ySize, zSize, LIQUID);
+   for (cell_idx_t z = 0; z < zSize; ++z)
+      for (cell_idx_t y = 0; y < ySize; ++y)
+         grid[size_t(z)][size_t(y)][2] = OBSTACLE; // full y-z wall at x=2
+   grid[2][2][2] = FORMER_OBSTACLE;                 // the cell under test, in the middle of the wall
+
+   const PhaseReachability pr = computePhases(grid, xSize, ySize, zSize);
+   // The core claim: still exactly ONE liquid component, despite the wall spanning the full
+   // cross-section -- the two "sides" are the same body of water, connected through the wall.
+   WALBERLA_CHECK_EQUAL(pr.totalLiquidComponents, uint_t(1));
+   WALBERLA_CHECK(pr.liquidConfidentlyReachable(2, 2, 2));
+   // No real gas anywhere in this fixture at all.
+   WALBERLA_CHECK(!pr.gasConfidentlyReachable(2, 2, 2));
+}
+
+void testComponentsFormerObstacleClusterIsNotEvidence()
+{
+   // A 3x3 cluster of formerObstacle cells sitting in the middle of an otherwise all-liquid plane
+   // (inset from the domain boundary so the cluster's own gas-graph component doesn't touch the
+   // scanned region's edge -- note the z-dimension needs thickness >1 too, or every cell would
+   // trivially "touch" the degenerate single-layer z boundary). No real gas anywhere. Confirms the
+   // cluster itself -- however large -- contributes zero evidence: every cell in it still correctly
+   // sees the surrounding real liquid.
+   const cell_idx_t xSize = 5, ySize = 5, zSize = 3;
+   Grid grid = makeGrid(xSize, ySize, zSize, LIQUID);
+   for (cell_idx_t y = 1; y <= 3; ++y)
+      for (cell_idx_t x = 1; x <= 3; ++x)
+         grid[1][size_t(y)][size_t(x)] = FORMER_OBSTACLE;
+
+   const PhaseReachability pr = computePhases(grid, xSize, ySize, zSize);
+   WALBERLA_CHECK_EQUAL(pr.totalGasComponents, uint_t(0));
+   WALBERLA_CHECK_EQUAL(pr.totalLiquidComponents, uint_t(1));
+   for (cell_idx_t y = 1; y <= 3; ++y)
+      for (cell_idx_t x = 1; x <= 3; ++x)
+      {
+         WALBERLA_CHECK(pr.liquidConfidentlyReachable(x, y, 1));
+         WALBERLA_CHECK(!pr.gasConfidentlyReachable(x, y, 1));
+         WALBERLA_CHECK(!pr.gasInconclusive(x, y, 1));
+         WALBERLA_CHECK(classifyViaWaterlineReachability(false, false, true, false) ==
+                        WaterlineVerdict::WouldBeLiquid);
+      }
+}
+
+void testComponentsTwoSeparateGasRegionsBothTracked()
+{
+   // Two real-gas patches far enough apart (and separated by real liquid) to be genuinely
+   // disconnected components -- the "main surface plus an unrelated trapped cavity" case. A single
+   // formerObstacle test cell sits adjacent to only ONE of the two patches. Confirms reachability
+   // is tracked per-component: the cell correctly reaches the nearby patch and is NOT penalised by
+   // the existence of the other, unreachable one elsewhere in the same scan.
+   const cell_idx_t xSize = 9, ySize = 9, zSize = 2;
+   Grid grid = makeGrid(xSize, ySize, zSize, LIQUID);
+   // Patch A (near the test cell): z=1, x=1..2, y=1..2.
+   for (cell_idx_t y = 1; y <= 2; ++y)
+      for (cell_idx_t x = 1; x <= 2; ++x)
+         grid[1][size_t(y)][size_t(x)] = GAS;
+   grid[0][2][2] = FORMER_OBSTACLE; // test cell: directly below/adjacent to patch A
+   // Patch B (far away, unreachable from the test cell without crossing real liquid): z=1, x=6..7, y=6..7.
+   for (cell_idx_t y = 6; y <= 7; ++y)
+      for (cell_idx_t x = 6; x <= 7; ++x)
+         grid[1][size_t(y)][size_t(x)] = GAS;
+
+   const PhaseReachability pr = computePhases(grid, xSize, ySize, zSize);
+   WALBERLA_CHECK_EQUAL(pr.totalGasComponents, uint_t(2)); // two genuinely separate real-gas regions
+   WALBERLA_CHECK(pr.gasConfidentlyReachable(2, 2, 0));    // reaches patch A
+   WALBERLA_CHECK(pr.liquidConfidentlyReachable(2, 2, 0)); // plenty of real liquid nearby too
+   WALBERLA_CHECK(classifyViaWaterlineReachability(true, false, true, false) ==
+                  WaterlineVerdict::StillAmbiguousSurfaceNearby);
+}
+
+void testComponentsNoEvidenceAnywhereIsInconclusiveNotConfident()
+{
+   // A domain with NO real gas or liquid anywhere at all (every cell formerObstacle). The single
+   // all-permeable component necessarily spans -- and therefore touches -- the scanned region's own
+   // outer boundary (there is nothing else to stop it), so this resolves to "inconclusive" rather
+   // than a confident "no evidence of either phase": with truly zero real evidence anywhere in
+   // reach, the honest answer is "can't rule out more just past what we can see," not "confirmed
+   // empty." (Enclosure by one real phase always also proves reachability of that same phase --
+   // see class docs -- so a confident-and-non-edge-touching empty verdict never arises from a
+   // partial enclosure either; it takes an actual real cell of the corresponding phase to resolve
+   // confidently.)
+   const cell_idx_t xSize = 5, ySize = 5, zSize = 5;
+   const Grid grid = makeGrid(xSize, ySize, zSize, FORMER_OBSTACLE);
+
+   const PhaseReachability pr = computePhases(grid, xSize, ySize, zSize);
+   WALBERLA_CHECK_EQUAL(pr.totalGasComponents, uint_t(0));
+   WALBERLA_CHECK_EQUAL(pr.totalLiquidComponents, uint_t(0));
+   WALBERLA_CHECK(pr.gasInconclusive(2, 2, 2));
+   WALBERLA_CHECK(pr.liquidInconclusive(2, 2, 2));
+   WALBERLA_CHECK(classifyViaWaterlineReachability(false, true, false, true) ==
+                  WaterlineVerdict::ExcludedNearUnresolvedEdge);
+}
+
+void testComponentsEdgeTruncation()
+{
+   // A formerObstacle region that runs all the way to the scanned window's outer boundary without
+   // ever finding real gas -- the "we can't see far enough to be sure" case. Real liquid is present
+   // elsewhere in the fixture (so this is not simply the no-evidence-anywhere case above), but the
+   // specific cell under test only has a permeable path that reaches the edge on the gas side.
+   const cell_idx_t xSize = 5, ySize = 5, zSize = 5;
+   Grid grid = makeGrid(xSize, ySize, zSize, LIQUID);
+   // Punch a formerObstacle corridor from the centre out to the x=0 boundary, never touching real
+   // gas (there is none in this fixture at all) -- the centre cell's gas-graph component therefore
+   // reaches the edge without ever becoming productive.
+   for (cell_idx_t x = 0; x <= 2; ++x)
+      grid[2][2][size_t(x)] = FORMER_OBSTACLE;
+
+   const PhaseReachability pr = computePhases(grid, xSize, ySize, zSize);
+   WALBERLA_CHECK(pr.gasInconclusive(2, 2, 2));
+   WALBERLA_CHECK(!pr.gasConfidentlyReachable(2, 2, 2));
+   // Liquid is directly adjacent (e.g. (2,1,2) or (1,2,2) are real liquid) and not edge-limited.
+   WALBERLA_CHECK(pr.liquidConfidentlyReachable(2, 2, 2));
+   WALBERLA_CHECK(!pr.liquidInconclusive(2, 2, 2));
+   WALBERLA_CHECK(classifyViaWaterlineReachability(false, true, true, false) ==
+                  WaterlineVerdict::ExcludedNearUnresolvedEdge);
+}
+
 } // namespace lbm_mesapd_coupling
 } // namespace walberla
 
@@ -236,6 +422,13 @@ int main(int argc, char** argv)
    testCubeAllInterfaceNoRealPhase();
    testCubeFormerObstacleNeighbourBlocksLiquidPromotion();
    testCubeFormerObstacleNeighbourBlocksGasPromotion();
+
+   testComponentsSingleLiquidSingleGasSimpleSurface();
+   testComponentsObstacleDoesNotSplitLiquid();
+   testComponentsFormerObstacleClusterIsNotEvidence();
+   testComponentsTwoSeparateGasRegionsBothTracked();
+   testComponentsNoEvidenceAnywhereIsInconclusiveNotConfident();
+   testComponentsEdgeTruncation();
 
    return EXIT_SUCCESS;
 }

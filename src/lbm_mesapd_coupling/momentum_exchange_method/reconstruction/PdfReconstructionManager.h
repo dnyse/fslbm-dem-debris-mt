@@ -152,6 +152,209 @@ inline BognerNeighbourhoodState classifyFormerObstacleCell(NeighbourFlagGetter g
    return classifyFormerObstacleNeighbourhood(hasGasOut, hasLiquidOut, hasUnknownOut);
 }
 
+//**************************************************************************************************************************************
+/*!\brief DIAGNOSTIC ONLY (see PdfReconstructionManager's "[WATERLINE-SHADOW]" usage): result of
+ * computeRealPhaseComponents(), answering -- for every cell in a scanned region -- whether a real
+ * bognerGas / bognerLiquid cell is reachable from it without crossing the OPPOSITE real phase.
+ *
+ * This never changes what any cell actually commits to. It is a parallel "shadow" computation,
+ * logged for later comparison against how cells actually turn out, before ever being wired into a
+ * real decision (see changes.md / the plan this was built from for the staged validate-before-acting
+ * rationale).
+ */
+//**************************************************************************************************************************************
+struct PhaseReachability
+{
+   cell_idx_t xMin_ = cell_idx_t(0), yMin_ = cell_idx_t(0), zMin_ = cell_idx_t(0);
+   cell_idx_t xSize_ = cell_idx_t(0), ySize_ = cell_idx_t(0), zSize_ = cell_idx_t(0);
+
+   std::vector< uint8_t > gasConfidentlyReachable_;
+   std::vector< uint8_t > gasInconclusive_;
+   std::vector< uint8_t > liquidConfidentlyReachable_;
+   std::vector< uint8_t > liquidInconclusive_;
+
+   uint_t totalGasComponents    = uint_t(0); // # of distinct components that contain real gas
+   uint_t totalLiquidComponents = uint_t(0); // # of distinct components that contain real liquid
+
+   inline size_t flatIndex(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
+   {
+      return (size_t(z - zMin_) * size_t(ySize_) + size_t(y - yMin_)) * size_t(xSize_) + size_t(x - xMin_);
+   }
+   inline bool gasConfidentlyReachable(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
+   {
+      return gasConfidentlyReachable_[flatIndex(x, y, z)] != uint8_t(0);
+   }
+   inline bool gasInconclusive(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
+   {
+      return gasInconclusive_[flatIndex(x, y, z)] != uint8_t(0);
+   }
+   inline bool liquidConfidentlyReachable(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
+   {
+      return liquidConfidentlyReachable_[flatIndex(x, y, z)] != uint8_t(0);
+   }
+   inline bool liquidInconclusive(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
+   {
+      return liquidInconclusive_[flatIndex(x, y, z)] != uint8_t(0);
+   }
+};
+
+//**************************************************************************************************************************************
+/*!\brief DIAGNOSTIC ONLY: computes, for every cell in [xMin,xMax]x[yMin,yMax]x[zMin,zMax] (all
+ * inclusive, matching the same absolute-coordinate convention as FlagField::get(x,y,z) so
+ * production can pass a bare field-access lambda), whether real gas / real liquid is reachable
+ * from it without crossing the opposite real phase.
+ *
+ * The flood fill is free to pass through any cell that is NEITHER real bognerGas NOR real
+ * bognerLiquid (formerObstacle, interface, particle-obstacle cells, walls, ...) -- such cells carry
+ * no evidence of either phase, so: (a) a floating object sitting in open liquid does not split that
+ * liquid into two separate reachability regions (there is a permeable path through the object's own
+ * cells connecting both sides), and (b) a cluster of merely-uncovered formerObstacle cells does not
+ * itself look like a waterline (it contributes nothing until the flood fill reaches an actual real
+ * gas or real liquid cell on the far side).
+ *
+ * "Confidently reachable" means a real cell of that phase was actually found, connected via only
+ * permeable cells. "Inconclusive" means the flood fill for that phase ran all the way to the outer
+ * boundary of the scanned region without finding one -- i.e. the true situation might extend further
+ * than this region reaches, so "not reachable" cannot be trusted there.
+ *
+ * getFlag(x, y, z) must return the flag at the given ABSOLUTE coordinates for every cell in the
+ * scanned region.
+ */
+//**************************************************************************************************************************************
+template< typename Flag_T, typename FlagGetter >
+inline PhaseReachability computeRealPhaseComponents(FlagGetter getFlag, cell_idx_t xMin, cell_idx_t xMax,
+                                                     cell_idx_t yMin, cell_idx_t yMax, cell_idx_t zMin,
+                                                     cell_idx_t zMax, Flag_T bognerLiquid, Flag_T bognerGas)
+{
+   PhaseReachability result;
+   result.xMin_  = xMin;
+   result.yMin_  = yMin;
+   result.zMin_  = zMin;
+   result.xSize_ = xMax - xMin + cell_idx_t(1);
+   result.ySize_ = yMax - yMin + cell_idx_t(1);
+   result.zSize_ = zMax - zMin + cell_idx_t(1);
+
+   const size_t nx = size_t(result.xSize_);
+   const size_t ny = size_t(result.ySize_);
+   const size_t nz = size_t(result.zSize_);
+   const size_t n  = nx * ny * nz;
+
+   result.gasConfidentlyReachable_.assign(n, uint8_t(0));
+   result.gasInconclusive_.assign(n, uint8_t(0));
+   result.liquidConfidentlyReachable_.assign(n, uint8_t(0));
+   result.liquidInconclusive_.assign(n, uint8_t(0));
+
+   auto toAbs = [&](size_t flat, cell_idx_t& x, cell_idx_t& y, cell_idx_t& z) {
+      x = xMin + cell_idx_c(flat % nx);
+      y = yMin + cell_idx_c((flat / nx) % ny);
+      z = zMin + cell_idx_c(flat / (nx * ny));
+   };
+   auto flatOf = [&](cell_idx_t x, cell_idx_t y, cell_idx_t z) -> size_t {
+      return (size_t(z - zMin) * ny + size_t(y - yMin)) * nx + size_t(x - xMin);
+   };
+
+   // One "graph": nodes are every cell that is NOT `blockingFlag` (i.e. the opposite real phase);
+   // edges are 26-connectivity. A resulting component is "productive" if it contains at least one
+   // real `productiveFlag` cell, and "touches the edge" if it reaches the outer boundary of the
+   // scanned region. Writes confidence/inconclusive results for every cell that IS part of this
+   // graph (cells that ARE `blockingFlag` are simply left at 0/0 -- irrelevant for this phase).
+   auto runGraph = [&](Flag_T blockingFlag, Flag_T productiveFlag, std::vector< uint8_t >& confidentOut,
+                       std::vector< uint8_t >& inconclusiveOut) -> uint_t {
+      std::vector< int32_t > label(n, int32_t(-1));
+      std::vector< uint8_t > productive;
+      std::vector< uint8_t > touchesEdge;
+      std::vector< size_t > stack;
+
+      for (size_t startFlat = 0; startFlat < n; ++startFlat)
+      {
+         if (label[startFlat] != int32_t(-1)) continue;
+         cell_idx_t sx, sy, sz;
+         toAbs(startFlat, sx, sy, sz);
+         if (isFlagSet(getFlag(sx, sy, sz), blockingFlag)) continue; // not part of this graph
+
+         const int32_t myLabel = int32_t(productive.size());
+         productive.push_back(uint8_t(0));
+         touchesEdge.push_back(uint8_t(0));
+         label[startFlat] = myLabel;
+         stack.clear();
+         stack.push_back(startFlat);
+
+         while (!stack.empty())
+         {
+            const size_t curFlat = stack.back();
+            stack.pop_back();
+            cell_idx_t cx, cy, cz;
+            toAbs(curFlat, cx, cy, cz);
+            const Flag_T cf = getFlag(cx, cy, cz);
+            if (isFlagSet(cf, productiveFlag)) productive[size_t(myLabel)] = uint8_t(1);
+            if (cx == xMin || cx == xMax || cy == yMin || cy == yMax || cz == zMin || cz == zMax)
+               touchesEdge[size_t(myLabel)] = uint8_t(1);
+
+            for (int dz = -1; dz <= 1; ++dz)
+               for (int dy = -1; dy <= 1; ++dy)
+                  for (int dx = -1; dx <= 1; ++dx)
+                  {
+                     if (dx == 0 && dy == 0 && dz == 0) continue;
+                     const cell_idx_t nx_ = cx + cell_idx_c(dx);
+                     const cell_idx_t ny_ = cy + cell_idx_c(dy);
+                     const cell_idx_t nz_ = cz + cell_idx_c(dz);
+                     if (nx_ < xMin || nx_ > xMax || ny_ < yMin || ny_ > yMax || nz_ < zMin || nz_ > zMax) continue;
+                     const size_t nFlat = flatOf(nx_, ny_, nz_);
+                     if (label[nFlat] != int32_t(-1)) continue;
+                     if (isFlagSet(getFlag(nx_, ny_, nz_), blockingFlag)) continue;
+                     label[nFlat] = myLabel;
+                     stack.push_back(nFlat);
+                  }
+         }
+      }
+
+      uint_t totalProductive = uint_t(0);
+      for (uint8_t p : productive)
+         if (p) ++totalProductive;
+
+      for (size_t flat = 0; flat < n; ++flat)
+      {
+         if (label[flat] == int32_t(-1)) continue; // this cell IS the blocking phase -- not part of this graph
+         const size_t c = size_t(label[flat]);
+         if (productive[c]) confidentOut[flat] = uint8_t(1);
+         else if (touchesEdge[c]) inconclusiveOut[flat] = uint8_t(1);
+      }
+      return totalProductive;
+   };
+
+   result.totalGasComponents = runGraph(bognerLiquid, bognerGas, result.gasConfidentlyReachable_,
+                                        result.gasInconclusive_);
+   result.totalLiquidComponents = runGraph(bognerGas, bognerLiquid, result.liquidConfidentlyReachable_,
+                                           result.liquidInconclusive_);
+
+   return result;
+}
+
+//! DIAGNOSTIC ONLY: verdict of the waterline-reachability shadow check for a single cell.
+enum class WaterlineVerdict
+{
+   WouldBeLiquid,
+   WouldBeGas,
+   StillAmbiguousSurfaceNearby,  // both real gas and real liquid confidently reachable -- a true local surface
+   StillAmbiguousNoEvidence,     // neither reachable -- no real evidence of either phase within the scanned region
+   ExcludedNearUnresolvedEdge    // the scanned region ended before ruling out gas and/or liquid; not trustworthy
+};
+
+//**************************************************************************************************************************************
+/*!\brief DIAGNOSTIC ONLY: the waterline-reachability decision rule, given one cell's reachability
+ * results from computeRealPhaseComponents().
+ */
+//**************************************************************************************************************************************
+inline WaterlineVerdict classifyViaWaterlineReachability(bool gasConfidentlyReachable, bool gasInconclusive,
+                                                          bool liquidConfidentlyReachable, bool liquidInconclusive)
+{
+   if (gasInconclusive || liquidInconclusive) return WaterlineVerdict::ExcludedNearUnresolvedEdge;
+   if (liquidConfidentlyReachable && !gasConfidentlyReachable) return WaterlineVerdict::WouldBeLiquid;
+   if (gasConfidentlyReachable && !liquidConfidentlyReachable) return WaterlineVerdict::WouldBeGas;
+   if (gasConfidentlyReachable && liquidConfidentlyReachable) return WaterlineVerdict::StillAmbiguousSurfaceNearby;
+   return WaterlineVerdict::StillAmbiguousNoEvidence;
+}
+
 // ScalarField_T (defaulted to void) is the fill-level field type, used only by the Bogner
 // state-selection path to seed the volume fraction φ of freshly converted cells
 // (Bogner & Rüde 2013, §5.2). For the non-Bogner path it stays void and all fill code is
@@ -254,6 +457,25 @@ class PdfReconstructionManager
       convGas_ = convLiquid_ = convIntfUnknown_ = convIntfUnknownGas_ = convIntfSurface_ = convIntfUnresolved_ = uint_t(0);
       formerMoTotal_ = formerMoWithUnknownNbr_ = unknownNbrSum_ = unknownNbrMax_ = uint_t(0);
       unknownNbrHist_.fill(uint_t(0));
+
+      // [WATERLINE-SHADOW] aggregate report.
+      std::vector< uint_t > s = { shadowWouldBeLiquid_,       shadowWouldBeGas_, shadowStillAmbiguousSurface_,
+                                  shadowStillAmbiguousNoEvidence_, shadowExcludedNearEdge_,
+                                  blockGasComponentCountSum_, blockLiquidComponentCountSum_, blockScanCount_ };
+      walberla::mpi::reduceInplace(s, walberla::mpi::SUM);
+      WALBERLA_ROOT_SECTION()
+      {
+         const uint_t blocks   = s[7];
+         const real_t meanGasComp = (blocks > uint_t(0)) ? real_c(s[5]) / real_c(blocks) : real_t(0);
+         const real_t meanLiqComp = (blocks > uint_t(0)) ? real_c(s[6]) / real_c(blocks) : real_t(0);
+         WALBERLA_LOG_INFO_ON_ROOT("[WATERLINE-SHADOW-SUMMARY t=" << t << "] wouldBeLiquid=" << s[0]
+            << " wouldBeGas=" << s[1] << " stillAmbiguousSurface=" << s[2] << " stillAmbiguousNoEvidence=" << s[3]
+            << " excludedNearEdge=" << s[4] << " | mean gas components/block=" << meanGasComp
+            << " mean liquid components/block=" << meanLiqComp << " (over " << blocks << " block scans)");
+      }
+      shadowWouldBeLiquid_ = shadowWouldBeGas_ = shadowStillAmbiguousSurface_ = shadowStillAmbiguousNoEvidence_ =
+         shadowExcludedNearEdge_ = uint_t(0);
+      blockGasComponentCountSum_ = blockLiquidComponentCountSum_ = blockScanCount_ = uint_t(0);
    }
 
  private:
@@ -344,6 +566,18 @@ class PdfReconstructionManager
    uint_t unknownNbrSum_          = uint_t(0); // sum of unknown-neighbour counts (→ mean per cell)
    uint_t unknownNbrMax_          = uint_t(0); // largest unknown-neighbour count seen on any cell
    std::array< uint_t, 27 > unknownNbrHist_ = {}; // histogram indexed by #unknown neighbours (0..26)
+
+   // [WATERLINE-SHADOW] diagnostic counters (see PhaseReachability/computeRealPhaseComponents above).
+   // Tallied for every branch-C/A'/E cell (i.e. every cell that today falls back to interface),
+   // regardless of whether the shadow verdict is ever wired into a real decision.
+   uint_t shadowWouldBeLiquid_            = uint_t(0);
+   uint_t shadowWouldBeGas_               = uint_t(0);
+   uint_t shadowStillAmbiguousSurface_    = uint_t(0);
+   uint_t shadowStillAmbiguousNoEvidence_ = uint_t(0);
+   uint_t shadowExcludedNearEdge_         = uint_t(0);
+   uint_t blockGasComponentCountSum_      = uint_t(0); // Σ totalGasComponents over every block scanned
+   uint_t blockLiquidComponentCountSum_   = uint_t(0); // Σ totalLiquidComponents over every block scanned
+   uint_t blockScanCount_                 = uint_t(0); // # of blocks scanned (→ mean components/block)
 };
 
 template< typename PdfField_T, typename BoundaryHandling_T, typename ParticleAccessor_T, typename Reconstructor_T,
@@ -413,6 +647,24 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       bognerLiquid    = flagField->getFlag(liquidFlagUID_);
       bognerGas       = flagField->getFlag(gasFlagUID_);
       bognerInterface = flagField->getFlag(interfaceFlagUID_);
+   }
+
+   // [WATERLINE-SHADOW] diagnostic-only phase-connectivity check (PhaseReachability /
+   // computeRealPhaseComponents, above). Computed ONCE per block, over the block's full
+   // ghost-inclusive extent (2 ghost layers already exist for this flag field -- see
+   // AntidunesBoundaryHandling.impl.h -- so this needs no new communication). Consulted below by
+   // bognerTargetFlag purely to log what a wider, connectivity-aware look would have concluded;
+   // never changes what a cell actually commits to.
+   PhaseReachability waterlineShadow;
+   if (useBognerStateSelection_)
+   {
+      const auto ci = flagField->xyzSizeWithGhostLayer();
+      waterlineShadow = computeRealPhaseComponents(
+         [&](cell_idx_t x, cell_idx_t y, cell_idx_t z) { return flagField->get(x, y, z); }, ci.xMin(), ci.xMax(),
+         ci.yMin(), ci.yMax(), ci.zMin(), ci.zMax(), bognerLiquid, bognerGas);
+      blockGasComponentCountSum_ += waterlineShadow.totalGasComponents;
+      blockLiquidComponentCountSum_ += waterlineShadow.totalLiquidComponents;
+      ++blockScanCount_;
    }
 
    // Helper lambda: per-cell Bogner target flag.
@@ -549,6 +801,58 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
                }
             }
          }
+
+         // [WATERLINE-SHADOW] diagnostic-only (see PhaseReachability/computeRealPhaseComponents
+         // above): never changes the `return bognerInterface;` below. Skipped for branch D
+         // (hasGas && hasLiquid) -- that's already a genuine, correctly-resolved surface cell, not
+         // something to shadow-check.
+         if (inner && !(hasGas && hasLiquid))
+         {
+            const bool gasReach = waterlineShadow.gasConfidentlyReachable(cx, cy, cz);
+            const bool gasIncon = waterlineShadow.gasInconclusive(cx, cy, cz);
+            const bool liqReach = waterlineShadow.liquidConfidentlyReachable(cx, cy, cz);
+            const bool liqIncon = waterlineShadow.liquidInconclusive(cx, cy, cz);
+            const WaterlineVerdict verdict = classifyViaWaterlineReachability(gasReach, gasIncon, liqReach, liqIncon);
+
+            switch (verdict)
+            {
+            case WaterlineVerdict::WouldBeLiquid: ++shadowWouldBeLiquid_; break;
+            case WaterlineVerdict::WouldBeGas: ++shadowWouldBeGas_; break;
+            case WaterlineVerdict::StillAmbiguousSurfaceNearby: ++shadowStillAmbiguousSurface_; break;
+            case WaterlineVerdict::StillAmbiguousNoEvidence: ++shadowStillAmbiguousNoEvidence_; break;
+            case WaterlineVerdict::ExcludedNearUnresolvedEdge: ++shadowExcludedNearEdge_; break;
+            }
+
+            static uint_t waterlineShadowLogCount = uint_t(0);
+            ++waterlineShadowLogCount;
+            if (waterlineShadowLogCount <= uint_t(20) || (waterlineShadowLogCount % uint_t(5000) == uint_t(0)))
+            {
+               const char* branchLabel = (hasLiquid && !hasGas && hasUnknown) ? "unknown-liquid"
+                                        : (hasGas && !hasLiquid && hasUnknown) ? "unknown-gas"
+                                                                               : "ambiguous-E";
+               const char* verdictLabel =
+                  (verdict == WaterlineVerdict::WouldBeLiquid) ?
+                     "WouldBeLiquid" :
+                     (verdict == WaterlineVerdict::WouldBeGas) ?
+                     "WouldBeGas" :
+                     (verdict == WaterlineVerdict::StillAmbiguousSurfaceNearby) ?
+                     "StillAmbiguousSurfaceNearby" :
+                     (verdict == WaterlineVerdict::StillAmbiguousNoEvidence) ? "StillAmbiguousNoEvidence" :
+                                                                                "ExcludedNearUnresolvedEdge";
+               const auto&  aabb = block->getAABB();
+               const real_t cdx  = aabb.xSize() / real_c(flagField->xSize());
+               WALBERLA_LOG_WARNING("[WATERLINE-SHADOW] (#" << waterlineShadowLogCount << ") world≈("
+                  << (aabb.xMin() + (real_c(cx) + real_t(0.5)) * cdx) << ","
+                  << (aabb.yMin() + (real_c(cy) + real_t(0.5)) * cdx) << ","
+                  << (aabb.zMin() + (real_c(cz) + real_t(0.5)) * cdx) << ")"
+                  << "  branch=" << branchLabel << "  verdict=" << verdictLabel
+                  << "  reachableGasComponents=" << (gasReach ? 1 : 0)
+                  << "  reachableLiquidComponents=" << (liqReach ? 1 : 0)
+                  << "  blockTotalGasComponents=" << waterlineShadow.totalGasComponents
+                  << "  blockTotalLiquidComponents=" << waterlineShadow.totalLiquidComponents);
+            }
+         }
+
          return bognerInterface;
       }
       WALBERLA_ABORT("unreachable: classifyFormerObstacleNeighbourhood returned an unhandled state");
