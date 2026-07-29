@@ -605,20 +605,33 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
    simObjs->floaterPlaneOrigin = std::make_shared< std::unordered_map< walberla::id_t, Vector3< real_t > > >();
    simObjs->floaterPlaneNormal = std::make_shared< std::unordered_map< walberla::id_t, Vector3< real_t > > >();
    WALBERLA_LOG_INFO_ON_ROOT("[MEM reference height] "
-      << (simParams->model.useDynamicReferenceHeight
-             ? "DYNAMIC (live, EMA-tracked from floaters' fitted local waterlines)"
-             : "STATIC (flat H=" + std::to_string(simParams->staticReferenceHeight())
-                  + (simParams->model.staticReferenceHeightOverride >= real_t(0)
-                        ? ", OVERRIDDEN via staticReferenceHeightOverride — flat absoluteLiquidHeight would be "
-                             + std::to_string(simParams->computed.absoluteLiquidHeight)
-                        : " = absoluteLiquidHeight") + ")"));
+      << (simParams->model.useBognerThreePhaseMEM
+             ? "DISABLED -- useBognerThreePhaseMEM=true: no rhoHydStat subtraction at all, reproducing "
+               "Bogner & Rude (2013) Eq. 5.9's original three-phase MEM force as published"
+             : (simParams->model.useDynamicReferenceHeight
+                   ? "DYNAMIC (live, EMA-tracked from floaters' fitted local waterlines)"
+                   : "STATIC (flat H=" + std::to_string(simParams->staticReferenceHeight())
+                        + (simParams->model.staticReferenceHeightOverride >= real_t(0)
+                              ? ", OVERRIDDEN via staticReferenceHeightOverride — flat absoluteLiquidHeight would be "
+                                   + std::to_string(simParams->computed.absoluteLiquidHeight)
+                              : " = absoluteLiquidHeight") + ")")));
+
+   // useBognerThreePhaseMEM: pass a null functor so SimpleBB's `hydrostaticDensityFct_ == nullptr`
+   // branch is taken -- no static/dynamic H subtraction at all. Combined with the (already-default)
+   // fill-weighting below, this is exactly Bogner & Rude's Eq. 5.9: a phi(x_b)-weighted blend of the
+   // real boundary-link PDFs and the gas-equilibrium distribution, nothing else.
+   std::function< real_t(const Vector3< real_t >&) > hydrostaticFtor;
+   if (!simParams->model.useBognerThreePhaseMEM)
+   {
+      hydrostaticFtor = simParams->model.useDynamicReferenceHeight
+         ? HydrostaticDensityFtor(simObjs->acceleration, simObjs->memReferenceHeight)
+         : HydrostaticDensityFtor(simObjs->acceleration, simParams->staticReferenceHeight());
+   }
 
    simObjs->antidunesBoundaryHandling = std::make_shared< AntidunesBoundaryHandling_T >(
       simObjs->blockForest, simObjs->pdfFieldID, simObjs->fillFieldID, simObjs->particleFieldID,
       simObjs->particleAccessor,
-      simParams->model.useDynamicReferenceHeight
-         ? HydrostaticDensityFtor(simObjs->acceleration, simObjs->memReferenceHeight)
-         : HydrostaticDensityFtor(simObjs->acceleration, simParams->staticReferenceHeight()),
+      hydrostaticFtor,
       simParams->model.useFillWeighting);
 
    // initialize BCs from config (NoSlip top/bottom, CellInterval pillar defined in Antidunes.prm)

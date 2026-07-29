@@ -573,10 +573,12 @@ class AddExternalForces {
 public:
    AddExternalForces(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain,
       const std::shared_ptr< Vector3< real_t > >& acceleration,
-      real_t particleDensityRatio)
+      real_t particleDensityRatio,
+      bool useBognerBuoyancy = false)
       : domain_(domain)
       , acceleration_(acceleration)
       , particleDensityRatio_(particleDensityRatio)
+      , useBognerBuoyancy_(useBognerBuoyancy)
       , submergedVolumes_(nullptr)
       , buoyancyCenterOffset_(nullptr)
    {}
@@ -635,11 +637,14 @@ public:
       }
 
       // X/Y: full-volume driving force (pressure-gradient body force acts on the whole particle).
-      // Z:   gravity (rho * vFull) minus correct buoyancy (vSub × g, fluid density = 1).
+      // Z:   useBognerBuoyancy_ → gravity only (rho * vFull); the MEM/hydrodynamic force alone
+      //      supplies buoyant support (Bogner & Rude 2013 -- no separate geometric channel).
+      //      otherwise → gravity minus the analytic buoyancy term (vSub × g, fluid density = 1),
+      //      Antidunes' extended split (default).
       Vector3< real_t > bodyForce(
          vFull * (*acceleration_)[0],
          vFull * (*acceleration_)[1],
-         (rho * vFull - vSub) * (*acceleration_)[2]);
+         (useBognerBuoyancy_ ? (rho * vFull) : (rho * vFull - vSub)) * (*acceleration_)[2]);
 
       auto hydro_force  = ac.getHydrodynamicForce(idx);
       auto hydro_torque = ac.getHydrodynamicTorque(idx);
@@ -827,6 +832,12 @@ private:
    std::shared_ptr< mesa_pd::domain::BlockForestDomain >   domain_;
    std::shared_ptr< Vector3< real_t > >                    acceleration_;
    real_t                                                   particleDensityRatio_;
+   // true  → vertical body force is gravity only (rho*vFull*a_z); buoyant support comes solely from
+   //         the MEM/hydrodynamic force, matching Bogner & Rude (2013)'s original formulation (no
+   //         separate geometric buoyancy channel). submergedVolumes_ is still populated/used for
+   //         submersion%/torque diagnostics -- only this force term is affected.
+   // false → gravity minus the analytic vSub*g buoyancy term (default; Antidunes' extended split).
+   bool                                                     useBognerBuoyancy_;
    const std::unordered_map< walberla::id_t, real_t >*     submergedVolumes_;
    const std::unordered_map< walberla::id_t, real_t >*     phantomForceZ_ = nullptr; // Option A vertical MEM correction; null = disabled
    const std::unordered_map< walberla::id_t, Vector3< real_t > >* buoyancyCenterOffset_;
@@ -1129,7 +1140,8 @@ public:
       , addExternalForces(
          simObjs->mesapdDomain,
          simObjs->acceleration,
-         simParams->particle.densityRatio)
+         simParams->particle.densityRatio,
+         simParams->model.useBognerBuoyancy)
       , useLubricationCorrection(simParams->particle.useLubricationCorrection)
       , evalFrequency_(simParams->evaluation.evaluationFrequency)
       , stepCounter_(uint_t(0))
@@ -1169,6 +1181,10 @@ public:
       usePhantomForceCorrection_ = simParams->model.usePhantomForceCorrection;
       WALBERLA_LOG_INFO_ON_ROOT("[FloaterForces] phantom-force correction (Option A): "
          << (usePhantomForceCorrection_ ? "ON (F_hydro_z −= tapered F_pred_z)" : "OFF"));
+      WALBERLA_LOG_INFO_ON_ROOT("[FloaterForces] buoyancy model: "
+         << (simParams->model.useBognerBuoyancy
+                ? "BOGNER (MEM/hydro_force alone supplies buoyancy; body force is gravity-only)"
+                : "SPLIT (gravity minus analytic vSub*g; default, Antidunes' extended model)"));
 
       // Combined box + cylinder "clip floater" list: both shapes share the plane-fit + clip V_sub
       // pipeline in computeSubmergedVolumesBox(); a cylinder is described by halfExtents = (r, r, L/2)

@@ -1,0 +1,209 @@
+// sphere_density_showcase_bogner_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// BUOYANCY SHOWCASE (sphere), BOGNER THREE-PHASE MEM variant -- identical to
+// sphere_density_showcase_gas.prm (three spheres, radius 12, densityRatio
+// 0.25/0.5/0.75, pinned in X/Y, still water) except ModelParameters now sets:
+//
+//   useBognerThreePhaseMEM true   -- SimpleBB is built with a NULL hydrostaticDensityFct,
+//                                    so no rhoHydStat is ever subtracted from the boundary-
+//                                    link PDFs. Combined with useFillWeighting (already the
+//                                    default), this reproduces Bogner & Rude (2013) Eq. 5.9's
+//                                    original three-phase MEM force exactly as published --
+//                                    a phi(x_b)-weighted blend of the real link PDFs and the
+//                                    gas-equilibrium distribution, nothing else subtracted.
+//   useBognerBuoyancy      true   -- AddExternalForces' vertical body force drops the
+//                                    separate analytic vSub*g buoyancy term entirely
+//                                    (gravity only, rho*vFull*a_z); buoyant support comes
+//                                    SOLELY from the (now-uncancelled) MEM/hydrodynamic force.
+//
+// Together these two switches remove every piece of Antidunes-specific buoyancy machinery
+// this project added on top of the original thesis method -- no static/dynamic reference
+// height, no separate submerged-volume force channel, no phantom-force correction needed
+// (that correction only exists to fix problems the split design itself created).
+//
+// PURPOSE: this is the direct correctness check for both new prm options. Expected
+// equilibrium (Archimedes, uniform-density sphere) is UNCHANGED from the baseline file:
+// submerged volume fraction = densityRatio, i.e. 25%/50%/75% of each sphere's volume below
+// the fitted waterline once settled. Run this side by side with the baseline
+// sphere_density_showcase_gas.prm (split-buoyancy, static-H) to compare final submersion%
+// and settling behaviour between the two buoyancy models on the exact same geometry.
+//
+// Layout (domain centreline y=30; absoluteLiquidHeight ~56.024), unchanged from baseline:
+//   • densityRatio 0.25: position (32, 30, 56)
+//   • densityRatio 0.50: position (64, 30, 56)
+//   • densityRatio 0.75: position (96, 30, 56)
+//   32 LU apart, radius 12 -> 8 LU clearance between neighbours; 18 LU clearance
+//   to the N/S walls (y=30, domain Y=60). All clear at t=0.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         30000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      position     < 32, 30, 56 >;
+      radius       12;
+      densityRatio 0.25;
+      settlingSteps 0;
+      pinPosition  true;
+      pinAxes      < 1, 1, 0 >;
+      pinRotation  true;
+   }
+   FloatingSphere
+   {
+      position     < 64, 30, 56 >;
+      radius       12;
+      densityRatio 0.5;
+      settlingSteps 0;
+      pinPosition  true;
+      pinAxes      < 1, 1, 0 >;
+      pinRotation  true;
+   }
+   FloatingSphere
+   {
+      position     < 96, 30, 56 >;
+      radius       12;
+      densityRatio 0.75;
+      settlingSteps 0;
+      pinPosition  true;
+      pinAxes      < 1, 1, 0 >;
+      pinRotation  true;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;   // Eq. 5.9's phi(x_b) blend -- already the default, kept explicit here
+   useBognerThreePhaseMEM        true;   // NEW: no rhoHydStat subtraction at all (see header)
+   useBognerBuoyancy             true;   // NEW: no separate vSub*g channel (see header)
+   writeFloaterPlaneVTK          true;   // emit planeOrigin/planeNormal for each sphere
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

@@ -100,6 +100,12 @@ struct PhysicsParams {
    // viscosity), overriding the value above. Lets a still-water settle test (U=0) be made more viscous
    // — e.g. so a tumbling cube/log damps to rest instead of coasting in near-inviscid water. 0 = off.
    real_t relaxationRateOverride;
+   // Optional gravity knob: when > 0, sets the lattice-unit gravity directly, overriding both the
+   // hardcoded and U-derived values above. Lets a still-water validation run be matched against a
+   // specific reference value from the literature (e.g. Bogner & Rude 2013's g=7.5e-4, used for their
+   // Fekken-cube floating-density validation) independent of this project's own Fr-derived antidune-flow
+   // scaling, which for the default config lands ~100x smaller (7.02618e-06). 0 = off.
+   real_t gravityOverride;
 
    PhysicsParams(const config::Config::BlockHandle& b)
       : enableWetting          { b.getParameter< bool >  ("enableWetting") }
@@ -109,6 +115,7 @@ struct PhysicsParams {
       , We                     { b.getParameter< real_t >("We") }
       , useHardcodedUnits      { b.getParameter< bool >  ("useHardcodedUnits", false) }
       , relaxationRateOverride { b.getParameter< real_t >("relaxationRateOverride", real_c(0)) }
+      , gravityOverride        { b.getParameter< real_t >("gravityOverride", real_c(0)) }
    {}
 };
 
@@ -379,6 +386,28 @@ struct ModelParams {
    // false → pass a null fill accessor so the raw two-phase MEM force is used (reference / ablation).
    bool        useFillWeighting;
 
+   // true  → disable the static/dynamic MEM reference height H entirely: SimpleBB is constructed with
+   //         a null hydrostaticDensityFct, so no rhoHydStat is ever subtracted from the boundary-link
+   //         PDFs. Combined with useFillWeighting (Eq. 5.9's φ-weighted blend, already the default),
+   //         this reproduces Bogner & Rüde (2013)'s original three-phase MEM force EXACTLY as
+   //         published — no static-H ablation machinery, no separate hydrostatic reference at all.
+   //         staticReferenceHeightOverride/useDynamicReferenceHeight are ignored while this is true
+   //         (there is nothing left to feed them into).
+   // false → subtract rhoHydStat as before (default; Antidunes' extended, non-thesis behaviour).
+   bool        useBognerThreePhaseMEM;
+
+   // true  → drop the separate analytic geometric buoyancy term (vSub·g, computeSubmergedVolumes) from
+   //         AddExternalForces' vertical body force entirely -- gravity only (rho*vFull*a_z). Buoyant
+   //         support then comes ONLY from the MEM force (hydro_force), matching Bogner & Rüde (2013):
+   //         no separate buoyancy channel, the hydrostatic pressure already carried by the (uncancelled,
+   //         fill-weighted) boundary-link PDFs supplies it. submergedVolumes_ itself keeps being computed
+   //         (still used for submersion%/torque diagnostics) -- only the FORCE term is affected. Most
+   //         physically consistent when paired with useBognerThreePhaseMEM=true (no double subtraction
+   //         nor double-counted buoyancy); pairing this alone with the default rhoHydStat subtraction
+   //         re-introduces the original phantom-lift problem that subtraction was added to avoid.
+   // false → gravity minus vSub*g (default; Antidunes' extended, non-thesis split).
+   bool        useBognerBuoyancy;
+
    // true  → re-seed each FormerMO cell to the depth-consistent hydrostatic density
    //         ρ_hyd(z) = 1 + 3·a_z·(z − H) instead of the EquilibriumReconstructor's fill-blind
    //         unweighted mean (interface cells report ρ≈1 however empty they are). Kills the ρ≈1
@@ -459,6 +488,8 @@ struct ModelParams {
       , cellConversionForceThreshold{ b.getParameter< real_t >     ("cellConversionForceThreshold") }
       , useBognerReconstruction     { b.getParameter< bool >       ("useBognerReconstruction", true) }
       , useFillWeighting            { b.getParameter< bool >       ("useFillWeighting", true) }
+      , useBognerThreePhaseMEM      { b.getParameter< bool >       ("useBognerThreePhaseMEM", false) }
+      , useBognerBuoyancy           { b.getParameter< bool >       ("useBognerBuoyancy", false) }
       , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
       , useAnalyticBoxBuoyancy      { b.getParameter< bool >       ("useAnalyticBoxBuoyancy", false) }
       , usePhantomForceCorrection   { b.getParameter< bool >       ("usePhantomForceCorrection", false) }
@@ -570,6 +601,9 @@ struct ComputedParams {
          relaxationRate = physics.relaxationRateOverride;
          viscosity      = (real_c(1) / relaxationRate - real_c(0.5)) / real_c(3);
       }
+
+      // Gravity override: see PhysicsParams::gravityOverride doc comment. 0 = keep the value above.
+      if (physics.gravityOverride > real_c(0)) { gravity = physics.gravityOverride; }
 
       const real_t viscosity_SI = real_c(1.0016e-6);  // kinemtic viscosity of water at 20°C at 1 bar
       dx_SI = real_c(1) / particleScalingFactor;
