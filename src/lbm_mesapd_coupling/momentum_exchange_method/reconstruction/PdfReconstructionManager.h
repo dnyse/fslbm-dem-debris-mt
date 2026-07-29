@@ -707,6 +707,15 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
    // itself just been through this same classifier), neither promotion is provably safe, so it
    // falls back to the safe `interface` buffer; the ordinary free-surface conversion sweep resolves
    // it later once a real liquid/gas neighbour actually becomes reachable.
+   //
+   // formerObstacleGhostBounds: the field's full ghost-inclusive extent, computed once here so the
+   // neighbour-read lambda below can bounds-check against it. Needed because the Pass-2 update loop
+   // (below) iterates x/y/z over this SAME full ghost-inclusive range, but classifyFormerObstacleCell
+   // reads a further +/-1 cell around whichever cell it's given -- a formerObstacle cell sitting at
+   // the OUTERMOST ghost layer therefore has a neighbour one cell beyond the field's actual allocated
+   // buffer. Confirmed with AddressSanitizer on a real cluster run (27-floater mixed-shape pillars
+   // showcase, job 3893620): SEGV, invalid READ, exactly at the flagField->get() call directly below.
+   const auto formerObstacleGhostBounds = flagField->xyzSizeWithGhostLayer();
    auto bognerTargetFlag = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) -> flag_t {
       // Scan + decision both live in classifyFormerObstacleCell()/classifyFormerObstacleNeighbourhood()
       // (top of this file) as pure, directly unit-tested functions
@@ -716,8 +725,21 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       bool hasLiquid, hasGas, hasUnknown;
       uint_t unknownNbr;
       const BognerNeighbourhoodState state = classifyFormerObstacleCell(
-         [&](int dx, int dy, int dz) { return flagField->get(cx + dx, cy + dy, cz + dz); }, bognerLiquid,
-         bognerGas, formerObstacle, hasGas, hasLiquid, hasUnknown, unknownNbr);
+         [&](int dx, int dy, int dz) -> flag_t {
+            const cell_idx_t nx = cx + cell_idx_c(dx);
+            const cell_idx_t ny = cy + cell_idx_c(dy);
+            const cell_idx_t nz = cz + cell_idx_c(dz);
+            // Neighbour falls outside the field's allocated (ghost-inclusive) range: we cannot read
+            // it safely. Report it as an unresolved ("formerObstacle") neighbour -- the SAME
+            // conservative fallback this classifier already uses for a same-pass-unresolved neighbour
+            // (falls back to interface, the always-legal state) -- rather than reading invalid memory.
+            if (nx < formerObstacleGhostBounds.xMin() || nx > formerObstacleGhostBounds.xMax() ||
+                ny < formerObstacleGhostBounds.yMin() || ny > formerObstacleGhostBounds.yMax() ||
+                nz < formerObstacleGhostBounds.zMin() || nz > formerObstacleGhostBounds.zMax())
+               return formerObstacle;
+            return flagField->get(nx, ny, nz);
+         },
+         bognerLiquid, bognerGas, formerObstacle, hasGas, hasLiquid, hasUnknown, unknownNbr);
 
       // inner-cell guard for the conversion counters: a FormerMO cell in a ghost layer is a
       // duplicate of another rank's inner cell, so only inner cells are tallied.

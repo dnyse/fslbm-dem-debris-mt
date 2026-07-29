@@ -607,6 +607,13 @@ public:
    // every floater (any count) logs its force breakdown exactly once per eval step.
    void setLogForces(bool logForces) { logForces_ = logForces; }
 
+   // Sub-cycle index within the current LBM step (0..numSubCycles-1), for the DEM/MEM-WATCH logs
+   // below -- lets a blowup that GROWS across sub-cycles (implicating DEM contact resolution, since
+   // hydro_force is fixed for the whole outer step and only F_contact is recomputed each sub-cycle)
+   // be told apart from one that is ALREADY anomalous at sub-cycle 0 (implicating MEM, since that is
+   // the first sub-cycle to see this step's hydro_force at all).
+   void setSubCycle(uint_t subCycle) { subCycle_ = subCycle; }
+
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx, ParticleAccessor_T& ac){
       // Buoyancy acts only in Z because the hydrostatic MEM contribution is only in Z.
@@ -700,6 +707,35 @@ public:
       if (!std::isfinite(hydro_torque[0]) || !std::isfinite(hydro_torque[1]) || !std::isfinite(hydro_torque[2]))
          WALBERLA_LOG_WARNING("[AddExternalForces] NaN/Inf hydrodynamic torque on uid=" << ac.getUid(idx)
             << " pos=" << ac.getPosition(idx));
+
+      // MEM-WATCH: hydro_force is the fluid->particle momentum-exchange force, computed ONCE per LBM
+      // step (reduceAndAvgHydroForces, called before doDEMSubCycles) and held fixed across all
+      // sub-cycles of this step -- so if it is ALREADY large at subCycle_==0, the fluid coupling fed
+      // in a bad value before any DEM contact this step could have caused it, pointing at MEM rather
+      // than DEM. Checked every sub-cycle (not just once per eval step) so the exact step is caught.
+      {
+         const real_t hydroMag = hydro_force.length();
+         if (hydroMag > kMemWatchThreshold)
+            WALBERLA_LOG_WARNING("[MEM-WATCH] large hydrodynamic force uid=" << ac.getUid(idx)
+               << " step=" << (stepCounter_ ? *stepCounter_ : uint_t(0)) << " subCycle=" << subCycle_
+               << " |F_hydro|=" << hydroMag << " F_hydro=" << hydro_force
+               << " pos=" << ac.getPosition(idx) << " vel=" << ac.getLinearVelocity(idx));
+      }
+
+      // DEM-WATCH: ac.getForce(idx) here = contact + lubrication accumulated THIS sub-cycle
+      // (ComputeContacts runs before AddExternalForces, every sub-cycle). Unlike hydro_force above,
+      // this is recomputed fresh each sub-cycle -- a value that GROWS across subCycle_=0..9 within a
+      // single step (while MEM-WATCH stays flat, since hydro_force doesn't change within a step)
+      // implicates DEM contact resolution rather than the fluid coupling.
+      {
+         const auto  fContactWatch = ac.getForce(idx);
+         const real_t contactMag   = fContactWatch.length();
+         if (contactMag > kDemWatchThreshold)
+            WALBERLA_LOG_WARNING("[DEM-WATCH] large contact+lubrication force uid=" << ac.getUid(idx)
+               << " step=" << (stepCounter_ ? *stepCounter_ : uint_t(0)) << " subCycle=" << subCycle_
+               << " |F_contact+lub|=" << contactMag << " F_contact+lub=" << fContactWatch
+               << " pos=" << ac.getPosition(idx) << " vel=" << ac.getLinearVelocity(idx));
+      }
 
       // Per-floater force breakdown, once per eval step (doDEMSubCycles sets logForces_ on sub-cycle 0,
       // so every sphere AND the box log exactly once). ac.getForce(idx) here = contact + lubrication
@@ -799,6 +835,17 @@ private:
    // For the per-floater force-breakdown log.
    const uint_t* stepCounter_ = nullptr; // step number, for the log only
    bool          logForces_   = false;   // set true by doDEMSubCycles on the first sub-cycle of an eval step
+   uint_t        subCycle_    = uint_t(0); // current DEM sub-cycle index, for DEM/MEM-WATCH (see setSubCycle)
+
+   // DEM-vs-MEM diagnostic thresholds (see the [DEM-WATCH]/[MEM-WATCH] logs in operator() below).
+   // Typical per-floater force magnitudes observed in stable runs are ~1e-3 to ~1e-2 (see
+   // [FloaterForces] logs, e.g. F_buoy+grav_z~-0.003, F_hydro~0.002); 0.05 is roughly an order of
+   // magnitude above that, so it should stay silent in normal operation but fire early -- well before
+   // a value goes non-finite -- on the kind of blowup that produced avgParticleVelocity=inf in
+   // mix_sed_pil.log. Deliberately unconditional (every sub-cycle, every floater), unlike the
+   // once-per-eval-step [FloaterForces] log, so the exact triggering step/sub-cycle is captured.
+   static constexpr real_t kDemWatchThreshold = real_t(0.05);
+   static constexpr real_t kMemWatchThreshold = real_t(0.05);
 };
 
 
@@ -1223,6 +1270,9 @@ public:
       {
          // Log the per-floater force breakdown once per eval step (only on the first sub-cycle).
          addExternalForces.setLogForces(logForcesThisStep && subCycle == uint_t(0));
+         // DEM/MEM-WATCH sub-cycle index (see AddExternalForces::setSubCycle) -- unconditional, every
+         // sub-cycle, unlike the eval-step-gated log above.
+         addExternalForces.setSubCycle(subCycle);
 
          // velocity verlet pre-force (update positions) --------------------------------
          tp["MESAPD: VelocityVerletPreForceUpdate"].start();
