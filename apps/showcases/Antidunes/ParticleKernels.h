@@ -53,6 +53,7 @@
 #include "mesa_pd/data/shape/HalfSpace.h"
 #include "mesa_pd/data/shape/Sphere.h"
 
+#include "PaperAnalyticalContacts.h"
 #include "SimulationParams.h"
 #include "SimulationObjects.h"
 
@@ -464,6 +465,122 @@ public:
    {
       return operator()(idx2, idx1, cyl, cb, ac);
    }
+
+   // Box vs Box / Cylinder vs Cylinder — OPTIONAL closed-form alternative (PaperAnalyticalContacts.h)
+   // to the two operator() overloads these pairs would otherwise inherit unchanged from
+   // GeneralContactDetection (GJK/EPA). Gated at runtime by useAnalyticalContactDetection so both
+   // paths stay reachable from the same binary; default false reproduces the exact pre-existing
+   // GJK/EPA-only behaviour. See ModelParameters.useAnalyticalContactDetection (SimulationParams.h)
+   // for the .prm switch and PaperAnalyticalContactTest.cpp for the 33-case cross-check both branches
+   // below are validated against.
+   //
+   // Box×Box: boxBoxSAT is the fully-verified branch (no known discrepancy vs. GJK/EPA across the
+   // test suite) — trusted directly, no fallback gate.
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::Box& bx1,
+                   const mesa_pd::data::Box& bx2,
+                   Accessor& ac)
+   {
+      if (!useAnalyticalContactDetection)
+         return GeneralContactDetection::operator()(idx1, idx2, bx1, bx2, ac);
+
+      getIdx1() = idx1;
+      getIdx2() = idx2;
+
+      const auto result = paper_analytical::boxBoxSAT(
+         ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(), bx1.getEdgeLength() * real_t(0.5),
+         ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(), bx2.getEdgeLength() * real_t(0.5));
+
+      if (!result.contact) return false;
+      ++contactStats.boxBoxSAT;
+      // paper_analytical convention: overlap > 0 = penetrating. This class: penetrationDepth < 0.
+      getPenetrationDepth() = -result.overlap;
+      getContactNormal()    = result.normal;
+      getContactPoint()     = result.point;
+      return true;
+   }
+
+   // Cylinder×Cylinder: cylinderCylinderContact's rim-vs-face/band branches (face-edge,
+   // special-contact, band-edge) can report the wrong OVERLAP MAGNITUDE for some oblique tilts (the
+   // true closest feature sits on a curved band neither Kodam et al. nor Guo et al.'s corrections
+   // search) — cylinderCylinderResultIsUncertain flags exactly those cases (plus any near-miss the
+   // analytical dispatch found no contact for at all) and this falls back to GJK/EPA for them, so the
+   // reported contact is never trusted blind.
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::Cylinder& cyl1,
+                   const mesa_pd::data::Cylinder& cyl2,
+                   Accessor& ac)
+   {
+      if (!useAnalyticalContactDetection)
+         return GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
+
+      const paper_analytical::CylinderState ci{ ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(),
+                                                 cyl1.getRadius(), cyl1.getHeight() };
+      const paper_analytical::CylinderState cj{ ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(),
+                                                 cyl2.getRadius(), cyl2.getHeight() };
+
+      const auto result = paper_analytical::cylinderCylinderContact(ci, cj);
+      if (paper_analytical::cylinderCylinderResultIsUncertain(ci, cj, result))
+      {
+         // Tier 2 (analytical DID find a contact, but the magnitude is flagged untrustworthy) vs
+         // Tier 1 (analytical found nothing at all) — see cylinderCylinderResultIsUncertain's own
+         // comment in PaperAnalyticalContacts.h for what each tier actually checks.
+         if (result.contact) ++contactStats.cylFallbackTier2;
+         else ++contactStats.cylFallbackTier1;
+         return GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
+      }
+
+      if (!result.contact) return false;
+      contactStats.bumpCylScenario(result.scenario);
+      getIdx1() = idx1;
+      getIdx2() = idx2;
+      getPenetrationDepth() = -result.overlap;
+      getContactNormal()    = result.normal;
+      getContactPoint()     = result.point;
+      return true;
+   }
+
+   // Diagnostics: per-rank tallies of which PaperAnalyticalContacts.h scenario / GJK-EPA-fallback
+   // path fired, only incremented while useAnalyticalContactDetection is on. Fixed named counters
+   // (not a string-keyed map) specifically so ParticleKernels::logContactDetectionStatistics() can
+   // MPI-sum them across ranks with plain scalar allReduceInplace calls, the same pattern already
+   // used throughout SetupStages.h/DataInitialization.h — no variable-key gather needed.
+   struct ContactDetectionStats
+   {
+      uint64_t boxBoxSAT           = 0;
+      uint64_t cylFaceFace         = 0;
+      uint64_t cylBandBandParallel = 0;
+      uint64_t cylFaceBand         = 0;
+      uint64_t cylBandBandSkewed   = 0;
+      uint64_t cylFaceEdge         = 0;
+      uint64_t cylSpecialContact   = 0;
+      uint64_t cylBandEdge         = 0;
+      uint64_t cylEdgeEdge         = 0;
+      // Fired when cylinderCylinderResultIsUncertain() overruled the analytical result and this
+      // fell back to GJK/EPA instead — see the two counters' definitions at their increment sites.
+      uint64_t cylFallbackTier1 = 0;
+      uint64_t cylFallbackTier2 = 0;
+
+      void bumpCylScenario(const char* scenario)
+      {
+         const std::string s(scenario);
+         if      (s == "face-face")           ++cylFaceFace;
+         else if (s == "band-band-parallel")  ++cylBandBandParallel;
+         else if (s == "face-band")           ++cylFaceBand;
+         else if (s == "band-band-skewed")    ++cylBandBandSkewed;
+         else if (s == "face-edge")           ++cylFaceEdge;
+         else if (s == "special-contact")     ++cylSpecialContact;
+         else if (s == "band-edge")           ++cylBandEdge;
+         else if (s == "edge-edge")           ++cylEdgeEdge;
+      }
+   };
+   ContactDetectionStats contactStats;
+
+   // Runtime switch (default false = exact pre-existing GJK/EPA-only behaviour). Public so
+   // ComputeContacts can set it once at construction from ModelParameters.useAnalyticalContactDetection.
+   bool useAnalyticalContactDetection = false;
 };
 
 
@@ -506,7 +623,7 @@ public:
    ComputeContacts(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain,
       real_t restitutionCoefficient, real_t kappa,
       real_t collisionTime, real_t particleTimestepSize, real_t frictionCoefficient,
-      uint_t numParticleTypes = uint_t(2))
+      uint_t numParticleTypes = uint_t(2), bool useAnalyticalContactDetection = false)
       : domain_(domain)
       , collisionResponse_(numParticleTypes)
       , restitutionCoefficient_(restitutionCoefficient)
@@ -517,7 +634,12 @@ public:
       for (uint_t t = 0; t < numParticleTypes; ++t)
          for (uint_t u = t; u < numParticleTypes; ++u)
             collisionResponse_.setFrictionCoefficientDynamic(t, u, frictionCoefficient);
+      acd_.useAnalyticalContactDetection = useAnalyticalContactDetection;
    }
+
+   // Read-only access to acd_'s per-rank scenario/fallback tallies, for
+   // ParticleKernels::logContactDetectionStatistics() to MPI-sum and log at end-of-run.
+   const SolidCylinderContactDetection::ContactDetectionStats& contactStats() const { return acd_.contactStats; }
 
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx1, const size_t idx2, ParticleAccessor_T& ac){
@@ -598,6 +720,127 @@ private:
    real_t kappa_;
    real_t collisionTime_;
    real_t particleTimestepSize_;
+};
+
+
+// An arch tunnel is a finite hollow-cylinder INTERIOR a floater can pass through -- the opposite of
+// every other contact in this file, which is a solid a floater collides with from the OUTSIDE
+// (CylindricalBoundary pillars, HalfSpace walls). Not a mesa_pd body at all: DoubleCast is a
+// code-generated closed switch over 7 hardcoded shape types, and CylindricalBoundary (SHAPE_TYPE==2)
+// is already claimed by the pillars' outside-solid overloads above, so the same C++ shape type cannot
+// get a second, inside-out interpretation through overload resolution. Instead this iterates active
+// floaters directly (forEachParticle, not forEachParticlePairHalf/DoubleCast) against a small
+// in-memory list of tunnel definitions (ArchTunnelParams — center Y/Z, radius, axial X-range).
+//
+// mesa_pd::kernel::LinearSpringDashpot::operator() cannot be called one-sided (it dereferences a
+// SECOND real particle index for type/uid/contact-history/velocity) -- see plan Correction A. This
+// class uses LinearSpringDashpot only for its public stiffness/damping GETTERS (never operator()),
+// and applies the resulting force directly via mesa_pd::addForceAtWFPosAtomic -- no second particle,
+// no dummy/sentinel body.
+//
+// Every floater shape (sphere/box/cylinder) is treated as its own circumscribing sphere
+// (ac.getInteractionRadius(idx), the SAME bound already used project-wide, e.g. Box/Cylinder floaters'
+// own interactionRadius = half-diagonal / sqrt(r²+(L/2)²)) rather than the oriented body's true
+// farthest-from-axis point. This is a deliberate simplification, same spirit as
+// PaperAnalyticalContacts.h's own circumscribing-sphere Tier-2 bound: exact for a sphere, a
+// conservative (slightly early-triggering, never late) approximation for a rotated box/cylinder. The
+// alternative (the oriented body's true farthest point from the axis) is the mirror-image of the
+// existing Box/CylindricalBoundary and Cylinder/CylindricalBoundary overloads' closest-point clamp
+// above -- NOT a simple reuse of that code, since "farthest from axis" clamps every dimension AWAY
+// from the axis instead of toward it, a real per-shape derivation this file does not attempt yet.
+//
+// Friction is similarly simplified relative to LinearSpringDashpot's full stick-slip tangential
+// spring (which needs a persistent per-contact history keyed against a second real particle): plain
+// Coulomb-capped viscous drag instead (proportional to tangential slip velocity, capped at
+// mu_dynamic * fN — the "always slipping" limit of the full model). The physically essential claim
+// here is containment (fN keeps the floater inside the tunnel); faithful stick/slip fidelity is not.
+class ComputeTunnelContacts {
+public:
+   ComputeTunnelContacts(std::vector< ArchTunnelParams > tunnels, real_t restitutionCoefficient,
+      real_t kappa, real_t collisionTime, real_t frictionCoefficient)
+      : tunnels_(std::move(tunnels))
+      , stiffnessCalc_(1)
+      , restitutionCoefficient_(restitutionCoefficient)
+      , kappa_(kappa)
+      , collisionTime_(collisionTime)
+   {
+      stiffnessCalc_.setFrictionCoefficientDynamic(0, 0, frictionCoefficient);
+   }
+
+   template< typename ParticleAccessor_T >
+   void operator()(const size_t idx, ParticleAccessor_T& ac)
+   {
+      const uint_t t = ac.getType(idx);
+      if (t != uint_t(1) && t != uint_t(3) && t != uint_t(4)) return; // floaters only
+
+      const mesa_pd::Vec3 pos  = ac.getPosition(idx);
+      const real_t        effR = ac.getInteractionRadius(idx);
+
+      for (const auto& tunnel : tunnels_)
+      {
+         // Axial (world-X) gate: the tunnel's cross-section is constant along its whole length, so a
+         // floater whose own X-extent doesn't overlap [xMin,xMax] at all is unaffected by this tunnel,
+         // full stop -- no phantom wall outside the arch's own footprint.
+         if (pos[0] + effR < tunnel.xMin || pos[0] - effR > tunnel.xMax) continue;
+
+         const real_t dy   = pos[1] - tunnel.center[1];
+         const real_t dz   = pos[2] - tunnel.center[2];
+         const real_t dist = std::sqrt(dy * dy + dz * dz); // radial distance to the axis (X-independent)
+
+         // Radial gate: mirrors the axial (X) gate above. All arch tunnels in this bridge share the same
+         // [xMin,xMax] span (they're all under the same deck), so the X-gate alone lets a floater near
+         // ONE tunnel also pass the gate for the OTHER tunnels it isn't anywhere near. Without this check,
+         // `overlap` below is unbounded for any floater merely passing through the shared X-span far from
+         // this particular tunnel's axis, producing a runaway spring force toward the wrong tunnel's wall
+         // (this caused a real crash: the resulting single-substep velocity spike flung a floater far
+         // enough to outrun ghost-particle sync, producing a stale-UID heap-buffer-overflow in
+         // SimpleBB::treatDirection, caught via ASan on job 4065016). Once gated, `dist <= radius + effR`
+         // bounds `overlap` to at most 2*effR -- small and physically sane by construction.
+         if (dist - effR > tunnel.radius) continue; // nowhere near this tunnel's wall
+
+         const real_t overlap = (dist + effR) - tunnel.radius; // > 0 → floater's outer reach crosses the wall
+         if (overlap <= real_t(0)) continue;                    // safely inside the tunnel bore
+
+         const mesa_pd::Vec3 outward = (dist > real_t(1e-10))
+                                          ? mesa_pd::Vec3(real_t(0), dy, dz) / dist
+                                          : mesa_pd::Vec3(real_t(0), real_t(1), real_t(0));
+         const mesa_pd::Vec3 normal       = -outward; // points inward, toward the axis (opposite of a
+                                                       // solid pillar's outward-pointing normal)
+         const mesa_pd::Vec3 contactPoint = pos + outward * effR; // approx: floater surface point nearest the wall
+
+         // Effective mass: wall side is infinite mass (same physical assumption CylindricalBoundary/
+         // HalfSpace pillar contacts already make), so 1/(invMass_floater + 0) = the floater's own mass.
+         const real_t meff = real_t(1) / ac.getInvMass(idx);
+         stiffnessCalc_.setStiffnessAndDamping(0, 0, restitutionCoefficient_, collisionTime_, kappa_, meff);
+         const real_t stiffnessN = stiffnessCalc_.getStiffnessN(0, 0);
+         const real_t dampingN   = stiffnessCalc_.getDampingN(0, 0);
+         const real_t dampingT   = stiffnessCalc_.getDampingT(0, 0);
+         const real_t muDynamic  = stiffnessCalc_.getFrictionCoefficientDynamic(0, 0);
+
+         const mesa_pd::Vec3 velAtContact = mesa_pd::getVelocityAtWFPoint(idx, ac, contactPoint);
+         const real_t        velN         = velAtContact * normal;
+         const mesa_pd::Vec3 velT         = velAtContact - velN * normal;
+
+         // Normal force: same linear spring-dashpot formula LinearSpringDashpot::operator() uses
+         // (stiffnessN*overlap + dampingN*closing-velocity), one-sided.
+         real_t fN = stiffnessN * overlap - dampingN * velN;
+         if (fN < real_t(0)) fN = real_t(0); // a spring-dashpot must never pull the floater toward the wall
+
+         mesa_pd::Vec3 fT = -dampingT * velT;
+         const real_t  fTmag = fT.length();
+         const real_t  fTmax = muDynamic * fN;
+         if (fTmag > fTmax && fTmag > real_t(1e-12)) fT *= (fTmax / fTmag);
+
+         mesa_pd::addForceAtWFPosAtomic(idx, ac, fN * normal + fT, contactPoint);
+      }
+   }
+
+private:
+   std::vector< ArchTunnelParams >      tunnels_;
+   mesa_pd::kernel::LinearSpringDashpot stiffnessCalc_; // getters only -- operator() is never called
+   real_t restitutionCoefficient_;
+   real_t kappa_;
+   real_t collisionTime_;
 };
 
 
@@ -1190,7 +1433,9 @@ public:
          simParams->computed.particleCollisionTime,
          simParams->computed.particleTimestepSize,
          simParams->particle.frictionCoefficient,
-         uint_t(5)) // 5 types: 0=bed/wall, 1=sphere floater, 2=pillar, 3=box floater, 4=cylinder floater
+         uint_t(5), // 5 types: 0=bed/wall, 1=sphere floater, 2=pillar, 3=box floater, 4=cylinder floater
+         simParams->model.useAnalyticalContactDetection)
+      , dormantFloaterUIDs_(simObjs->dormantFloaterUIDs)
       , addExternalForces(
          simObjs->mesapdDomain,
          simObjs->acceleration,
@@ -1207,6 +1452,18 @@ public:
       , memReferenceHeight_(simObjs->memReferenceHeight)
       , useDynamicReferenceHeight_(simParams->model.useDynamicReferenceHeight)
    {
+      if (!simParams->archTunnels.empty())
+      {
+         computeTunnelContacts_ = std::make_unique< ComputeTunnelContacts >(
+            simParams->archTunnels,
+            simParams->particle.restitutionCoefficient,
+            simParams->computed.particleKappa,
+            simParams->computed.particleCollisionTime,
+            simParams->particle.frictionCoefficient);
+         WALBERLA_LOG_INFO_ON_ROOT("ComputeTunnelContacts active: " << simParams->archTunnels.size()
+            << " arch tunnel(s)");
+      }
+
       // UIDs are resolved by setupParticles via an indexed creation loop + allReduce(SUM),
       // so every rank already has the correct UID for every floater in simObjs->floaterUIDs /
       // floaterBoxUIDs.  Copying avoids the earlier bug where a per-rank assignIdx caused
@@ -1289,6 +1546,56 @@ public:
                                         : "STATIC (flat H=" + std::to_string(surfaceHeight_) + ")"));
    }
 
+   // End-of-run diagnostic: MPI-sums computeContacts' per-rank PaperAnalyticalContacts.h scenario /
+   // GJK-EPA-fallback tallies (all zero unless ModelParameters.useAnalyticalContactDetection is on)
+   // and logs one line on root. Call once after the main timeloop finishes -- see Antidunes.cpp.
+   void logContactDetectionStatistics() const
+   {
+      const auto& s = computeContacts.contactStats();
+      uint64_t boxBoxSAT = s.boxBoxSAT, cylFaceFace = s.cylFaceFace,
+               cylBandBandParallel = s.cylBandBandParallel, cylFaceBand = s.cylFaceBand,
+               cylBandBandSkewed = s.cylBandBandSkewed, cylFaceEdge = s.cylFaceEdge,
+               cylSpecialContact = s.cylSpecialContact, cylBandEdge = s.cylBandEdge,
+               cylEdgeEdge = s.cylEdgeEdge, cylFallbackTier1 = s.cylFallbackTier1,
+               cylFallbackTier2 = s.cylFallbackTier2;
+
+      mpi::allReduceInplace(boxBoxSAT,           mpi::SUM);
+      mpi::allReduceInplace(cylFaceFace,         mpi::SUM);
+      mpi::allReduceInplace(cylBandBandParallel, mpi::SUM);
+      mpi::allReduceInplace(cylFaceBand,         mpi::SUM);
+      mpi::allReduceInplace(cylBandBandSkewed,   mpi::SUM);
+      mpi::allReduceInplace(cylFaceEdge,         mpi::SUM);
+      mpi::allReduceInplace(cylSpecialContact,   mpi::SUM);
+      mpi::allReduceInplace(cylBandEdge,         mpi::SUM);
+      mpi::allReduceInplace(cylEdgeEdge,         mpi::SUM);
+      mpi::allReduceInplace(cylFallbackTier1,    mpi::SUM);
+      mpi::allReduceInplace(cylFallbackTier2,    mpi::SUM);
+
+      const uint64_t cylAnalyticalTrusted = cylFaceFace + cylBandBandParallel + cylFaceBand +
+         cylBandBandSkewed + cylFaceEdge + cylSpecialContact + cylBandEdge + cylEdgeEdge;
+      const uint64_t cylFallbackTotal = cylFallbackTier1 + cylFallbackTier2;
+      const uint64_t cylTotal = cylAnalyticalTrusted + cylFallbackTotal;
+      const real_t fallbackRatePercent =
+         (cylTotal > uint64_t(0)) ? real_t(100) * real_t(cylFallbackTotal) / real_t(cylTotal) : real_t(0);
+
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "[ContactDetectionStats] Box x Box: SAT=" << boxBoxSAT
+         << " | Cylinder x Cylinder analytical (trusted): face-face=" << cylFaceFace
+         << " band-band-parallel=" << cylBandBandParallel
+         << " face-band=" << cylFaceBand
+         << " band-band-skewed=" << cylBandBandSkewed
+         << " face-edge=" << cylFaceEdge
+         << " special-contact=" << cylSpecialContact
+         << " band-edge=" << cylBandEdge
+         << " edge-edge=" << cylEdgeEdge
+         << " (trusted total=" << cylAnalyticalTrusted << ")"
+         << " | GJK/EPA fallback: tier1(analytical-found-nothing)=" << cylFallbackTier1
+         << " tier2(analytical-magnitude-flagged-uncertain)=" << cylFallbackTier2
+         << " (fallback total=" << cylFallbackTotal << ")"
+         << " | cylinder-cylinder grand total=" << cylTotal
+         << " fallback-rate=" << fallbackRatePercent << "%");
+   }
+
    template< typename TP >
    void resetHydroForces(timing::TimingPool<TP> & tp){
       tp["MESAPD: ResetHydrodynamicForceTorqueKernel"].start();
@@ -1367,12 +1674,24 @@ public:
          syncCall();
          tp["MESAPD: syncCall 1"].end();
 
+         // Dormant (startInactive, not yet at settlingSteps) floaters must not participate in any DEM
+         // contact -- mesa_pd has no selector-combinator type, so this ANDs ExcludeInfiniteInfinite's
+         // check with a dormant-UID lookup on both indices in one local lambda (same pattern as
+         // SetupStages::floaterSelector / BuildTimeloop::movingObstacleSelector's fluid-mapping guard).
+         auto dormant = dormantFloaterUIDs_;
+         auto pairSelector = [dormant](size_t idx, size_t jdx, auto& ac) {
+            using namespace mesa_pd::data::particle_flags;
+            if (isSet(ac.getFlags(idx), INFINITE) && isSet(ac.getFlags(jdx), INFINITE)) return false;
+            if (dormant->count(ac.getUid(idx)) || dormant->count(ac.getUid(jdx))) return false;
+            return true;
+         };
+
          // compute lubrication forces --------------------------------------------------
          if (useLubricationCorrection)
          {
             tp["MESAPD: ComputeLubrication"].start();
             particleStorage->forEachParticlePairHalf(useOpenMP,
-               mesa_pd::kernel::ExcludeInfiniteInfinite(), *particleAccessor,
+               pairSelector, *particleAccessor,
                computeLubrication, *particleAccessor);
             tp["MESAPD: ComputeLubrication"].end();
          }
@@ -1380,9 +1699,23 @@ public:
          // compute contact forces ------------------------------------------------------
          tp["MESAPD: ComputeContacts"].start();
          particleStorage->forEachParticlePairHalf(useOpenMP,
-            mesa_pd::kernel::ExcludeInfiniteInfinite(), *particleAccessor,
+            pairSelector, *particleAccessor,
             computeContacts, *particleAccessor);
          tp["MESAPD: ComputeContacts"].end();
+
+         // compute arch-tunnel contacts (floaters vs. the inside of a hollow tunnel -- see
+         // ComputeTunnelContacts's class comment) ---------------------------------------
+         if (computeTunnelContacts_)
+         {
+            tp["MESAPD: ComputeTunnelContacts"].start();
+            auto tunnelSelector = [dormant](const size_t idx, const auto& ac) {
+               return dormant->count(ac.getUid(idx)) == 0;
+            };
+            particleStorage->forEachParticle(useOpenMP,
+               tunnelSelector, *particleAccessor,
+               *computeTunnelContacts_, *particleAccessor);
+            tp["MESAPD: ComputeTunnelContacts"].end();
+         }
 
          // reduce contact history ------------------------------------------------------
          tp["MESAPD: ReduceContactHistory"].start();
@@ -2340,6 +2673,12 @@ private:
    mesa_pd::kernel::VelocityVerletPostForceUpdate vvIntegratorPostForce;
    ComputeLubrication computeLubrication;
    ComputeContacts computeContacts;
+   // Lazily constructed: only non-null when ModelParameters/the prm actually defines ArchTunnels.
+   std::unique_ptr< ComputeTunnelContacts >           computeTunnelContacts_;
+   // Shared with SetupStages.h/BuildTimeloop.h (see SimulationObjects::dormantFloaterUIDs) — used to
+   // exclude dormant (startInactive, not yet at settlingSteps) floaters from DEM contact pairs here,
+   // same as they're already excluded from fluid mapping.
+   std::shared_ptr< std::unordered_set< walberla::id_t > > dormantFloaterUIDs_;
    AddExternalForces addExternalForces;
    bool useLubricationCorrection;
    uint_t                                             evalFrequency_;

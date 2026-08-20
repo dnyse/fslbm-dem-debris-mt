@@ -455,6 +455,12 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          << " pinPosition=" << (fsp.pinPosition ? "true" : "false"));
    }
    mpi::allReduceInplace(simObjs->floaterUIDs, mpi::SUM);
+   // Register startInactive spheres as dormant -- AFTER the UID sync above, so every rank inserts the
+   // same, now-fully-resolved UID (this loop itself needs no communication: floatingSpheres[fi] is
+   // parsed identically from the same prm on every rank).
+   for (size_t fi = 0; fi < simParams->floatingSpheres.size(); ++fi)
+      if (simParams->floatingSpheres[fi].startInactive)
+         simObjs->dormantFloaterUIDs->insert(simObjs->floaterUIDs[fi]);
 
    // Floating boxes (type 3) — same indexed-UID pattern as floating spheres.
    // interactionRadius = circumscribed-sphere half-diagonal so getParticleCellBB produces a
@@ -502,6 +508,9 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          << " pinPosition=" << (fbp.pinPosition ? "true" : "false"));
    }
    mpi::allReduceInplace(simObjs->floaterBoxUIDs, mpi::SUM);
+   for (size_t bi = 0; bi < simParams->floatingBoxes.size(); ++bi)
+      if (simParams->floatingBoxes[bi].startInactive)
+         simObjs->dormantFloaterUIDs->insert(simObjs->floaterBoxUIDs[bi]);
 
    // Floating cylinders / logs (type 4) — same indexed-UID pattern as spheres and boxes.
    // The mesa_pd Cylinder's axis is its BODY z-axis; the initial rotation aligns body-z with the
@@ -555,6 +564,9 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          << " pinPosition=" << (fcp.pinPosition ? "true" : "false"));
    }
    mpi::allReduceInplace(simObjs->floaterCylinderUIDs, mpi::SUM);
+   for (size_t ci = 0; ci < simParams->floatingCylinders.size(); ++ci)
+      if (simParams->floatingCylinders[ci].startInactive)
+         simObjs->dormantFloaterUIDs->insert(simObjs->floaterCylinderUIDs[ci]);
 
    // choose particle sync algorithm -----------------------------------------------------
    // blockSyncExtension must be >= the largest floater extent so that SyncNextNeighbors
@@ -684,11 +696,17 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
 {
    WALBERLA_LOG_INFO_ON_ROOT("mapParticlesOntoCells");
    // Select all floaters: type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder.
-   // Fixed obstacles (pillars, walls) are mapped separately as static NoSlip/FreeSlip.
-   auto floaterSelector = [](const size_t particleIdx, const auto& ac)
+   // Fixed obstacles (pillars, walls) are mapped separately as static NoSlip/FreeSlip. Dormant
+   // (startInactive, not yet at settlingSteps) floaters are excluded too -- they are not "in the
+   // simulation" yet, so must not claim fluid cells (this is what lets several floaters share the
+   // exact same spawn position without conflicting). Must stay consistent with movingObstacleSelector
+   // in BuildTimeloop.h (the per-step equivalent of this init-time mapping).
+   auto dormantUIDs = simObjs->dormantFloaterUIDs;
+   auto floaterSelector = [dormantUIDs](const size_t particleIdx, const auto& ac)
    {
       const uint_t t = ac.getType(particleIdx);
-      return t == uint_t(1) || t == uint_t(3) || t == uint_t(4);
+      if (t != uint_t(1) && t != uint_t(3) && t != uint_t(4)) return false;
+      return dormantUIDs->count(ac.getUid(particleIdx)) == 0;
    };
 
    // map particles onto LBM domain (this is for initilization. iterations happen in timeloopAfterParticles)
@@ -734,6 +752,7 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
                                                     mesa_pd::data::particle_flags::FIXED);
          },
          *simObjs->particleAccessor);
+      simObjs->dormantFloaterUIDs->erase(uid);
 
       WALBERLA_LOG_INFO_ON_ROOT("Released floating sphere uid=" << uid << " (index " << i
                                 << ") from settling phase at step " << currentStep);
@@ -753,6 +772,7 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
                                                     mesa_pd::data::particle_flags::FIXED);
          },
          *simObjs->particleAccessor);
+      simObjs->dormantFloaterUIDs->erase(uid);
 
       WALBERLA_LOG_INFO_ON_ROOT("Released floating box uid=" << uid << " (index " << i
                                 << ") from settling phase at step " << currentStep);
@@ -772,6 +792,7 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
                                                     mesa_pd::data::particle_flags::FIXED);
          },
          *simObjs->particleAccessor);
+      simObjs->dormantFloaterUIDs->erase(uid);
 
       WALBERLA_LOG_INFO_ON_ROOT("Released floating cylinder uid=" << uid << " (index " << i
                                 << ") from settling phase at step " << currentStep);

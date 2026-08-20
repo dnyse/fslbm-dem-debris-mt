@@ -211,6 +211,8 @@ int main(int argc, char** argv)
       }
    }
 
+   particleKernels.logContactDetectionStatistics();
+
    return EXIT_SUCCESS;
 }
 

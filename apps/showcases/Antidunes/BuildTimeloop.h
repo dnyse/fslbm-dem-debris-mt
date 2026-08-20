@@ -630,11 +630,16 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    // fluid, receives a MEM hydrodynamic force via SimpleBB, and has its vacated cells reconstructed.
    // Fixed pillars (type 2) are deliberately excluded here; they are mapped separately as static
    // NoSlip/FreeSlip (see SetupStages). Must stay consistent with `floaterSelector` in SetupStages.
-   auto movingObstacleSelector = [](const size_t particleIdx, const auto& ac) {
+   // Dormant (startInactive, not yet at settlingSteps) floaters are excluded too -- this is the
+   // per-step equivalent of SetupStages::mapParticlesOntoCells's init-time dormant guard; both must
+   // agree or a dormant floater would appear in the fluid the very first step after initialization.
+   auto dormantUIDs = simObjs->dormantFloaterUIDs;
+   auto movingObstacleSelector = [dormantUIDs](const size_t particleIdx, const auto& ac) {
       const bool isSphere           = ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
       const bool isFloatingBox      = ac.getType(particleIdx) == uint_t(3);
       const bool isFloatingCylinder = ac.getType(particleIdx) == uint_t(4);
-      return isSphere || isFloatingBox || isFloatingCylinder;
+      if (!(isSphere || isFloatingBox || isFloatingCylinder)) return false;
+      return dormantUIDs->count(ac.getUid(particleIdx)) == 0;
    };
 
    // sweep for mapping particles into the LBM cells

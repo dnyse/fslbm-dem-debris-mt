@@ -61,10 +61,12 @@ int main(int argc, char** argv)
    else if (testCase == "angleOfRepose") pass = dem_validation::runAngleOfRepose(block);
    else if (testCase == "packingSingleShape") pass = dem_validation::runPackingSingleShape(block);
    else if (testCase == "rotatingDrum") pass = dem_validation::runRotatingDrum(block);
+   else if (testCase == "archTunnelContainment") pass = dem_validation::runArchTunnelContainment(block);
    else WALBERLA_ABORT("Unknown testCase '" << testCase
                                              << "'. Valid values: wallImpactSphere, wallImpactCylinder, "
                                                 "wallImpactBox, pairRestitution, energyConservation, packing, "
-                                                "angleOfRepose, packingSingleShape, rotatingDrum.");
+                                                "angleOfRepose, packingSingleShape, rotatingDrum, "
+                                                "archTunnelContainment.");
 
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] FINAL RESULT for " << testCase << ": " << (pass ? "PASS" : "FAIL"));
    return pass ? EXIT_SUCCESS : EXIT_FAILURE;

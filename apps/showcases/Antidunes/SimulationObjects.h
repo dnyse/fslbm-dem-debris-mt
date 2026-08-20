@@ -34,6 +34,7 @@
 #include "PIDController.h"
 
 #include <unordered_map>
+#include <unordered_set>
 
 namespace walberla {
 namespace antidunes {
@@ -88,7 +89,16 @@ struct SimulationObjects
    std::vector< walberla::id_t >                               floaterUIDs;
    std::vector< walberla::id_t >                               floaterBoxUIDs;
    std::vector< walberla::id_t >                               floaterCylinderUIDs;
-    
+
+   // UIDs of floaters currently "dormant" (startInactive, not yet at settlingSteps): excluded from
+   // fluid mapping (SetupStages::floaterSelector / BuildTimeloop::movingObstacleSelector) and DEM
+   // contact (ComputeContacts/ComputeLubrication pair selector, ComputeTunnelContacts) until
+   // releaseSettledFloatingSpheres clears their UID at settlingSteps. Shared (not owned by
+   // ParticleKernels) because SetupStages.h and BuildTimeloop.h's sweep-registration lambdas need it
+   // too, and both run before ParticleKernels is constructed.
+   std::shared_ptr< std::unordered_set< walberla::id_t > >     dormantFloaterUIDs =
+      std::make_shared< std::unordered_set< walberla::id_t > >();
+
    // Boundary and flags ----------------------------------------------------------------------------------------------
    shared_ptr< AntidunesBoundaryHandling_T > antidunesBoundaryHandling;
    BlockDataID flagFieldID;

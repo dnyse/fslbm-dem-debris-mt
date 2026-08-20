@@ -1,0 +1,25 @@
+// dem_validation_arch_tunnel.prm
+// Fluid-free local validation of ComputeTunnelContacts (ParticleKernels.h) -- see
+// DEMValidationScenarios.h's runArchTunnelContainment for the two claims checked: (1) containment
+// (the floater never clips through the tunnel wall from inside), (2) no phantom wall outside the
+// tunnel's own axial [xMin,xMax] span. tunnelRadius=5, tunnelHalfSpan=5 here are arbitrary clean round
+// numbers for this isolated test, not the real bridge's own arch dimensions (radius 5/10, deck
+// X-span 56-72) -- the mechanism being tested (radial containment + axial gate) is dimensionless.
+DEMValidation
+{
+   testCase archTunnelContainment;
+
+   shape sphere;
+   sphereRadius       1.0;
+   density            1.0;
+   restitutionCoefficient 0.5;
+   frictionCoefficient    0.3;
+   poissonsRatio           0.22;
+   collisionTime           0.01;
+
+   gravity            9.81;
+   tunnelRadius       5.0;
+   tunnelHalfSpan     5.0;
+   settleSteps        4000;
+   containmentTolerance 0.05;
+}

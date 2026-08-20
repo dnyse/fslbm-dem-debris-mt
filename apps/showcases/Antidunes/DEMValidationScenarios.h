@@ -158,6 +158,16 @@ public:
 
    size_t addWall(const Vec3& pos, const Vec3& normal) { return createPlane(*ps_, pos, normal).getIdx(); }
 
+   //! Register one arch tunnel (see ParticleKernels.h::ComputeTunnelContacts for the full mechanism --
+   //! this is not a mesa_pd particle, just an entry in a small list ComputeTunnelContacts iterates
+   //! active floaters against directly). Lazily constructs computeTunnelContacts_ on first call.
+   void addArchTunnel(const Vec3& center, real_t radius, real_t xMin, real_t xMax, real_t frictionCoefficient)
+   {
+      tunnels_.emplace_back(center, radius, xMin, xMax);
+      computeTunnelContacts_ = std::make_unique< ComputeTunnelContacts >(
+         tunnels_, restitutionCoefficient_, kappa_, collisionTime_, frictionCoefficient);
+   }
+
    //! Re-poses an existing wall (from addWall) in place -- HalfSpace's normal is immutable after
    //! construction (mesa_pd/data/shape/HalfSpace.h has no setter), so "rotating" a wall means replacing
    //! its baseShape with a freshly-built HalfSpace(newNormal) alongside setPosition. Used to animate a
@@ -215,6 +225,9 @@ public:
       linkedCells.forEachParticlePairHalf(
          false, kernel::ExcludeInfiniteInfinite(), *ac_,
          [this](const size_t idx1, const size_t idx2, auto& ac) { (*computeContacts_)(idx1, idx2, ac); }, *ac_);
+
+      if (computeTunnelContacts_)
+         ps_->forEachParticle(false, kernel::SelectLocal(), *ac_, *computeTunnelContacts_, *ac_);
 
       if (std::abs(gravityZ_) > real_t(0))
       {
@@ -324,6 +337,8 @@ private:
    std::unique_ptr< data::ParticleAccessorWithBaseShape > ac_;
    std::unique_ptr< kernel::AssocToBlock >                assoc_;
    std::unique_ptr< ComputeContacts >                     computeContacts_;
+   std::vector< ArchTunnelParams >                        tunnels_;
+   std::unique_ptr< ComputeTunnelContacts >                computeTunnelContacts_;
 
    kernel::VelocityVerletPreForceUpdate       preVV_;
    kernel::VelocityVerletPostForceUpdate      postVV_;
@@ -1800,6 +1815,96 @@ inline bool runRotatingDrum(const config::Config::BlockHandle& b)
          "flat, low layer rather than a sloped bed, even inside a closed, rotating drum. This is a genuine "
          "contact-model gap this validation run has surfaced, not a broken test.");
    return pass;
+}
+
+//======================================================================================================================
+// 10: arch tunnel containment -- fluid-free local validation for ComputeTunnelContacts (ParticleKernels.h),
+// isolated from the fluid-coupling/dormant-floater changes so a containment bug surfaces here first
+// rather than in a full bridge run. Two claims per shape ("sphere"/"box"/"cylinder", swap via the
+// `shape` prm key):
+//   1. CONTAINMENT: dropped from rest near the tunnel axis under gravity, the body's radial distance
+//      from the axis (plus its own circumscribing radius) never exceeds the tunnel radius -- it settles
+//      resting against the wall rather than clipping through it.
+//   2. NO PHANTOM WALL: the SAME drop, but positioned outside the tunnel's axial [xMin,xMax] span,
+//      shows ZERO lateral (Y) deflection -- confirms the X-range gate doesn't leak a force outside the
+//      arch's own footprint (there's nothing else in this bare scenario to deflect it sideways, so any
+//      Y motion at all means the gate leaked).
+//======================================================================================================================
+inline bool runArchTunnelContainment(const config::Config::BlockHandle& b)
+{
+   const std::string shape     = b.getParameter< std::string >("shape", "sphere");
+   const real_t sphereRadius   = b.getParameter< real_t >("sphereRadius", real_t(1));
+   const Vec3   boxHalfExtents = b.getParameter< Vec3 >("boxHalfExtents", Vec3(real_t(0.8)));
+   const real_t cylRadius      = b.getParameter< real_t >("cylRadius", real_t(0.8));
+   const real_t cylLength      = b.getParameter< real_t >("cylLength", real_t(2));
+   const real_t density        = b.getParameter< real_t >("density", real_t(1));
+   const real_t e              = b.getParameter< real_t >("restitutionCoefficient", real_t(0.5));
+   const real_t mu             = b.getParameter< real_t >("frictionCoefficient", real_t(0.3));
+   const real_t poisson        = b.getParameter< real_t >("poissonsRatio", real_t(0.22));
+   const real_t collisionTime  = b.getParameter< real_t >("collisionTime", real_t(0.01));
+   const real_t dt             = b.getParameter< real_t >("dt", collisionTime / real_t(50));
+   const real_t gravityMag     = b.getParameter< real_t >("gravity", real_t(9.81));
+   const real_t tunnelRadius   = b.getParameter< real_t >("tunnelRadius", real_t(5));
+   const real_t tunnelHalfSpan = b.getParameter< real_t >("tunnelHalfSpan", real_t(5)); // xMin=-half, xMax=+half
+   const uint_t settleSteps    = b.getParameter< uint_t >("settleSteps", uint_t(4000));
+   const real_t tolerance      = b.getParameter< real_t >("containmentTolerance", real_t(0.05)); // LU slack
+
+   detail::PassFailAccumulator acc;
+   const real_t effR = detail::shapeCircumRadius(shape, sphereRadius, boxHalfExtents, cylRadius, cylLength);
+
+   // --- Case 1: containment -- start just ABOVE where the body will come to rest against the tunnel
+   // wall (a small gap, not at the axis), well inside [xMin,xMax], so most of the run is spent actually
+   // resolving the wall contact and settling rather than in free-fall approaching it. -----------------
+   {
+      DEMEngine engine(dt, e, mu, poisson, collisionTime, gravityMag, tunnelHalfSpan + tunnelRadius + real_t(20));
+      engine.addArchTunnel(Vec3(0, 0, 0), tunnelRadius, -tunnelHalfSpan, tunnelHalfSpan, mu);
+      const Vec3   startPos = Vec3(0, 0, -(tunnelRadius - effR) + real_t(0.3) * effR);
+      const size_t idx      = detail::addRandomOrientedShape(engine, shape, startPos, sphereRadius,
+                                                              boxHalfExtents, cylRadius, cylLength, density);
+      engine.finalizeSetup(real_t(2) * effR);
+
+      real_t maxRadialReach = real_t(0);
+      const uint_t maxSteps = settleSteps;
+      for (uint_t s = 0; s < maxSteps; ++s)
+      {
+         engine.step();
+         const Vec3   pos    = engine.ac().getPosition(idx);
+         const real_t radial = std::sqrt(pos[1] * pos[1] + pos[2] * pos[2]) + effR;
+         maxRadialReach       = std::max(maxRadialReach, radial);
+      }
+      const bool pass = maxRadialReach <= tunnelRadius + tolerance;
+      acc.record(pass);
+      WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] archTunnelContainment shape=" << shape
+                                 << " maxRadialReach=" << maxRadialReach << " tunnelRadius=" << tunnelRadius
+                                 << " (tolerance=" << tolerance << ")  " << (pass ? "PASS" : "FAIL"));
+   }
+
+   // --- Case 2: no phantom wall -- same drop, positioned outside the tunnel's axial span. -------------
+   {
+      DEMEngine engine(dt, e, mu, poisson, collisionTime, gravityMag, tunnelHalfSpan + tunnelRadius + real_t(20));
+      engine.addArchTunnel(Vec3(0, 0, 0), tunnelRadius, -tunnelHalfSpan, tunnelHalfSpan, mu);
+      const real_t startY    = real_t(0.3) * (tunnelRadius - effR); // same lateral offset as case 1
+      const Vec3   startPos  = Vec3(tunnelHalfSpan + real_t(5) + effR, startY, 0);
+      const size_t idx       = detail::addRandomOrientedShape(engine, shape, startPos, sphereRadius,
+                                                               boxHalfExtents, cylRadius, cylLength, density);
+      engine.finalizeSetup(real_t(2) * effR);
+
+      for (uint_t s = 0; s < settleSteps; ++s)
+         engine.step();
+
+      const Vec3   pos      = engine.ac().getPosition(idx);
+      const real_t yDrift   = std::abs(pos[1] - startY);
+      const bool   pass     = yDrift < real_t(1e-6); // pure free-fall: Y must be untouched
+      acc.record(pass);
+      WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] archTunnelContainment (outside xRange) shape=" << shape
+                                 << " yDrift=" << yDrift << " (expect ~0, no phantom wall)  "
+                                 << (pass ? "PASS" : "FAIL"));
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] archTunnelContainment OVERALL: "
+                              << (acc.allPassed() ? "PASS" : "FAIL") << " (" << acc.passed << "/" << acc.total
+                              << ")");
+   return acc.allPassed();
 }
 
 } // namespace dem_validation

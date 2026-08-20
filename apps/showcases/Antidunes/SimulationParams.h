@@ -22,6 +22,7 @@
 #pragma once
 
 #include "core/config/Config.h"
+#include "core/logging/Logging.h"
 #include "core/math/Vector3.h"
 
 #include "Utility.h"
@@ -185,6 +186,33 @@ struct CylinderPillarParams {
    }
 };
 
+// An arch's tunnel opening: a finite hollow-cylinder interior a floater can pass through, bounded to
+// the arch's own axial (X) span so it never affects anything outside that span. Unlike CylindricalBoundary
+// (infinite along its axis, used for solid pillars), this is not a mesa_pd body at all -- it's consumed
+// directly by ParticleKernels.h's ComputeTunnelContacts. center's X is ignored (the tunnel's axis is
+// always world-X); only Y/Z (the tunnel's cross-section centre, matching the arch's BodyBC cylinder)
+// matter.
+struct ArchTunnelParams {
+   Vector3< real_t > center;
+   real_t            radius;
+   real_t            xMin;
+   real_t            xMax;
+
+   ArchTunnelParams(const config::Config::BlockHandle& b)
+   {
+      center = b.getParameter< Vector3< real_t > >("center");
+      radius = b.getParameter< real_t >           ("radius");
+      xMin   = b.getParameter< real_t >           ("xMin");
+      xMax   = b.getParameter< real_t >           ("xMax");
+   }
+
+   // Direct-value constructor for callers with no prm block to parse from (e.g. DEMValidationScenarios.h's
+   // fluid-free local validation harness, which builds scenarios entirely in code).
+   ArchTunnelParams(const Vector3< real_t >& c, real_t r, real_t xmn, real_t xmx)
+      : center(c), radius(r), xMin(xmn), xMax(xmx)
+   {}
+};
+
 struct FloatingSphereParams {
    Vector3< real_t > position;
    real_t            radius;
@@ -214,6 +242,12 @@ struct FloatingSphereParams {
    // FloatingBoxParams/FloatingCylinderParams.
    bool              pinRotation;
    Vector3< real_t > pinRotationAxes;
+   // true → the floater is not "in the simulation" at all until settlingSteps elapses: excluded from
+   // fluid mapping AND DEM contact (dormant), not merely held FIXED. Lets several floaters share the
+   // exact same spawn position with different settlingSteps, dropped one at a time with no step-0
+   // collision/mapping pile-up between overlapping siblings. Requires settlingSteps > 0 (otherwise
+   // there is no trigger to ever activate it -- a warning is logged if this is violated).
+   bool              startInactive;
 
    FloatingSphereParams(const config::Config::BlockHandle& b)
    {
@@ -226,6 +260,11 @@ struct FloatingSphereParams {
       pinAxes         = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
       pinRotation     = b.getParameter< bool >             ("pinRotation", false);
       pinRotationAxes = b.getParameter< Vector3< real_t > >("pinRotationAxes", Vector3< real_t >(real_t(1)));
+      startInactive   = b.getParameter< bool >             ("startInactive", false);
+      if (startInactive && settlingSteps == uint_t(0))
+         WALBERLA_LOG_WARNING("FloatingSphere startInactive=true but settlingSteps=0 -- this floater "
+                              "will never be activated (releaseSettledFloatingSpheres no-ops when "
+                              "settlingSteps==0).");
    }
 };
 
@@ -251,6 +290,19 @@ inline std::vector< CylinderPillarParams > parseCylinderPillars(const shared_ptr
    config::Config::Blocks pillarBlocks;
    containers[0].getBlocks("CylinderPillar", pillarBlocks, 0, 100);
    for (const auto& b : pillarBlocks)
+      result.emplace_back(b);
+   return result;
+}
+
+inline std::vector< ArchTunnelParams > parseArchTunnels(const shared_ptr< config::Config >& cfg)
+{
+   std::vector< ArchTunnelParams > result;
+   config::Config::Blocks containers;
+   cfg->getBlocks("ArchTunnels", containers, 0, 1);
+   if (containers.empty()) return result;
+   config::Config::Blocks tunnelBlocks;
+   containers[0].getBlocks("ArchTunnel", tunnelBlocks, 0, 100);
+   for (const auto& b : tunnelBlocks)
       result.emplace_back(b);
    return result;
 }
@@ -301,6 +353,7 @@ struct FloatingBoxParams {
                                           // (X) and yaw (Z) — e.g. to let a 1x2x1 box roll toward its
                                           // corner-down equilibrium without also picking up an incidental
                                           // yaw from asymmetric contact/splash noise.
+   bool              startInactive;      // see FloatingSphereParams::startInactive for the full comment.
 
    FloatingBoxParams(const config::Config::BlockHandle& b)
    {
@@ -314,6 +367,11 @@ struct FloatingBoxParams {
       pinAxes              = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
       pinRotation          = b.getParameter< bool >             ("pinRotation", false);
       pinRotationAxes      = b.getParameter< Vector3< real_t > >("pinRotationAxes", Vector3< real_t >(real_t(1)));
+      startInactive        = b.getParameter< bool >             ("startInactive", false);
+      if (startInactive && settlingSteps == uint_t(0))
+         WALBERLA_LOG_WARNING("FloatingBox startInactive=true but settlingSteps=0 -- this floater will "
+                              "never be activated (releaseSettledFloatingSpheres no-ops when "
+                              "settlingSteps==0).");
    }
 };
 
@@ -346,6 +404,7 @@ struct FloatingCylinderParams {
    Vector3< real_t > pinAxes;             // per-axis pin mask (same as box)
    bool              pinRotation;         // per-axis rotation pin, zero angular velocity (same as box)
    Vector3< real_t > pinRotationAxes;     // per-axis rotation pin mask (same as box)
+   bool              startInactive;       // see FloatingSphereParams::startInactive for the full comment.
 
    FloatingCylinderParams(const config::Config::BlockHandle& b)
    {
@@ -361,6 +420,11 @@ struct FloatingCylinderParams {
       pinAxes              = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
       pinRotation          = b.getParameter< bool >             ("pinRotation", false);
       pinRotationAxes      = b.getParameter< Vector3< real_t > >("pinRotationAxes", Vector3< real_t >(real_t(1)));
+      startInactive        = b.getParameter< bool >             ("startInactive", false);
+      if (startInactive && settlingSteps == uint_t(0))
+         WALBERLA_LOG_WARNING("FloatingCylinder startInactive=true but settlingSteps=0 -- this floater "
+                              "will never be activated (releaseSettledFloatingSpheres no-ops when "
+                              "settlingSteps==0).");
       WALBERLA_CHECK_GREATER(axis.length(), real_t(1e-10), "FloatingCylinder axis must be nonzero!");
       axis = axis.getNormalized();
    }
@@ -491,6 +555,18 @@ struct ModelParams {
    // that motivated this.
    real_t      boxPlaneFitBandFactor;
 
+   // true  → Box-Box and Cylinder-Cylinder DEM contact detection uses the closed-form algorithms in
+   //         PaperAnalyticalContacts.h (Gottschalk, Lin & Manocha 1996 OBBTree SAT for Box-Box; Kodam
+   //         et al. 2010 + Guo et al. 2012's corrections for Cylinder-Cylinder) instead of the generic
+   //         GJK/EPA fallback. Box-Box is trusted directly (fully verified against GJK/EPA, no known
+   //         discrepancy). Cylinder-Cylinder is a HYBRID: cylinderCylinderResultIsUncertain() gates
+   //         every analytical result and falls back to GJK/EPA automatically for the oblique-tilt cases
+   //         the papers' own scenario taxonomy does not cover cleanly — see PaperAnalyticalContacts.h
+   //         and PaperAnalyticalContactTest.cpp (33 cross-checked cases) for the full derivation.
+   // false → GJK/EPA for both pairs, exactly the pre-existing behaviour (default; flip this back to
+   //         false to return to the known-working path if the analytical route misbehaves).
+   bool        useAnalyticalContactDetection;
+
    ModelParams(const config::Config::BlockHandle& b)
       : pdfReconstructionModel      { b.getParameter< std::string >("pdfReconstructionModel") }
       , pdfRefillingModel           { b.getParameter< std::string >("pdfRefillingModel") }
@@ -511,6 +587,7 @@ struct ModelParams {
       , staticReferenceHeightOverride{ b.getParameter< real_t >    ("staticReferenceHeightOverride", real_t(-1)) }
       , floaterPlaneFitRadiusFactor  { b.getParameter< real_t >    ("floaterPlaneFitRadiusFactor", real_t(1.8)) }
       , boxPlaneFitBandFactor        { b.getParameter< real_t >    ("boxPlaneFitBandFactor", real_t(0.8)) }
+      , useAnalyticalContactDetection{ b.getParameter< bool >      ("useAnalyticalContactDetection", false) }
    {}
 };
 
@@ -708,6 +785,7 @@ struct SimulationParams {
    ParticleParams                       particle;
    std::vector< PillarParams >          pillars;
    std::vector< CylinderPillarParams >  cylinderPillars;
+   std::vector< ArchTunnelParams >      archTunnels;
    std::vector< FloatingSphereParams >  floatingSpheres;
    std::vector< FloatingBoxParams >     floatingBoxes;
    std::vector< FloatingCylinderParams > floatingCylinders;
@@ -735,6 +813,7 @@ struct SimulationParams {
       , particle     { cfg->getOneBlock("ParticleParameters") }
       , pillars          { parsePillars(cfg) }
       , cylinderPillars  { parseCylinderPillars(cfg) }
+      , archTunnels      { parseArchTunnels(cfg) }
       , floatingSpheres  { parseFloatingSpheres(cfg) }
       , floatingBoxes    { parseFloatingBoxes(cfg) }
       , floatingCylinders{ parseFloatingCylinders(cfg) }

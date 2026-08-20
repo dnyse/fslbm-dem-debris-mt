@@ -1,0 +1,321 @@
+// test_bridge_v1_overtop_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// OVERTOPPING VARIANT of test_bridge_v1_gas.prm, identical in every other respect except
+// liquidHeightFactor raised from 2.862 to 5.9. The baseline run (job 4060404) confirmed via real
+// velocity-field data (gas_cell_zero_setter zeroes velocity in gas cells before VTK output, so any
+// nonzero velocity = genuinely wet) that water piles up ~9 LU higher right at the piers than the
+// undisturbed baseline (settling at Z=71.5 near the bridge vs. Z=62.5 away from it, steady from step
+// 15000 onward) -- a real, physically expected damming effect from supercritical flow (Fr=1.31)
+// squeezed through the pier openings, but it never reached the deck top (Z=76) in that run. This
+// variant asks: what happens once the flood level itself, not just the local pile-up, is high enough
+// to submerge the deck? liquidHeightFactor=5.9 -> liquidHeight=8.00194*5.9=47.211,
+// absoluteLiquidHeight=floorHeight(33.122)+47.211=80.33 -- already 4.3 LU above the deck top (76)
+// even in the UNDISTURBED baseline, before any pier-driven pile-up adds more on top. Everything else
+// (Re/Fr/We, PID target, piers, arches, timesteps=30000) unchanged from the baseline run -- isolating
+// water level as the one changed variable, same discipline as every other ablation this session.
+//
+// FIRST TEST BRIDGE, v1: real fluid flow, standard canal domain (same
+// <128,60,180> / cellsPerBlock <32,20,30> = 72-process convention as
+// cylinder_two_pillars_gas.prm), NO floaters/debris yet, NOT the real bridge
+// dimensions (Pont ferroviere, Rue Goffontaine, Trooz -- pier spacing ~8.9m,
+// length ~31.7m) -- a scaled-down shakedown to prove the geometry technique
+// before scaling up.
+//
+// CORRECTION from an earlier turn: I initially thought BodyBC only supported
+// Cylinder/Sphere/Ellipsoid with no way to carve a hole. Checked
+// src/geometry/bodies/BodyFromConfig.cpp directly (the actual "shape" keyword
+// factory, not just BoundaryFromBody.impl.h's includes) and it supports much
+// more: Box (AABB), and full boolean composition -- LogicalOR, LogicalAND,
+// LogicalNOT -- recursively nestable via "first"/"second" sub-blocks. So both
+// requested features are directly buildable:
+//
+// PIERS (2): "round ends with box in between" = a stadium/capsule shape, built
+// as LogicalOR(LogicalOR(Cylinder_frontCap, Cylinder_backCap), Box_middle).
+// Each pier spans the full domain height (Z=0..180), footprint 16 LU long (X)
+// x 10 LU wide (Y): end-cap cylinders radius 5 at X=61 and X=67, connecting
+// box X=61..67, Y=+-5 around the pier's Y-centre.
+//   Pier 1: Y-centre 15 (box Y=10..20)
+//   Pier 2: Y-centre 45 (box Y=40..50)
+// Wall gaps 10 LU each side (Y=0..10, Y=50..60), inter-pier gap 20 LU (Y=20..40).
+//
+// ARCHES (3, one per span -- now matching the real bridge's 3 openings): each
+// span gets its own solid spandrel/deck box MINUS a cylindrical tunnel (axis
+// along X, the flow direction), same construction as the pier-carving trick,
+// just sized to that span's own width. Built as
+// LogicalAND(Box_deck, LogicalNOT(Cylinder_tunnel)) per span.
+//
+// KEY FIX (geometry bug caught and corrected): the tunnel cylinder must be
+// centred at the box's BOTTOM edge (the springing line, Z=56), not its
+// Z-midpoint. Centring at the midpoint makes the circle touch all 4 box edges
+// at single POINTS -- a lens/vesica shape, near-zero width right at the water
+// line and only open at mid-height, backwards for an arch. Centring at Z=56
+// instead means LogicalAND's own clipping against the box's lower bound
+// discards the circle's entire lower half for free (nothing below Z=56 to
+// intersect anyway) -- what's left is exactly the upper half: full-width
+// opening at the springing line, narrowing to a point at the crown. This is
+// also the key to sizing EACH span's arch correctly without any new "half
+// cylinder" shape: for a true semicircular half-pipe, radius = half that
+// span's own Y-width -- the same construction just scales per span, no new
+// primitive needed even though the outer spans are narrower than the central
+// one.
+//   Left arch:    Y=0..10  (width 10), radius 5,  crown Z=61
+//   Central arch: Y=20..40 (width 20), radius 10, crown Z=66
+//   Right arch:   Y=50..60 (width 10), radius 5,  crown Z=61
+// All three deck boxes: X=56..72 (matching pier footprint), Z=56..76 (free
+// surface up to deck top) -- the outer arches' shorter crowns leave a thicker
+// solid "collar" above them before the deck (15 LU vs the central arch's 10),
+// which is structurally realistic, not a flaw.
+//
+// Free surface: same domain (X=128) as the reference runs this session already
+// established avgParticleDiameter=8.00194 for (liquidHeightFactor 2.862,
+// floorHeightFactor 4.1393) -- liquidHeight=22.9, floorHeight=33.12, surface
+// Z=56.02. No rescaling needed/risked here since this reuses the EXACT
+// reference domain size, unlike the widened-domain saga from the sphere/pillar
+// scenario earlier this session.
+//
+// No CylinderPillars/DEM block: no floaters exist in this test, so there is
+// nothing to collide with the piers -- the LBM-only BodyBC geometry above is
+// the entire solid representation needed here.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 5.9;  // overtop variant -- see header note; absoluteLiquidHeight~80.3 vs deck top 76
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         30000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+   // no gravityOverride -- dynamically computed gravity
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// DEM bodies matching the BodyBC piers exactly (BodyBC is LBM-only -- floaters need a real mesa_pd
+// body to collide with, and nothing else creates one). 4 cylinders (the piers' round end-caps,
+// radius 5) + 2 boxes (the connecting box between them, halfExtents = half of X=61-67/Y=10-20-or-
+// 40-50/Z=0-76). center Z is cosmetic (CylindricalBoundary is infinite along its axis).
+CylinderPillars
+{
+   CylinderPillar { center < 61, 15, 38 >; radius 5; }
+   CylinderPillar { center < 67, 15, 38 >; radius 5; }
+   CylinderPillar { center < 61, 45, 38 >; radius 5; }
+   CylinderPillar { center < 67, 45, 38 >; radius 5; }
+}
+
+Pillars
+{
+   Pillar { center < 64, 15, 38 >; halfExtents < 3, 5, 38 >; }
+   Pillar { center < 64, 45, 38 >; halfExtents < 3, 5, 38 >; }
+}
+
+// One entry per arch, matching the BodyBC arch cylinders exactly (center Y/Z, radius, and the deck's
+// own X-span 56-72). Not mesa_pd bodies -- consumed directly by ParticleKernels.h's
+// ComputeTunnelContacts (see its class comment for why: DoubleCast can't give CylindricalBoundary a
+// second, inside-out interpretation, since the pillars above already claim the outside-solid one).
+ArchTunnels
+{
+   ArchTunnel { center < 0, 5, 56 >;  radius 5;  xMin 56; xMax 72; }  // left arch
+   ArchTunnel { center < 0, 30, 56 >; radius 10; xMin 56; xMax 72; }  // central arch
+   ArchTunnel { center < 0, 55, 56 >; radius 5;  xMin 56; xMax 72; }  // right arch
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePass3Reresolution          true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+
+   // Pier 1 (Y-centre 15): stadium shape = two round end-caps + a connecting box. Capped at Z=76
+   // (the deck top), NOT the full domain height -- piers stop flush with the top of the bridge
+   // instead of poking up into the open air above it.
+   BodyBC
+   {
+      shape LogicalOR;
+      first
+      {
+         shape LogicalOR;
+         first  { shape Cylinder; min < 61, 15, 0 >; max < 61, 15, 76 >; radius 5; }
+         second { shape Cylinder; min < 67, 15, 0 >; max < 67, 15, 76 >; radius 5; }
+      }
+      second { shape Box; min < 61, 10, 0 >; max < 67, 20, 76 >; }
+      NoSlip{}
+   }
+
+   // Pier 2 (Y-centre 45): same stadium shape, same Z=76 cap
+   BodyBC
+   {
+      shape LogicalOR;
+      first
+      {
+         shape LogicalOR;
+         first  { shape Cylinder; min < 61, 45, 0 >; max < 61, 45, 76 >; radius 5; }
+         second { shape Cylinder; min < 67, 45, 0 >; max < 67, 45, 76 >; radius 5; }
+      }
+      second { shape Box; min < 61, 40, 0 >; max < 67, 50, 76 >; }
+      NoSlip{}
+   }
+
+   // Left arch (wall-to-pier1 span, Y=0..10, width 10 -> radius 5): same construction as
+   // the central arch, sized to its own span so the opening is a true semicircular
+   // half-pipe (full width at the springing line Z=56, point at the crown Z=61).
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 56, 0, 56 >; max < 72, 10, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 56, 5, 56 >; max < 72, 5, 56 >; radius 5; }
+      }
+      NoSlip{}
+   }
+
+   // Central arch (pier1-to-pier2 span, Y=20..40, width 20 -> radius 10): full width at
+   // Z=56, crown at Z=66.
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 56, 20, 56 >; max < 72, 40, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 56, 30, 56 >; max < 72, 30, 56 >; radius 10; }
+      }
+      NoSlip{}
+   }
+
+   // Right arch (pier2-to-wall span, Y=50..60, width 10 -> radius 5): mirrors the left arch.
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 56, 50, 56 >; max < 72, 60, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 56, 55, 56 >; max < 72, 55, 56 >; radius 5; }
+      }
+      NoSlip{}
+   }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;  // cell type per timestep: 1=liquid 2=interface 3=gas 4=noSlip 6=freeSlip/UBB
+                       // 7=UBB-inflow 8=pressure 9=pressure-outflow 10=outlet (VtkWriter.h) -- lets
+                       // the bridge geometry (piers/deck/arches, all NoSlip=4) be isolated directly
+                       // in ParaView (Threshold filter on mapped_flag == 4), independent of the water.
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}
