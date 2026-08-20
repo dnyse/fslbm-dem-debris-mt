@@ -312,6 +312,13 @@ class PdfReconstructionManager
       else if (isFlagSet(targetFlag, liquidFlag)) { seededFill = real_t(1); }
       else // interface
       {
+         // Bounds-checked D3Q27 read -- same fix as getBoundedNeighbourFlag above (commit d8c0a265
+         // fixed the analogous unguarded read in bognerTargetFlag/classifyFormerObstacleCell; this
+         // function has its OWN, separate unguarded 3x3x3 read that fix never covered). A cell
+         // converted at the OUTERMOST ghost layer has a D3Q27 neighbour one cell beyond flagField's/
+         // fillField's allocated (ghost-inclusive) extent. Confirmed with AddressSanitizer:
+         // heap-buffer-overflow READ at this exact loop (job 4063969, 1000-sphere v6 scenario).
+         const auto ghostBounds = flagField->xyzSizeWithGhostLayer();
          real_t sum = real_t(0);
          uint_t cnt = uint_t(0);
          for (int dz = -1; dz <= 1; ++dz)
@@ -319,9 +326,17 @@ class PdfReconstructionManager
                for (int dx = -1; dx <= 1; ++dx)
                {
                   if (dx == 0 && dy == 0 && dz == 0) continue;
-                  if (isFlagSet(flagField->get(x + dx, y + dy, z + dz), interfaceFlag))
+                  const cell_idx_t nx = x + cell_idx_c(dx);
+                  const cell_idx_t ny = y + cell_idx_c(dy);
+                  const cell_idx_t nz = z + cell_idx_c(dz);
+                  if (nx < ghostBounds.xMin() || nx > ghostBounds.xMax() ||
+                      ny < ghostBounds.yMin() || ny > ghostBounds.yMax() ||
+                      nz < ghostBounds.zMin() || nz > ghostBounds.zMax())
+                     continue; // neighbour outside the allocated field -- no evidence, skip (same
+                               // conservative stance as getBoundedNeighbourFlag's out-of-bounds case)
+                  if (isFlagSet(flagField->get(nx, ny, nz), interfaceFlag))
                   {
-                     sum += fillField->get(x + dx, y + dy, z + dz);
+                     sum += fillField->get(nx, ny, nz);
                      ++cnt;
                   }
                }
