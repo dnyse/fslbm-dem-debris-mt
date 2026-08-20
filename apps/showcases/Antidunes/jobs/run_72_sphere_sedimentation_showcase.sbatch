@@ -11,16 +11,18 @@
 #SBATCH --mail-user=dennys.huber@fau.de
 
 # build + run: "particle impact and sedimentation at a free surface" showcase,
-# v2 -- 100 identical-size spheres (radius 4.5, up from 3), only 3 mixed
-# densities (0.5 light / 1.0 neutral / 2.0 heavy, up from 5 closely-packed
-# values), arranged as a 5x4x5 cuboid grid (spacing 12) just above still water
-# (X,Y periodic, no side walls), released from rest to fall, impact the
-# surface, and separate by buoyancy. No pillars, no flow forcing, no pinning.
-# Bigger radius + wider density spread specifically targets the v1 finding that
-# small, near-neutral spheres were too weakly buoyant relative to ambient
-# dynamic-force noise/local currents to reliably reach equilibrium. Time budget
-# is a rough estimate carried over from v1 -- adjust after seeing the actual
-# per-step rate for the larger spheres.
+# v3 -- 100 identical-size spheres (radius 4.5), 3 densities (0.5 light / 1.0
+# neutral / 2.0 heavy), arranged as a 5x4x5 cuboid grid (spacing 12) just above
+# still water (X,Y periodic, no side walls), released from rest to fall, impact
+# the surface, and separate by buoyancy. No pillars, no flow forcing, no
+# pinning. v3 changes vs. v2: densities are now COLUMN-UNIFORM (assigned by X
+# grid index only, so every YZ slice at fixed X shares one density, reversing
+# v2's deliberate 3D mixing); gravityOverride set so lattice gravity converts
+# to true Earth gravity 9.81 m/s^2 under the current (rescaled) bed; Bogner
+# three-phase MEM buoyancy model (useBognerThreePhaseMEM) enabled; timesteps
+# 100000 -> 50000. See the prm file's own header for the full derivation. Time
+# budget (3h) is a generous carryover from the v2 100k-step estimate, now
+# running half as many steps.
 # domainSize <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 blocks
 # Resolve the repo root programmatically (mirrors antidunes.sh's own SCRIPT_DIR/REPO_ROOT
 # derivation) -- no hardcoded path, so this works across mirror clones (mt-dennys,

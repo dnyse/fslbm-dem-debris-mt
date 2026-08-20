@@ -1,11 +1,28 @@
 BedGeneration{
-    domainSize_SI < 0.32, 0.15, 1.0 >;
+    // Rescaled from the previous <0.32,0.15,1.0>/0.02/0.035 values by the same factor (6.89286) so that
+    // avgParticleDiameter (lattice) stays ~8.0 for the 128-cell-wide Antidunes domain -- i.e. liquidHeight
+    // and every sphere/pillar z-position in nine_stacked_release_pillar_bogner_gas.prm stay valid -- while
+    // diameter_SI now matches the original antidunes branch's own value (2.9mm), which is what makes the
+    // computed lattice gravity convert back to real Earth gravity (9.81 m/s^2) instead of the ~0.03 m/s^2
+    // the previous (20mm-sphere) values implied. See thesis chapters/02_background/fslbm/units.tex and
+    // this session's SI-gravity sanity check for the derivation (g_SI depends only on diameter_SI here).
+    //
+    // domainSize_SI[1] carries a deliberate +0.3-cell safety margin above the exact 60/128 (=45/96)
+    // ratio: Utility.h's getAvgDiameterScalingFactor re-derives scalingFactor from spheres_out.dat's
+    // own (text-truncated, ~13-sig-fig) header line and checks uint_c(scalingFactor*domainSize_SI[1])
+    // == domainSize[1] EXACTLY -- uint_c() truncates rather than rounds, so an exact-ratio value that
+    // round-trips through that text precision as even 1e-10 low (e.g. 59.999999999... instead of
+    // 60.0) truncates to the WRONG integer and aborts (confirmed: this happened on both the 128- and
+    // 96-wide domains before this margin was added). +0.3 clears that boundary comfortably for every
+    // domain width sharing this file (currently 128 and 96, both exactly the same 15:32 X:Y ratio)
+    // without approaching the next integer up.
+    domainSize_SI < 0.046424848318763846, 0.021870455887667655, 0.145077650996137 >;
     blocks < 3, 2, 12 >;
-    diameter_SI 0.02;
+    diameter_SI 0.0029015530199227404;
     gravity_SI 9.81;
     densityFluid_SI 1000;
     densityParticle_SI 2550;
-    generationSpacing_SI 0.035;
+    generationSpacing_SI 0.005077717784864796;
     initialVelocity_SI 1;
     dt_SI 5e-5;
     frictionCoefficient 0.5;

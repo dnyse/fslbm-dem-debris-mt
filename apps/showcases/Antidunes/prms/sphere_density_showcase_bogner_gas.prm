@@ -11,7 +11,7 @@
 //                                    original three-phase MEM force exactly as published --
 //                                    a phi(x_b)-weighted blend of the real link PDFs and the
 //                                    gas-equilibrium distribution, nothing else subtracted.
-//   useBognerBuoyancy      true   -- AddExternalForces' vertical body force drops the
+//   useMemOnlyBuoyancy      true   -- AddExternalForces' vertical body force drops the
 //                                    separate analytic vSub*g buoyancy term entirely
 //                                    (gravity only, rho*vFull*a_z); buoyant support comes
 //                                    SOLELY from the (now-uncancelled) MEM/hydrodynamic force.
@@ -139,7 +139,7 @@ ModelParameters
    useBognerReconstruction       true;
    useFillWeighting              true;   // Eq. 5.9's phi(x_b) blend -- already the default, kept explicit here
    useBognerThreePhaseMEM        true;   // NEW: no rhoHydStat subtraction at all (see header)
-   useBognerBuoyancy             true;   // NEW: no separate vSub*g channel (see header)
+   useMemOnlyBuoyancy             true;   // NEW: no separate vSub*g channel (see header)
    writeFloaterPlaneVTK          true;   // emit planeOrigin/planeNormal for each sphere
 }
 

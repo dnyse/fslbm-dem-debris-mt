@@ -114,16 +114,6 @@ struct SimulationObjects
    // forceMEM, after the field write). Null / unused when the toggle is off (static flat H).
    shared_ptr< real_t >             memReferenceHeight;
 
-   // Per-floater free-surface plane fit used for the buoyancy/submerged-volume calculation, keyed by
-   // particle UID. Populated every step by ParticleKernels' computeSubmergedVolumes() (spheres) and
-   // computeSubmergedVolumesBox() (box/cylinder floaters). Diagnostic/visualization only (VTK output
-   // in BuildTimeloop.h, identifier "floaterPlane") — never read back into the physics. floaterPlaneOrigin
-   // is a point on the fitted plane (xBar); floaterPlaneNormal is the fitted free-surface normal
-   // (liquid->gas). A floater with no entry, or a zero-length normal, had no clean plane fit this step
-   // (fully submerged/emerged -> nothing meaningful to draw).
-   shared_ptr< std::unordered_map< walberla::id_t, Vector3< real_t > > > floaterPlaneOrigin;
-   shared_ptr< std::unordered_map< walberla::id_t, Vector3< real_t > > > floaterPlaneNormal;
-
    shared_ptr< DataCols >           dataCols;
 };
 

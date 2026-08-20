@@ -259,28 +259,57 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       mesa_pd::mpi::ClearGhostOwnerSync{}(*simObjs->particleAccessor);
 
       // count and validate particles loaded from snapshot ---------------------------------------
-      real_t avgParticleDiameterTest = real_c(0);
-      simObjs->particleStorage->forEachParticle(
-         false, mesa_pd::kernel::SelectLocal(), *simObjs->particleAccessor,
-         [&avgParticleDiameterTest, &numParticles, &numFixedParticles](const size_t idx, auto& ac) {
-            auto sp = static_cast< mesa_pd::data::Sphere* >(ac.getBaseShape(idx).get());
-            avgParticleDiameterTest += real_c(2) * sp->getRadius();
-            ++numParticles;
-            if (!mesa_pd::data::particle_flags::isSet( ac.getFlags(idx), mesa_pd::data::particle_flags::FIXED))
-            {
-               ++numFixedParticles;
-            }
-         },
-         *simObjs->particleAccessor);
-
-      mpi::allReduceInplace(numParticles, mpi::SUM);
-      mpi::allReduceInplace(avgParticleDiameterTest, mpi::SUM);
-      avgParticleDiameterTest /= real_c(numParticles);
-
-      WALBERLA_LOG_INFO_ON_ROOT("Read particles from check pointing file with avg diameter of " << avgParticleDiameterTest)
-      if (std::abs(avgParticleDiameterTest - simParams->computed.avgParticleDiameter) / avgParticleDiameterTest > real_c(0.05))
+      // The static_cast<Sphere*> + avg-diameter consistency check below only makes sense when the
+      // checkpointed particleStorage actually holds a settled BED of spheres (useParticleBed=true)
+      // to validate against spheres_out.dat's header-derived avgParticleDiameter -- it was never
+      // exercised any other way before. In a floater-only scenario (useParticleBed=false, e.g. the
+      // mixed-shape sphere/box/cylinder showcases), particleStorage holds whatever shapes the
+      // floaters are; blindly static_cast-ing a Box/Cylinder's BaseShape to Sphere* and calling
+      // getRadius() on it is undefined behaviour (reads garbage as a radius), which corrupts
+      // avgParticleDiameterTest and made the very first attempt to loadSnapshot a mixed-shape
+      // checkpoint abort with "Particle diameters not correct." even though nothing was actually
+      // wrong. Guarding on useParticleBed keeps the original bed-consistency check fully intact
+      // for bed-based runs while skipping it (just counting particles, any shape, no cast) here.
+      if (simParams->particle.useParticleBed)
       {
-         WALBERLA_ABORT("Particle diameters not correct.")
+         real_t avgParticleDiameterTest = real_c(0);
+         simObjs->particleStorage->forEachParticle(
+            false, mesa_pd::kernel::SelectLocal(), *simObjs->particleAccessor,
+            [&avgParticleDiameterTest, &numParticles, &numFixedParticles](const size_t idx, auto& ac) {
+               auto sp = static_cast< mesa_pd::data::Sphere* >(ac.getBaseShape(idx).get());
+               avgParticleDiameterTest += real_c(2) * sp->getRadius();
+               ++numParticles;
+               if (!mesa_pd::data::particle_flags::isSet( ac.getFlags(idx), mesa_pd::data::particle_flags::FIXED))
+               {
+                  ++numFixedParticles;
+               }
+            },
+            *simObjs->particleAccessor);
+
+         mpi::allReduceInplace(numParticles, mpi::SUM);
+         mpi::allReduceInplace(avgParticleDiameterTest, mpi::SUM);
+         avgParticleDiameterTest /= real_c(numParticles);
+
+         WALBERLA_LOG_INFO_ON_ROOT("Read particles from check pointing file with avg diameter of " << avgParticleDiameterTest)
+         if (std::abs(avgParticleDiameterTest - simParams->computed.avgParticleDiameter) / avgParticleDiameterTest > real_c(0.05))
+         {
+            WALBERLA_ABORT("Particle diameters not correct.")
+         }
+      }
+      else
+      {
+         simObjs->particleStorage->forEachParticle(
+            false, mesa_pd::kernel::SelectLocal(), *simObjs->particleAccessor,
+            [&numParticles, &numFixedParticles](const size_t idx, auto& ac) {
+               ++numParticles;
+               if (!mesa_pd::data::particle_flags::isSet( ac.getFlags(idx), mesa_pd::data::particle_flags::FIXED))
+               {
+                  ++numFixedParticles;
+               }
+            },
+            *simObjs->particleAccessor);
+         mpi::allReduceInplace(numParticles, mpi::SUM);
+         WALBERLA_LOG_INFO_ON_ROOT("Read " << numParticles << " particles from checkpointing file (useParticleBed=false, no diameter check).")
       }
    }
    else
@@ -600,10 +629,6 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
    // and the static-height functor overload below is used instead.
    simObjs->memReferenceHeight = std::make_shared< real_t >(simParams->staticReferenceHeight());
 
-   // Per-floater buoyancy plane-fit (diagnostic/VTK only — see SimulationObjects.h). Populated every
-   // step by ParticleKernels; empty here, just needs a backing map before the first VTK write.
-   simObjs->floaterPlaneOrigin = std::make_shared< std::unordered_map< walberla::id_t, Vector3< real_t > > >();
-   simObjs->floaterPlaneNormal = std::make_shared< std::unordered_map< walberla::id_t, Vector3< real_t > > >();
    WALBERLA_LOG_INFO_ON_ROOT("[MEM reference height] "
       << (simParams->model.useBognerThreePhaseMEM
              ? "DISABLED -- useBognerThreePhaseMEM=true: no rhoHydStat subtraction at all, reproducing "

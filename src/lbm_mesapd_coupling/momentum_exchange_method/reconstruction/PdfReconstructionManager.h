@@ -126,6 +126,18 @@ inline BognerNeighbourhoodState classifyFormerObstacleNeighbourhood(bool hasGas,
  * needs to support isFlagSet(value, testFlag) (field::isFlagSet, an integer bitmask test) -- the
  * real production flag_t (BoundaryHandling_T::flag_t) and a small test-local flag type both work.
  *
+ * `obstacle` excludes a neighbour from ALL evidence (hasGas/hasLiquid/hasUnknown) the moment it's
+ * set, checked before any other flag on that neighbour -- a cell currently covered by a particle is
+ * definitively solid right now, unlike `formerObstacle` (genuinely mid-reclassification, still
+ * counted as evidence of ambiguity) or real liquid/gas (genuine evidence). This matters because
+ * MovingParticleMapping's obstacle-covering step only clears/sets the `domain_` mask (liquid |
+ * interface for Antidunes) -- a cell that was GAS when a particle's geometry swept over it is never
+ * routed through that step at all (gas isn't part of `domain_`), so it can end up simultaneously
+ * `obstacle`-flagged (from some other mapping path) or simply left mid-transition while still
+ * carrying its old gas bit. Without this exclusion, such a stale bit would be read as genuine gas
+ * evidence by any FormerMO neighbour scanning it. Confirmed via direct VTK inspection of a real run:
+ * mapped_flag=GAS cells sitting >=1 LU inside 42-54 of 81 spheres, persisting across many timesteps.
+ *
  * hasGas/hasLiquid/hasUnknown/unknownNbr are written back to the caller (needed for the per-branch
  * conversion counters and the same-pass-race warning, which need the raw booleans, not just the
  * final Gas/Liquid/Interface classification).
@@ -134,7 +146,8 @@ inline BognerNeighbourhoodState classifyFormerObstacleNeighbourhood(bool hasGas,
 template< typename Flag_T, typename NeighbourFlagGetter >
 inline BognerNeighbourhoodState classifyFormerObstacleCell(NeighbourFlagGetter getNeighbourFlag,
                                                              Flag_T bognerLiquid, Flag_T bognerGas,
-                                                             Flag_T formerObstacle, bool& hasGasOut,
+                                                             Flag_T formerObstacle, Flag_T obstacle,
+                                                             bool& hasGasOut,
                                                              bool& hasLiquidOut, bool& hasUnknownOut,
                                                              uint_t& unknownNbrOut)
 {
@@ -145,6 +158,7 @@ inline BognerNeighbourhoodState classifyFormerObstacleCell(NeighbourFlagGetter g
          {
             if (dx == 0 && dy == 0 && dz == 0) continue; // skip centre
             const Flag_T nf = getNeighbourFlag(dx, dy, dz);
+            if (isFlagSet(nf, obstacle)) continue; // currently solid -- not evidence, not ambiguity, pure exclusion
             if (isFlagSet(nf, bognerLiquid))   hasLiquidOut = true;
             if (isFlagSet(nf, bognerGas))      hasGasOut    = true;
             if (isFlagSet(nf, formerObstacle)) { hasUnknownOut = true; ++unknownNbrOut; }
@@ -153,211 +167,23 @@ inline BognerNeighbourhoodState classifyFormerObstacleCell(NeighbourFlagGetter g
 }
 
 //**************************************************************************************************************************************
-/*!\brief Result of computeRealPhaseComponents() (see PdfReconstructionManager's "[WATERLINE-CHECK]"
- * usage), answering -- for every cell in a scanned region -- whether a real bognerGas / bognerLiquid
- * cell is reachable from it without crossing the OPPOSITE real phase.
+/*!\brief Pass-3 candidacy rule: should this FormerMO cell's fallback-to-interface outcome from
+ * Pass 2 be re-examined once every same-pass FormerMO cell in the block has a final state?
  *
- * Used by bognerTargetFlag to resolve cells that would otherwise fall back to interface (an
- * unresolved same-pass neighbour, or no real phase within 1 cell) whenever it can prove -- from
- * real flags only, via genuine connectivity, never a guess -- that the dangerous opposite phase is
- * not reachable at all. Initially landed as a log-only shadow check (see the commit immediately
- * preceding this one) with the intent to validate it against a real cluster run before wiring it
- * into an actual decision; wired in directly instead on the reasoning that a log-only pass, with
- * every cell still forced to interface, wouldn't produce a meaningful comparison anyway -- not yet
- * confirmed against a real cluster run.
+ * True only for the two same-pass-ambiguity fallback branches (A': hasGas&&!hasLiquid&&hasUnknown,
+ * and C: hasLiquid&&!hasGas&&hasUnknown) plus branch E (!hasGas&&!hasLiquid) when it ALSO had an
+ * unresolved neighbour (hasUnknown) -- a branch-E cell with zero unresolved neighbours at Pass-2
+ * time cannot have anything change in its neighbourhood by Pass-3 time, so it is structurally
+ * unrescuable and not worth queuing. Never true for branch D (hasGas&&hasLiquid): that is already a
+ * genuine, correct free-surface cell, and re-scanning the single largest bucket for zero benefit
+ * would be pure waste.
  */
 //**************************************************************************************************************************************
-struct PhaseReachability
+inline bool isPass3Candidate(BognerNeighbourhoodState state, bool hasGas, bool hasLiquid, bool hasUnknown)
 {
-   cell_idx_t xMin_ = cell_idx_t(0), yMin_ = cell_idx_t(0), zMin_ = cell_idx_t(0);
-   cell_idx_t xSize_ = cell_idx_t(0), ySize_ = cell_idx_t(0), zSize_ = cell_idx_t(0);
-
-   std::vector< uint8_t > gasConfidentlyReachable_;
-   std::vector< uint8_t > gasInconclusive_;
-   std::vector< uint8_t > liquidConfidentlyReachable_;
-   std::vector< uint8_t > liquidInconclusive_;
-
-   uint_t totalGasComponents    = uint_t(0); // # of distinct components that contain real gas
-   uint_t totalLiquidComponents = uint_t(0); // # of distinct components that contain real liquid
-
-   inline size_t flatIndex(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
-   {
-      return (size_t(z - zMin_) * size_t(ySize_) + size_t(y - yMin_)) * size_t(xSize_) + size_t(x - xMin_);
-   }
-   inline bool gasConfidentlyReachable(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
-   {
-      return gasConfidentlyReachable_[flatIndex(x, y, z)] != uint8_t(0);
-   }
-   inline bool gasInconclusive(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
-   {
-      return gasInconclusive_[flatIndex(x, y, z)] != uint8_t(0);
-   }
-   inline bool liquidConfidentlyReachable(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
-   {
-      return liquidConfidentlyReachable_[flatIndex(x, y, z)] != uint8_t(0);
-   }
-   inline bool liquidInconclusive(cell_idx_t x, cell_idx_t y, cell_idx_t z) const
-   {
-      return liquidInconclusive_[flatIndex(x, y, z)] != uint8_t(0);
-   }
-};
-
-//**************************************************************************************************************************************
-/*!\brief Computes, for every cell in [xMin,xMax]x[yMin,yMax]x[zMin,zMax] (all
- * inclusive, matching the same absolute-coordinate convention as FlagField::get(x,y,z) so
- * production can pass a bare field-access lambda), whether real gas / real liquid is reachable
- * from it without crossing the opposite real phase.
- *
- * The flood fill is free to pass through any cell that is NEITHER real bognerGas NOR real
- * bognerLiquid (formerObstacle, interface, particle-obstacle cells, walls, ...) -- such cells carry
- * no evidence of either phase, so: (a) a floating object sitting in open liquid does not split that
- * liquid into two separate reachability regions (there is a permeable path through the object's own
- * cells connecting both sides), and (b) a cluster of merely-uncovered formerObstacle cells does not
- * itself look like a waterline (it contributes nothing until the flood fill reaches an actual real
- * gas or real liquid cell on the far side).
- *
- * "Confidently reachable" means a real cell of that phase was actually found, connected via only
- * permeable cells. "Inconclusive" means the flood fill for that phase ran all the way to the outer
- * boundary of the scanned region without finding one -- i.e. the true situation might extend further
- * than this region reaches, so "not reachable" cannot be trusted there.
- *
- * getFlag(x, y, z) must return the flag at the given ABSOLUTE coordinates for every cell in the
- * scanned region.
- */
-//**************************************************************************************************************************************
-template< typename Flag_T, typename FlagGetter >
-inline PhaseReachability computeRealPhaseComponents(FlagGetter getFlag, cell_idx_t xMin, cell_idx_t xMax,
-                                                     cell_idx_t yMin, cell_idx_t yMax, cell_idx_t zMin,
-                                                     cell_idx_t zMax, Flag_T bognerLiquid, Flag_T bognerGas)
-{
-   PhaseReachability result;
-   result.xMin_  = xMin;
-   result.yMin_  = yMin;
-   result.zMin_  = zMin;
-   result.xSize_ = xMax - xMin + cell_idx_t(1);
-   result.ySize_ = yMax - yMin + cell_idx_t(1);
-   result.zSize_ = zMax - zMin + cell_idx_t(1);
-
-   const size_t nx = size_t(result.xSize_);
-   const size_t ny = size_t(result.ySize_);
-   const size_t nz = size_t(result.zSize_);
-   const size_t n  = nx * ny * nz;
-
-   result.gasConfidentlyReachable_.assign(n, uint8_t(0));
-   result.gasInconclusive_.assign(n, uint8_t(0));
-   result.liquidConfidentlyReachable_.assign(n, uint8_t(0));
-   result.liquidInconclusive_.assign(n, uint8_t(0));
-
-   auto toAbs = [&](size_t flat, cell_idx_t& x, cell_idx_t& y, cell_idx_t& z) {
-      x = xMin + cell_idx_c(flat % nx);
-      y = yMin + cell_idx_c((flat / nx) % ny);
-      z = zMin + cell_idx_c(flat / (nx * ny));
-   };
-   auto flatOf = [&](cell_idx_t x, cell_idx_t y, cell_idx_t z) -> size_t {
-      return (size_t(z - zMin) * ny + size_t(y - yMin)) * nx + size_t(x - xMin);
-   };
-
-   // One "graph": nodes are every cell that is NOT `blockingFlag` (i.e. the opposite real phase);
-   // edges are 26-connectivity. A resulting component is "productive" if it contains at least one
-   // real `productiveFlag` cell, and "touches the edge" if it reaches the outer boundary of the
-   // scanned region. Writes confidence/inconclusive results for every cell that IS part of this
-   // graph (cells that ARE `blockingFlag` are simply left at 0/0 -- irrelevant for this phase).
-   auto runGraph = [&](Flag_T blockingFlag, Flag_T productiveFlag, std::vector< uint8_t >& confidentOut,
-                       std::vector< uint8_t >& inconclusiveOut) -> uint_t {
-      std::vector< int32_t > label(n, int32_t(-1));
-      std::vector< uint8_t > productive;
-      std::vector< uint8_t > touchesEdge;
-      std::vector< size_t > stack;
-
-      for (size_t startFlat = 0; startFlat < n; ++startFlat)
-      {
-         if (label[startFlat] != int32_t(-1)) continue;
-         cell_idx_t sx, sy, sz;
-         toAbs(startFlat, sx, sy, sz);
-         if (isFlagSet(getFlag(sx, sy, sz), blockingFlag)) continue; // not part of this graph
-
-         const int32_t myLabel = int32_t(productive.size());
-         productive.push_back(uint8_t(0));
-         touchesEdge.push_back(uint8_t(0));
-         label[startFlat] = myLabel;
-         stack.clear();
-         stack.push_back(startFlat);
-
-         while (!stack.empty())
-         {
-            const size_t curFlat = stack.back();
-            stack.pop_back();
-            cell_idx_t cx, cy, cz;
-            toAbs(curFlat, cx, cy, cz);
-            const Flag_T cf = getFlag(cx, cy, cz);
-            if (isFlagSet(cf, productiveFlag)) productive[size_t(myLabel)] = uint8_t(1);
-            if (cx == xMin || cx == xMax || cy == yMin || cy == yMax || cz == zMin || cz == zMax)
-               touchesEdge[size_t(myLabel)] = uint8_t(1);
-
-            for (int dz = -1; dz <= 1; ++dz)
-               for (int dy = -1; dy <= 1; ++dy)
-                  for (int dx = -1; dx <= 1; ++dx)
-                  {
-                     if (dx == 0 && dy == 0 && dz == 0) continue;
-                     const cell_idx_t nx_ = cx + cell_idx_c(dx);
-                     const cell_idx_t ny_ = cy + cell_idx_c(dy);
-                     const cell_idx_t nz_ = cz + cell_idx_c(dz);
-                     if (nx_ < xMin || nx_ > xMax || ny_ < yMin || ny_ > yMax || nz_ < zMin || nz_ > zMax) continue;
-                     const size_t nFlat = flatOf(nx_, ny_, nz_);
-                     if (label[nFlat] != int32_t(-1)) continue;
-                     if (isFlagSet(getFlag(nx_, ny_, nz_), blockingFlag)) continue;
-                     label[nFlat] = myLabel;
-                     stack.push_back(nFlat);
-                  }
-         }
-      }
-
-      uint_t totalProductive = uint_t(0);
-      for (uint8_t p : productive)
-         if (p) ++totalProductive;
-
-      for (size_t flat = 0; flat < n; ++flat)
-      {
-         if (label[flat] == int32_t(-1)) continue; // this cell IS the blocking phase -- not part of this graph
-         const size_t c = size_t(label[flat]);
-         if (productive[c]) confidentOut[flat] = uint8_t(1);
-         else if (touchesEdge[c]) inconclusiveOut[flat] = uint8_t(1);
-      }
-      return totalProductive;
-   };
-
-   result.totalGasComponents = runGraph(bognerLiquid, bognerGas, result.gasConfidentlyReachable_,
-                                        result.gasInconclusive_);
-   result.totalLiquidComponents = runGraph(bognerGas, bognerLiquid, result.liquidConfidentlyReachable_,
-                                           result.liquidInconclusive_);
-
-   return result;
-}
-
-//! Verdict of the waterline-reachability check for a single cell. WouldBeLiquid/WouldBeGas are
-//! committed directly by bognerTargetFlag; the other three still fall back to interface.
-enum class WaterlineVerdict
-{
-   WouldBeLiquid,
-   WouldBeGas,
-   StillAmbiguousSurfaceNearby,  // both real gas and real liquid confidently reachable -- a true local surface
-   StillAmbiguousNoEvidence,     // neither reachable -- no real evidence of either phase within the scanned region
-   ExcludedNearUnresolvedEdge    // the scanned region ended before ruling out gas and/or liquid; not trustworthy
-};
-
-//**************************************************************************************************************************************
-/*!\brief The waterline-reachability decision rule, given one cell's reachability results from
- * computeRealPhaseComponents().
- */
-//**************************************************************************************************************************************
-inline WaterlineVerdict classifyViaWaterlineReachability(bool gasConfidentlyReachable, bool gasInconclusive,
-                                                          bool liquidConfidentlyReachable, bool liquidInconclusive)
-{
-   if (gasInconclusive || liquidInconclusive) return WaterlineVerdict::ExcludedNearUnresolvedEdge;
-   if (liquidConfidentlyReachable && !gasConfidentlyReachable) return WaterlineVerdict::WouldBeLiquid;
-   if (gasConfidentlyReachable && !liquidConfidentlyReachable) return WaterlineVerdict::WouldBeGas;
-   if (gasConfidentlyReachable && liquidConfidentlyReachable) return WaterlineVerdict::StillAmbiguousSurfaceNearby;
-   return WaterlineVerdict::StillAmbiguousNoEvidence;
+   if (state != BognerNeighbourhoodState::Interface) return false;
+   if (hasGas && hasLiquid) return false; // branch D -- genuine surface, nothing to resolve
+   return hasUnknown;
 }
 
 // ScalarField_T (defaulted to void) is the fill-level field type, used only by the Bogner
@@ -387,7 +213,8 @@ class PdfReconstructionManager
         particleFieldID_(particleFieldID), ac_(ac), reconstructor_(reconstructor), formerObstacle_(formerObstacle),
         fluid_(fluid), conserveMomentumWhenRestoring_(conserveMomentumWhenRestoring),
         optimizeForSmallObstacleFraction_(optimizeForSmallObstacleFraction), useBognerStateSelection_(false),
-        liquidFlagUID_(fluid), gasFlagUID_(fluid), interfaceFlagUID_(fluid), fillFieldID_(BlockDataID())
+        liquidFlagUID_(fluid), gasFlagUID_(fluid), interfaceFlagUID_(fluid), movingObstacleFlagUID_(fluid),
+        fillFieldID_(BlockDataID())
    {}
 
    // Bogner state-selection constructor [Bogner, 2009].
@@ -405,11 +232,13 @@ class PdfReconstructionManager
                                    const shared_ptr< Reconstructor_T >& reconstructor,
                                    bool conserveMomentumWhenRestoring, const FlagUID& liquidFlagUID,
                                    const FlagUID& gasFlagUID, const FlagUID& interfaceFlagUID,
+                                   const FlagUID& movingObstacleFlagUID,
                                    const BlockDataID& fillFieldID, const bool useBognerStateSelection = true,
                                    const bool optimizeForSmallObstacleFraction = false,
                                    const bool useHydrostaticReconstruction = false,
                                    const real_t hydrostaticAccelerationZ = real_t(0),
-                                   const real_t absoluteLiquidHeight = real_t(0))
+                                   const real_t absoluteLiquidHeight = real_t(0),
+                                   const bool usePass3Reresolution = false)
       : blockStorage_(blockStorage), pdfFieldID_(pdfFieldID), boundaryHandlingID_(boundaryHandlingID),
         particleFieldID_(particleFieldID), ac_(ac), reconstructor_(reconstructor), formerObstacle_(formerObstacle),
         fluid_(fluid), conserveMomentumWhenRestoring_(conserveMomentumWhenRestoring),
@@ -418,7 +247,8 @@ class PdfReconstructionManager
         useHydrostaticReconstruction_(useHydrostaticReconstruction),
         hydrostaticAccelerationZ_(hydrostaticAccelerationZ), absoluteLiquidHeight_(absoluteLiquidHeight),
         liquidFlagUID_(liquidFlagUID), gasFlagUID_(gasFlagUID), interfaceFlagUID_(interfaceFlagUID),
-        fillFieldID_(fillFieldID)
+        movingObstacleFlagUID_(movingObstacleFlagUID),
+        fillFieldID_(fillFieldID), usePass3Reresolution_(usePass3Reresolution)
    {}
 
    void inline operator()(IBlock* const block);
@@ -429,13 +259,16 @@ class PdfReconstructionManager
    // the true number of physical cells converted, not duplicated across block ghost layers.
    void logAndResetConversionCounts(const uint_t t)
    {
-      std::vector< uint_t > c = { convGas_, convLiquid_, convIntfUnknown_, convIntfUnknownGas_, convIntfSurface_, convIntfUnresolved_ };
+      std::vector< uint_t > c = { convGas_, convLiquid_, convIntfUnknown_, convIntfUnknownGas_, convIntfSurface_, convIntfUnresolved_,
+                                  convPass3ToLiquid_, convPass3ToGas_, convPass3StillInterface_, convPass3UnresolvedIsland_ };
       walberla::mpi::reduceInplace(c, walberla::mpi::SUM);
       WALBERLA_LOG_INFO_ON_ROOT("[FORMERMO-CONVERT t=" << t << "] cells converted since last report: "
          << "gas(A)=" << c[0] << " liquid(B)=" << c[1]
          << " interface-unknown(C)=" << c[2] << " interface-unknown-gas(A')=" << c[3] << " interface-surface(D)=" << c[4]
          << " interface-unresolved(E)=" << c[5]
-         << " | total=" << (c[0] + c[1] + c[2] + c[3] + c[4] + c[5]));
+         << " | total=" << (c[0] + c[1] + c[2] + c[3] + c[4] + c[5])
+         << " | pass3ToLiquid=" << c[6] << " pass3ToGas=" << c[7] << " pass3StillInterface=" << c[8]
+         << " pass3UnresolvedIsland=" << c[9]);
 
       // Phantom-force investigation: how many unknowns, and how clustered are they?
       std::vector< uint_t > u    = { formerMoTotal_, formerMoWithUnknownNbr_, unknownNbrSum_ };
@@ -462,28 +295,7 @@ class PdfReconstructionManager
       convGas_ = convLiquid_ = convIntfUnknown_ = convIntfUnknownGas_ = convIntfSurface_ = convIntfUnresolved_ = uint_t(0);
       formerMoTotal_ = formerMoWithUnknownNbr_ = unknownNbrSum_ = unknownNbrMax_ = uint_t(0);
       unknownNbrHist_.fill(uint_t(0));
-
-      // [WATERLINE-CHECK] aggregate report. waterlineResolvedLiquid_/waterlineResolvedGas_ are cells
-      // ACTUALLY committed to liquid/gas by the phase-connectivity check (see bognerTargetFlag)
-      // instead of falling back to interface; the remaining three counters are cells that still
-      // fell back to interface, broken down by why the check couldn't resolve them.
-      std::vector< uint_t > s = { waterlineResolvedLiquid_,       waterlineResolvedGas_, shadowStillAmbiguousSurface_,
-                                  shadowStillAmbiguousNoEvidence_, shadowExcludedNearEdge_,
-                                  blockGasComponentCountSum_, blockLiquidComponentCountSum_, blockScanCount_ };
-      walberla::mpi::reduceInplace(s, walberla::mpi::SUM);
-      WALBERLA_ROOT_SECTION()
-      {
-         const uint_t blocks   = s[7];
-         const real_t meanGasComp = (blocks > uint_t(0)) ? real_c(s[5]) / real_c(blocks) : real_t(0);
-         const real_t meanLiqComp = (blocks > uint_t(0)) ? real_c(s[6]) / real_c(blocks) : real_t(0);
-         WALBERLA_LOG_INFO_ON_ROOT("[WATERLINE-CHECK-SUMMARY t=" << t << "] resolvedLiquid=" << s[0]
-            << " resolvedGas=" << s[1] << " stillAmbiguousSurface=" << s[2] << " stillAmbiguousNoEvidence=" << s[3]
-            << " excludedNearEdge=" << s[4] << " | mean gas components/block=" << meanGasComp
-            << " mean liquid components/block=" << meanLiqComp << " (over " << blocks << " block scans)");
-      }
-      waterlineResolvedLiquid_ = waterlineResolvedGas_ = shadowStillAmbiguousSurface_ = shadowStillAmbiguousNoEvidence_ =
-         shadowExcludedNearEdge_ = uint_t(0);
-      blockGasComponentCountSum_ = blockLiquidComponentCountSum_ = blockScanCount_ = uint_t(0);
+      convPass3ToLiquid_ = convPass3ToGas_ = convPass3StillInterface_ = convPass3UnresolvedIsland_ = uint_t(0);
    }
 
  private:
@@ -550,7 +362,14 @@ class PdfReconstructionManager
    const FlagUID liquidFlagUID_;
    const FlagUID gasFlagUID_;
    const FlagUID interfaceFlagUID_;
+   const FlagUID movingObstacleFlagUID_; // currently-covered flag, excluded entirely from Bogner classifier evidence
    const BlockDataID fillFieldID_; // fill-level field for φ seeding (Bogner path only)
+
+   // Pass-3 local re-resolution (prm: ModelParameters.usePass3Reresolution): after Pass 2 finishes and
+   // every FormerMO cell has a final state, re-examine cells that fell back to interface purely because
+   // of same-pass ambiguity (see isPass3Candidate) and resolve them directly. Off by default -> identical
+   // to the plain Pass-2-only fallback behaviour.
+   const bool usePass3Reresolution_ = false;
 
    // FormerMO → state conversion counters, one per branch of bognerTargetFlag (see the table in
    // contact_ring_crash_analysis.md §5.3). Accumulated over inner cells across blocks; flushed by
@@ -575,20 +394,15 @@ class PdfReconstructionManager
    uint_t unknownNbrMax_          = uint_t(0); // largest unknown-neighbour count seen on any cell
    std::array< uint_t, 27 > unknownNbrHist_ = {}; // histogram indexed by #unknown neighbours (0..26)
 
-   // [WATERLINE-CHECK] counters (see PhaseReachability/computeRealPhaseComponents above), tallied
-   // for every branch-C/A'/E cell (the ones that used to fall back to interface unconditionally).
-   // waterlineResolvedLiquid_/waterlineResolvedGas_ count cells the phase-connectivity check
-   // resolved and ACTUALLY committed (see bognerTargetFlag) -- a real behaviour change, not a
-   // diagnostic. The remaining three count cells the check could NOT resolve (still fell back to
-   // interface exactly as before), broken down by why.
-   uint_t waterlineResolvedLiquid_            = uint_t(0);
-   uint_t waterlineResolvedGas_               = uint_t(0);
-   uint_t shadowStillAmbiguousSurface_    = uint_t(0);
-   uint_t shadowStillAmbiguousNoEvidence_ = uint_t(0);
-   uint_t shadowExcludedNearEdge_         = uint_t(0);
-   uint_t blockGasComponentCountSum_      = uint_t(0); // Σ totalGasComponents over every block scanned
-   uint_t blockLiquidComponentCountSum_   = uint_t(0); // Σ totalLiquidComponents over every block scanned
-   uint_t blockScanCount_                 = uint_t(0); // # of blocks scanned (→ mean components/block)
+   // Pass-3 conversion counters (inner cells only, matching the Pass-2 convention above). A Pass-3
+   // decision is one of: promote to liquid/gas, or stay interface -- convPass3StillInterface_ counts
+   // every "stay interface" outcome, convPass3UnresolvedIsland_ is the subset of those that are
+   // genuinely !hasGas && !hasLiquid even after full same-pass resolution (see isPass3Candidate's
+   // doc and the [PASS3-UNRESOLVED-ISLAND] log below) -- a strict subset, not an alternative bucket.
+   uint_t convPass3ToLiquid_        = uint_t(0);
+   uint_t convPass3ToGas_           = uint_t(0);
+   uint_t convPass3StillInterface_  = uint_t(0);
+   uint_t convPass3UnresolvedIsland_ = uint_t(0);
 };
 
 template< typename PdfField_T, typename BoundaryHandling_T, typename ParticleAccessor_T, typename Reconstructor_T,
@@ -648,34 +462,19 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
    flag_t bognerLiquid    = flag_t(0);
    flag_t bognerGas       = flag_t(0);
    flag_t bognerInterface = flag_t(0);
+   flag_t movingObstacle  = flag_t(0);
 
    if (useBognerStateSelection_)
    {
       WALBERLA_ASSERT(flagField->flagExists(liquidFlagUID_));
       WALBERLA_ASSERT(flagField->flagExists(gasFlagUID_));
       WALBERLA_ASSERT(flagField->flagExists(interfaceFlagUID_));
+      WALBERLA_ASSERT(flagField->flagExists(movingObstacleFlagUID_));
 
       bognerLiquid    = flagField->getFlag(liquidFlagUID_);
       bognerGas       = flagField->getFlag(gasFlagUID_);
       bognerInterface = flagField->getFlag(interfaceFlagUID_);
-   }
-
-   // [WATERLINE-SHADOW] diagnostic-only phase-connectivity check (PhaseReachability /
-   // computeRealPhaseComponents, above). Computed ONCE per block, over the block's full
-   // ghost-inclusive extent (2 ghost layers already exist for this flag field -- see
-   // AntidunesBoundaryHandling.impl.h -- so this needs no new communication). Consulted below by
-   // bognerTargetFlag purely to log what a wider, connectivity-aware look would have concluded;
-   // never changes what a cell actually commits to.
-   PhaseReachability waterlineShadow;
-   if (useBognerStateSelection_)
-   {
-      const auto ci = flagField->xyzSizeWithGhostLayer();
-      waterlineShadow = computeRealPhaseComponents(
-         [&](cell_idx_t x, cell_idx_t y, cell_idx_t z) { return flagField->get(x, y, z); }, ci.xMin(), ci.xMax(),
-         ci.yMin(), ci.yMax(), ci.zMin(), ci.zMax(), bognerLiquid, bognerGas);
-      blockGasComponentCountSum_ += waterlineShadow.totalGasComponents;
-      blockLiquidComponentCountSum_ += waterlineShadow.totalLiquidComponents;
-      ++blockScanCount_;
+      movingObstacle  = flagField->getFlag(movingObstacleFlagUID_);
    }
 
    // Helper lambda: per-cell Bogner target flag.
@@ -716,6 +515,32 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
    // buffer. Confirmed with AddressSanitizer on a real cluster run (27-floater mixed-shape pillars
    // showcase, job 3893620): SEGV, invalid READ, exactly at the flagField->get() call directly below.
    const auto formerObstacleGhostBounds = flagField->xyzSizeWithGhostLayer();
+
+   // Bounds-checked D3Q27 neighbour read, shared by bognerTargetFlag (Pass 2) and the Pass-3 decide
+   // loop below -- factored out so there is only one copy of the logic whose original hand-inlined
+   // version caused the ASAN-fixed OOB read (commit d8c0a265). A neighbour falling outside the
+   // field's allocated (ghost-inclusive) range is reported as unresolved ("formerObstacle") -- the
+   // same conservative fallback used for a genuine same-pass-unresolved neighbour -- rather than
+   // reading invalid memory.
+   auto getBoundedNeighbourFlag = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz, int dx, int dy,
+                                      int dz) -> flag_t {
+      const cell_idx_t nx = cx + cell_idx_c(dx);
+      const cell_idx_t ny = cy + cell_idx_c(dy);
+      const cell_idx_t nz = cz + cell_idx_c(dz);
+      if (nx < formerObstacleGhostBounds.xMin() || nx > formerObstacleGhostBounds.xMax() ||
+          ny < formerObstacleGhostBounds.yMin() || ny > formerObstacleGhostBounds.yMax() ||
+          nz < formerObstacleGhostBounds.zMin() || nz > formerObstacleGhostBounds.zMax())
+         return formerObstacle;
+      return flagField->get(nx, ny, nz);
+   };
+
+   // Pass-3 candidates collected during Pass 2 below (see isPass3Candidate) -- a plain local vector
+   // is sufficient since Pass 2 and Pass 3 run back-to-back within this single operator() call, no
+   // persistent BlockDataID/flag bit needed. Always collected (cheap push_backs); only the Pass-3
+   // processing loop further down is gated by usePass3Reresolution_.
+   struct Pass3Candidate { Cell cell; bool inner; };
+   std::vector< Pass3Candidate > pass3Candidates;
+
    auto bognerTargetFlag = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) -> flag_t {
       // Scan + decision both live in classifyFormerObstacleCell()/classifyFormerObstacleNeighbourhood()
       // (top of this file) as pure, directly unit-tested functions
@@ -725,21 +550,8 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       bool hasLiquid, hasGas, hasUnknown;
       uint_t unknownNbr;
       const BognerNeighbourhoodState state = classifyFormerObstacleCell(
-         [&](int dx, int dy, int dz) -> flag_t {
-            const cell_idx_t nx = cx + cell_idx_c(dx);
-            const cell_idx_t ny = cy + cell_idx_c(dy);
-            const cell_idx_t nz = cz + cell_idx_c(dz);
-            // Neighbour falls outside the field's allocated (ghost-inclusive) range: we cannot read
-            // it safely. Report it as an unresolved ("formerObstacle") neighbour -- the SAME
-            // conservative fallback this classifier already uses for a same-pass-unresolved neighbour
-            // (falls back to interface, the always-legal state) -- rather than reading invalid memory.
-            if (nx < formerObstacleGhostBounds.xMin() || nx > formerObstacleGhostBounds.xMax() ||
-                ny < formerObstacleGhostBounds.yMin() || ny > formerObstacleGhostBounds.yMax() ||
-                nz < formerObstacleGhostBounds.zMin() || nz > formerObstacleGhostBounds.zMax())
-               return formerObstacle;
-            return flagField->get(nx, ny, nz);
-         },
-         bognerLiquid, bognerGas, formerObstacle, hasGas, hasLiquid, hasUnknown, unknownNbr);
+         [&](int dx, int dy, int dz) -> flag_t { return getBoundedNeighbourFlag(cx, cy, cz, dx, dy, dz); },
+         bognerLiquid, bognerGas, formerObstacle, movingObstacle, hasGas, hasLiquid, hasUnknown, unknownNbr);
 
       // inner-cell guard for the conversion counters: a FormerMO cell in a ghost layer is a
       // duplicate of another rank's inner cell, so only inner cells are tallied.
@@ -775,130 +587,55 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       {
          if (hasGas && hasLiquid)
          {
-            // Genuine mixed/free-surface neighbourhood -- always interface, independent of the
-            // waterline-reachability check below (there is nothing to resolve; this is already a
-            // correct, real surface cell).
+            // Genuine mixed/free-surface neighbourhood -- always interface, nothing to resolve.
             if (inner) ++convIntfSurface_;
             return bognerInterface;
          }
 
-         // [WATERLINE-CHECK] the remaining three sub-cases (would-be-liquid/gas blocked by an
-         // unresolved neighbour, and branch E with neither real phase reachable within 1 cell) all
-         // go through the phase-connectivity reachability check (PhaseReachability /
-         // computeRealPhaseComponents, above) before falling back to interface. If it can prove --
-         // from REAL bognerGas/bognerLiquid flags only, via genuine connectivity, never a guess --
-         // that the dangerous opposite phase is not reachable at all, it commits to liquid/gas
-         // directly instead of the conservative interface fallback. Validated as a log-only shadow
-         // check first (see git history immediately before this commit) before being wired in here.
-         const bool gasReach = waterlineShadow.gasConfidentlyReachable(cx, cy, cz);
-         const bool gasIncon = waterlineShadow.gasInconclusive(cx, cy, cz);
-         const bool liqReach = waterlineShadow.liquidConfidentlyReachable(cx, cy, cz);
-         const bool liqIncon = waterlineShadow.liquidInconclusive(cx, cy, cz);
-         const WaterlineVerdict verdict = classifyViaWaterlineReachability(gasReach, gasIncon, liqReach, liqIncon);
-
-         if (verdict == WaterlineVerdict::WouldBeLiquid || verdict == WaterlineVerdict::WouldBeGas)
-         {
-            const bool toLiquid = (verdict == WaterlineVerdict::WouldBeLiquid);
-            if (inner)
-            {
-               if (toLiquid) { ++waterlineResolvedLiquid_; }
-               else { ++waterlineResolvedGas_; }
-            }
-            static uint_t waterlineResolvedLogCount = uint_t(0);
-            ++waterlineResolvedLogCount;
-            if (waterlineResolvedLogCount <= uint_t(20) || (waterlineResolvedLogCount % uint_t(5000) == uint_t(0)))
-            {
-               const auto&  aabb = block->getAABB();
-               const real_t cdx  = aabb.xSize() / real_c(flagField->xSize());
-               WALBERLA_LOG_WARNING("[WATERLINE-RESOLVED] (#" << waterlineResolvedLogCount << ") cell ("
-                  << cx << ", " << cy << ", " << cz << ") world≈("
-                  << (aabb.xMin() + (real_c(cx) + real_t(0.5)) * cdx) << ","
-                  << (aabb.yMin() + (real_c(cy) + real_t(0.5)) * cdx) << ","
-                  << (aabb.zMin() + (real_c(cz) + real_t(0.5)) * cdx) << ") had "
-                  << (hasUnknown ? unknownNbr : uint_t(0)) << " unclassified FormerMO neighbour(s) and/or no real "
-                     "phase within 1 cell, but the phase-connectivity check confirms no real "
-                  << (toLiquid ? "gas" : "liquid") << " is reachable -- resolving to "
-                  << (toLiquid ? "liquid" : "gas") << " instead of falling back to interface.");
-            }
-            return toLiquid ? bognerLiquid : bognerGas;
-         }
-
-         // Not resolved by the waterline check -- fall back to interface exactly as before, with
-         // the existing branch-specific diagnostics.
+         // The remaining sub-cases (would-be-liquid/gas blocked by an unresolved same-pass
+         // neighbour, and branch E with neither real phase within 1 cell) fall back to interface
+         // here, exactly as Pass 2 always has -- Pass 3 (usePass3Reresolution_, below, after every
+         // FormerMO cell in the block has a final state) is what actually resolves most of these,
+         // not this fallback itself.
          if (hasLiquid && !hasGas && hasUnknown)
          {
-            // Would qualify as bulk liquid, but an unclassified FormerMO neighbour could still
-            // become gas this pass — downgrade to the safe interface buffer instead of liquid.
-            WALBERLA_LOG_WARNING("Bogner state selection: cell ("
-                                 << cx << ", " << cy << ", " << cz
-                                 << ") has " << unknownNbr << " unclassified FormerMO neighbour(s); falling back to "
-                                    "interface instead of liquid to preserve the liquid/gas separation invariant.");
             if (inner) ++convIntfUnknown_;
+            static uint_t provisionalLogCount = uint_t(0);
+            ++provisionalLogCount;
+            if (provisionalLogCount <= uint_t(20) || (provisionalLogCount % uint_t(5000) == uint_t(0)))
+            {
+               WALBERLA_LOG_INFO("Bogner state selection: cell (" << cx << ", " << cy << ", " << cz << ") has "
+                  << unknownNbr << " unclassified FormerMO neighbour(s); "
+                  << (usePass3Reresolution_
+                         ? "provisionally interface pending Pass-3 re-resolution."
+                         : "falling back to interface instead of liquid to preserve the liquid/gas separation "
+                           "invariant."));
+            }
          }
          else if (hasGas && !hasLiquid && hasUnknown)
          {
-            // Symmetric case: would qualify as bulk gas, but an unclassified FormerMO neighbour could
-            // still become liquid this pass — downgrade to the safe interface buffer instead of gas.
-            WALBERLA_LOG_WARNING("Bogner state selection: cell ("
-                                 << cx << ", " << cy << ", " << cz
-                                 << ") has " << unknownNbr << " unclassified FormerMO neighbour(s); falling back to "
-                                    "interface instead of gas to preserve the liquid/gas separation invariant.");
+            // Symmetric case.
             if (inner) ++convIntfUnknownGas_;
+            static uint_t provisionalGasLogCount = uint_t(0);
+            ++provisionalGasLogCount;
+            if (provisionalGasLogCount <= uint_t(20) || (provisionalGasLogCount % uint_t(5000) == uint_t(0)))
+            {
+               WALBERLA_LOG_INFO("Bogner state selection: cell (" << cx << ", " << cy << ", " << cz << ") has "
+                  << unknownNbr << " unclassified FormerMO neighbour(s); "
+                  << (usePass3Reresolution_
+                         ? "provisionally interface pending Pass-3 re-resolution."
+                         : "falling back to interface instead of gas to preserve the liquid/gas separation "
+                           "invariant."));
+            }
          }
          else
          {
             // Neither a real gas nor a real liquid neighbour within one cell (branch E).
             if (inner) ++convIntfUnresolved_;
-
-            // DIAGNOSTIC (never changes behaviour, throttled like the FormerMO-neighbour warning
-            // above): look a few cells further up than the 1-cell stencil this classifier is
-            // limited to. If there is real LIQUID directly overhead with no GAS in between, this
-            // cell is sitting under a genuine water column -- i.e. very likely actually fully
-            // submerged -- and only landed in this ambiguous fallback because its immediate
-            // neighbourhood happens to be entirely interface/unresolved cells. That is exactly the
-            // interface-contagion pattern the hasGas/hasLiquid fix above targets (see the class
-            // comment): confirms at a glance whether THIS instance of the fallback is one of those
-            // "actually submerged, just locally under-resolved" cells, e.g. deep inside a densely
-            // packed, actively-jittering particle bed (cylinder_sedimentation_showcase_gas.prm).
-            // (The waterline check above is the more thorough, connectivity-aware version of this
-            // same idea; this narrower column probe still runs for whatever it doesn't resolve.)
-            constexpr cell_idx_t columnCheckDepth = cell_idx_t(8);
-            const cell_idx_t     gl = cell_idx_c(flagField->nrOfGhostLayers());
-            bool columnIsLiquid = false, columnHitsGas = false;
-            for (cell_idx_t k = 1; k <= columnCheckDepth; ++k)
-            {
-               const cell_idx_t nz = cz + k;
-               if (nz >= zs + gl) break;
-               const flag_t nf = flagField->get(cx, cy, nz);
-               if (isFlagSet(nf, bognerGas)) { columnHitsGas = true; break; }
-               if (isFlagSet(nf, bognerLiquid)) { columnIsLiquid = true; break; }
-            }
-            if (columnIsLiquid && !columnHitsGas)
-            {
-               static uint_t fallbackSubmergedLogCount = uint_t(0);
-               ++fallbackSubmergedLogCount;
-               if (fallbackSubmergedLogCount <= uint_t(20) || (fallbackSubmergedLogCount % uint_t(5000) == uint_t(0)))
-               {
-                  WALBERLA_LOG_WARNING("[FORMERMO-FALLBACK-SUBMERGED] (#" << fallbackSubmergedLogCount
-                     << ") cell (" << cx << ", " << cy << ", " << cz << ") reconstructed as INTERFACE via the "
-                        "ambiguous fallback (no real gas/liquid within 1 cell), but a real LIQUID column was "
-                        "found directly overhead within " << columnCheckDepth << " cells with no GAS in "
-                        "between -- this cell is very likely genuinely fully submerged, not near any real "
-                        "free surface; only its immediate neighbourhood is itself interface/unresolved.");
-               }
-            }
          }
 
-         if (inner)
-         {
-            switch (verdict)
-            {
-            case WaterlineVerdict::StillAmbiguousSurfaceNearby: ++shadowStillAmbiguousSurface_; break;
-            case WaterlineVerdict::StillAmbiguousNoEvidence: ++shadowStillAmbiguousNoEvidence_; break;
-            case WaterlineVerdict::ExcludedNearUnresolvedEdge: ++shadowExcludedNearEdge_; break;
-            default: break; // WouldBeLiquid/WouldBeGas already returned above
-            }
-         }
+         if (isPass3Candidate(state, hasGas, hasLiquid, hasUnknown))
+            pass3Candidates.push_back({ Cell(cx, cy, cz), inner });
 
          return bognerInterface;
       }
@@ -1048,6 +785,88 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             particleField->get(x, y, z) = ac_->getInvalidUid();
          })
    }
+
+   // ---- Pass 3: local re-resolution (usePass3Reresolution_ only) ------------------------------
+   //
+   // By the time Pass 2 above has finished, every FormerMO cell in this block has a final,
+   // definite state -- there is no more "unknown" anywhere. pass3Candidates (collected during
+   // bognerTargetFlag above) holds every cell that fell back to interface purely because of
+   // same-pass ambiguity (isPass3Candidate). Re-running the same classifier on them now, with
+   // hasUnknown guaranteed false (except the literal outermost ghost layer, which degrades safely
+   // to "stays interface" via getBoundedNeighbourFlag), resolves most of them directly.
+   //
+   // MUST be decide-then-apply (two sub-loops), not decide-and-apply-immediately: two mutual-
+   // neighbour candidates must both be classified against the SAME frozen post-Pass-2 snapshot,
+   // otherwise the one processed second would see the first's fresh promotion and could cascade
+   // into an incorrect classification -- the exact same class of same-pass-order bug Pass 3 exists
+   // to fix in Pass 2, reappearing one level in if this isn't respected.
+   if (usePass3Reresolution_ && !pass3Candidates.empty())
+   {
+      struct Pass3Decision { Cell cell; bool inner; BognerNeighbourhoodState state; bool hasGas; bool hasLiquid; };
+      std::vector< Pass3Decision > pass3Decisions;
+      pass3Decisions.reserve(pass3Candidates.size());
+
+      // Sub-loop 1: decide (read-only against the frozen post-Pass-2 snapshot).
+      for (const auto& candidate : pass3Candidates)
+      {
+         const cell_idx_t cx = candidate.cell.x(), cy = candidate.cell.y(), cz = candidate.cell.z();
+         bool hasG, hasL, hasU;
+         uint_t nbr;
+         const BognerNeighbourhoodState state = classifyFormerObstacleCell(
+            [&](int dx, int dy, int dz) -> flag_t { return getBoundedNeighbourFlag(cx, cy, cz, dx, dy, dz); },
+            bognerLiquid, bognerGas, formerObstacle, movingObstacle, hasG, hasL, hasU, nbr);
+         pass3Decisions.push_back({ candidate.cell, candidate.inner, state, hasG, hasL });
+
+         if (state == BognerNeighbourhoodState::Interface)
+         {
+            if (candidate.inner) ++convPass3StillInterface_;
+            if (!hasG && !hasL)
+            {
+               // Genuinely unresolvable: even after every same-pass FormerMO cell in the block has
+               // a final state, this cell still has no real liquid and no real gas within 1 cell in
+               // any direction -- unlike an ordinary Pass-2 branch-E cell (which might simply not
+               // have had time to resolve yet), this is an anomalous signal worth surfacing
+               // distinctly rather than folding into the generic still-interface count. It must stay
+               // interface either way -- there is no safe basis to pick liquid or gas here.
+               if (candidate.inner) ++convPass3UnresolvedIsland_;
+               static uint_t unresolvedIslandLogCount = uint_t(0);
+               ++unresolvedIslandLogCount;
+               if (unresolvedIslandLogCount <= uint_t(20) || (unresolvedIslandLogCount % uint_t(5000) == uint_t(0)))
+               {
+                  const auto&  aabb = block->getAABB();
+                  const real_t cdx  = aabb.xSize() / real_c(flagField->xSize());
+                  WALBERLA_LOG_WARNING("[PASS3-UNRESOLVED-ISLAND] (#" << unresolvedIslandLogCount << ") cell ("
+                     << cx << ", " << cy << ", " << cz << ") world≈("
+                     << (aabb.xMin() + (real_c(cx) + real_t(0.5)) * cdx) << ","
+                     << (aabb.yMin() + (real_c(cy) + real_t(0.5)) * cdx) << ","
+                     << (aabb.zMin() + (real_c(cz) + real_t(0.5)) * cdx) << ") still has no real liquid and no "
+                        "real gas within 1 cell even after every same-pass FormerMO neighbour resolved -- "
+                        "genuinely isolated from both phases, staying interface (no safe basis to pick "
+                        "either side).");
+               }
+            }
+         }
+      }
+
+      // Sub-loop 2: apply the buffered decisions.
+      for (const auto& decision : pass3Decisions)
+      {
+         if (decision.state != BognerNeighbourhoodState::Gas && decision.state != BognerNeighbourhoodState::Liquid)
+            continue; // stays interface -- already correct from Pass 2, already tallied above
+
+         const flag_t newFlag = (decision.state == BognerNeighbourhoodState::Gas) ? bognerGas : bognerLiquid;
+         boundaryHandling->forceDomain(newFlag, decision.cell.x(), decision.cell.y(), decision.cell.z());
+         if constexpr (!std::is_void_v< ScalarField_T >)
+            if (fillField != nullptr)
+               seedConvertedCellFill(fillField, flagField, decision.cell.x(), decision.cell.y(), decision.cell.z(),
+                                     newFlag, bognerGas, bognerLiquid, bognerInterface);
+         if (decision.inner)
+         {
+            if (decision.state == BognerNeighbourhoodState::Gas) { ++convPass3ToGas_; }
+            else { ++convPass3ToLiquid_; }
+         }
+      }
+   }
 }
 
 // ---- Free factory functions ------------------------------------------------
@@ -1096,11 +915,13 @@ shared_ptr< PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAc
                                       const FlagUID& formerObstacle, const FlagUID& fluid,
                                       bool conserveMomentumWhenRestoring, const FlagUID& liquidFlagUID,
                                       const FlagUID& gasFlagUID, const FlagUID& interfaceFlagUID,
+                                      const FlagUID& movingObstacleFlagUID,
                                       const BlockDataID& fillFieldID, const bool useBognerStateSelection = true,
                                       const bool optimizeForSmallObstacleFraction = false,
                                       const bool useHydrostaticReconstruction = false,
                                       const real_t hydrostaticAccelerationZ = real_t(0),
-                                      const real_t absoluteLiquidHeight = real_t(0))
+                                      const real_t absoluteLiquidHeight = real_t(0),
+                                      const bool usePass3Reresolution = false)
 {
    using RM_T = PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_T,
                                           EquilibriumReconstructor< BoundaryHandling_T >, ScalarField_T >;
@@ -1108,8 +929,10 @@ shared_ptr< PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAc
                                    fluid,
                                    makeEquilibriumReconstructor< BoundaryHandling_T >(blockStorage, boundaryHandlingID),
                                    conserveMomentumWhenRestoring, liquidFlagUID, gasFlagUID, interfaceFlagUID,
+                                   movingObstacleFlagUID,
                                    fillFieldID, useBognerStateSelection, optimizeForSmallObstacleFraction,
-                                   useHydrostaticReconstruction, hydrostaticAccelerationZ, absoluteLiquidHeight));
+                                   useHydrostaticReconstruction, hydrostaticAccelerationZ, absoluteLiquidHeight,
+                                   usePass3Reresolution));
 }
 
 } // namespace lbm_mesapd_coupling

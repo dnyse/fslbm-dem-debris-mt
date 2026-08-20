@@ -14,3 +14,14 @@ endif ()
 add_executable ( BedGeneration BedGeneration.cpp )
 target_link_libraries ( BedGeneration walberla::blockforest walberla::core walberla::domain_decomposition
         walberla::mesa_pd walberla::vtk )
+
+if ( WALBERLA_BUILD_WITH_CODEGEN )
+   # Fluid-free DEM validation dry-run (DEMValidationScenarios.h, AnalyticalSolutions.h). Reuses
+   # SolidCylinderContactDetection/ComputeContacts from ParticleKernels.h verbatim, which transitively
+   # pulls in the generated LBM lattice model -- same reason ContactDetectionTest.cpp and
+   # PaperAnalyticalContactTest.cpp require this flag despite not touching LBM directly.
+   add_executable ( DEMValidation DEMValidation.cpp )
+   target_link_libraries ( DEMValidation walberla::blockforest walberla::boundary walberla::core
+           walberla::domain_decomposition walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
+           walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk AntidunesLatticeModelGeneration )
+endif ()

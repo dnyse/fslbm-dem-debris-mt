@@ -2,6 +2,92 @@
 
 ---
 
+## Follow-up on DEMValidation: conservation checks + a real Kodam Part II Test 1 replica (2026-08-12)
+
+Two additions to the dry-run below, prompted by the question "does this actually validate against the
+papers' data, and does conservation hold?":
+
+**Conservation checks added to every scenario** (`logConservation`/`logMomentumConservation`/
+`totalMechanicalEnergy` in `DEMValidationScenarios.h`): kinetic energy must never INCREASE across any
+dissipative collision (a model-agnostic hard bound, independent of restitution/friction calibration);
+linear momentum must be conserved to numerical precision for the isolated two-body pair tests; total
+mechanical energy (KE+PE) must not trend upward between sampling checkpoints in the multi-body gravity
+tests. All pass cleanly across every scenario (momentum to ~1e-6, energy-non-increase with wide margin).
+
+**Energy budget (not just non-increase) added** (`logEnergyBudget`, `kineticEnergyOf`): the one-sided
+"never increases" bound is necessarily weak for the deliberately-inelastic scenarios (restitution <1 by
+design, matching real materials) -- it would pass even if the simulation dissipated a wildly wrong
+AMOUNT of energy. Added a companion check comparing the simulated post-impact KE against the EXACT
+value the analytical model (or, for pairRestitution at its default frictionless setting, a closed-form
+reduced-mass formula) predicts, not just its sign. Wall-impact tests: 1-14% relative error (same order
+as the existing velocity-comparison tolerance, since both trace back to the same friction-model gap).
+
+**New `dem_validation_wall_cylinder_kodam_test1.prm`**: a REPLICA of Kodam et al. (2010) Part II's own
+Test 1 -- their exact geometry (diameter 8.0mm/length 5.3mm, aspect ratio 0.6625), their exact
+restitution (0.85, calibrated by them from Plexiglas sphere drops), their exact protocol (frictionless,
+gravity-free, purely-normal impact velocity, zero initial spin, 1 m/s). This is a genuinely stronger
+validation than the earlier cylinder test: at tilt=0deg/90deg the simulated rebound ratio is checked
+DIRECTLY against the paper's own stated number (0.85), not just against our own re-derived formula --
+PASSES at <0.6% error at both points. Intermediate tilt angles show larger *relative* errors at the
+tolerance used (0.02, tight since friction is off), but the *absolute* deviations are small (~0.02-0.03
+on a ~1 m/s scale) and concentrated near natural zero-crossings of the rebound velocity (a relative-error
+metric is inherently unstable near zero regardless of physical correctness) -- not evidence of a real
+discrepancy, but flagged honestly rather than tuned away.
+
+---
+
+## NEW: fluid-free DEM validation dry-run, `DEMValidation` (2026-08-12)
+
+**New standalone executable** (`DEMValidation.cpp`, `AnalyticalSolutions.h`, `DEMValidationScenarios.h`,
+7 `prms/dem_validation_*.prm` configs, new CMake target) that runs the PRODUCTION DEM code
+(`SolidCylinderContactDetection`, `ComputeContacts`, `VelocityVerletPre/PostForceUpdate` from
+`ParticleKernels.h`, unmodified) through a minimal fluid-free sub-cycle loop and checks the resulting
+DYNAMICS against closed-form analytical solutions and literature values. Existing tests
+(`ContactDetectionTest.cpp`, `PaperAnalyticalContactTest.cpp`, `validation/*.py`) only ever checked
+static contact geometry (given two placed bodies, is the reported penetration/normal/point correct?) —
+nothing previously ran a real time-stepped collision and checked the result.
+
+**Physics**: one general rigid-body single-point-impulse solver (`AnalyticalSolutions.h::rigidBodyImpact`,
+the standard Coulomb-friction two-branch impulse-momentum method) applied to every shape rather than
+per-shape formulas — specialises to the classic oblique sphere-wall impact, to Kodam et al. (2010) Part
+II's cylinder-wall test (contact point taken directly from the not-yet-simulation-wired
+`PaperAnalyticalContacts.h` closed forms), and — via an internal self-check
+(`selfCheckHousnerRelativeError`) — reproduces Housner (1963)'s rocking-block restitution exactly in the
+zero-tangential-velocity limit.
+
+**Results**: 6/7 scenarios PASS —
+- `wallImpactSphere`/`wallImpactCylinder`/`wallImpactBox`: single-body wall-bounce vs. the analytical
+  solver across a tilt/angle sweep (tolerance 0.25-0.3, calibrated against a real, documented, expected
+  gap between mesa_pd's Cundall-Strack tangential-spring friction model and the idealised instantaneous-
+  Coulomb-impulse assumption — see `AnalyticalSolutions.h`'s calibration note).
+- `pairRestitution`/`energyConservation`: central head-on collisions for all 6 shape-pair combinations
+  (incl. Box×Box and Cylinder×Cylinder, the two pairs with no analytic contact overload — GJK/EPA only).
+  Restitution matches to <1%; elastic (e=1) energy conservation matches to ~3e-5 — Feng (2023)'s "ECC"
+  criterion, satisfied cleanly across every pair. Box-box/cylinder-cylinder additionally get a LIVE
+  per-step cross-check of `PaperAnalyticalContacts.h`'s closed forms against the production GJK/EPA
+  geometry actually driving the dynamics (`paperAnalyticalMaxOverlapDelta`, measured 0 in this run).
+- `packing`: mixed sphere+box+cylinder bed, gravity-settled into a bounded pit; bulk solid fraction 0.415,
+  between the sphere (~0.64) and cube (~0.78) RCP literature bounds for the mix.
+- `angleOfRepose`: **FAILS** (~1deg, i.e. flat) — root-caused, not just tolerance-missed: mesa_pd's
+  `LinearSpringDashpot` implements pure Coulomb sliding friction with **no rolling-resistance torque**, so
+  particles roll/slide out to a flat layer instead of mounding up, regardless of shape (sphere vs.
+  elongated rod) or containment (open floor vs. bounded pit) — all tried, all failed the same way. A real,
+  literature-documented DEM contact-model gap this validation surfaced, not a test bug; see
+  `dem_validation_angle_of_repose.prm`'s header and `DEMValidationScenarios.h`'s calibration notes for
+  the full diagnosis trail.
+
+**Bug found in shared mesa_pd code** (worked around locally, not patched at the source):
+`mesa_pd::data::LinkedCells`'s constructor leaves `infiniteParticles_` at its default-member-initializer
+value (0, via `std::atomic<int>`'s C++20 value-init) instead of the `-1` sentinel its own traversal logic
+expects — only `.clear()` sets it correctly. `BedGeneration.cpp` already calls `.clear()` every step for
+an unrelated reason (reusing one long-lived `LinkedCells` object) and so never hits this; a *freshly
+constructed* `LinkedCells` (this app's pattern) needs the same call for a different reason. Manifests as
+a genuine self-pairing crash (`AnalyticalContactDetection`'s "colliding with itself" assertion) when
+index 0 happens to be the sole finite body in the scene — exactly the single-body wall-impact tests here.
+Worth a proper fix in `LinkedCells`'s constructor at some point.
+
+---
+
 ## Mixed single-pillar test scaled up: floaters ×2, pillar ×1.5 (2026-07-16)
 
 **`prms/mixed_floaters_single_pillar_gas.prm` resized** — sphere radius 5→10, box `halfExtents`

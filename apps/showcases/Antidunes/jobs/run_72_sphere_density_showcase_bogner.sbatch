@@ -11,7 +11,7 @@
 #SBATCH --mail-user=dennys.huber@fau.de
 
 # build + run: correctness check for the two new ModelParameters options
-# (useBognerThreePhaseMEM, useBognerBuoyancy -- see prms/sphere_density_showcase_bogner_gas.prm
+# (useBognerThreePhaseMEM, useMemOnlyBuoyancy -- see prms/sphere_density_showcase_bogner_gas.prm
 # for the full rationale). Same geometry as the baseline sphere_density_showcase_gas.prm
 # (three spheres, r=12, densityRatio 0.25/0.5/0.75, pinned in X/Y, still water) but with
 # SimpleBB's rhoHydStat subtraction disabled and the separate analytic vSub*g buoyancy

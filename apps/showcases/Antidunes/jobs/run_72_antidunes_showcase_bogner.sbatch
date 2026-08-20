@@ -12,7 +12,7 @@
 
 # build + run: the REAL E1 antidune showcase (100000 timesteps, real settled
 # particle bed via spheres_out.dat, actual Re=3100/Fr=1.31/We=15.6188), but
-# with ModelParameters.useBognerThreePhaseMEM/useBognerBuoyancy both set true
+# with ModelParameters.useBognerThreePhaseMEM/useMemOnlyBuoyancy both set true
 # -- i.e. Bogner & Rude (2013)'s original three-phase MEM buoyancy force,
 # instead of Antidunes' extended split (static/dynamic reference height
 # subtraction + separate analytic vSub*g channel). Gravity/viscosity are the

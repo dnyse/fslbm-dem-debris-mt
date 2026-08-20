@@ -108,47 +108,6 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
    // particleFieldVTKOutput->setSamplingResolution(simParams->vtk.samplingResolution);
    // timeloop->addFuncBeforeTimeStep(vtk::writeFiles(particleFieldVTKOutput), "VTK: particle field data");
 
-   // Per-floater buoyancy plane-fit output selectors (shared by the sphere/box/cylinder floater VTK
-   // blocks below). Read simObjs->floaterPlaneOrigin/floaterPlaneNormal — populated every step by
-   // ParticleKernels' computeSubmergedVolumes()/computeSubmergedVolumesBox() (see SimulationObjects.h).
-   // A floater with no clean plane fit this step (fully submerged/emerged) reads back (0,0,0) for both —
-   // a zero-length "planeNormal" is the signal there's nothing to draw for that floater this frame.
-   //
-   // ParaView recipe (see changes.md): on the point data (before or after Glyph — a Glyph copies point
-   // data onto every vertex of the glyph, unchanged), add a Calculator computing
-   //   signedDist = planeNormal_X*(coordsX-planeOrigin_X) + planeNormal_Y*(coordsY-planeOrigin_Y)
-   //              + planeNormal_Z*(coordsZ-planeOrigin_Z)
-   // on the GLYPHED sphere/box/cylinder (so "coords" varies per vertex across the solid's surface) —
-   // this recomputes the true fitted plane freshly every frame, no manual per-timestep numbers needed.
-   // Then Filters > Clip, Clip Type = Scalar, Scalars = signedDist, Value = 0: splits the solid into
-   // submerged (signedDist < 0) vs emerged (signedDist > 0) pieces automatically, colour each separately.
-   // For the plane itself as a visible patch: Calculator with "Coordinate Results" checked, Result =
-   // planeOrigin (repositions the point to the fitted plane's actual location, not the floater centre),
-   // then Glyph that point (Glyph Type = Plane or 2D Disc, Orientation Array = planeNormal).
-   struct SelectFloaterPlaneOrigin
-   {
-      using return_type = mesa_pd::Vec3;
-      const std::unordered_map< walberla::id_t, Vector3< real_t > >* map_;
-      explicit SelectFloaterPlaneOrigin(const std::unordered_map< walberla::id_t, Vector3< real_t > >* m) : map_(m) {}
-      return_type operator()(const mesa_pd::data::Particle& p) const
-      {
-         if (!map_) return mesa_pd::Vec3(real_t(0));
-         auto it = map_->find(p.getUid());
-         return (it != map_->end()) ? it->second : mesa_pd::Vec3(real_t(0));
-      }
-   };
-   struct SelectFloaterPlaneNormal
-   {
-      using return_type = mesa_pd::Vec3;
-      const std::unordered_map< walberla::id_t, Vector3< real_t > >* map_;
-      explicit SelectFloaterPlaneNormal(const std::unordered_map< walberla::id_t, Vector3< real_t > >* m) : map_(m) {}
-      return_type operator()(const mesa_pd::data::Particle& p) const
-      {
-         if (!map_) return mesa_pd::Vec3(real_t(0));
-         auto it = map_->find(p.getUid());
-         return (it != map_->end()) ? it->second : mesa_pd::Vec3(real_t(0));
-      }
-   };
    // densityRatio (ρ_solid/ρ_fluid) for coloring in ParaView. Not stored directly on the particle —
    // recovered exactly from mass/volume, since updateMassAndInertia(density) at creation set
    // mass = getVolume() * density (SimulationParams' densityRatio IS that density, as ρ_fluid = 1 in
@@ -186,13 +145,6 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       floaterPointData->addOutput< mesa_pd::data::SelectParticleInteractionRadius >("radius");
       floaterPointData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
       floaterPointData->addOutput< SelectFloaterDensityRatio >("densityRatio");
-      if (simParams->model.writeFloaterPlaneVTK)
-      {
-         floaterPointData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(
-                                         SelectFloaterPlaneOrigin(simObjs->floaterPlaneOrigin.get())));
-         floaterPointData->addOutput("planeNormal", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneNormal > >(
-                                         SelectFloaterPlaneNormal(simObjs->floaterPlaneNormal.get())));
-      }
       floaterPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
          return pIt->getType() == uint_t(1) && !isSet(pIt->getFlags(), GHOST);
@@ -249,13 +201,6 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       boxFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
       boxFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
       boxFloaterData->addOutput< SelectFloaterDensityRatio >("densityRatio");
-      if (simParams->model.writeFloaterPlaneVTK)
-      {
-         boxFloaterData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(
-                                       SelectFloaterPlaneOrigin(simObjs->floaterPlaneOrigin.get())));
-         boxFloaterData->addOutput("planeNormal", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneNormal > >(
-                                       SelectFloaterPlaneNormal(simObjs->floaterPlaneNormal.get())));
-      }
       boxFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
          return pIt->getType() == uint_t(3) && !isSet(pIt->getFlags(), GHOST);
@@ -320,13 +265,6 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       cylinderFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
       cylinderFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
       cylinderFloaterData->addOutput< SelectFloaterDensityRatio >("densityRatio");
-      if (simParams->model.writeFloaterPlaneVTK)
-      {
-         cylinderFloaterData->addOutput("planeOrigin", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneOrigin > >(
-                                            SelectFloaterPlaneOrigin(simObjs->floaterPlaneOrigin.get())));
-         cylinderFloaterData->addOutput("planeNormal", std::make_shared< mesa_pd::vtk::OutputSelector< SelectFloaterPlaneNormal > >(
-                                            SelectFloaterPlaneNormal(simObjs->floaterPlaneNormal.get())));
-      }
       cylinderFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
          return pIt->getType() == uint_t(4) && !isSet(pIt->getFlags(), GHOST);
@@ -765,12 +703,14 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
          walberla::free_surface::flagIDs::liquidFlagID,
          walberla::free_surface::flagIDs::gasFlagID,
          walberla::free_surface::flagIDs::interfaceFlagID,
+         AntidunesBoundaryHandling_T::movingObstacleFlagID,
          simObjs->fillFieldID,
          simParams->model.useBognerReconstruction,
          /* optimizeForSmallObstacleFraction */ false,
          simParams->model.useHydrostaticReconstruction,
          (*simObjs->acceleration)[2],                    // a_z (= -gravity), same value HydrostaticDensityFtor uses
-         simParams->staticReferenceHeight());            // flat static reference H (same as SimpleBB)
+         simParams->staticReferenceHeight(),             // flat static reference H (same as SimpleBB)
+         simParams->model.usePass3Reresolution);
 
    const uint_t convLogFreq = simParams->evaluation.evaluationFrequency;
 

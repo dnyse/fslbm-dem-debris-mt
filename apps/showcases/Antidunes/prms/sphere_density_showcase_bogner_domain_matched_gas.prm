@@ -4,7 +4,7 @@
 // MATCHED TO BOGNER'S OWN VALIDATION (thesis §5.3.3 "Equilibration of floating
 // cubes", reproducing Bogner & Rude 2013's density test). Same buoyancy model
 // as sphere_density_showcase_bogner_gas.prm (useBognerThreePhaseMEM +
-// useBognerBuoyancy, both true), but this run additionally overrides gravity
+// useMemOnlyBuoyancy, both true), but this run additionally overrides gravity
 // and reshapes the domain to match the exact numbers Bogner validated the
 // method against, instead of Antidunes' own Fr-derived antidune-flow scaling:
 //
@@ -159,7 +159,7 @@ ModelParameters
    useBognerReconstruction       true;
    useFillWeighting              true;   // Eq. 5.9's phi(x_b) blend -- already the default, kept explicit here
    useBognerThreePhaseMEM        true;   // no rhoHydStat subtraction at all (see sphere_density_showcase_bogner_gas.prm)
-   useBognerBuoyancy             true;   // no separate vSub*g channel (see sphere_density_showcase_bogner_gas.prm)
+   useMemOnlyBuoyancy             true;   // no separate vSub*g channel (see sphere_density_showcase_bogner_gas.prm)
    writeFloaterPlaneVTK          true;   // emit planeOrigin/planeNormal for each sphere
 }
 

@@ -3,14 +3,16 @@
 #SBATCH --partition=singlenode
 #SBATCH --constraint=el9
 #SBATCH --nodes=1
-#SBATCH --ntasks=9
+#SBATCH --ntasks=72
 #SBATCH --time=01:00:00
 #SBATCH --output=sbatch-output/output/antidunes_bed_%j.out
 #SBATCH --error=sbatch-output/error/antidunes_bed_%j.err
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# BedGeneration.prm hardcodes blocks <3, 3, 1> = 9 MPI processes
+# BedGeneration.prm currently hardcodes blocks <3, 2, 12> = 72 MPI processes (this drifted from
+# the <3,3,1>=9 this script was originally written for; ntasks/--bed-np below must always match
+# whatever "blocks" the current BedGeneration.prm actually specifies).
 # Resolve the repo root programmatically (mirrors antidunes.sh's own SCRIPT_DIR/REPO_ROOT
 # derivation) -- no hardcoded path, so this works across mirror clones (mt-dennys,
 # mt-dennys-mirror, mt-dennys-mirror2, ...) regardless of which one submitted the job. Jobs
@@ -24,4 +26,4 @@ else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     REPO="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 fi
-"$REPO/apps/showcases/Antidunes/antidunes.sh" --bed --bed-np 9
+"$REPO/apps/showcases/Antidunes/antidunes.sh" --build --jobs "$(nproc)" --bed --bed-np 72

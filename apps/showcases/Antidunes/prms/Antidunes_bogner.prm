@@ -3,7 +3,7 @@
 // Real E1 antidune showcase (identical geometry/particle bed/Re/Fr/We/timesteps
 // to ../Antidunes.prm), except ModelParameters switches the buoyancy/MEM force
 // computation to Bogner & Rude (2013)'s original three-phase formula
-// (useBognerThreePhaseMEM + useBognerBuoyancy, both true) instead of Antidunes'
+// (useBognerThreePhaseMEM + useMemOnlyBuoyancy, both true) instead of Antidunes'
 // extended split (static/dynamic reference height subtraction + separate
 // analytic vSub*g channel). See prms/sphere_density_showcase_bogner_gas.prm
 // for the isolated validation of these two switches (job 3905990: stable but
@@ -124,7 +124,7 @@ ModelParameters
    useBognerThreePhaseMEM        true;   // NEW: no rhoHydStat subtraction at all -- Bogner & Rude (2013)'s
                                          // three-phase MEM force exactly as published, instead of Antidunes'
                                          // extended split (static/dynamic reference height + subtraction).
-   useBognerBuoyancy             true;   // NEW: no separate vSub*g analytic buoyancy channel -- buoyant
+   useMemOnlyBuoyancy             true;   // NEW: no separate vSub*g analytic buoyancy channel -- buoyant
                                          // support comes solely from the (now-uncancelled) MEM/hydro force,
                                          // matching Bogner & Rude (2013). Real Re/Fr/We-derived gravity and
                                          // viscosity are kept UNCHANGED here (this run only swaps the

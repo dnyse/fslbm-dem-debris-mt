@@ -134,6 +134,16 @@ struct ParticleParams {
    real_t      floaterRingBand;   // sphere V_sub plane-fit: keep interface cells with |dist-r|<band.
                                   // 1.5 = contact-ring restriction (default). A large value (e.g. 1e6)
                                   // reproduces the old full-box sampling, for clean A/B comparison.
+   // Optional pair of overrides that together bypass reading inFileName's header for SI-unit scaling
+   // (getAvgDiameterScalingFactor, Utility.h) entirely -- avgParticleDiameter and particleScalingFactor
+   // are normally derived from an (often unrelated) sediment bed's own particle sizes, even in
+   // floater-only scenarios (useParticleBed=false) where that bed is never placed. For those scenarios,
+   // liquidHeight/floorHeight/particleFixingHeight (via avgParticleDiameterOverride, in LU) and
+   // dx_SI/dt_SI/the gravityOverride SI calibration (via dxSIOverride, in metres/LU) can instead be set
+   // directly, independent of whatever inFileName happens to contain. Both must be > 0 to take effect
+   // (either alone is ignored and the bed file is read as before) -- see ComputedParams's constructor.
+   real_t      avgParticleDiameterOverride;
+   real_t      dxSIOverride;
 
    ParticleParams(const config::Config::BlockHandle& b)
       : inFileName               { b.getParameter< std::string >("inFileName") }
@@ -148,6 +158,8 @@ struct ParticleParams {
       , useNoSlipParticles       { b.getParameter< bool >       ("useNoSlipParticles") }
       , useParticleBed           { b.getParameter< bool >       ("useParticleBed", true) }
       , floaterRingBand          { b.getParameter< real_t >     ("floaterRingBand", real_t(1.5)) }
+      , avgParticleDiameterOverride { b.getParameter< real_t >  ("avgParticleDiameterOverride", real_c(0)) }
+      , dxSIOverride                { b.getParameter< real_t >  ("dxSIOverride", real_c(0)) }
    {}
 };
 
@@ -250,7 +262,7 @@ inline std::vector< FloatingSphereParams > parseFloatingSpheres(const shared_ptr
    cfg->getBlocks("FloatingSpheres", containers, 0, 1);
    if (containers.empty()) return result;
    config::Config::Blocks sphereBlocks;
-   containers[0].getBlocks("FloatingSphere", sphereBlocks, 0, 100);
+   containers[0].getBlocks("FloatingSphere", sphereBlocks, 0, 10000);
    for (const auto& b : sphereBlocks)
       result.emplace_back(b);
    return result;
@@ -396,17 +408,20 @@ struct ModelParams {
    // false → subtract rhoHydStat as before (default; Antidunes' extended, non-thesis behaviour).
    bool        useBognerThreePhaseMEM;
 
-   // true  → drop the separate analytic geometric buoyancy term (vSub·g, computeSubmergedVolumes) from
-   //         AddExternalForces' vertical body force entirely -- gravity only (rho*vFull*a_z). Buoyant
-   //         support then comes ONLY from the MEM force (hydro_force), matching Bogner & Rüde (2013):
-   //         no separate buoyancy channel, the hydrostatic pressure already carried by the (uncancelled,
-   //         fill-weighted) boundary-link PDFs supplies it. submergedVolumes_ itself keeps being computed
-   //         (still used for submersion%/torque diagnostics) -- only the FORCE term is affected. Most
-   //         physically consistent when paired with useBognerThreePhaseMEM=true (no double subtraction
-   //         nor double-counted buoyancy); pairing this alone with the default rhoHydStat subtraction
-   //         re-introduces the original phantom-lift problem that subtraction was added to avoid.
-   // false → gravity minus vSub*g (default; Antidunes' extended, non-thesis split).
-   bool        useBognerBuoyancy;
+   // true  → (DEFAULT) drop the separate analytic geometric buoyancy term (vSub·g, computeSubmergedVolumes)
+   //         from AddExternalForces' vertical body force entirely -- gravity only (rho*vFull*a_z). Buoyant
+   //         support then comes ONLY from the MEM force (hydro_force), matching Bogner & Rüde (2013): no
+   //         separate buoyancy channel, the hydrostatic pressure already carried by the (uncancelled,
+   //         fill-weighted) boundary-link PDFs supplies it. computeSubmergedVolumes()/computeSubmergedVolumesBox()
+   //         are SKIPPED entirely in this mode (ParticleKernels::doDEMSubCycles) -- not just excluded from the
+   //         force term -- since Bogner's own righting-moment derivation (Eq. 18) uses the raw MEM torque alone,
+   //         with no separate analytic buoyancy-lever addition on top; this also matches the torque path,
+   //         not just the force. Most physically consistent when paired with useBognerThreePhaseMEM=true (no
+   //         double subtraction nor double-counted buoyancy); pairing this alone with the default rhoHydStat
+   //         subtraction re-introduces the original phantom-lift problem that subtraction was added to avoid.
+   // false → gravity minus vSub*g, plus the analytic vSub-derived righting torque (Antidunes' extended,
+   //         non-thesis split; the pre-existing behaviour before this flag defaulted to true).
+   bool        useMemOnlyBuoyancy;
 
    // true  → re-seed each FormerMO cell to the depth-consistent hydrostatic density
    //         ρ_hyd(z) = 1 + 3·a_z·(z − H) instead of the EquilibriumReconstructor's fill-blind
@@ -414,6 +429,14 @@ struct ModelParams {
    //         over-density at a moving floater's waterline that the MEM otherwise reads as phantom
    //         upward lift. Robust to negative contact-line fill drift (uses no φ). Off by default.
    bool        useHydrostaticReconstruction;
+
+   // true  → after Pass 2 of FormerMO reconstruction (PdfReconstructionManager) has given every
+   //         freshly-uncovered cell in the block a final state, re-examine cells that fell back to
+   //         interface purely because of same-pass ambiguity (an unresolved FormerMO neighbour at
+   //         the moment they were classified) and resolve them directly against the now-fully-known
+   //         neighbourhood. A cheap, purely local second sweep -- no flood fill, no block-wide scan.
+   // false → plain Pass-2-only fallback (default; every such cell stays interface, as before).
+   bool        usePass3Reresolution;
 
    // true  → floating-box submerged volume & centre of buoyancy computed ANALYTICALLY by clipping the
    //         oriented box against the fitted free-surface plane (exact 6-tetrahedron OBB∩half-space
@@ -468,16 +491,6 @@ struct ModelParams {
    // that motivated this.
    real_t      boxPlaneFitBandFactor;
 
-   // true  → the per-floater VTK point outputs ("floater", "floaterBox", "floaterCylinder") carry two
-   //         extra fields, "planeOrigin" and "planeNormal", visualizing the fitted free-surface plane
-   //         each floater's buoyancy is actually computed from (see BuildTimeloop.h / changes.md for the
-   //         ParaView recipe: Clip by the per-vertex signed distance to this plane to colour the
-   //         submerged part of the solid separately from the emerged part). Diagnostic only, never read
-   //         back into the physics; negligible IO cost (2 extra Vector3 per floater per VTK write).
-   // false → the two fields are omitted (default; keeps the point-data schema unchanged from before this
-   //         diagnostic existed).
-   bool        writeFloaterPlaneVTK;
-
    ModelParams(const config::Config::BlockHandle& b)
       : pdfReconstructionModel      { b.getParameter< std::string >("pdfReconstructionModel") }
       , pdfRefillingModel           { b.getParameter< std::string >("pdfRefillingModel") }
@@ -489,15 +502,15 @@ struct ModelParams {
       , useBognerReconstruction     { b.getParameter< bool >       ("useBognerReconstruction", true) }
       , useFillWeighting            { b.getParameter< bool >       ("useFillWeighting", true) }
       , useBognerThreePhaseMEM      { b.getParameter< bool >       ("useBognerThreePhaseMEM", false) }
-      , useBognerBuoyancy           { b.getParameter< bool >       ("useBognerBuoyancy", false) }
+      , useMemOnlyBuoyancy          { b.getParameter< bool >       ("useMemOnlyBuoyancy", true) }
       , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
+      , usePass3Reresolution        { b.getParameter< bool >       ("usePass3Reresolution", false) }
       , useAnalyticBoxBuoyancy      { b.getParameter< bool >       ("useAnalyticBoxBuoyancy", false) }
       , usePhantomForceCorrection   { b.getParameter< bool >       ("usePhantomForceCorrection", false) }
       , useDynamicReferenceHeight   { b.getParameter< bool >       ("useDynamicReferenceHeight", false) }
       , staticReferenceHeightOverride{ b.getParameter< real_t >    ("staticReferenceHeightOverride", real_t(-1)) }
       , floaterPlaneFitRadiusFactor  { b.getParameter< real_t >    ("floaterPlaneFitRadiusFactor", real_t(1.8)) }
       , boxPlaneFitBandFactor        { b.getParameter< real_t >    ("boxPlaneFitBandFactor", real_t(0.8)) }
-      , writeFloaterPlaneVTK         { b.getParameter< bool >      ("writeFloaterPlaneVTK", false) }
    {}
 };
 
@@ -552,15 +565,30 @@ struct ComputedParams {
    real_t sinusWavelength;
 
    ComputedParams(
-      const ParticleParams& particle, 
-      const DomainParams& domain, 
-      const PIDParams& pid, 
+      const ParticleParams& particle,
+      const DomainParams& domain,
+      const PIDParams& pid,
       const PhysicsParams& physics)
    {
-      getAvgDiameterScalingFactor(
-         particle.inFileName, domain.domainSize, 
-         particle.bedCopiesInX, particle.bedCopiesInY,
-         avgParticleDiameter, particleScalingFactor);
+      // avgParticleDiameterOverride/dxSIOverride (both > 0): skip inFileName's header entirely --
+      // see ParticleParams's doc comment. Otherwise fall back to the bed-file-derived scaling, exactly
+      // as before (also covers useParticleBed=true, which always needs the real bed-derived values).
+      if (particle.avgParticleDiameterOverride > real_c(0) && particle.dxSIOverride > real_c(0))
+      {
+         avgParticleDiameter   = particle.avgParticleDiameterOverride;
+         particleScalingFactor = real_c(1) / particle.dxSIOverride;
+         WALBERLA_LOG_INFO_ON_ROOT("avgParticleDiameter/particleScalingFactor overridden directly "
+            "(avgParticleDiameterOverride=" << particle.avgParticleDiameterOverride
+            << ", dxSIOverride=" << particle.dxSIOverride << ") -- " << particle.inFileName
+            << "'s header is NOT read for scaling purposes.")
+      }
+      else
+      {
+         getAvgDiameterScalingFactor(
+            particle.inFileName, domain.domainSize,
+            particle.bedCopiesInX, particle.bedCopiesInY,
+            avgParticleDiameter, particleScalingFactor);
+      }
 
       const real_t particlePoissonsRatio = real_c(0.22);
       particleKappa = real_c(2) * (real_c(1) - particlePoissonsRatio) / (real_c(2) - particlePoissonsRatio);
