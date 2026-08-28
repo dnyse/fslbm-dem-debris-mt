@@ -68,10 +68,11 @@
 //   Left arch:    Y=0..10  (width 10), radius 5,  crown Z=61
 //   Central arch: Y=20..40 (width 20), radius 10, crown Z=66
 //   Right arch:   Y=50..60 (width 10), radius 5,  crown Z=61
-// All three deck boxes: X=56..72 (matching pier footprint), Z=56..76 (free
-// surface up to deck top) -- the outer arches' shorter crowns leave a thicker
-// solid "collar" above them before the deck (15 LU vs the central arch's 10),
-// which is structurally realistic, not a flaw.
+// All three deck boxes: X=61..67 (recessed to the piers' own straight-box span, NOT their
+// outer footprint including the rounded end-caps -- the caps stick out past this on both
+// sides, see the ArchTunnels comment below), Z=56..76 (free surface up to deck top) -- the
+// outer arches' shorter crowns leave a thicker solid "collar" above them before the deck
+// (15 LU vs the central arch's 10), which is structurally realistic, not a flaw.
 //
 // Free surface: same domain (X=128) as the reference runs this session already
 // established avgParticleDiameter=8.00194 for (liquidHeightFactor 2.862,
@@ -161,15 +162,21 @@ Pillars
    Pillar { center < 64, 45, 38 >; halfExtents < 3, 5, 38 >; }
 }
 
-// One entry per arch, matching the BodyBC arch cylinders exactly (center Y/Z, radius, and the deck's
-// own X-span 56-72). Not mesa_pd bodies -- consumed directly by ParticleKernels.h's
+// One entry per arch, matching the BodyBC arch cylinders below exactly (center Y/Z, radius).
+// xMin/xMax DELIBERATELY set to the piers' own straight-box span (61..67, i.e. pier x_center +-
+// x_half), NOT the deck's outer X-span (56..72, what this used to be) -- recesses each arch
+// collar's flat leading/trailing face behind the piers' rounded end-caps, so the round nose
+// visibly sticks out past the deck edge instead of the deck being flush with the nose tip. Mirrors
+// the same recess applied to the real-scale bridge (pont_ferroviere_rue_goffontaine_realscale_gas.prm)
+// after 3D-voxel review there; the LBM BodyBC arch boxes below use the same 61..67 span, so DEM and
+// fluid geometry never diverge. Not mesa_pd bodies -- consumed directly by ParticleKernels.h's
 // ComputeTunnelContacts (see its class comment for why: DoubleCast can't give CylindricalBoundary a
 // second, inside-out interpretation, since the pillars above already claim the outside-solid one).
 ArchTunnels
 {
-   ArchTunnel { center < 0, 5, 56 >;  radius 5;  xMin 56; xMax 72; }  // left arch
-   ArchTunnel { center < 0, 30, 56 >; radius 10; xMin 56; xMax 72; }  // central arch
-   ArchTunnel { center < 0, 55, 56 >; radius 5;  xMin 56; xMax 72; }  // right arch
+   ArchTunnel { center < 0, 5, 56 >;  radius 5;  xMin 61; xMax 67; }  // left arch
+   ArchTunnel { center < 0, 30, 56 >; radius 10; xMin 61; xMax 67; }  // central arch
+   ArchTunnel { center < 0, 55, 56 >; radius 5;  xMin 61; xMax 67; }  // right arch
 }
 
 ModelParameters
@@ -242,11 +249,11 @@ BoundaryParameters
    BodyBC
    {
       shape LogicalAND;
-      first { shape Box; min < 56, 0, 56 >; max < 72, 10, 76 >; }
+      first { shape Box; min < 61, 0, 56 >; max < 67, 10, 76 >; }
       second
       {
          shape LogicalNOT;
-         first { shape Cylinder; min < 56, 5, 56 >; max < 72, 5, 56 >; radius 5; }
+         first { shape Cylinder; min < 61, 5, 56 >; max < 67, 5, 56 >; radius 5; }
       }
       NoSlip{}
    }
@@ -256,11 +263,11 @@ BoundaryParameters
    BodyBC
    {
       shape LogicalAND;
-      first { shape Box; min < 56, 20, 56 >; max < 72, 40, 76 >; }
+      first { shape Box; min < 61, 20, 56 >; max < 67, 40, 76 >; }
       second
       {
          shape LogicalNOT;
-         first { shape Cylinder; min < 56, 30, 56 >; max < 72, 30, 56 >; radius 10; }
+         first { shape Cylinder; min < 61, 30, 56 >; max < 67, 30, 56 >; radius 10; }
       }
       NoSlip{}
    }
@@ -269,11 +276,11 @@ BoundaryParameters
    BodyBC
    {
       shape LogicalAND;
-      first { shape Box; min < 56, 50, 56 >; max < 72, 60, 76 >; }
+      first { shape Box; min < 61, 50, 56 >; max < 67, 60, 76 >; }
       second
       {
          shape LogicalNOT;
-         first { shape Cylinder; min < 56, 55, 56 >; max < 72, 55, 56 >; radius 5; }
+         first { shape Cylinder; min < 61, 55, 56 >; max < 67, 55, 56 >; radius 5; }
       }
       NoSlip{}
    }

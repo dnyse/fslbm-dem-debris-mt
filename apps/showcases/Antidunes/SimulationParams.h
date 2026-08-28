@@ -108,6 +108,19 @@ struct PhysicsParams {
    // scaling, which for the default config lands ~100x smaller (7.02618e-06). 0 = off.
    real_t gravityOverride;
 
+   // Independent of Antidunes.cpp's own WATCH_FREQ/WATCH_DENSE_FROM debug watchers (trackWatchCells,
+   // checkClosedInterfaceLayer, logFloaterLinkBalance) -- these three ONLY gate checkPdfNaN's cadence.
+   // A NaN blowup is normally only caught once every WATCH_FREQ=1000 steps, by which point the fluid
+   // field may already be corrupted across much of the domain (streaming propagates a NaN outward by
+   // ~1 cell/step) -- not enough to localize the true origin step/cell. Resume from the last checkpoint
+   // before a known crash (loadSnapshot=true) and set denseNanScanEnabled=true with a
+   // from/toStep window bracketing the crash to scan every step in just that window, without paying
+   // per-step overhead for the rest of the run. Off by default (matches the pre-existing behaviour
+   // exactly: checkPdfNaN only runs on the normal watchNow cadence).
+   bool   denseNanScanEnabled;
+   uint_t denseNanScanFromStep;
+   uint_t denseNanScanToStep;
+
    PhysicsParams(const config::Config::BlockHandle& b)
       : enableWetting          { b.getParameter< bool >  ("enableWetting") }
       , timesteps              { b.getParameter< uint_t >("timesteps") }
@@ -117,6 +130,9 @@ struct PhysicsParams {
       , useHardcodedUnits      { b.getParameter< bool >  ("useHardcodedUnits", false) }
       , relaxationRateOverride { b.getParameter< real_t >("relaxationRateOverride", real_c(0)) }
       , gravityOverride        { b.getParameter< real_t >("gravityOverride", real_c(0)) }
+      , denseNanScanEnabled    { b.getParameter< bool >  ("denseNanScanEnabled", false) }
+      , denseNanScanFromStep   { b.getParameter< uint_t >("denseNanScanFromStep", uint_t(0)) }
+      , denseNanScanToStep     { b.getParameter< uint_t >("denseNanScanToStep", timesteps) }
    {}
 };
 
@@ -382,7 +398,7 @@ inline std::vector< FloatingBoxParams > parseFloatingBoxes(const shared_ptr< con
    cfg->getBlocks("FloatingBoxes", containers, 0, 1);
    if (containers.empty()) return result;
    config::Config::Blocks boxBlocks;
-   containers[0].getBlocks("FloatingBox", boxBlocks, 0, 100);
+   containers[0].getBlocks("FloatingBox", boxBlocks, 0, 10000); // matches FloatingSphere's own cap
    for (const auto& b : boxBlocks)
       result.emplace_back(b);
    return result;
@@ -437,7 +453,7 @@ inline std::vector< FloatingCylinderParams > parseFloatingCylinders(const shared
    cfg->getBlocks("FloatingCylinders", containers, 0, 1);
    if (containers.empty()) return result;
    config::Config::Blocks cylinderBlocks;
-   containers[0].getBlocks("FloatingCylinder", cylinderBlocks, 0, 100);
+   containers[0].getBlocks("FloatingCylinder", cylinderBlocks, 0, 10000); // matches FloatingSphere's own cap
    for (const auto& b : cylinderBlocks)
       result.emplace_back(b);
    return result;
@@ -462,14 +478,21 @@ struct ModelParams {
    // false → pass a null fill accessor so the raw two-phase MEM force is used (reference / ablation).
    bool        useFillWeighting;
 
-   // true  → disable the static/dynamic MEM reference height H entirely: SimpleBB is constructed with
-   //         a null hydrostaticDensityFct, so no rhoHydStat is ever subtracted from the boundary-link
-   //         PDFs. Combined with useFillWeighting (Eq. 5.9's φ-weighted blend, already the default),
-   //         this reproduces Bogner & Rüde (2013)'s original three-phase MEM force EXACTLY as
+   // true  → (DEFAULT) disable the static/dynamic MEM reference height H entirely: SimpleBB is
+   //         constructed with a null hydrostaticDensityFct, so no rhoHydStat is ever subtracted from the
+   //         boundary-link PDFs. Combined with useFillWeighting (Eq. 5.9's φ-weighted blend, already the
+   //         default), this reproduces Bogner & Rüde (2013)'s original three-phase MEM force EXACTLY as
    //         published — no static-H ablation machinery, no separate hydrostatic reference at all.
    //         staticReferenceHeightOverride/useDynamicReferenceHeight are ignored while this is true
-   //         (there is nothing left to feed them into).
-   // false → subtract rhoHydStat as before (default; Antidunes' extended, non-thesis behaviour).
+   //         (there is nothing left to feed them into). Paired with useMemOnlyBuoyancy=true (also the
+   //         default) below, this is now the project default; NOT pairing them (i.e. leaving
+   //         useMemOnlyBuoyancy=true while overriding this back to false) reintroduces gravity-only body
+   //         force with rhoHydStat still subtracted from the MEM force -- no buoyant support at all,
+   //         which is exactly what silently sank every floater in the bridge/1000-sphere scenarios
+   //         before this flag's default was flipped (both prms predated this default and never set it
+   //         explicitly, so they inherited the old, inconsistent false/true pairing).
+   // false → subtract rhoHydStat as before (Antidunes' extended, non-thesis behaviour; the default before
+   //         this flag was flipped to true).
    bool        useBognerThreePhaseMEM;
 
    // true  → (DEFAULT) drop the separate analytic geometric buoyancy term (vSub·g, computeSubmergedVolumes)
@@ -481,8 +504,10 @@ struct ModelParams {
    //         force term -- since Bogner's own righting-moment derivation (Eq. 18) uses the raw MEM torque alone,
    //         with no separate analytic buoyancy-lever addition on top; this also matches the torque path,
    //         not just the force. Most physically consistent when paired with useBognerThreePhaseMEM=true (no
-   //         double subtraction nor double-counted buoyancy); pairing this alone with the default rhoHydStat
-   //         subtraction re-introduces the original phantom-lift problem that subtraction was added to avoid.
+   //         double subtraction nor double-counted buoyancy, and now both this project's defaults); pairing
+   //         this alone with rhoHydStat subtraction (useBognerThreePhaseMEM=false) removes ALL buoyant
+   //         support, not the phantom-lift problem that subtraction was originally added to avoid -- see
+   //         useBognerThreePhaseMEM's own comment above for the concrete failure this caused.
    // false → gravity minus vSub*g, plus the analytic vSub-derived righting torque (Antidunes' extended,
    //         non-thesis split; the pre-existing behaviour before this flag defaulted to true).
    bool        useMemOnlyBuoyancy;
@@ -567,6 +592,79 @@ struct ModelParams {
    //         false to return to the known-working path if the analytical route misbehaves).
    bool        useAnalyticalContactDetection;
 
+   // true  → (only meaningful together with useAnalyticalContactDetection=true) removes the
+   //         Cylinder-Cylinder GJK/EPA safety net entirely: cylinderCylinderResultIsUncertain()'s
+   //         verdict is IGNORED, and the closed-form Kodam et al. (2010) + Guo et al. (2012) dispatch
+   //         is trusted as the sole answer -- exactly "pure Kodam+Guo", nothing added, matching how
+   //         those two papers' own algorithm stands on its own (neither paper uses GJK/EPA or any
+   //         other iterative solver anywhere; this project's hybrid fallback is entirely this
+   //         codebase's own addition on top of both papers, not part of either's methodology). A
+   //         tier-1 case (analytical found no contact at all) is accepted as "no contact", no
+   //         fallback attempted; a tier-2 case (analytical found a contact but flagged its own
+   //         magnitude untrustworthy) is still applied as-is. The independent raw-center-distance
+   //         guard in SolidCylinderContactDetection (rejects pairs geometrically too far apart to
+   //         possibly touch, added after a false-positive band-band-skewed crash -- see ParticleKernels.h)
+   //         stays active regardless of this flag: it is not part of either paper's scenario dispatch,
+   //         just a cheap pre-filter, so disabling it isn't needed to run "pure" Kodam+Guo honestly.
+   // false → (DEFAULT) the existing hybrid behaviour: fall back to GJK/EPA whenever
+   //         cylinderCylinderResultIsUncertain() flags the analytical result.
+   bool        usePureAnalyticalCylinder;
+
+   // true  → every rank writes its own CSV file under floaterHistoryBaseFolder/ (rank_<N>.csv,
+   //         truncated at simulation start), one row per contact/lubrication pair it actually computed
+   //         and accepted (i.e. that passed mesa_pd::mpi::ContactFilter), for EVERY DEM sub-cycle of
+   //         EVERY main LBM step (not gated behind the usual WATCH_FREQ/evaluationFrequency cadence
+   //         used by the coarser [CylForces]/[BoxForces] logs -- this is meant to catch the exact
+   //         sub-step transient those miss). Each row records: which rank computed it, both particles'
+   //         uid/isGhost, and -- critically -- ac.getOwner(idx) for both particles, i.e. mesa_pd's own
+   //         synced-to-every-copy "canonical owner" field (see mesa_pd::mpi::ContactFilter's `*`/`#`
+   //         rules, which is the actual arbitration rule this project's still-unimplemented "Option 2"
+   //         tiebreak would replace). Comparing the logging rank against getOwner() across all ranks'
+   //         CSVs for the same (uidA,uidB,mainStep,subCycle) is exactly how to catch a double-accept:
+   //         two different ranks each believing they should compute this contact in the same cycle.
+   //         Also logs the contact point/normal/penetrationDepth and the FORCE DELTA this specific
+   //         contact/lubrication pair contributed (captured via force-ref before/after readback, since
+   //         LinearSpringDashpot/LubricationCorrectionKernel add atomically onto whatever force other
+   //         contacts already accumulated this sub-cycle). Every row is flushed immediately (not
+   //         buffered) so data survives an abrupt WALBERLA_ABORT/MPI_ABORT mid-run, mirroring the
+   //         WALBERLA_LOG_WARNING-not-_INFO lesson from ParticleKernels' own logCylComputation. OFF by
+   //         default: this is a heavy, opt-in diagnostic (one row per pair per sub-cycle -- easily
+   //         millions of rows for a long dense run) meant for actively debugging the ContactFilter race,
+   //         not routine use.
+   bool        logFloaterHistory;
+
+   // Base folder for logFloaterHistory's per-rank CSVs, sibling to vtk-out/eval/snapshots (created by
+   // Antidunes.cpp alongside those, root-only, only when logFloaterHistory is true).
+   std::string floaterHistoryBaseFolder;
+
+   // 0 (DEFAULT) → logFloaterHistory (both the per-contact log() and the per-floater logState()
+   // world-state snapshot) covers every floater, as before. Nonzero → restrict BOTH logs to only the
+   // floaters whose settlingSteps equals this value (i.e. one specific staggered-release batch), by
+   // UID -- everyone else is skipped entirely, not just filtered after writing. Exists because
+   // logFloaterHistory's per-subcycle, local+ghost-copy world-state snapshot is what blew a 126GB
+   // quota when it covered all 1000 floaters in the collapsed-spawn scenario; scoping it to one
+   // ~100-floater release batch keeps the same per-substep position/velocity resolution at a
+   // fraction of the size. Matched by FloatingBox/FloatingSphere/FloatingCylinder settlingSteps in
+   // ParticleKernels.h's constructor (built once into a UID set, wired into FloaterHistoryLogger via
+   // setUidFilter()) -- has no effect on which floaters actually get released/settle, only on logging.
+   uint_t      logFloaterHistoryReleaseStepFilter;
+
+   // Diagnostic for the "how did water get up there" question: a job 4132582 [LOW-RHO] crash was
+   // traced (VTK velocity field, decoded directly) to a region that was completely dry gas 592 steps
+   // before the corruption appeared, with no floater anywhere nearby -- meaning some cell above the
+   // normal waterline was converted from gas to liquid/interface with NO log trail at all (neither
+   // waLBerla's own CellConversionSweep, src/lbm/free_surface/dynamics/CellConversionSweep.h, nor this
+   // project's wrapping of it in BuildTimeloop.h ever logs anything; only the separate, DEM-specific
+   // FormerMO reconstruction path has its own [FORMERMO-CONVERT] counters). This scans every LOCAL
+   // cell above highAltitudeWaterThresholdZ, every step, and warns the instant one is liquid or
+   // interface -- catching the conversion itself, not just its aftermath. OFF by default (0 threshold
+   // is meaningless/inactive unless explicitly enabled): opt-in for a targeted rerun once a crash's
+   // approximate altitude is already known (e.g. from a prior run's own [LOW-RHO] cell coordinates),
+   // not something to leave on for routine production runs -- a healthy run should trigger it zero
+   // times, but a run that's actively corrupting the free surface at height could log heavily.
+   bool        highAltitudeWaterScanEnabled;
+   real_t      highAltitudeWaterThresholdZ;
+
    ModelParams(const config::Config::BlockHandle& b)
       : pdfReconstructionModel      { b.getParameter< std::string >("pdfReconstructionModel") }
       , pdfRefillingModel           { b.getParameter< std::string >("pdfRefillingModel") }
@@ -577,7 +675,7 @@ struct ModelParams {
       , cellConversionForceThreshold{ b.getParameter< real_t >     ("cellConversionForceThreshold") }
       , useBognerReconstruction     { b.getParameter< bool >       ("useBognerReconstruction", true) }
       , useFillWeighting            { b.getParameter< bool >       ("useFillWeighting", true) }
-      , useBognerThreePhaseMEM      { b.getParameter< bool >       ("useBognerThreePhaseMEM", false) }
+      , useBognerThreePhaseMEM      { b.getParameter< bool >       ("useBognerThreePhaseMEM", true) }
       , useMemOnlyBuoyancy          { b.getParameter< bool >       ("useMemOnlyBuoyancy", true) }
       , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
       , usePass3Reresolution        { b.getParameter< bool >       ("usePass3Reresolution", false) }
@@ -588,7 +686,18 @@ struct ModelParams {
       , floaterPlaneFitRadiusFactor  { b.getParameter< real_t >    ("floaterPlaneFitRadiusFactor", real_t(1.8)) }
       , boxPlaneFitBandFactor        { b.getParameter< real_t >    ("boxPlaneFitBandFactor", real_t(0.8)) }
       , useAnalyticalContactDetection{ b.getParameter< bool >      ("useAnalyticalContactDetection", false) }
-   {}
+      , usePureAnalyticalCylinder   { b.getParameter< bool >       ("usePureAnalyticalCylinder", false) }
+      , logFloaterHistory           { b.getParameter< bool >       ("logFloaterHistory", false) }
+      , floaterHistoryBaseFolder    { b.getParameter< std::string >("floaterHistoryBaseFolder", "floater-history") }
+      , logFloaterHistoryReleaseStepFilter{ b.getParameter< uint_t >("logFloaterHistoryReleaseStepFilter", uint_t(0)) }
+      , highAltitudeWaterScanEnabled { b.getParameter< bool >       ("highAltitudeWaterScanEnabled", false) }
+      , highAltitudeWaterThresholdZ  { b.getParameter< real_t >     ("highAltitudeWaterThresholdZ", real_t(0)) }
+   {
+      if (usePureAnalyticalCylinder && !useAnalyticalContactDetection)
+         WALBERLA_LOG_WARNING("usePureAnalyticalCylinder=true but useAnalyticalContactDetection=false -- "
+            "this flag only has an effect inside the Cylinder x Cylinder analytical dispatch, which is "
+            "off, so it does nothing here.");
+   }
 };
 
 struct EvaluationParams {
@@ -609,11 +718,27 @@ struct VTKParams {
    std::string       baseFolder;
    real_t            samplingResolution;
 
+   // Windowed higher-frequency fluid_field VTK output around an expected crash step -- same
+   // rationale/pattern as PhysicsParams::denseNanScanEnabled (see its own doc comment), applied to
+   // VTK dumps instead of the NaN scanner: a NaN blowup found by the periodic (every writeFrequency
+   // steps) checkPdfNaN/VTK cadence is normally already spread across much of a block by the time
+   // it's caught -- not enough to see the actual onset. Parsed from an OPTIONAL second named VTK
+   // output block "fluid_field_dense" (see VtkWriter.h's addVTKOutput, which is what actually gates
+   // its execution to [denseFromStep, denseToStep) -- outside that window it is never invoked at
+   // all, so it costs nothing for the rest of the run). If that block is absent, denseEnabled is
+   // false and every existing prm behaves exactly as before.
+   bool              denseEnabled;
+   uint_t            denseFromStep;
+   uint_t            denseToStep;
+
    VTKParams(const config::Config::BlockHandle& b)
       : writeFrequency    { b.getOneBlock("fluid_field").getParameter< uint_t >     ("writeFrequency") }
       , ghostLayers       { b.getOneBlock("fluid_field").getParameter< uint_t >     ("ghostLayers") }
       , baseFolder        { b.getOneBlock("fluid_field").getParameter< std::string >("baseFolder") }
       , samplingResolution{ b.getOneBlock("fluid_field").getParameter< real_t >     ("samplingResolution") }
+      , denseEnabled      { static_cast< bool >(b.getBlock("fluid_field_dense")) }
+      , denseFromStep     { denseEnabled ? b.getOneBlock("fluid_field_dense").getParameter< uint_t >("denseFromStep") : uint_t(0) }
+      , denseToStep       { denseEnabled ? b.getOneBlock("fluid_field_dense").getParameter< uint_t >("denseToStep") : uint_t(0) }
    {}
 };
 

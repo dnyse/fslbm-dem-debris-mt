@@ -112,6 +112,11 @@ struct SimulationObjects
    const std::string                pidStateFile{ "pidState.file" };
 
    uint_t                           beginTimeStep;
+   // Live main-loop step counter, updated once per iteration at the top of Antidunes.cpp's timeloop
+   // (before timeloopFSLBM->singleStep() runs, so every before-time-step VTK/sweep callback sees the
+   // current step). Lets setup-time code (e.g. BuildTimeloop.h's addVTKOutput windowed-frequency gate)
+   // capture a live, always-current step value without needing the main loop's own local variable.
+   shared_ptr< uint_t >             currentMainStep = std::make_shared< uint_t >(uint_t(0));
    shared_ptr< PIDController >      pidController;
    shared_ptr< Vector3< real_t > >  acceleration;
    shared_ptr< Vector3< real_t > >  meanVelocity;

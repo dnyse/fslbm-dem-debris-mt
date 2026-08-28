@@ -58,6 +58,8 @@ int main(int argc, char** argv)
    {
       std::filesystem::create_directories(simParams->blockForest.snapshotBaseFolder);
       std::filesystem::create_directories(simParams->evaluation.baseFolderName);
+      if (simParams->model.logFloaterHistory)
+         std::filesystem::create_directories(simParams->model.floaterHistoryBaseFolder);
    }
 
    // Log computed params
@@ -158,15 +160,25 @@ int main(int argc, char** argv)
    // ----------------------------------------------------------------------------------------------------------------------------------
    for (uint_t t = simObjs->beginTimeStep; t != simParams->physics.timesteps; ++t)
    {
+      *simObjs->currentMainStep = t;
+
       releaseSettledFloatingSpheres(simParams, simObjs, t);
 
       const bool watchNow = (t % WATCH_FREQ == uint_c(0)) || (t >= WATCH_DENSE_FROM);
+
+      // Independent, prm-toggleable per-step NaN scan window (denseNanScanEnabled/From/ToStep in
+      // PhysicsParameters) -- see PhysicsParams' own comment for why this is separate from watchNow.
+      const bool denseNanScanNow = simParams->physics.denseNanScanEnabled &&
+         t >= simParams->physics.denseNanScanFromStep && t < simParams->physics.denseNanScanToStep;
+      const bool nanScanNow = watchNow || denseNanScanNow;
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] FSLBM step");
       timeloopFSLBM->singleStep(timingPool, true);
       if (watchNow) trackWatchCells(simObjs, "post-FSLBM", t, watchCells);
       if (watchNow) checkClosedInterfaceLayer(simObjs, "post-FSLBM", t);
-      if (watchNow && checkPdfNaN(simObjs, "timeloopFSLBM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopFSLBM at t=" << t);
+      if (nanScanNow && checkPdfNaN(simObjs, "timeloopFSLBM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopFSLBM at t=" << t);
+      if (simParams->model.highAltitudeWaterScanEnabled)
+         checkHighAltitudeWater(simObjs, "timeloopFSLBM", t, simParams->model.highAltitudeWaterThresholdZ);
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] DEM sub-cycles");
       particleKernels.reduceAndAvgHydroForces(timingPool, t==0);
@@ -178,7 +190,9 @@ int main(int argc, char** argv)
       if (watchNow) trackWatchCells(simObjs, "post-AfterDEM", t, watchCells);
       if (watchNow) checkClosedInterfaceLayer(simObjs, "post-AfterDEM", t);
       if (watchNow) logFloaterLinkBalance(simObjs, "post-AfterDEM", t);
-      if (watchNow && checkPdfNaN(simObjs, "timeloopAfterDEM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopAfterDEM at t=" << t);
+      if (nanScanNow && checkPdfNaN(simObjs, "timeloopAfterDEM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopAfterDEM at t=" << t);
+      if (simParams->model.highAltitudeWaterScanEnabled)
+         checkHighAltitudeWater(simObjs, "timeloopAfterDEM", t, simParams->model.highAltitudeWaterThresholdZ);
 
       WALBERLA_LOG_PROGRESS_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] Evaluators");
       timeloopEval->singleStep(timingPool, true);

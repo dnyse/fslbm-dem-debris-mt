@@ -88,7 +88,12 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
                                          ScalarField_T, VectorField_T >(
       simObjs->blockForest, *timeloop, simParams->cfgPtr, simObjs->flagInfo, simObjs->pdfFieldID, simObjs->flagFieldID,
       simObjs->fillFieldID, BlockDataID{}, simObjs->curvatureFieldID, simObjs->normalFieldID,
-      simObjs->obstacleNormalFieldID);
+      simObjs->obstacleNormalFieldID,
+      simParams->vtk.denseEnabled ? simObjs->currentMainStep : nullptr,
+      simParams->vtk.denseFromStep, simParams->vtk.denseToStep);
+   if (simParams->vtk.denseEnabled)
+      WALBERLA_LOG_INFO_ON_ROOT("[VTK] fluid_field_dense active for steps ["
+         << simParams->vtk.denseFromStep << ", " << simParams->vtk.denseToStep << ")");
    // triangle mesh of free surface ----------------------------------------
    // walberla::free_surface::SurfaceMeshWriter< ScalarField_T, FlagField_T >
    //    surfaceMeshWriter(simObjs->blockForest, simObjs->fillFieldID, simObjs->flagFieldID,
@@ -275,6 +280,10 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       timeloop->addFuncBeforeTimeStep(vtk::writeFiles(cylinderFloaterVTKOutput), "VTK: floating cylinder data");
    }
 
+   // Box pillar VTK and Cylinder pillar VTK (below) are disabled -- redundant with mapped_flag's
+   // NoSlip classification (see fluid_field's own writers), which is what pillar geometry will be
+   // read from going forward instead of these separate glyph-based DEM-body outputs.
+#if 0
    // Box pillar VTK — one point per pillar at box center with edgeLength attribute.
    // In ParaView: Filters > Glyph, glyph type Box, scale by edgeLength to render the full solid shape.
    if (!simParams->pillars.empty())
@@ -339,6 +348,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
          std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
       timeloop->addFuncBeforeTimeStep(vtk::writeFiles(cylinderVTKOutput), "VTK: cylinder pillar data");
    }
+#endif
 }
 
 void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& simParams,

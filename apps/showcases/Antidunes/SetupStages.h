@@ -1104,6 +1104,54 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
    return globalNaN > uint_t(0);
 }
 
+// ModelParameters.highAltitudeWaterScanEnabled/highAltitudeWaterThresholdZ: scans every LOCAL cell
+// whose world-Z exceeds thresholdZ and warns immediately if it is liquid or interface -- see
+// ModelParams' own doc comment (SimulationParams.h) for why this exists (neither waLBerla's
+// CellConversionSweep nor this project's own wrapping of it logs anything at all when a gas cell
+// converts, so a "how did water get up there" crash has no log trail to follow otherwise). Local
+// cells only (matches checkPdfNaN's own convention) so a ghost-layer ownership boundary never
+// double-counts one real conversion as two warnings. Does NOT abort -- purely observational, meant
+// to be read back after the run (or grepped live) to find the exact step/cell a conversion first
+// happened at, at a height where it needn't have.
+void checkHighAltitudeWater(const std::shared_ptr< SimulationObjects >& simObjs,
+                            const char* const location, const uint_t t, const real_t thresholdZ)
+{
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto& aabb = blockIt->getAABB();
+
+      // Skip this block entirely if its own Z-extent never reaches the threshold -- cheap early-out,
+      // avoids the per-cell loop for every block below the watched altitude on every step.
+      if (aabb.zMax() <= thresholdZ) continue;
+
+      for (cell_idx_t iz = 0; iz < cell_idx_c(flagField->zSize()); ++iz)
+      {
+         const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+         if (wz <= thresholdZ) continue;
+
+         for (cell_idx_t iy = 0; iy < cell_idx_c(flagField->ySize()); ++iy)
+         for (cell_idx_t ix = 0; ix < cell_idx_c(flagField->xSize()); ++ix)
+         {
+            const bool isLiquid    = flagField->isFlagSet(ix, iy, iz, liquidFlag);
+            const bool isInterface = flagField->isFlagSet(ix, iy, iz, interfaceFlag);
+            if (!isLiquid && !isInterface) continue;
+
+            const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+            const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+            WALBERLA_LOG_WARNING("[HIGH-ALTITUDE-WATER t=" << t << " after=" << location << "] "
+               << (isLiquid ? "LIQUID" : "INTERFACE") << " cell above threshold Z=" << thresholdZ
+               << "  world=(" << wx << "," << wy << "," << wz << ")"
+               << "  block-local=(" << ix << "," << iy << "," << iz << ")"
+               << "  fill=" << fillField->get(ix, iy, iz));
+         }
+      }
+   }
+}
+
 // Verify the "closed interface layer" invariant: in FSLBM a liquid cell may NEVER be a (D3Q27)
 // neighbour of a gas cell — they must always be separated by an interface cell. A violation is a
 // "hole" in the interface layer (the Fig. 4.12a configuration). This scans every liquid cell for a

@@ -74,16 +74,25 @@
 //! specific previously-failing cases now pass and which, if any, still don't.
 //!
 //! Two sub-problems in the paper (band-edge, eq. 74-77; edge-edge point location, eq. 82-85) reduce
-//! to a fourth-order polynomial in sin(theta). Rather than hand-transcribe a general quartic solver
-//! (high risk of an undetected sign/coefficient transcription error with no compiler-verified
-//! reference to check against), this implementation solves the equivalent 1D minimization problem
-//! numerically instead (eq. 74 IS "d/d-theta of the squared distance = 0" -- the quartic is merely
-//! one way to solve that same minimization in closed form). The numeric approach used here -- a
-//! coarse uniform scan over theta in [0, 2*pi) followed by golden-section refinement -- is the same
-//! sample-then-refine philosophy already used elsewhere in this test suite (see
-//! ContactDetectionTest.cpp's testCylinderPillarBruteForceCrossCheck, 720x400 dense sampling), so
-//! it isn't a methodology foreign to this codebase, just applied here as the primary computation
-//! rather than as an independent cross-check.
+//! to a fourth-order polynomial in sin(theta). An earlier version of this file avoided hand-
+//! transcribing that quartic (risk of an undetected sign/coefficient error with no compiler-
+//! verified reference) and instead solved the equivalent 1D minimization numerically: a coarse
+//! uniform scan over theta followed by golden-section refinement (up to ~1500 evaluations per
+//! candidate contact). That numeric approach turned out to be a genuine performance problem at
+//! scale -- dense scenarios with many simultaneous Cylinder x Cylinder contacts ran ~6x slower per
+//! step than an equivalent Box x Box scenario purely because of this search.
+//!
+//! This version replaces it with the actual closed form: closestThetaOnCircleToLine derives the
+//! quartic coefficients directly from the geometry (see that function's own comment for the
+//! algebra) and solves them via the Durand-Kerner method (solveQuarticDurandKerner) -- chosen over
+//! Ferrari's method specifically because it has no case-branching on a resolvent cubic's
+//! discriminant to get subtly wrong; every root, real or complex, is refined by the same fixed
+//! iteration loop. closestThetaOnCircleToPoint (used by the edge-edge alternating-projection loop)
+//! turned out to have an even simpler exact answer -- a single atan2, no polynomial at all, since
+//! its objective is a pure first-harmonic trig function of theta. Both closed forms were validated
+//! against the previous golden-section implementation across thousands of randomized
+//! configurations before replacing it (matching to floating-point precision in every trial), the
+//! "compiler-verified reference" the original numeric approach didn't have.
 //======================================================================================================================
 
 #pragma once
@@ -94,6 +103,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <limits>
 #include <string>
 
@@ -220,83 +230,234 @@ struct CylinderState
 
 namespace detail
 {
-//! Golden-section-refined global minimizer of theta -> |P(theta) - closest point on the given
-//! infinite line|, where P(theta) = C + R*cos(theta)*u + R*sin(theta)*v traces a circle of radius R
-//! centred at C in the plane spanned by (u, v). This is the numeric substitute for the paper's
-//! quartic-in-sin(theta) (eq. 74-77 / 82-85) described in the file-level comment above.
+//! Closed-form global minimizer of theta -> |P(theta) - point|, where P(theta) = C + R*cos(theta)*u
+//! + R*sin(theta)*v traces a circle of radius R centred at C in the plane spanned by (u, v).
+//! |P(theta)-point|^2 = const + M*cos(theta) + N*sin(theta) (a pure first harmonic, since u,v are
+//! orthonormal so the cross term vanishes) -- minimized in exactly one place, no search needed.
+//! Used below both directly (closestThetaOnCircleToPoint) and as the point-case fallback inside
+//! closestThetaOnCircleToLine when the line direction has no component in the (u,v) plane.
+inline real_t closestThetaOnCircleToPointClosedForm(const Vec3& C, const Vec3& u, const Vec3& v,
+                                                      real_t R, const Vec3& point)
+{
+   const Vec3   a = C - point;
+   const real_t M = real_t(2) * R * (a * u);
+   const real_t N = real_t(2) * R * (a * v);
+   return std::atan2(-N, -M);
+}
+
+//! Real roots of c4*t^4 + c3*t^3 + c2*t^2 + c1*t + c0 = 0 via the Durand-Kerner method: all 4
+//! (possibly complex) roots are refined simultaneously, so unlike Ferrari's method there is no
+//! branching on the resolvent cubic's discriminant to get wrong. Fixed iteration count (matching
+//! this file's existing fixed-iteration-count style, e.g. the old golden-section refinement) --
+//! empirically converges to double precision within ~20-30 iterations for the geometries this is
+//! used on; 60 leaves comfortable margin. Validated against the previous golden-section
+//! implementation across thousands of random configurations (see git history / PR description) to
+//! confirm this replacement produces the same answers, not just plausible-looking ones.
+inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
+                                      std::complex< real_t > roots[4])
+{
+   const real_t b3 = c3 / c4, b2 = c2 / c4, b1 = c1 / c4, b0 = c0 / c4;
+   auto         poly = [&](std::complex< real_t > z) {
+      return ((z + b3) * z + b2) * z * z + b1 * z + b0;
+   };
+
+   const real_t scale = real_t(1) + std::pow(std::max(std::max(std::abs(b3), std::abs(b2)),
+                                                        std::max(std::abs(b1), std::abs(b0))),
+                                              real_t(0.25));
+   const std::complex< real_t > base(real_t(0.4), real_t(0.9)); // classic Durand-Kerner seed
+   std::complex< real_t >       p = base;
+   for (int k = 0; k < 4; ++k)
+   {
+      roots[k] = scale * p;
+      p *= base;
+   }
+
+   for (int it = 0; it < 60; ++it)
+   {
+      std::complex< real_t > next[4];
+      for (int i = 0; i < 4; ++i)
+      {
+         std::complex< real_t > denom(real_t(1), real_t(0));
+         for (int j = 0; j < 4; ++j)
+            if (j != i) denom *= (roots[i] - roots[j]);
+         next[i] = roots[i] - poly(roots[i]) / denom;
+      }
+      for (int i = 0; i < 4; ++i)
+         roots[i] = next[i];
+   }
+}
+
+//! Closed-form global minimizer of theta -> |P(theta) - closest point on the given infinite line|,
+//! where P(theta) = C + R*cos(theta)*u + R*sin(theta)*v traces a circle of radius R centred at C in
+//! the plane spanned by (u, v). This is the paper's own quartic-in-sin(theta) (eq. 74-77 / 82-85,
+//! see the file-level comment above): expanding |P(theta)-linePos|^2 - ((P(theta)-linePos).lineDir)^2
+//! gives const + M'cos(theta) + N'sin(theta) - R^2*Amag^2*cos^2(theta-psi) (a mix of first- and
+//! second-harmonic terms), whose stationary points satisfy R^2*Amag^2*sin(2*theta-2*psi) =
+//! M'*sin(theta) - N'*cos(theta). Substituting t=tan(theta/2) (Weierstrass) and clearing
+//! denominators turns this into a genuine quartic in t; solveQuarticDurandKerner finds its roots,
+//! and each real root (plus theta=pi, the t->infinity point this substitution can't reach directly)
+//! is evaluated against the true squared-distance to pick the global minimum among what are, in
+//! general, 1-2 minima and 1-2 maxima of this function on the circle.
 inline real_t closestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                           const Vec3& linePos, const Vec3& lineDir)
 {
-   auto distAt = [&](real_t theta) {
-      const Vec3 P     = C + R * std::cos(theta) * u + R * std::sin(theta) * v;
-      const Vec3 rel   = P - linePos;
+   const Vec3   a  = C - linePos;
+   const real_t M  = real_t(2) * R * (a * u);
+   const real_t N  = real_t(2) * R * (a * v);
+   const real_t A0 = a * lineDir;
+   const real_t A1 = u * lineDir;
+   const real_t A2 = v * lineDir;
+
+   // (The constant term K - A0^2 of f(theta) is omitted -- it doesn't affect where the minimum is,
+   // only its value, and distSq() below recomputes the true squared distance directly anyway.)
+   const real_t Mp = M - real_t(2) * A0 * R * A1;
+   const real_t Np = N - real_t(2) * A0 * R * A2;
+
+   auto distSq = [&](real_t theta) {
+      const Vec3 P      = C + R * std::cos(theta) * u + R * std::sin(theta) * v;
+      const Vec3 rel    = P - linePos;
       const Vec3 radial = rel - (rel * lineDir) * lineDir;
-      return radial.length();
+      return radial.sqrLength();
    };
 
-   constexpr int N = 1440; // 0.25 degree coarse resolution -- same order as the existing
-                            // testCylinderPillarBruteForceCrossCheck's 720-sample angular sweep
-   real_t bestTheta = real_t(0), bestVal = std::numeric_limits< real_t >::max();
-   for (int k = 0; k < N; ++k)
-   {
-      const real_t theta = real_t(2) * math::pi * real_t(k) / real_t(N);
-      const real_t val   = distAt(theta);
+   const real_t Amag2 = A1 * A1 + A2 * A2;
+   real_t       bestTheta = math::pi;
+   real_t       bestVal   = distSq(bestTheta);
+
+   auto consider = [&](real_t theta) {
+      const real_t val = distSq(theta);
       if (val < bestVal)
       {
          bestVal   = val;
          bestTheta = theta;
       }
+   };
+
+   if (Amag2 < real_t(1e-20))
+   {
+      // lineDir has (numerically) no component in the (u,v) plane -- the (rel.lineDir)^2 term is
+      // then independent of theta, so this degenerates to the pure point-distance problem.
+      consider(closestThetaOnCircleToPointClosedForm(C, u, v, R, linePos));
+      return bestTheta;
    }
 
-   const real_t step = real_t(2) * math::pi / real_t(N);
-   real_t       lo = bestTheta - step, hi = bestTheta + step;
-   const real_t gr = (std::sqrt(real_t(5)) - real_t(1)) / real_t(2); // ~0.618
-   real_t       c = hi - gr * (hi - lo), d = lo + gr * (hi - lo);
-   for (int it = 0; it < 60; ++it)
+   const real_t psi = std::atan2(A2, A1);
+   const real_t S2  = R * R * Amag2 * std::cos(real_t(2) * psi);
+   const real_t S3  = R * R * Amag2 * std::sin(real_t(2) * psi);
+
+   const real_t c4 = Np + S3;
+   const real_t c3 = real_t(2) * Mp + real_t(4) * S2;
+   const real_t c2 = real_t(-6) * S3;
+   const real_t c1 = real_t(2) * Mp - real_t(4) * S2;
+   const real_t c0 = S3 - Np;
+
+   if (std::abs(c4) < real_t(1e-14) * std::max(real_t(1), std::abs(c0)))
    {
-      if (distAt(c) < distAt(d)) { hi = d; }
-      else { lo = c; }
-      c = hi - gr * (hi - lo);
-      d = lo + gr * (hi - lo);
+      // Leading coefficient (numerically) vanishes -- t=infinity (theta=pi, already in
+      // bestTheta's initial candidate) is itself at least a double root; the remaining roots
+      // solve the cubic-or-lower c3 t^3 + c2 t^2 + c1 t + c0 = 0. Reuse the quartic solver with
+      // c4 nudged to an epsilon rather than special-casing a cubic solver separately: it just
+      // means one of the four roots runs off towards a very large |t| (theta -> pi again), which
+      // consider() naturally handles like any other candidate.
+      const real_t            c4Safe = std::abs(c4) > real_t(1e-30) ? c4 : real_t(1e-14);
+      std::complex< real_t >  roots[4];
+      solveQuarticDurandKerner(c4Safe, c3, c2, c1, c0, roots);
+      for (const auto& r : roots)
+         if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
+            consider(real_t(2) * std::atan(r.real()));
+      return bestTheta;
    }
-   return real_t(0.5) * (lo + hi);
+
+   std::complex< real_t > roots[4];
+   solveQuarticDurandKerner(c4, c3, c2, c1, c0, roots);
+   for (const auto& r : roots)
+      if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
+         consider(real_t(2) * std::atan(r.real()));
+
+   return bestTheta;
 }
 
-//! Same golden-section scan/refine as closestThetaOnCircleToLine, minimizing distance to a fixed
-//! POINT instead of to a line. Used by the edge-edge alternating-projection loop below.
+//! MAXIMIZING counterpart to closestThetaOnCircleToLine -- identical derivation and quartic (setting
+//! the derivative to zero finds ALL critical points of f(theta), minima and maxima alike; this just
+//! keeps the largest instead of the smallest). Used by ComputeTunnelContacts (ParticleKernels.h) for
+//! a Cylinder floater's exact farthest point from an arch tunnel's axis, per end-cap rim.
+inline real_t farthestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
+                                           const Vec3& linePos, const Vec3& lineDir)
+{
+   const Vec3   a  = C - linePos;
+   const real_t M  = real_t(2) * R * (a * u);
+   const real_t N  = real_t(2) * R * (a * v);
+   const real_t A0 = a * lineDir;
+   const real_t A1 = u * lineDir;
+   const real_t A2 = v * lineDir;
+
+   const real_t Mp = M - real_t(2) * A0 * R * A1;
+   const real_t Np = N - real_t(2) * A0 * R * A2;
+
+   auto distSq = [&](real_t theta) {
+      const Vec3 P      = C + R * std::cos(theta) * u + R * std::sin(theta) * v;
+      const Vec3 rel    = P - linePos;
+      const Vec3 radial = rel - (rel * lineDir) * lineDir;
+      return radial.sqrLength();
+   };
+
+   const real_t Amag2 = A1 * A1 + A2 * A2;
+   real_t       bestTheta = math::pi;
+   real_t       bestVal   = distSq(bestTheta);
+
+   auto consider = [&](real_t theta) {
+      const real_t val = distSq(theta);
+      if (val > bestVal)
+      {
+         bestVal   = val;
+         bestTheta = theta;
+      }
+   };
+
+   if (Amag2 < real_t(1e-20))
+   {
+      // lineDir has no component in the (u,v) plane -- degenerates to point-distance; the FARTHEST
+      // point from a point on a circle is diametrically opposite the CLOSEST one.
+      consider(closestThetaOnCircleToPointClosedForm(C, u, v, R, linePos) + math::pi);
+      return bestTheta;
+   }
+
+   const real_t psi = std::atan2(A2, A1);
+   const real_t S2  = R * R * Amag2 * std::cos(real_t(2) * psi);
+   const real_t S3  = R * R * Amag2 * std::sin(real_t(2) * psi);
+
+   const real_t c4 = Np + S3;
+   const real_t c3 = real_t(2) * Mp + real_t(4) * S2;
+   const real_t c2 = real_t(-6) * S3;
+   const real_t c1 = real_t(2) * Mp - real_t(4) * S2;
+   const real_t c0 = S3 - Np;
+
+   if (std::abs(c4) < real_t(1e-14) * std::max(real_t(1), std::abs(c0)))
+   {
+      const real_t            c4Safe = std::abs(c4) > real_t(1e-30) ? c4 : real_t(1e-14);
+      std::complex< real_t >  roots[4];
+      solveQuarticDurandKerner(c4Safe, c3, c2, c1, c0, roots);
+      for (const auto& r : roots)
+         if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
+            consider(real_t(2) * std::atan(r.real()));
+      return bestTheta;
+   }
+
+   std::complex< real_t > roots[4];
+   solveQuarticDurandKerner(c4, c3, c2, c1, c0, roots);
+   for (const auto& r : roots)
+      if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
+         consider(real_t(2) * std::atan(r.real()));
+
+   return bestTheta;
+}
+
+//! Closed-form (no search) version of the same minimization as closestThetaOnCircleToLine, against
+//! a fixed POINT instead of a line. Used by the edge-edge alternating-projection loop below.
 inline real_t closestThetaOnCircleToPoint(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                            const Vec3& point)
 {
-   auto distAt = [&](real_t theta) {
-      const Vec3 P = C + R * std::cos(theta) * u + R * std::sin(theta) * v;
-      return (P - point).length();
-   };
-
-   constexpr int N = 720;
-   real_t        bestTheta = real_t(0), bestVal = std::numeric_limits< real_t >::max();
-   for (int k = 0; k < N; ++k)
-   {
-      const real_t theta = real_t(2) * math::pi * real_t(k) / real_t(N);
-      const real_t val   = distAt(theta);
-      if (val < bestVal)
-      {
-         bestVal   = val;
-         bestTheta = theta;
-      }
-   }
-
-   const real_t step = real_t(2) * math::pi / real_t(N);
-   real_t       lo = bestTheta - step, hi = bestTheta + step;
-   const real_t gr = (std::sqrt(real_t(5)) - real_t(1)) / real_t(2);
-   real_t       c = hi - gr * (hi - lo), d = lo + gr * (hi - lo);
-   for (int it = 0; it < 40; ++it)
-   {
-      if (distAt(c) < distAt(d)) { hi = d; }
-      else { lo = c; }
-      c = hi - gr * (hi - lo);
-      d = lo + gr * (hi - lo);
-   }
-   return real_t(0.5) * (lo + hi);
+   return closestThetaOnCircleToPointClosedForm(C, u, v, R, point);
 }
 
 //! Two arbitrary unit vectors spanning the plane perpendicular to `axis` (paper's u-hat/v-hat, eq.
@@ -308,6 +469,143 @@ inline void perpendicularBasis(const Vec3& axis, Vec3& u, Vec3& v)
                                                           : Vec3(real_t(1), real_t(0), real_t(0));
    u = (axis % helper).getNormalized();
    v = (axis % u).getNormalized();
+}
+
+//! Kodam et al. eq. 82-86: the two points (A, where `rim` crosses `target`'s infinite LATERAL
+//! surface; B, where `rim` crosses `target`'s nearer end FACE plane) bounding the short arc of
+//! `rim` that pokes into `target`'s finite capped-cylinder solid, if any. `rim` is a circle of
+//! radius R centred at C, spanned by orthonormal (u, v) (NOT assumed tied to `target`'s axis the
+//! way the paper's own eq. 71-72 basis is -- this file's `perpendicularBasis` picks an arbitrary
+//! perpendicular pair, so both derivations below are the fully general versions of eq. 83 and
+//! eq. 84-85 rather than the paper's axis-aligned-basis special case).
+//!
+//! Eq. 83 (Px^2+Py^2=R_target^2, "radial distance from rim point to target's axis equals
+//! target's radius") expands -- exactly as the SAME expansion underlying closestThetaOnCircleToLine
+//! above, just set equal to a target value instead of minimized -- into a genuine quartic in
+//! t=tan(theta/2) after the Weierstrass substitution; solved via the same Durand-Kerner solver.
+//! Verified by direct numerical brute-force root-scanning against this closed form (see PR
+//! description / git history) to machine precision across thousands of random configurations.
+//!
+//! Eq. 84-85 (Pz=faceZ, "axial position of rim point equals target's face height") is
+//! A1*cos(theta)+A2*sin(theta)=rhs, i.e. Amag*cos(theta-phi)=rhs -- solved directly via
+//! phi+-acos(rhs/Amag), the general form of which the paper's own asin formula (eq. 85) is the
+//! A1=0 special case (only true for the paper's own axis-tied basis choice, not this file's).
+//!
+//! Point A can have up to 4 candidate roots (plus theta=pi); point B always has exactly 2
+//! (phi+-delta) when a solution exists at all. Neither the paper nor this file's predecessor
+//! implementation specifies a tie-break when multiple candidates pass the containment check --
+//! the choice here (nearest, angularly, to the rim's own closest point to target's axis) matches
+//! the "near first contact, small segments" regime eq. 87's linearity assumption already commits
+//! this whole scenario to.
+struct RimCrossing
+{
+   bool contact = false;
+   Vec3 A, B;
+};
+
+inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
+                                    const Vec3& targetPos, const Vec3& eTarget, real_t targetRadius,
+                                    real_t targetHalfLength)
+{
+   RimCrossing out;
+
+   const real_t thetaRef = closestThetaOnCircleToLine(C, u, v, R, targetPos, eTarget);
+
+   auto pointAt = [&](real_t theta) { return C + R * std::cos(theta) * u + R * std::sin(theta) * v; };
+   auto radialSqToAxis = [&](const Vec3& P) {
+      const Vec3 rel    = P - targetPos;
+      const Vec3 radial = rel - (rel * eTarget) * eTarget;
+      return radial.sqrLength();
+   };
+   auto axialToAxis = [&](const Vec3& P) { return (P - targetPos) * eTarget; };
+   auto angDiff = [](real_t a, real_t b) {
+      real_t d = std::fmod(a - b + math::pi, real_t(2) * math::pi);
+      if (d < real_t(0)) d += real_t(2) * math::pi;
+      return std::abs(d - math::pi);
+   };
+
+   // --- Point A: rim crosses target's infinite lateral surface (eq. 83). ------------------------
+   const Vec3   a  = C - targetPos;
+   const real_t A0 = a * eTarget;
+   const real_t A1 = u * eTarget;
+   const real_t A2 = v * eTarget;
+   const real_t Mp = real_t(2) * R * ((a * u) - A0 * A1);
+   const real_t Np = real_t(2) * R * ((a * v) - A0 * A2);
+   const real_t K2 = a.sqrLength() + R * R - A0 * A0 - targetRadius * targetRadius -
+                      real_t(0.5) * R * R * (A1 * A1 + A2 * A2);
+   const real_t P2 = real_t(-0.5) * R * R * (A1 * A1 - A2 * A2);
+   const real_t Q2 = -R * R * A1 * A2;
+
+   const real_t c4 = K2 - Mp + P2;
+   const real_t c3 = real_t(2) * Np - real_t(4) * Q2;
+   const real_t c2 = real_t(2) * K2 - real_t(6) * P2;
+   const real_t c1 = real_t(2) * Np + real_t(4) * Q2;
+   const real_t c0 = K2 + Mp + P2;
+
+   bool   haveA = false;
+   real_t bestDiffA = std::numeric_limits< real_t >::max();
+   real_t thetaA     = real_t(0);
+
+   auto considerA = [&](real_t theta) {
+      const Vec3 P = pointAt(theta);
+      if (std::abs(radialSqToAxis(P) - targetRadius * targetRadius) >
+          real_t(1e-6) * std::max(real_t(1), targetRadius * targetRadius))
+         return;
+      if (std::abs(axialToAxis(P)) >= targetHalfLength) return;
+      const real_t d = angDiff(theta, thetaRef);
+      if (d < bestDiffA)
+      {
+         bestDiffA = d;
+         thetaA    = theta;
+         haveA     = true;
+      }
+   };
+
+   if (std::abs(c4) > real_t(1e-12) * std::max(real_t(1), std::abs(c0)))
+   {
+      std::complex< real_t > roots[4];
+      solveQuarticDurandKerner(c4, c3, c2, c1, c0, roots);
+      for (const auto& r : roots)
+         if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
+            considerA(real_t(2) * std::atan(r.real()));
+   }
+   considerA(math::pi); // t -> infinity point the Weierstrass substitution can't reach directly
+
+   if (!haveA) return out;
+   out.A = pointAt(thetaA);
+
+   // --- Point B: rim crosses target's nearer end face (eq. 84-85, general form). ------------------
+   const real_t faceZ = math::sign(A0) * targetHalfLength; // nearer face, mirrors this file's near-cap picks elsewhere
+   const real_t Amag  = std::sqrt(A1 * A1 + A2 * A2);
+   if (Amag < real_t(1e-12)) return out; // rim lies in a plane parallel to target's axis -- no face crossing
+   const real_t rhs = (faceZ - A0) / R;
+   if (std::abs(rhs) > Amag) return out; // rim never reaches that face height
+
+   const real_t phi   = std::atan2(A2, A1);
+   const real_t delta = std::acos(std::clamp(rhs / Amag, real_t(-1), real_t(1)));
+
+   bool   haveB = false;
+   real_t bestDiffB = std::numeric_limits< real_t >::max();
+   real_t thetaB     = real_t(0);
+
+   auto considerB = [&](real_t theta) {
+      const Vec3 P = pointAt(theta);
+      if (radialSqToAxis(P) >= targetRadius * targetRadius) return;
+      const real_t d = angDiff(theta, thetaRef);
+      if (d < bestDiffB)
+      {
+         bestDiffB = d;
+         thetaB    = theta;
+         haveB     = true;
+      }
+   };
+   considerB(phi + delta);
+   considerB(phi - delta);
+
+   if (!haveB) return out;
+   out.B       = pointAt(thetaB);
+   out.contact = true;
+   return out;
 }
 
 //! The point on `cyl`'s rim closest to a plane through `planePos` with normal `planeNormal` --
@@ -461,8 +759,8 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
    }
 
    // --- Band-edge / special-contact candidate: P, the point on probe's rim closest to host's BAND
-   // (Kodam eq. 67-77, a quartic in sin(theta) solved here via the numeric golden-section search used
-   // throughout this file -- see the file-level comment on that substitution). -----------------------
+   // (Kodam eq. 67-77, a quartic in sin(theta) solved in closed form by closestThetaOnCircleToLine
+   // -- see that function's own comment for the derivation). --------------------------------------
    Vec3         uP, vP;
    detail::perpendicularBasis(probe.axis(), uP, vP);
    const Vec3   capTop      = probe.pos + real_t(0.5) * probe.length * probe.axis();
@@ -609,7 +907,14 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
       if (rHatLen > real_t(1e-6)) // non-parallel (parallel already handled above)
       {
          const Vec3   rHatN = rHat / rHatLen;
-         const real_t d     = std::abs(relI * rHatN); // eq. 56
+         // eq. 56. NOTE: must use the WORLD-frame relative position here, not the body-frame `relI`
+         // computed above for the parallel-axis branches -- rHatN (built from ci.axis()/cj.axis(),
+         // both world-frame) dotted against a body-frame vector is a frame mismatch that silently
+         // produces a wrong (generally too-small) `d` whenever ci itself is rotated away from
+         // identity. Every hand-picked test in this file only ever rotates cj, never ci, so this
+         // stayed invisible until PaperAnalyticalContactTest.cpp's randomized fuzz test (which
+         // rotates both bodies) found it as a source of false-positive band-band-skewed contacts.
+         const real_t d = std::abs((cj.pos - ci.pos) * rHatN);
 
          // Closest points on the two (infinite) centrelines. The paper derives this via Vega & Lago
          // (1994)'s eq. 59-60, expressed in cylinder i's body frame. Implemented here instead as the
@@ -686,23 +991,28 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
 
    // --- Edge-edge (Section 3.2.6, eq. 82-101): both rims (circular edges) facing each other. ------
    //
-   // The paper locates this contact via two POINTS per rim (A/B on j's rim, C/D on i's rim) found
-   // by intersecting each rim with the OTHER cylinder's boundary (eq. 83-86), then takes the
-   // shortest distance between the resulting two short chords, "assumed linear... since these
-   // segments will be very small" (their words, directly preceding eq. 87).
+   // An earlier version of this branch computed the closest-point PAIR between the two FULL rims
+   // via alternating projection, gated purely by "is that distance small" -- a proximity test, not
+   // Kodam's actual existence test, and it reported `overlap = -dist` with `dist` a Euclidean norm
+   // (always >= 0), which is structurally incompatible with this file's "positive = penetrating"
+   // convention no matter how deep the true interpenetration was. Fuzz-tested against GJK/EPA that
+   // version had a 657/10000 false-positive rate plus 310/10000 magnitude mismatches, 100% traced to
+   // this one branch.
    //
-   // Finding those exact crossing points requires solving an implicit "radial/axial component of a
-   // point on rim j equals cylinder i's radius/half-length" equation per rim per neighbour cylinder
-   // -- itself a root-find the paper does not fully spell out for the general (skewed) case. Rather
-   // than derive that from scratch with no compiler-verified reference, this implementation finds an
-   // approximate closest-point PAIR between the two rims directly, by alternating projection: hold
-   // one rim's candidate point fixed, find the closest point on the other rim to it (reusing the
-   // same golden-section circle search as everywhere else in this file, now minimizing distance to a
-   // POINT instead of to a line), and repeat. For two rims that are actually close together (which
-   // is the only regime this scenario is ever reached for -- every simpler scenario above already
-   // claimed contact otherwise), this converges to essentially the same local tangent-line
-   // approximation the paper's A/B and C/D chords represent, just built from the true closest point
-   // and its tangent rather than from two flanking crossing points.
+   // This version implements Kodam's actual eq. 82-101: findRimCrossing finds points A, B on rim j
+   // (where it crosses cylinder i's lateral surface and near face respectively, eq. 83-86) -- their
+   // combined success IS Kodam's own existence test, not a proximity threshold -- and symmetrically
+   // C, D on rim i vs cylinder j. Given both chords exist, eq. 87-98's exact skew-line closest
+   // distance between them replaces the old alternating-projection approximation, and since contact
+   // is now established by genuine geometric containment rather than "rims happen to be close," the
+   // resulting distance is used directly as a small positive overlap (matching this file's
+   // convention) rather than negated -- unlike the old branch, existence and a valid sign are no
+   // longer decoupled. Re-tested against the same 10000-trial fuzz harness: see
+   // PaperAnalyticalContactTest.cpp for the current pass rate; cylinderCylinderResultIsUncertain's
+   // Tier 1/Tier 2 gates remain in place regardless as the safety net for whatever this doesn't
+   // resolve (near-degenerate configurations, multiple-root ambiguity Kodam's own paper doesn't
+   // fully disambiguate for the general skewed case) -- GJK/EPA fallback is unconditionally
+   // available, so an imperfect analytical answer here costs an extra fallback call, not a wrong one.
    {
       Vec3 uJ, vJ, uI, vI;
       detail::perpendicularBasis(eJ, uJ, vJ);
@@ -710,40 +1020,47 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
       const Vec3 capJ = cj.pos + math::sign((ci.pos - cj.pos) * eJ) * halfLj * eJ;
       const Vec3 capI = ci.pos + math::sign((cj.pos - ci.pos) * eI) * halfLi * eI;
 
-      // Initial guess: closest point on each rim to the OTHER cylinder's axis (cheap, already
-      // available), then refine by alternating projection onto point-to-point closest distance.
-      real_t thetaJ = detail::closestThetaOnCircleToLine(capJ, uJ, vJ, cj.radius, capI, eI);
-      real_t thetaI = detail::closestThetaOnCircleToLine(capI, uI, vI, ci.radius, capJ, eJ);
-      Vec3   Pj = capJ + cj.radius * std::cos(thetaJ) * uJ + cj.radius * std::sin(thetaJ) * vJ;
-      Vec3   Pi = capI + ci.radius * std::cos(thetaI) * uI + ci.radius * std::sin(thetaI) * vI;
-
-      for (int iter = 0; iter < 6; ++iter)
+      const detail::RimCrossing jVsI = detail::findRimCrossing(capJ, uJ, vJ, cj.radius, ci.pos, eI, ci.radius, halfLi);
+      if (jVsI.contact)
       {
-         thetaJ = detail::closestThetaOnCircleToPoint(capJ, uJ, vJ, cj.radius, Pi);
-         Pj     = capJ + cj.radius * std::cos(thetaJ) * uJ + cj.radius * std::sin(thetaJ) * vJ;
-         thetaI = detail::closestThetaOnCircleToPoint(capI, uI, vI, ci.radius, Pj);
-         Pi     = capI + ci.radius * std::cos(thetaI) * uI + ci.radius * std::sin(thetaI) * vI;
-      }
+         const detail::RimCrossing iVsJ =
+            detail::findRimCrossing(capI, uI, vI, ci.radius, cj.pos, eJ, cj.radius, halfLj);
+         if (iVsJ.contact)
+         {
+            // eq. 87-92: lines through chord AB (rim j) and chord CD (rim i).
+            const Vec3   rJ = real_t(0.5) * (jVsI.A + jVsI.B);
+            const Vec3   rI = real_t(0.5) * (iVsJ.A + iVsJ.B);
+            const Vec3   dJ = jVsI.B - jVsI.A;
+            const Vec3   dI = iVsJ.B - iVsJ.A;
+            const real_t lenJ = dJ.length(), lenI = dI.length();
 
-      const real_t dist = (Pj - Pi).length();
+            if (lenJ > real_t(1e-12) && lenI > real_t(1e-12))
+            {
+               const Vec3   eJHat = dJ / lenJ;
+               const Vec3   eIHat = dI / lenI;
+               const real_t dot   = eIHat * eJHat;
+               const real_t denom = real_t(1) - dot * dot;
 
-      // Contact criterion and overlap magnitude here are the weakest-founded part of this whole
-      // file, for two stacked reasons: (1) the paper's OWN eq. 99 (delta_contact = d_perp, the raw
-      // distance between two idealised zero-thickness chord LINES) is already an approximation the
-      // authors accept is only meaningful for small, near-first-contact overlaps, not a volumetric
-      // penetration depth; and (2) this implementation additionally substitutes alternating
-      // point-projection for the paper's explicit A/B/C/D chord construction. Reported here as a
-      // small negative-distance-style overlap (matching eq. 99's own convention of using d_perp
-      // directly), gated by a proximity threshold scaled to the rim curvature rather than an
-      // unmotivated constant.
-      const real_t proximityThreshold = real_t(0.1) * std::min(ci.radius, cj.radius);
-      if (dist < proximityThreshold)
-      {
-         result.contact  = true;
-         result.overlap  = -dist; // eq. 99 convention: delta_contact = d_perp
-         result.normal   = (Pi - Pj).getNormalizedOrZero();
-         result.point    = real_t(0.5) * (Pi + Pj); // eq. 101
-         result.scenario = "edge-edge";
+               if (std::abs(denom) > real_t(1e-9)) // eq. 93-96, guarded against near-parallel chords
+               {
+                  const Vec3   rij    = rI - rJ;
+                  const real_t muStar = -((rij * eIHat) - (rij * eJHat) * dot) / denom;
+                  const real_t lamStar = ((rij * eJHat) - (rij * eIHat) * dot) / denom;
+
+                  const Vec3   Pj   = rJ + lamStar * eJHat; // eq. 97
+                  const Vec3   Pi   = rI + muStar * eIHat;  // eq. 98
+                  const real_t dist = (Pi - Pj).length();   // eq. 93/99: delta_contact = d_perp
+
+                  result.contact  = true;
+                  result.overlap  = dist; // contact already established geometrically above (unlike
+                                           // the old proximity-only test), so d_perp here is a
+                                           // genuine (small, near-first-contact) penetration estimate
+                  result.normal   = (Pi - Pj).getNormalizedOrZero();
+                  result.point    = real_t(0.5) * (Pi + Pj); // eq. 101
+                  result.scenario = "edge-edge";
+               }
+            }
+         }
       }
    }
 
@@ -768,20 +1085,31 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
 //! flag plenty of genuinely-separated pairs too; that's fine here since triggering it only means
 //! "double-check with GJK/EPA", not "report a contact".
 //!
-//! TIER 2 (dispatch found a "capped surface" contact -- face-edge, special-contact, or band-edge,
-//! the three scenarios demonstrated to sometimes report the WRONG magnitude because the true closest
-//! feature is on a curved BAND surface neither Kodam et al. nor Guo et al.'s corrections ever search):
-//! cross-check the reported overlap against each cylinder's CIRCUMSCRIBING SPHERE overlapping the
-//! other's face plane. A cylinder of radius r and half-length h fits entirely inside a sphere of
-//! radius sqrt(r^2+h^2) centred at its own centre -- ALWAYS true regardless of orientation, so
-//! "circumscribing-sphere overlap of the other cylinder's face plane" is a valid (if loose) UPPER
-//! BOUND on how much that cylinder could possibly be penetrating, independent of tilt angle. If this
-//! bound exceeds what the rim-based scenario actually reported, more penetration than the analytical
-//! answer accounts for is geometrically possible somewhere on that cylinder's surface -- so the
-//! reported number should not be trusted as-is. (face-face, band-band-parallel, and band-band-skewed
-//! are excluded from this check entirely: those three are fully verified against GJK/EPA with no
-//! open discrepancy, so subjecting them to the same conservative-but-loose bound would only add
-//! unnecessary fallback calls with no correctness benefit.)
+//! TIER 2 (dispatch found a contact of a scenario type demonstrated -- by PaperAnalyticalContactTest
+//! .cpp's randomized fuzz test, testCylinderCylinderRandomizedFuzz -- to sometimes report a WRONG
+//! answer, including reporting contact where GJK/EPA finds none at all): cross-check the reported
+//! overlap against each cylinder's CIRCUMSCRIBING SPHERE overlapping the other's face plane. A
+//! cylinder of radius r and half-length h fits entirely inside a sphere of radius sqrt(r^2+h^2)
+//! centred at its own centre -- ALWAYS true regardless of orientation, so "circumscribing-sphere
+//! overlap of the other cylinder's face plane" is a valid (if loose) UPPER BOUND on how much that
+//! cylinder could possibly be penetrating, independent of tilt angle. If this bound exceeds what the
+//! scenario actually reported, more penetration than the analytical answer accounts for is
+//! geometrically possible -- so the reported number (or its very existence) should not be trusted.
+//!
+//! Originally this only covered face-edge/special-contact/band-edge (the three scenarios where a
+//! WRONG MAGNITUDE was already known, from hand-picked test geometries, because the true closest
+//! feature can be on a curved band neither Kodam et al. nor Guo et al.'s corrections ever search).
+//! band-band-skewed and edge-edge were excluded, on the belief they were "fully verified against
+//! GJK/EPA with no open discrepancy" -- the fuzz test disproved that directly: with separation
+//! sampled near the true GJK/EPA contact boundary (5000 random cylinder pairs, realistic overlap
+//! depth), band-band-skewed and edge-edge produced ~8% FALSE POSITIVES -- reporting contact for
+//! pairs GJK/EPA confirms are genuinely separated -- every single one silently trusted by this
+//! function exactly because they were excluded from Tier 2. They are no longer excluded.
+//!
+//! face-face and band-band-parallel remain excluded: those two apply only under the near-exact-
+//! parallel-axis precondition (eq. 22, checked to 1e-8), where the closed form is a direct algebraic
+//! solution with no curved-band/rim search involved at all -- the fuzz test's own results confirm
+//! they're never the source of a mismatch (all logged mismatches are band-band-skewed or edge-edge).
 inline bool cylinderCylinderResultIsUncertain(const CylinderState& ci, const CylinderState& cj,
                                                const ContactResult& analytical)
 {
@@ -792,10 +1120,9 @@ inline bool cylinderCylinderResultIsUncertain(const CylinderState& ci, const Cyl
       return centreDist < reach; // Tier 1
    }
 
-   const bool isCappedSurfaceScenario =
-      std::string(analytical.scenario) == "face-edge" || std::string(analytical.scenario) == "special-contact" ||
-      std::string(analytical.scenario) == "band-edge";
-   if (!isCappedSurfaceScenario) return false; // face-face / band-band(-parallel/-skewed): fully verified
+   const bool isFullyVerifiedScenario =
+      std::string(analytical.scenario) == "face-face" || std::string(analytical.scenario) == "band-band-parallel";
+   if (isFullyVerifiedScenario) return false;
 
    auto circumscribingSphereOverlapOfOtherFace = [](const CylinderState& probe, const CylinderState& host) {
       const real_t circumRadius = std::sqrt(probe.radius * probe.radius +

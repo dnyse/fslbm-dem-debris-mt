@@ -42,6 +42,7 @@
 #include "stencil/Directions.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace walberla {
 namespace lbm_mesapd_coupling {
@@ -168,6 +169,7 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
    WALBERLA_ASSERT_UNEQUAL( particleField_->get(nx,ny,nz), ac_->getInvalidUid(), "UID of particle is invalid!" );
 
    real_t pdf_old = pdfField_->get( x, y, z, Stencil_T::idx[dir] );
+   const real_t pdf_old_raw = pdf_old; // pre-hydrostatic-subtraction value, kept only for [NAN-LINK] logging below
 
    // Dry-link guard for free-surface coupling: a cell on the fluid side of this obstacle link may be
    // a GAS cell (e.g. at the waterline of a floating particle), which carries no valid PDF — its value
@@ -217,15 +219,46 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
    auto particleIdx = ac_->uidToIdx(particleField_->get( nx, ny, nz ));
    WALBERLA_ASSERT_UNEQUAL( particleIdx, ac_->getInvalidIdx(), "Index of particle is invalid!" );
 
+   // Stale-mapping guard, same reasoning as the dry-link guard above: particleField_'s UID -> idx
+   // lookup can go stale (the owning particle's storage slot was reused, migrated, or removed
+   // without this cell's obstacle-ownership entry being refreshed yet) between when a cell was last
+   // mapped as this particle's obstacle and when this sweep actually runs. The WALBERLA_ASSERT above
+   // only catches this in a Debug build -- in Release/RelWithDebInfo (i.e. every production run, and
+   // the previous ASan run that WAS built RelWithDebInfo) it's compiled out, so an invalid index
+   // silently proceeded into getVelocityAtWFPoint() below, reading position/velocity through a
+   // garbage index -- an AddressSanitizer-confirmed heap-buffer-overflow (8 bytes before a
+   // ParticleStorage-backed vector's allocation), consistent with this project's own history of
+   // heap-corruption / invalid-quaternion crashes whose symptom varied run to run depending on what
+   // happened to occupy the over-read memory. Treated the same as the dry-link case: this specific
+   // obstacle link contributes no momentum exchange this sub-step rather than reading garbage.
+   if( particleIdx == ac_->getInvalidIdx() ) {
+      static uint_t staleParticleIdxLogCount = uint_t(0);
+      if( staleParticleIdxLogCount < uint_t(30) ) {
+         WALBERLA_LOG_WARNING("[STALE-PARTICLE-IDX] cell (" << nx << "," << ny << "," << nz
+            << ") is flagged as owned by particle uid=" << particleField_->get(nx,ny,nz)
+            << ", but that uid no longer maps to a valid local particle index -- skipping this "
+               "obstacle link's momentum exchange instead of reading through an invalid index.");
+         ++staleParticleIdxLogCount;
+      }
+      return;
+   }
+
    // assumed boundary position
    const Vector3<real_t> boundaryPosition( cellCenter + delta * direction );
 
    auto boundaryVelocity = mesa_pd::getVelocityAtWFPoint(particleIdx, *ac_, boundaryPosition );
 
    // include effect of boundary velocity
+   // Hoisted out of the compressible branch (was block-scoped to the `if` below) so [NAN-LINK] logging
+   // further down can report it -- this is the near-boundary cell's FULL 27-PDF density (same quantity
+   // ReconstructInterfaceCellABB.h's [LOW-RHO] guard checks), not just the single pdf_old already
+   // finite-checked above. If OTHER PDF components at this cell have gone non-finite while pdf_old
+   // (this one link's direction) is still finite, this density read silently carries that corruption
+   // into pdf_new/forceMEM/force below without ever tripping the dry-link guard above.
+   real_t density = std::numeric_limits< real_t >::quiet_NaN(); // stays NaN (marker for "n/a") on the incompressible path
    if( LatticeModel_T::compressible )
    {
-       const auto density  = pdfField_->getDensity(x,y,z);
+       density  = pdfField_->getDensity(x,y,z);
        pdf_new -= real_c(3.0) * alpha * density * LatticeModel_T::w[ Stencil_T::idx[dir] ] *
                      ( real_c( stencil::cx[ dir ] ) * boundaryVelocity[0] +
                        real_c( stencil::cy[ dir ] ) * boundaryVelocity[1] +
@@ -283,6 +316,31 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
    Vector3<real_t> force( real_c( stencil::cx[dir] ) * forceMEM - correction * boundaryVelocity[0],
                           real_c( stencil::cy[dir] ) * forceMEM - correction * boundaryVelocity[1],
                           real_c( stencil::cz[dir] ) * forceMEM - correction * boundaryVelocity[2] );
+
+   // TEMP DIAGNOSTIC (remove after investigation): dumps every intermediate quantity that feeds into
+   // this link's contribution to the particle's hydrodynamic force, the first time that contribution
+   // comes out non-finite despite pdf_old (this link's own PDF) having passed the dry-link finite-check
+   // above. This is the gap that check leaves open: pdf_old is only ONE of 27 populations at cell
+   // (x,y,z); `density` (used above, compressible path) is getDensity(x,y,z) -- the SUM of all 27 --
+   // so another direction's PDF can be corrupted (a [LOW-RHO] cell) while this link's own pdf_old is
+   // still perfectly finite, silently carrying the corruption through pdf_new/forceMEM/correction into
+   // `force` here without ever tripping [DRY-LINK]. Throttled to the first 50 hits per rank.
+   if( !(std::isfinite(force[0]) && std::isfinite(force[1]) && std::isfinite(force[2])) )
+   {
+      static uint_t nanLinkLogCount = uint_t(0);
+      if( nanLinkLogCount < uint_t(50) )
+      {
+         WALBERLA_LOG_WARNING("[NAN-LINK] non-finite force on particle uid="
+            << ac_->getUid(particleIdx) << " from link cell (" << x << "," << y << "," << z
+            << ") -> obstacle cell (" << nx << "," << ny << "," << nz << ") dir=" << uint_t(dir)
+            << "  pdf_old_raw=" << pdf_old_raw << " pdf_old(post-hydrostatic)=" << pdf_old
+            << " density=" << density << " boundaryVelocity=" << boundaryVelocity
+            << " pdf_new=" << pdf_new << " forceMEM=" << forceMEM << " correction=" << correction
+            << " force(pre-fill-weight,pre-scale)=" << force
+            << " forceScalingFactor=" << forceScalingFactor_);
+         ++nanLinkLogCount;
+      }
+   }
 
    // Three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9). The bounce-back force above (Eq. 5.6)
    // treats the near-boundary cell as full liquid (ρ≈1) regardless of its actual fill — but at a floating

@@ -46,6 +46,11 @@ namespace free_surface
  * Add VTK output to time loop that includes all relevant free surface information. It must be configured via
  * config-file.
  **********************************************************************************************************************/
+// denseStepPtr/denseFromStep/denseToStep: optional windowed-execution gate for a VTK output block
+// named "fluid_field_dense" (if the prm's "VTK" block defines one -- see VTKParams::denseEnabled's
+// own doc comment). denseStepPtr left null (the default) disables gating entirely -- every other
+// discovered block (including "fluid_field" itself) always fires on its own writeFrequency,
+// unaffected, exactly as before this parameter was added.
 template< typename LatticeModel_T, typename FreeSurfaceBoundaryHandling_T, typename PdfField_T, typename FlagField_T,
           typename ScalarField_T, typename VectorField_T, bool useCodegen = false,
           typename VectorFieldFlattened_T = GhostLayerField< real_t, 3 > >
@@ -54,7 +59,9 @@ void addVTKOutput(const std::weak_ptr< StructuredBlockForest >& blockForestPtr, 
                   const typename FreeSurfaceBoundaryHandling_T::FlagInfo_T& flagInfo, const BlockDataID& pdfFieldID,
                   const BlockDataID& flagFieldID, const BlockDataID& fillFieldID,
                   const BlockDataID& forceDensityFieldID, const BlockDataID& curvatureFieldID,
-                  const BlockDataID& normalFieldID, const BlockDataID& obstacleNormalFieldID)
+                  const BlockDataID& normalFieldID, const BlockDataID& obstacleNormalFieldID,
+                  const std::shared_ptr< const uint_t >& denseStepPtr = nullptr, uint_t denseFromStep = uint_t(0),
+                  uint_t denseToStep = uint_t(0))
 {
    using value_type       = typename FlagField_T::value_type;
    const auto blockForest = blockForestPtr.lock();
@@ -209,7 +216,24 @@ void addVTKOutput(const std::weak_ptr< StructuredBlockForest >& blockForestPtr, 
    vtk::initializeVTKOutput(vtkOutputFunctions, vtkConfigFunc, blockForest, config);
    for (auto const &[label, function] : vtkOutputFunctions)
    {
-      timeloop.addFuncBeforeTimeStep(function, std::string("VTK: ") + label);
+      // "fluid_field_dense" (see this function's own doc comment) gets its own writeFrequency from
+      // the prm as usual, but its actual invocation is ADDITIONALLY gated to [denseFromStep,
+      // denseToStep) here -- outside that window the wrapped lambda never calls the real write
+      // function at all, so its own internal execution counter simply doesn't advance while
+      // skipped (harmless: it only ever runs within this one contiguous window).
+      if (label == "fluid_field_dense" && denseStepPtr)
+      {
+         timeloop.addFuncBeforeTimeStep(
+            [function, denseStepPtr, denseFromStep, denseToStep]() {
+               const uint_t step = *denseStepPtr;
+               if (step >= denseFromStep && step < denseToStep) function();
+            },
+            std::string("VTK: ") + label);
+      }
+      else
+      {
+         timeloop.addFuncBeforeTimeStep(function, std::string("VTK: ") + label);
+      }
    }
 }
 
