@@ -751,6 +751,15 @@ struct ModelParams {
    // setUidFilter()) -- has no effect on which floaters actually get released/settle, only on logging.
    uint_t      logFloaterHistoryReleaseStepFilter;
 
+   // 0 (DEFAULT) -> logFloaterHistory writes from step 0, as before. Nonzero -> both log() (per-
+   // contact) and logState() (per-floater world-state) skip every row until mainStep reaches this
+   // value, same zero-cost-when-disabled spirit as logFloaterHistoryReleaseStepFilter above but
+   // scoping by TIME instead of by floater identity. For a targeted rerun of a crash whose approximate
+   // step is already known (e.g. from a prior run's own [LOW-RHO]/[MIGRATION-NAN] step number), this
+   // lets logFloaterHistory run at full (unfiltered-by-UID) resolution for just the steps that matter
+   // instead of paying its per-subcycle cost for the entire run up to that point.
+   uint_t      logFloaterHistoryStartStep;
+
    // Diagnostic for the "how did water get up there" question: a job 4132582 [LOW-RHO] crash was
    // traced (VTK velocity field, decoded directly) to a region that was completely dry gas 592 steps
    // before the corruption appeared, with no floater anywhere nearby -- meaning some cell above the
@@ -804,6 +813,7 @@ struct ModelParams {
       , logFloaterHistory           { b.getParameter< bool >       ("logFloaterHistory", false) }
       , floaterHistoryBaseFolder    { b.getParameter< std::string >("floaterHistoryBaseFolder", "floater-history") }
       , logFloaterHistoryReleaseStepFilter{ b.getParameter< uint_t >("logFloaterHistoryReleaseStepFilter", uint_t(0)) }
+      , logFloaterHistoryStartStep   { b.getParameter< uint_t >     ("logFloaterHistoryStartStep", uint_t(0)) }
       , highAltitudeWaterScanEnabled { b.getParameter< bool >       ("highAltitudeWaterScanEnabled", false) }
       , highAltitudeWaterThresholdZ  { b.getParameter< real_t >     ("highAltitudeWaterThresholdZ", real_t(0)) }
       , useArchTunnelAsMesaPDObject  { b.getParameter< bool >       ("useArchTunnelAsMesaPDObject", false) }

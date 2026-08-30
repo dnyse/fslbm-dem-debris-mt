@@ -1228,6 +1228,12 @@ public:
    // all 1000 floaters). Pointer, not owned -- caller (ParticleKernels) keeps the real set alive.
    void setUidFilter(const std::unordered_set< walberla::id_t >* uidFilter) { uidFilter_ = uidFilter; }
 
+   // 0 (default) -> log from step 0, as before. See ModelParams::logFloaterHistoryStartStep's own
+   // comment (SimulationParams.h) for why: a targeted rerun of an already-approximately-located crash
+   // doesn't need (and can't afford, size-wise) full-resolution logging for every step before the
+   // window that actually matters.
+   void setMinStep(uint_t minStep) { minStep_ = minStep; }
+
    // kind: "contact" (ComputeContacts) or "lubrication" (ComputeLubrication). detectionPath describes
    // which algorithm actually produced this row: for Box-Box / Cylinder-Cylinder pairs (the only two
    // gated by ModelParameters.useAnalyticalContactDetection) this is the string recorded by
@@ -1244,7 +1250,7 @@ public:
             real_t penetrationDepth, const mesa_pd::Vec3& forceOnA, const mesa_pd::Vec3& forceOnB,
             const std::string& detectionPath)
    {
-      if (!enabled_) return;
+      if (!enabled_ || mainStep < minStep_) return;
       if (uidFilter_ && !uidFilter_->count(ac.getUid(idx1)) && !uidFilter_->count(ac.getUid(idx2))) return;
       using namespace mesa_pd::data::particle_flags;
       file_ << mainStep << ',' << subCycle << ',' << kind << ',' << mpi::MPIManager::instance()->rank() << ','
@@ -1278,7 +1284,7 @@ public:
    template< typename ParticleAccessor_T >
    void logState(uint_t mainStep, uint_t subCycle, const ParticleAccessor_T& ac, size_t idx, real_t fluidDensity)
    {
-      if (!enabled_) return;
+      if (!enabled_ || mainStep < minStep_) return;
       if (uidFilter_ && !uidFilter_->count(ac.getUid(idx))) return;
       using namespace mesa_pd::data::particle_flags;
       const auto& vel         = ac.getLinearVelocity(idx);
@@ -1317,7 +1323,7 @@ public:
       size_t tunnelIndex, const mesa_pd::Vec3& contactPoint, const mesa_pd::Vec3& normal,
       real_t penetrationDepth, const mesa_pd::Vec3& forceOnFloater)
    {
-      if (!enabled_) return;
+      if (!enabled_ || mainStep < minStep_) return;
       if (uidFilter_ && !uidFilter_->count(ac.getUid(idx))) return;
       using namespace mesa_pd::data::particle_flags;
       file_ << mainStep << ',' << subCycle << ',' << "tunnel" << ',' << mpi::MPIManager::instance()->rank() << ','
@@ -1340,6 +1346,7 @@ private:
    std::ofstream file_;
    std::ofstream stateFile_;
    const std::unordered_set< walberla::id_t >* uidFilter_ = nullptr;
+   uint_t minStep_ = uint_t(0);
 };
 
 
@@ -2737,12 +2744,16 @@ public:
       // pair is actually computed. Directory itself is created root-only, once, in Antidunes.cpp,
       // before this constructor runs.
       floaterHistoryLogger_.init(simParams->model.floaterHistoryBaseFolder, simParams->model.logFloaterHistory);
+      floaterHistoryLogger_.setMinStep(simParams->model.logFloaterHistoryStartStep);
       computeContacts.setHistoryLogger(&floaterHistoryLogger_);
       computeLubrication.setHistoryLogger(&floaterHistoryLogger_);
       if (computeTunnelContacts_) computeTunnelContacts_->setHistoryLogger(&floaterHistoryLogger_);
       if (simParams->model.logFloaterHistory)
          WALBERLA_LOG_INFO_ON_ROOT("[FloaterHistoryLogger] enabled -- per-rank CSVs under \""
-            << simParams->model.floaterHistoryBaseFolder << "/\"");
+            << simParams->model.floaterHistoryBaseFolder << "/\""
+            << (simParams->model.logFloaterHistoryStartStep != uint_t(0)
+                   ? (" starting at step " + std::to_string(simParams->model.logFloaterHistoryStartStep))
+                   : std::string()));
 
       // ModelParams::logFloaterHistoryReleaseStepFilter (0 = disabled = log everyone, unchanged):
       // build the UID allowlist from whichever FloatingSphere/Box/Cylinder entries have a matching
