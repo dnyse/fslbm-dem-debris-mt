@@ -240,6 +240,36 @@ inline auto createCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Ve
    return p0;
 }
 
+// Arch tunnel as a REAL mesa_pd body (ModelParams.useArchTunnelAsMesaPDObject -- see that flag's own
+// doc comment): a CylindricalBoundary in CONTAINMENT mode (SolidCylinderContactDetection's new
+// containment overloads, ParticleKernels.h), axially bounded to the tunnel's own [xMin,xMax] span and
+// half-clipped to only the semicircle above its own springing line (a real arch is solid material only
+// from the springing line up to the crown -- see ComputeTunnelContacts' own class comment for the same
+// physical fact, ported here as a general CylindricalBoundary field instead of Antidunes-specific code).
+// Same FIXED/INFINITE/GLOBAL/NON_COMMUNICATING pattern as createCylinder (piers) above -- infinite mass,
+// always a broad-phase candidate, narrow-phase math (axial + half-clip gates) does the real cutoff.
+inline auto createArchTunnel(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center,
+                             real_t radius, real_t xMin, real_t xMax)
+{
+   const real_t axisX = real_t(0.5) * (xMin + xMax);
+   auto p0 = ps.create(true);
+   p0->setPosition(mesa_pd::Vec3(axisX, center[1], center[2]));
+   auto shape = std::make_shared< mesa_pd::data::CylindricalBoundary >(radius, mesa_pd::Vec3(1, 0, 0));
+   shape->setContainment(true);
+   shape->setAxialBounds(xMin - axisX, xMax - axisX);
+   shape->setHalfClipNormal(mesa_pd::Vec3(0, 0, 1)); // solid only at/above the springing line (center[2])
+   p0->setBaseShape(shape);
+   p0->getBaseShapeRef()->updateMassAndInertia(real_t(1));
+   p0->setOwner(walberla::mpi::MPIManager::instance()->rank());
+   p0->setType(2);
+   p0->setInteractionRadius(std::numeric_limits< real_t >::infinity());
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::GLOBAL);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::INFINITE);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::NON_COMMUNICATING);
+   return p0;
+}
+
 inline auto createPlane(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& pos, const mesa_pd::Vec3& normal)
 {
    auto p0 = ps.create(true);

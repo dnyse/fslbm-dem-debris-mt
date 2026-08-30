@@ -236,6 +236,55 @@ void setupSurfaceGeometryFields(const std::shared_ptr< const SimulationParams >&
    simObjs->smoothFillFieldID =     field::addToStorage< ScalarField_T >(bf, "Smooth fill level field", real_c(0), field::fzyx, uint_c(1));
 }
 
+// Creates the deck-fill and haunch solid FixedBox pieces for one arch tunnel (both no-ops when the
+// corresponding ArchSolidBox geometry comes back std::nullopt -- see ArchTunnelParams's own comment,
+// SimulationParams.h, for the exact backward-compatible defaulting rule). Kept separate from the
+// geometry math itself (archDeckFillBoxGeometry/archHaunchBoxGeometry, SimulationParams.h) so that
+// math is unit-testable without a live mesa_pd::data::ParticleStorage.
+void createArchSolidElements(mesa_pd::data::ParticleStorage& ps, const ArchTunnelParams& tunnel)
+{
+   if (const auto deckFill = archDeckFillBoxGeometry(tunnel))
+      createBox(ps, deckFill->center, deckFill->edgeLength);
+
+   if (const auto leftHaunch = archHaunchBoxGeometry(tunnel, ArchHaunchSide::Left))
+      createBox(ps, leftHaunch->center, leftHaunch->edgeLength);
+
+   if (const auto rightHaunch = archHaunchBoxGeometry(tunnel, ArchHaunchSide::Right))
+      createBox(ps, rightHaunch->center, rightHaunch->edgeLength);
+}
+
+// The complete arch block as ONE call: the curved containment wall (createArchTunnel) plus every
+// solid flat piece around it (createArchSolidElements) -- everything §07 of the "Arch Tunnel
+// Containment" writeup describes as reading like one continuous shape, built in one place instead
+// of two calls a caller has to remember to pair up. Equivalent to calling both separately; kept as
+// two underlying particles (the curve is not a box, and mesa_pd has no CSG boolean shape), just
+// created together.
+void createArchBlock(mesa_pd::data::ParticleStorage& ps, const ArchTunnelParams& tunnel)
+{
+   createArchTunnel(ps, tunnel.center, tunnel.radius, tunnel.xMin, tunnel.xMax);
+   createArchSolidElements(ps, tunnel);
+}
+
+// Dimension-based builder: the arch's own footprint as X/Y/Z extents plus a bore radius, rather than
+// requiring the caller to pre-compute xMin/xMax/yMin/yMax/deckTopZ by hand -- see archBlockParams'
+// own comment (SimulationParams.h) for the dims->params conversion and what `base`/xDim/yDim/zDim
+// mean. A prm-driven ArchTunnelParams stays the normal path for the real bridge scenarios
+// (SimulationParams.h parses it directly from the ArchTunnels block); this overload is for callers
+// building geometry in code with no prm block to parse from -- e.g. DEMValidationScenarios.h, or a
+// future hand-authored bridge layout script.
+void createArchBlock(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& base,
+                      real_t xDim, real_t yDim, real_t zDim, real_t radius)
+{
+   WALBERLA_CHECK_GREATER_EQUAL(yDim, real_t(2) * radius,
+      "createArchBlock: yDim (" << yDim << ") must be at least 2*radius (" << real_t(2) * radius
+      << ") for the circular bore to fit inside the block's own width.");
+   WALBERLA_CHECK_GREATER_EQUAL(zDim, radius,
+      "createArchBlock: zDim (" << zDim << ") must be at least radius (" << radius
+      << ") for the block to reach the crown at all.");
+
+   createArchBlock(ps, archBlockParams(base, xDim, yDim, zDim, radius));
+}
+
 void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, const std::shared_ptr< SimulationObjects >& simObjs)
 {
    const auto& bfParams = simParams->blockForest;
@@ -416,6 +465,18 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    for (const auto& pillar : simParams->cylinderPillars)
    {
       createCylinder(*simObjs->particleStorage, pillar.center, pillar.radius);
+   }
+
+   // ModelParams.useArchTunnelAsMesaPDObject (see its own doc comment): when enabled, each arch
+   // tunnel becomes a real, infinite-mass mesa_pd body instead of the one-sided ComputeTunnelContacts
+   // kernel (ParticleKernels.h's ParticleKernels constructor skips constructing that kernel whenever
+   // this flag is set, so the two paths are never both active for the same tunnel).
+   if (simParams->model.useArchTunnelAsMesaPDObject)
+   {
+      for (const auto& tunnel : simParams->archTunnels)
+      {
+         createArchBlock(*simObjs->particleStorage, tunnel);
+      }
    }
 
    // Indexed loop so each sphere's UID is captured at the correct index fi.

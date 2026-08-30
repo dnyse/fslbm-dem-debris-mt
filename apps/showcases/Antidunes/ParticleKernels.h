@@ -69,6 +69,77 @@
 namespace walberla {
 namespace antidunes {
 
+// Shared geometry for CylindricalBoundary CONTAINMENT mode (mesa_pd::data::CylindricalBoundary::
+// isContainment() -- see that shape's own doc comment). Used by every Sphere/Box/Cylinder x
+// CylindricalBoundary overload in SolidCylinderContactDetection below to find a body's own FARTHEST
+// point from the tube's axis (the mirror image of the pillar overloads' CLOSEST-point search), so a
+// body poking outside the tube gets pushed back toward the axis instead of repelled from it.
+namespace containment_detail {
+
+// Farthest point (from a target axis line) on a circle (circleCenter, radius, spanned by
+// orthonormal u/v that are perpendicular to axisDir), restricted to the "solid" half of a plane
+// through clipOrigin with normal clipNormal (zero clipNormal = no restriction, matching
+// CylindricalBoundary::hasHalfClip()==false). Reuses the same closed-form quartic solver
+// (farthestThetaOnCircleToLine) already used for the unrestricted case elsewhere in this codebase,
+// and the same "circle crosses a plane" closed form (amplitude/phase solve) already used for the
+// springing-line-restricted cylinder-rim search that used to live only in ComputeTunnelContacts.
+struct CircleFarthestResult
+{
+   mesa_pd::Vec3 point;
+   real_t        radialDistSq = real_t(0);
+   bool          valid        = false;
+};
+
+inline CircleFarthestResult circleFarthestFromAxisClipped(
+   const mesa_pd::Vec3& circleCenter, const mesa_pd::Vec3& u, const mesa_pd::Vec3& v, real_t circleRadius,
+   const mesa_pd::Vec3& axisPoint, const mesa_pd::Vec3& axisDir,
+   const mesa_pd::Vec3& clipOrigin, const mesa_pd::Vec3& clipNormal)
+{
+   auto pointAt = [&](real_t theta) {
+      return circleCenter + circleRadius * std::cos(theta) * u + circleRadius * std::sin(theta) * v;
+   };
+   auto radialSq = [&](const mesa_pd::Vec3& P) {
+      const mesa_pd::Vec3 rel    = P - axisPoint;
+      const mesa_pd::Vec3 radial = rel - (rel * axisDir) * axisDir;
+      return radial.sqrLength();
+   };
+   const bool hasClip = clipNormal.sqrLength() > real_t(1e-20);
+   auto onSolidSide = [&](const mesa_pd::Vec3& P) {
+      return !hasClip || (P - clipOrigin) * clipNormal >= real_t(0);
+   };
+
+   const real_t thetaBest = paper_analytical::detail::farthestThetaOnCircleToLine(
+      circleCenter, u, v, circleRadius, axisPoint, axisDir);
+   const mesa_pd::Vec3 candidate = pointAt(thetaBest);
+
+   if (!hasClip || onSolidSide(candidate)) return { candidate, radialSq(candidate), true };
+
+   // Unconstrained farthest point is on the wrong side of the clip -- restrict to the (up to two)
+   // points where this circle crosses the clip plane.
+   const real_t A1 = u * clipNormal, A2 = v * clipNormal;
+   const real_t Amag = std::sqrt(A1 * A1 + A2 * A2);
+   if (Amag < real_t(1e-12)) return { candidate, real_t(0), false }; // circle's plane || clip plane, whole circle on the wrong side
+
+   const real_t rhs = ((clipOrigin - circleCenter) * clipNormal) / circleRadius;
+   if (std::abs(rhs) > Amag) return { candidate, real_t(0), false }; // whole circle on the wrong side
+
+   const real_t phi   = std::atan2(A2, A1);
+   const real_t delta = std::acos(std::clamp(rhs / Amag, real_t(-1), real_t(1)));
+   const mesa_pd::Vec3 e1 = pointAt(phi + delta);
+   const mesa_pd::Vec3 e2 = pointAt(phi - delta);
+   const real_t r1 = radialSq(e1), r2 = radialSq(e2);
+   return (r1 > r2) ? CircleFarthestResult{ e1, r1, true } : CircleFarthestResult{ e2, r2, true };
+}
+
+// Axial coordinate of a world point relative to the CylindricalBoundary's own position, i.e. what
+// CylindricalBoundary::getAxialMin()/getAxialMax() are measured against.
+inline real_t axialCoord(const mesa_pd::Vec3& worldPoint, const mesa_pd::Vec3& cbPos, const mesa_pd::Vec3& axis)
+{
+   return (worldPoint - cbPos) * axis;
+}
+
+} // namespace containment_detail
+
 // Subclass that hides the hollow-cylinder overload of AnalyticContactDetection with exterior
 // (solid cylinder) contact math. DoubleCast deduces the concrete functor type, so C++ overload
 // resolution picks this method instead of the base-class version.
@@ -104,6 +175,81 @@ public:
       const auto& posCyl    = ac.getPosition(idx2);
       const auto& axis      = cb.getAxis();
 
+      if (cb.isContainment())
+      {
+         // Same envelope-safety scale as the pillar-exterior overloads' maxOverlap (see that
+         // overload's own comment) -- bounds how much force a single degenerate/runaway overlap can
+         // inject, here for the arch/tunnel containment branch.
+         const real_t maxOverlap = real_t(1.0);
+
+         // Axial (X-along-axis) gate: skip entirely if the sphere's own axial extent doesn't
+         // overlap the tube's bounded span at all (unbounded axialMin/axialMax makes this vacuous,
+         // reproducing the old infinite-tube behaviour).
+         const real_t axialC = containment_detail::axialCoord(posSphere, posCyl, axis);
+         if (axialC + s.getRadius() < cb.getAxialMin() || axialC - s.getRadius() > cb.getAxialMax())
+            return false;
+
+         // Radial pre-gate: mirrors the axial gate above -- needed because multiple tubes can share
+         // the same axial span (e.g. this bridge's 3 arches all span the same X-range). Without this,
+         // a body merely within that SHARED span, but nowhere near THIS tube's own axis, still gets a
+         // huge, spurious overlap computed against it (found directly: job 4141165 logged overlap=
+         // 15.75, 251% of interaction radius, for a box ~26 LU away from the arch it was "contained"
+         // by in Y-Z). dist-effR is a valid lower bound on the body's true minimum distance to the
+         // axis for any shape (its own reach is always an upper bound from its centre) -- the same
+         // bound ComputeTunnelContacts already used for the identical problem.
+         {
+            const mesa_pd::Vec3 relCenter  = posSphere - posCyl;
+            const real_t        distCenter = (relCenter - (relCenter * axis) * axis).length();
+            if (distCenter - s.getRadius() > cb.getRadius()) return false;
+         }
+
+         mesa_pd::Vec3 u, v;
+         paper_analytical::detail::perpendicularBasis(axis, u, v);
+         const auto far = containment_detail::circleFarthestFromAxisClipped(
+            posSphere, u, v, s.getRadius(), posCyl, axis, posCyl, cb.getHalfClipNormal());
+         if (!far.valid) return false; // sphere entirely on the non-solid (clipped-away) side
+
+         real_t farthestRadial = std::sqrt(far.radialDistSq);
+         real_t overlap = farthestRadial - cb.getRadius(); // > 0 -> pokes outside the tube
+         if (overlap <= real_t(0)) return false;           // safely inside
+
+         // SAFETY: same envelope clamp as the pillar-exterior overloads above (see that overload's
+         // own comment, job 4140767 postmortem) -- a body whose farthest point is wildly outside the
+         // tube (already-corrupted state from elsewhere, e.g. a prior runaway contact) must not feed
+         // an unbounded spring force back into the sim. Found necessary directly: job 4141165 logged
+         // a Box x arch [DEM-WATCH] overlap of 15.75 (251% of interaction radius) completely
+         // unclamped through this branch before this fix.
+         const bool envelopClamped = overlap > maxOverlap;
+         if (envelopClamped)
+         {
+            static uint_t archEnvelopLogCount = uint_t(0);
+            if (archEnvelopLogCount < uint_t(20))
+            {
+               WALBERLA_LOG_WARNING("[ARCH-ENVELOP] sphere uid=" << ac.getUid(idx1)
+                  << " deeply overlaps/envelops arch tunnel uid=" << ac.getUid(idx2)
+                  << " (raw overlap=" << overlap << ", farthest-point radial dist=" << farthestRadial
+                  << ") — clamping overlap to " << maxOverlap << ".");
+               ++archEnvelopLogCount;
+            }
+            overlap = maxOverlap;
+            farthestRadial = cb.getRadius() + maxOverlap;
+         }
+
+         const mesa_pd::Vec3 rel     = far.point - posCyl;
+         const mesa_pd::Vec3 outward = rel - (rel * axis) * axis;
+         const real_t        outDist = outward.length();
+         const mesa_pd::Vec3 outHat  = (outDist > real_t(1e-10))
+                                          ? outward / outDist
+                                          : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+
+         getPenetrationDepth() = -overlap;  // pokes outside -> penetrating (this class's convention)
+         getContactNormal()    = -outHat;   // points inward, toward the axis
+         getContactPoint()     = far.point;
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            envelopClamped ? "arch/tunnel containment (Sphere, ENVELOP-clamped)" : "arch/tunnel containment (Sphere)");
+         return true;
+      }
+
       // Radial vector from cylinder axis to sphere center (component perpendicular to axis)
       const mesa_pd::Vec3 delta  = posSphere - posCyl;
       const mesa_pd::Vec3 radial = delta - (delta * axis) * axis;
@@ -118,6 +264,7 @@ public:
                                  ? radial / dist
                                  : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
          getContactPoint() = posSphere - (s.getRadius() + getPenetrationDepth()) * getContactNormal();
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "pillar exterior (Sphere)");
          return true;
       }
       return false;
@@ -244,6 +391,125 @@ public:
 
       const mesa_pd::Vec3 half = bx.getEdgeLength() * real_t(0.5);
 
+      if (cb.isContainment())
+      {
+         const real_t maxOverlap = real_t(1.0); // same envelope-safety scale as the pillar overload
+
+         // Radial pre-gate: needed because multiple tubes can share the same axial span (e.g. this
+         // bridge's 3 arches all span the same X-range) -- without this, a body merely within that
+         // SHARED span, but nowhere near THIS tube's own axis, still gets a huge, spurious overlap
+         // computed against it (found directly: job 4141165 logged overlap=15.75, 251% of
+         // interaction radius, for a box ~26 LU away from the arch it was "contained" by in Y-Z).
+         // Uses the conservative interaction-radius bound (always >= the box's true reach from its
+         // centre), same as ComputeTunnelContacts' own identical gate.
+         {
+            const real_t        effR      = ac.getInteractionRadius(idx1);
+            const auto&         axisCheck = cb.getAxis();
+            const mesa_pd::Vec3 relCenter = c - cylCenter;
+            const real_t distCenter = (relCenter - (relCenter * axisCheck) * axisCheck).length();
+            if (distCenter - effR > cb.getRadius()) return false;
+         }
+
+         // Farthest point from the axis is always a corner: radial-distance-to-a-line is a convex
+         // function of the box's body-frame point, and a convex function maximized over a convex
+         // polytope always attains its max at a vertex -- check all 8, keep the largest (that also
+         // satisfies the half-clip, if any -- e.g. an arch tunnel is only solid above its own
+         // springing line).
+         const auto&   axis = cb.getAxis();
+         const mesa_pd::Vec3& clipN = cb.getHalfClipNormal();
+         real_t        farthestRadialSq = real_t(-1);
+         mesa_pd::Vec3 worstCorner;
+         // Runner-up corner (top-2 tracking, single pass): populated whenever a SECOND corner also
+         // pokes past the tube radius independently of the worst one -- see hasSecondaryContact()'s
+         // own comment for why this matters (an elongated box wedged so two corners breach at once).
+         real_t        secondRadialSq = real_t(-1);
+         mesa_pd::Vec3 secondCorner;
+         real_t        axialLo = std::numeric_limits<real_t>::infinity();
+         real_t        axialHi = -std::numeric_limits<real_t>::infinity();
+         for (real_t sx : { real_t(-1), real_t(1) })
+            for (real_t sy : { real_t(-1), real_t(1) })
+               for (real_t sz : { real_t(-1), real_t(1) })
+               {
+                  const mesa_pd::Vec3 corner = c + R * mesa_pd::Vec3(sx * half[0], sy * half[1], sz * half[2]);
+                  const real_t axialC = containment_detail::axialCoord(corner, cylCenter, axis);
+                  axialLo = std::min(axialLo, axialC);
+                  axialHi = std::max(axialHi, axialC);
+                  if (clipN.sqrLength() > real_t(1e-20) && (corner - cylCenter) * clipN < real_t(0))
+                     continue; // on the non-solid side (e.g. below an arch's springing line)
+                  const mesa_pd::Vec3 rel     = corner - cylCenter;
+                  const mesa_pd::Vec3 radial  = rel - (rel * axis) * axis;
+                  const real_t        radSq   = radial.sqrLength();
+                  if (radSq > farthestRadialSq)
+                  {
+                     secondRadialSq = farthestRadialSq; secondCorner = worstCorner;
+                     farthestRadialSq = radSq; worstCorner = corner;
+                  }
+                  else if (radSq > secondRadialSq)
+                  {
+                     secondRadialSq = radSq; secondCorner = corner;
+                  }
+               }
+         if (axialHi < cb.getAxialMin() || axialLo > cb.getAxialMax()) return false; // outside the tube's span
+         if (farthestRadialSq < real_t(0)) return false; // every corner on the non-solid side
+
+         real_t farthestRadial = std::sqrt(farthestRadialSq);
+         real_t overlap = farthestRadial - cb.getRadius();
+         if (overlap <= real_t(0)) return false; // safely inside
+
+         // SAFETY: same envelope clamp as the pillar-exterior overloads (see that overload's own
+         // comment, job 4140767 postmortem) -- caps how much force a single degenerate/runaway
+         // overlap can inject.
+         const bool envelopClamped = overlap > maxOverlap;
+         if (envelopClamped)
+         {
+            static uint_t archEnvelopLogCount = uint_t(0);
+            if (archEnvelopLogCount < uint_t(20))
+            {
+               WALBERLA_LOG_WARNING("[ARCH-ENVELOP] box uid=" << ac.getUid(idx1)
+                  << " deeply overlaps/envelops arch tunnel uid=" << ac.getUid(idx2)
+                  << " (raw overlap=" << overlap << ", farthest-point radial dist=" << farthestRadial
+                  << ") — clamping overlap to " << maxOverlap << ".");
+               ++archEnvelopLogCount;
+            }
+            overlap = maxOverlap;
+            farthestRadial = cb.getRadius() + maxOverlap;
+         }
+
+         const mesa_pd::Vec3 rel     = worstCorner - cylCenter;
+         const mesa_pd::Vec3 outward = rel - (rel * axis) * axis;
+         const real_t        outDist = outward.length();
+         const mesa_pd::Vec3 outHat  = (outDist > real_t(1e-10))
+                                          ? outward / outDist
+                                          : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+
+         getPenetrationDepth() = -overlap;
+         getContactNormal()    = -outHat; // points inward, toward the axis
+         getContactPoint()     = worstCorner;
+
+         // Secondary contact: see hasSecondaryContact()'s own comment. Only counts if the runner-up
+         // corner ALSO genuinely pokes past the radius on its own (not merely "next largest" -- an
+         // ordinary single-corner contact must not spuriously report a second one).
+         if (secondRadialSq > cb.getRadius() * cb.getRadius())
+         {
+            real_t secondOverlap = std::sqrt(secondRadialSq) - cb.getRadius();
+            if (secondOverlap > maxOverlap) secondOverlap = maxOverlap; // same envelope clamp as the primary
+            const mesa_pd::Vec3 relS     = secondCorner - cylCenter;
+            const mesa_pd::Vec3 outwardS = relS - (relS * axis) * axis;
+            const real_t        outDistS = outwardS.length();
+            const mesa_pd::Vec3 outHatS  = (outDistS > real_t(1e-10))
+                                              ? outwardS / outDistS
+                                              : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+            hasSecondaryContact_       = true;
+            secondaryContactPoint_     = secondCorner;
+            secondaryContactNormal_    = -outHatS;
+            secondaryPenetrationDepth_ = -secondOverlap;
+         }
+
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            envelopClamped ? "arch/tunnel containment (Box, ENVELOP-clamped)" : "arch/tunnel containment (Box)");
+         return true;
+      }
+
       // Cylinder axis as a LINE in the box body frame (cylinder is infinite along its axis).
       mesa_pd::Vec3 d  = Rt * cb.getAxis();
       const real_t  dl = d.length();
@@ -275,9 +541,22 @@ public:
          // near-radius penetration with a degenerate normal, which the spring-dashpot turns into a
          // catastrophic force that blows up the coupled fluid (global NaN). Bound the reported overlap
          // so the contact stays a finite restoring push, and warn so the pathological geometry is visible.
-         const real_t maxOverlap = real_t(1.5);
+         // 1.5 -> 1.0 (job 4140767 postmortem, floater-history CSV): the box-cylinder(pillar) clamp
+         // firing at 1.5 LU for 5 consecutive sub-cycles in a row, simultaneous with an unclamped
+         // box-box collision on the same body, injected forces up to ~500 -- more than enough to
+         // launch the body and corrupt the fluid. An initial attempt at 0.3 LU (~5% of this
+         // scenario's own floater interaction radius, 6.26 LU) turned out to clamp genuinely
+         // NON-degenerate contacts too -- testCylinderPillarContact/testCylinderPillarBruteForceCrossCheck
+         // (ContactDetectionTest.cpp) hand-verify a perfectly ordinary 0.5 LU overlap with a
+         // well-defined normal, no envelope at all, and this file's own [DEM-WATCH] calibration
+         // confirms genuine launch-causing hits reach 0.68-0.77 LU (~7-8%) even under normal physics.
+         // 1.0 LU stays safely above that legitimate range (so ordinary deep contacts are never
+         // clamped) while still cutting the worst-case injected force by a third versus 1.5.
+         const real_t maxOverlap = real_t(1.0);
+         bool envelopClamped = false;
          if (penetrationDepth < -maxOverlap)
          {
+            envelopClamped = true;
             static uint_t envelopLogCount = uint_t(0);
             if (envelopLogCount < uint_t(20))
             {
@@ -296,6 +575,8 @@ public:
                                         : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
          getContactNormal() = R * nBody;     // body → world
          getContactPoint()  = c + R * boxPt; // body → world
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            envelopClamped ? "pillar exterior (Box, ENVELOP-clamped)" : "pillar exterior (Box)");
          return true;
       }
       return false;
@@ -409,6 +690,118 @@ public:
       const real_t rc = cyl.getRadius();
       const real_t hh = cyl.getHeight() * real_t(0.5);
 
+      if (cb.isContainment())
+      {
+         const real_t maxOverlap = real_t(1.0); // same envelope-safety scale as the pillar overload
+
+         // Axial gate: uses the isotropic circumscribing-sphere bound (not the log's exact extent)
+         // -- a conservative over-approximation (interactionRadius >= half-length always), cheap and
+         // never a false negative, matching the level of precision this gate has always used.
+         const auto&   axis  = cb.getAxis();
+         const real_t  effR  = ac.getInteractionRadius(idx1);
+         const real_t  axialC = containment_detail::axialCoord(c, cylCenter, axis);
+         if (axialC + effR < cb.getAxialMin() || axialC - effR > cb.getAxialMax()) return false;
+
+         // Radial pre-gate: mirrors the axial gate above -- needed because multiple tubes can share
+         // the same axial span. Without this, a body merely within that SHARED span, but nowhere
+         // near THIS tube's own axis, still gets a huge, spurious overlap computed against it (see
+         // the Box overload's own comment, job 4141165 postmortem, for the concrete evidence).
+         {
+            const mesa_pd::Vec3 relCenter  = c - cylCenter;
+            const real_t        distCenter = (relCenter - (relCenter * axis) * axis).length();
+            if (distCenter - effR > cb.getRadius()) return false;
+         }
+
+         // A solid cylinder's farthest point from any line is always on one of its two end-cap rims
+         // (squared radial distance is a convex quadratic in the axial rim parameter, so its max over
+         // the finite length is always at an endpoint) -- search each rim's own farthest point (with
+         // the half-clip, if any) and keep whichever rim reaches farther.
+         const mesa_pd::Vec3 logAxis = R * mesa_pd::Vec3(real_t(0), real_t(0), real_t(1));
+         mesa_pd::Vec3 uB, vB;
+         paper_analytical::detail::perpendicularBasis(logAxis, uB, vB);
+
+         real_t        farthestRadialSq = real_t(-1);
+         mesa_pd::Vec3 worstPoint;
+         // The "runner-up" here is simply the OTHER rim, if it also breaches independently -- see
+         // hasSecondaryContact()'s own comment (Box overload above) for why this matters: a log lying
+         // across the tube such that both end caps poke past the radius at once.
+         real_t        secondRadialSq = real_t(-1);
+         mesa_pd::Vec3 secondPoint;
+         for (const real_t sgn : { real_t(-1), real_t(1) })
+         {
+            const mesa_pd::Vec3 rimC = c + sgn * hh * logAxis;
+            const auto far = containment_detail::circleFarthestFromAxisClipped(
+               rimC, uB, vB, rc, cylCenter, axis, cylCenter, cb.getHalfClipNormal());
+            if (!far.valid) continue;
+            if (far.radialDistSq > farthestRadialSq)
+            {
+               secondRadialSq = farthestRadialSq; secondPoint = worstPoint;
+               farthestRadialSq = far.radialDistSq; worstPoint = far.point;
+            }
+            else if (far.radialDistSq > secondRadialSq)
+            {
+               secondRadialSq = far.radialDistSq; secondPoint = far.point;
+            }
+         }
+         if (farthestRadialSq < real_t(0)) return false; // both rims entirely on the non-solid side
+
+         real_t farthestRadial = std::sqrt(farthestRadialSq);
+         real_t overlap = farthestRadial - cb.getRadius();
+         if (overlap <= real_t(0)) return false; // safely inside
+
+         // SAFETY: same envelope clamp as the pillar-exterior overloads (see that overload's own
+         // comment, job 4140767 postmortem).
+         const bool envelopClamped = overlap > maxOverlap;
+         if (envelopClamped)
+         {
+            static uint_t archEnvelopLogCount = uint_t(0);
+            if (archEnvelopLogCount < uint_t(20))
+            {
+               WALBERLA_LOG_WARNING("[ARCH-ENVELOP] cylinder uid=" << ac.getUid(idx1)
+                  << " deeply overlaps/envelops arch tunnel uid=" << ac.getUid(idx2)
+                  << " (raw overlap=" << overlap << ", farthest-point radial dist=" << farthestRadial
+                  << ") — clamping overlap to " << maxOverlap << ".");
+               ++archEnvelopLogCount;
+            }
+            overlap = maxOverlap;
+            farthestRadial = cb.getRadius() + maxOverlap;
+         }
+
+         const mesa_pd::Vec3 rel     = worstPoint - cylCenter;
+         const mesa_pd::Vec3 outward = rel - (rel * axis) * axis;
+         const real_t        outDist = outward.length();
+         const mesa_pd::Vec3 outHat  = (outDist > real_t(1e-10))
+                                          ? outward / outDist
+                                          : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+
+         getPenetrationDepth() = -overlap;
+         getContactNormal()    = -outHat; // points inward, toward the axis
+         getContactPoint()     = worstPoint;
+
+         // Secondary contact: the other rim, if it also genuinely breaches on its own (not merely
+         // "the other candidate" -- an ordinary single-rim contact must not spuriously report a
+         // second one). See hasSecondaryContact()'s own comment.
+         if (secondRadialSq > cb.getRadius() * cb.getRadius())
+         {
+            real_t secondOverlap = std::sqrt(secondRadialSq) - cb.getRadius();
+            if (secondOverlap > maxOverlap) secondOverlap = maxOverlap; // same envelope clamp as the primary
+            const mesa_pd::Vec3 relS     = secondPoint - cylCenter;
+            const mesa_pd::Vec3 outwardS = relS - (relS * axis) * axis;
+            const real_t        outDistS = outwardS.length();
+            const mesa_pd::Vec3 outHatS  = (outDistS > real_t(1e-10))
+                                              ? outwardS / outDistS
+                                              : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+            hasSecondaryContact_       = true;
+            secondaryContactPoint_     = secondPoint;
+            secondaryContactNormal_    = -outHatS;
+            secondaryPenetrationDepth_ = -secondOverlap;
+         }
+
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            envelopClamped ? "arch/tunnel containment (Cylinder, ENVELOP-clamped)" : "arch/tunnel containment (Cylinder)");
+         return true;
+      }
+
       // Pillar axis as a LINE in the log body frame.
       mesa_pd::Vec3 d  = Rt * cb.getAxis();
       const real_t  dl = d.length();
@@ -436,9 +829,13 @@ public:
       {
          // Same envelop safety clamp as Box×CylindricalBoundary: a log enveloping the thin pillar
          // yields a near-radius overlap + degenerate normal → unbounded spring force → fluid NaN.
-         const real_t maxOverlap = real_t(1.5);
+         // 1.5 -> 1.0 -- see the Box×CylindricalBoundary overload's own comment (job 4140767
+         // postmortem) for the rationale, including why 0.3 turned out too aggressive.
+         const real_t maxOverlap = real_t(1.0);
+         bool envelopClamped = false;
          if (penetrationDepth < -maxOverlap)
          {
+            envelopClamped = true;
             static uint_t envelopLogCount = uint_t(0);
             if (envelopLogCount < uint_t(20))
             {
@@ -457,6 +854,8 @@ public:
                                         : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
          getContactNormal() = R * nBody;     // body → world, pillar → log
          getContactPoint()  = c + R * logPt; // body → world
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            envelopClamped ? "pillar exterior (Cylinder, ENVELOP-clamped)" : "pillar exterior (Cylinder)");
          return true;
       }
       return false;
@@ -734,9 +1133,34 @@ public:
    // the closed-form Kodam et al. (2010) + Guo et al. (2012) dispatch as-is ("pure Kodam+Guo").
    bool usePureAnalyticalCylinder = false;
 
+   // Secondary contact point (arch/tunnel containment only, Box/Cylinder floaters): the containment
+   // branches' farthest-point search can find TWO independent points simultaneously poking past the
+   // tube radius at once -- e.g. an elongated floater wedged so both a leading and trailing corner
+   // (or, for a Cylinder, both end-cap rims) breach simultaneously. The base GeneralContactDetection
+   // interface only carries ONE contact point/normal/depth per call, so the worse of the two still
+   // drives the normal return-value path unchanged (full LinearSpringDashpot response, incl. friction
+   // and tangential-spring history, via ComputeContacts as before); the second one is exposed here so
+   // ComputeContacts can give it its own simplified one-sided response (see that call site's own
+   // comment for why it's simplified) instead of silently discarding it, as happened before this.
+   bool hasSecondaryContact() const { return hasSecondaryContact_; }
+   const mesa_pd::Vec3& getSecondaryContactPoint() const { return secondaryContactPoint_; }
+   const mesa_pd::Vec3& getSecondaryContactNormal() const { return secondaryContactNormal_; }
+   real_t getSecondaryPenetrationDepth() const { return secondaryPenetrationDepth_; }
+   // Called once per pair by ComputeContacts before dispatching -- this object is reused across every
+   // pair visited in a sub-cycle (not reconstructed per-pair), so without an explicit reset a stale
+   // hasSecondaryContact_=true from a PREVIOUS pair could leak into a pair whose own branch (or a
+   // branch other than the two containment ones below) never touches these fields at all.
+   void resetSecondaryContact() { hasSecondaryContact_ = false; }
+
 private:
    // Backing storage for recordDetectionPath()/lookupDetectionPath() above.
    std::map<std::pair<walberla::id_t, walberla::id_t>, std::string> pairDetectionPath;
+
+   // Backing storage for the secondary-contact getters above.
+   bool          hasSecondaryContact_       = false;
+   mesa_pd::Vec3 secondaryContactPoint_;
+   mesa_pd::Vec3 secondaryContactNormal_;
+   real_t        secondaryPenetrationDepth_ = real_t(0);
 };
 
 
@@ -1023,6 +1447,7 @@ public:
       // Box-Box (and every other convex pair without an analytic overload) is handled by the
       // GJK/EPA fallback in SolidCylinderContactDetection's GeneralContactDetection base, so
       // floating boxes/cylinders collide with each other and with FixedBox pillars.
+      acd_.resetSecondaryContact(); // acd_ is reused across every pair -- see that method's own comment
       if (double_cast_(idx1, idx2, ac, acd_, ac))
       {
          if (contact_filter_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), *domain_))
@@ -1195,6 +1620,47 @@ public:
                   acd_.getContactPoint(), acd_.getContactNormal(), acd_.getPenetrationDepth(),
                   ac.getForceRef(acd_.getIdx1()) - forceBeforeA, ac.getForceRef(acd_.getIdx2()) - forceBeforeB,
                   detectionPath);
+            }
+
+            // Secondary contact (arch/tunnel containment only, Box/Cylinder floaters): a second point
+            // independently poking past the tube radius at the same time as the primary one -- see
+            // SolidCylinderContactDetection::hasSecondaryContact()'s own comment. Deliberately NOT
+            // routed back through collisionResponse_ (LinearSpringDashpot): its tangential-spring
+            // history is keyed only by (idx1,idx2) UID pair, not by "which of the two contact points",
+            // so a second call for the same pair this same sub-cycle would read/overwrite the SAME
+            // history entry as the primary call just above -- conflating two physically distinct
+            // contact points' sliding history into one. A plain velocity-based normal+tangential
+            // spring-dashpot (no persistent history, same formula ComputeTunnelContacts already uses
+            // one-sided for the whole tube) sidesteps that entirely, reusing the SAME stiffness/
+            // damping just set above for this exact type pair -- both points are the same materials,
+            // same contact, just two places at once.
+            if (acd_.hasSecondaryContact())
+            {
+               const mesa_pd::Vec3& secNormal = acd_.getSecondaryContactNormal();
+               const mesa_pd::Vec3& secPoint  = acd_.getSecondaryContactPoint();
+               const real_t         secOverlap = -acd_.getSecondaryPenetrationDepth();
+
+               const real_t stiffnessN = collisionResponse_.getStiffnessN(t1, t2);
+               const real_t dampingN   = collisionResponse_.getDampingN(t1, t2);
+               const real_t dampingT   = collisionResponse_.getDampingT(t1, t2);
+               const real_t muDynamic  = collisionResponse_.getFrictionCoefficientDynamic(t1, t2);
+
+               const mesa_pd::Vec3 relVel = mesa_pd::getVelocityAtWFPoint(acd_.getIdx2(), ac, secPoint)
+                                           - mesa_pd::getVelocityAtWFPoint(acd_.getIdx1(), ac, secPoint);
+               const real_t        velN   = relVel * secNormal;
+               const mesa_pd::Vec3 velT   = relVel - velN * secNormal;
+
+               real_t fN = stiffnessN * secOverlap + dampingN * velN;
+               if (fN < real_t(0)) fN = real_t(0); // a spring-dashpot must never pull the bodies together
+
+               mesa_pd::Vec3 fT = dampingT * velT;
+               const real_t  fTmag = fT.length();
+               const real_t  fTmax = muDynamic * fN;
+               if (fTmag > fTmax && fTmag > real_t(1e-12)) fT *= (fTmax / fTmag);
+
+               const mesa_pd::Vec3 secondaryForce = fN * secNormal + fT;
+               mesa_pd::addForceAtWFPosAtomic(acd_.getIdx1(), ac,  secondaryForce, secPoint);
+               mesa_pd::addForceAtWFPosAtomic(acd_.getIdx2(), ac, -secondaryForce, secPoint);
             }
          }
       }
@@ -2244,7 +2710,11 @@ public:
       , memReferenceHeight_(simObjs->memReferenceHeight)
       , useDynamicReferenceHeight_(simParams->model.useDynamicReferenceHeight)
    {
-      if (!simParams->archTunnels.empty())
+      // useArchTunnelAsMesaPDObject (see its own doc comment, SimulationParams.h): arch tunnels are
+      // then real mesa_pd bodies created in SetupStages.h::setupParticles, going through the standard
+      // ComputeContacts/LinearSpringDashpot pipeline -- this one-sided kernel must NOT also run for
+      // them, or the containment force would be double-applied.
+      if (!simParams->archTunnels.empty() && !simParams->model.useArchTunnelAsMesaPDObject)
       {
          computeTunnelContacts_ = std::make_unique< ComputeTunnelContacts >(
             simParams->archTunnels,
@@ -2254,6 +2724,12 @@ public:
             simParams->particle.frictionCoefficient);
          WALBERLA_LOG_INFO_ON_ROOT("ComputeTunnelContacts active: " << simParams->archTunnels.size()
             << " arch tunnel(s)");
+      }
+      else if (!simParams->archTunnels.empty())
+      {
+         WALBERLA_LOG_INFO_ON_ROOT("Arch tunnels active as real mesa_pd objects ("
+            << simParams->archTunnels.size() << "): ComputeTunnelContacts NOT constructed "
+            "(useArchTunnelAsMesaPDObject=true).");
       }
 
       // ModelParameters.logFloaterHistory (see its own doc comment in SimulationParams.h): opens this

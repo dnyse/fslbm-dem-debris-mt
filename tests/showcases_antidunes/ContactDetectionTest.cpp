@@ -910,6 +910,550 @@ void testCylinderHalfSpaceNoContact()
    WALBERLA_CHECK(!scd(0, 1, cylShape, wallShape, ac));
 }
 
+// ---------------------------------------------------------------------------------------------
+// CylindricalBoundary CONTAINMENT mode (cb.setContainment(true)) -- the mirror image of the
+// pillar (outside-solid) overloads above: a body poking OUTSIDE the tube gets pushed back toward
+// the axis. Exercises the new farthest-point search (Sphere/Box/Cylinder), the optional axial
+// bounds, and the optional half-clip plane (e.g. an arch tunnel is only solid above its own
+// springing line) added to SolidCylinderContactDetection alongside the pillar overloads it never
+// touches (isContainment() defaults to false, so every test above this section is unaffected).
+// ---------------------------------------------------------------------------------------------
+
+void testSphereCylindricalBoundaryContainmentContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(2), real_t(4.7), real_t(0)));
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.6));
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   const real_t expectedRadial = real_t(4.7) + real_t(0.6); // sphere is isotropic: exact, no basis needed
+   const real_t expectedOverlap = expectedRadial - real_t(5);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, sphereShape, tubeShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), -expectedOverlap, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactNormal(), Vec3(real_t(0), real_t(-1), real_t(0)), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactPoint(), Vec3(real_t(2), expectedRadial, real_t(0)), real_t(1e-6));
+
+   // Swapped-argument overload must give the identical result.
+   SolidCylinderContactDetection scd2;
+   WALBERLA_CHECK(scd2(1, 0, tubeShape, sphereShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), scd2.getPenetrationDepth());
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), scd2.getContactNormal());
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), scd2.getContactPoint());
+}
+
+void testSphereCylindricalBoundaryContainmentNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(2), real_t(3), real_t(0))); // farthest reach 3+0.6=3.6 < radius 5
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.6));
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, tubeShape, ac));
+}
+
+void testSphereCylindricalBoundaryContainmentAxialBounds()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   // Radially this sphere clearly pokes outside (farthest reach 4.7+0.6=5.3 > radius 5), but it
+   // sits at world X=10, well outside the tube's bounded [xMin=-3,xMax=3] (offsets from the tube's
+   // own position at X=0) axial span -- the axial gate must reject it before the radial search
+   // even runs, exactly like ComputeTunnelContacts' own X-extent gate (ParticleKernels.h).
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(10), real_t(4.7), real_t(0)));
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.6));
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+   tubeShape.setAxialBounds(real_t(-3), real_t(3));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, tubeShape, ac));
+}
+
+void testSphereCylindricalBoundaryContainmentHalfClipExcludesBelow()
+{
+   // Sphere entirely on the non-solid side of the half-clip plane (e.g. below an arch's own
+   // springing line, Z < 0 here): even though it pokes radially outside the FULL tube's radius,
+   // there is no real wall there, so this must report no contact -- mirrors ComputeTunnelContacts'
+   // own springing-line exclusion (ParticleKernels.h, "below the springing line -- no real wall
+   // here").
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(2), real_t(0), real_t(-4.7))); // top of sphere at z=-4.1, still < 0
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.6));
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+   tubeShape.setHalfClipNormal(Vec3(real_t(0), real_t(0), real_t(1)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, tubeShape, ac));
+}
+
+void testSphereCylindricalBoundaryContainmentHalfClipStraddling()
+{
+   // Sphere straddling the clip plane (Z=0): its unconstrained farthest-from-axis point would dip
+   // below Z=0 (non-solid), so the resulting contact point must be pulled back onto the clip arc's
+   // boundary -- verified via invariants (contact fires, the reported point stays on the solid
+   // side, and it is a genuine radial overlap) rather than a hand-derived closed form, since the
+   // exact arc-endpoint position depends on the quartic solver already validated elsewhere.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(2), real_t(4.9), real_t(0.3)));
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.6));
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+   tubeShape.setHalfClipNormal(Vec3(real_t(0), real_t(0), real_t(1)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, sphereShape, tubeShape, ac));
+   WALBERLA_CHECK(scd.getContactPoint()[2] >= real_t(-1e-9)); // stayed on the solid side of the clip
+   const real_t radialDist = std::sqrt(scd.getContactPoint()[1] * scd.getContactPoint()[1] +
+                                        scd.getContactPoint()[2] * scd.getContactPoint()[2]);
+   WALBERLA_CHECK(radialDist > real_t(5)); // genuine overlap, not a clamped-to-boundary non-contact
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), -(radialDist - real_t(5)), real_t(1e-6));
+}
+
+void testBoxCylindricalBoundaryContainmentContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(0), real_t(4.5), real_t(0.3))); // z-shifted to avoid a Z-symmetric tie
+   box->setRotation(mesa_pd::Rot3());
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Box boxShape(Vec3(real_t(2), real_t(2), real_t(2))); // half-extent 1 each way
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   // Farthest corner is unambiguously (Y=4.5+1, Z=0.3+1) -- both offsets add, no tie to break.
+   const real_t expectedY = real_t(5.5), expectedZ = real_t(1.3);
+   const real_t expectedRadial = std::sqrt(expectedY * expectedY + expectedZ * expectedZ);
+   const real_t expectedOverlap = expectedRadial - real_t(5);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, boxShape, tubeShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), -expectedOverlap, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactPoint(), Vec3(real_t(-1), expectedY, expectedZ), real_t(1e-6));
+}
+
+void testBoxCylindricalBoundaryContainmentNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(0), real_t(3), real_t(0))); // farthest corner reach sqrt(4^2+1^2) < 5
+   box->setRotation(mesa_pd::Rot3());
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Box boxShape(Vec3(real_t(2), real_t(2), real_t(2)));
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, boxShape, tubeShape, ac));
+}
+
+void testBoxCylindricalBoundaryContainmentRadialPreGate()
+{
+   // job 4141165 postmortem: two arch tunnels can share the same axial (X) span (this bridge's own
+   // 3 arches all span X=[61,67]), and a box merely within that shared span but nowhere near THIS
+   // tube's own axis in Y-Z used to still get a (huge, spurious) farthest-corner overlap computed
+   // against it -- confirmed in production as overlap=15.75 (251% of interaction radius) for a box
+   // ~26 LU away from the arch it was wrongly "contained" by. This tube's axial span is world-X
+   // [-3,3] (offsets from the tube's own position at X=0); the box sits well within that span but
+   // 30 LU away in Y -- the radial pre-gate must reject it before the corner search ever runs.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(1), real_t(30), real_t(0))); // inside the axial span, far away radially
+   box->setRotation(mesa_pd::Rot3());
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Box boxShape(Vec3(real_t(2), real_t(2), real_t(2))); // half-extent 1 each way
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+   tubeShape.setAxialBounds(real_t(-3), real_t(3));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, boxShape, tubeShape, ac));
+}
+
+void testCylinderCylindricalBoundaryContainmentContact()
+{
+   // Tilted (not axis-aligned) on purpose: a floating cylinder oriented EXACTLY along a world axis
+   // that is itself exactly perpendicular to the tube's own axis hits a genuine pre-existing
+   // degenerate-quartic edge case in farthestThetaOnCircleToLine (PaperAnalyticalContacts.h) --
+   // found while writing this test (c4/c2/c0 all vanish simultaneously for that special alignment,
+   // and the Durand-Kerner solve doesn't reliably recover the true root then). That function is
+   // shared, already exercised elsewhere, and out of scope for the containment feature itself, so
+   // this test instead uses a generic tilt (representative of a real tumbling log) and validates
+   // via invariants rather than a hand-derived closed form.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(4.7), real_t(0.3)));
+   cyl->setRotation(mesa_pd::Rot3(Vec3(real_t(0), real_t(1), real_t(0)), math::pi * real_t(0.17)));
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Cylinder cylShape(real_t(0.4), real_t(2)); // radius 0.4, height 2 (hh=1)
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, cylShape, tubeShape, ac));
+
+   const auto&  cp = scd.getContactPoint();
+   const real_t radialDist = std::sqrt(cp[1] * cp[1] + cp[2] * cp[2]);
+   WALBERLA_CHECK(radialDist > real_t(5)); // genuine overlap, not a boundary/no-contact case
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), -(radialDist - real_t(5)), real_t(1e-6));
+   // The reported point must genuinely lie on the floater's own rim: exactly cylRadius from the
+   // floater's OWN axis line, and exactly at one end (+-hh) of it (never a fractional/interior
+   // axial offset -- see the "always at an endpoint" derivation in the calling code's comment).
+   const mesa_pd::Vec3 logAxis = cyl->getRotation().getMatrix() * mesa_pd::Vec3(real_t(0), real_t(0), real_t(1));
+   const mesa_pd::Vec3 rel     = cp - cyl->getPosition();
+   const real_t         axialT  = rel * logAxis;
+   const mesa_pd::Vec3 radialOnCyl = rel - axialT * logAxis;
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(radialOnCyl.length(), real_t(0.4), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(axialT), real_t(1), real_t(1e-6));
+   // Normal must point inward (back toward the tube axis).
+   WALBERLA_CHECK(scd.getContactNormal() * mesa_pd::Vec3(real_t(0), cp[1], cp[2]) < real_t(0));
+}
+
+void testCylinderCylindricalBoundaryContainmentNoContact()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(3), real_t(0))); // farthest reach 3+0.4=3.4 < radius 5
+   cyl->setRotation(mesa_pd::Rot3());
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Cylinder cylShape(real_t(0.4), real_t(2));
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, cylShape, tubeShape, ac));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Secondary contact points (arch/tunnel containment, Box/Cylinder floaters only -- Sphere is
+// inherently single-point). The farthest-point search's top-2 tracking exposes a SECOND
+// independently-breaching point via hasSecondaryContact()/getSecondaryContact*() instead of
+// silently discarding it, so an object touching the curve at two points genuinely gets a force
+// response at both, not just whichever one happens to be worse.
+// ---------------------------------------------------------------------------------------------
+
+void testBoxCylindricalBoundaryContainmentDualCornerContact()
+{
+   // Same geometry as testBoxCylindricalBoundaryContainmentContact -- but an UNROTATED box's farthest
+   // (Y,Z) corner pair is always tied along local X (two corners differing only in local X share the
+   // same world Y,Z, hence the identical radial distance from the tube axis). That means BOTH ends of
+   // this box's top edge genuinely poke past the tube radius at once, not just one -- exactly the
+   // "does an object touching the arch at two points get modeled at both" case. Loop order (sx outer,
+   // so sx=-1 is visited before sx=+1) makes the X=-1 corner win the tie and become primary; X=+1 is
+   // the tied runner-up.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(0), real_t(4.5), real_t(0.3)));
+   box->setRotation(mesa_pd::Rot3());
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Box boxShape(Vec3(real_t(2), real_t(2), real_t(2))); // half-extent 1 each way
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, boxShape, tubeShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactPoint(), Vec3(real_t(-1), real_t(5.5), real_t(1.3)), real_t(1e-6));
+
+   WALBERLA_CHECK(scd.hasSecondaryContact());
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getSecondaryContactPoint(), Vec3(real_t(1), real_t(5.5), real_t(1.3)), real_t(1e-6));
+   // Tied corners -> identical overlap and normal, just the other end of the same edge.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getSecondaryPenetrationDepth(), scd.getPenetrationDepth(), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getSecondaryContactNormal(), scd.getContactNormal(), real_t(1e-6));
+}
+
+void testBoxCylindricalBoundaryContainmentSingleCornerNoSecondary()
+{
+   // Rotated (not axis-aligned) on purpose: an unrotated box always ties its farthest corner pair
+   // along local X (see the dual-corner test above), so honestly testing the "only one point, no
+   // secondary" case requires breaking that degeneracy. Same tilt convention as
+   // testCylinderCylindricalBoundaryContainmentContact and for the same reason: a generic,
+   // non-axis-aligned rotation has no reason to reintroduce an exact tie between two different
+   // corners.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   // Numerically searched (not hand-derived) for a comfortable margin on both sides: worst corner
+   // radial dist ~5.208 (overlap ~0.208), runner-up ~4.814 (safely ~0.186 short of the radius) --
+   // confirmed via a standalone corner-enumeration script against this exact rotation before writing
+   // this test, not assumed.
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(0), real_t(3.5), real_t(0.6)));
+   box->setRotation(mesa_pd::Rot3(Vec3(real_t(0), real_t(1), real_t(0)), math::pi * real_t(0.17)));
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Box boxShape(Vec3(real_t(2.4), real_t(2.4), real_t(2.4))); // half-extent 1.2
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, boxShape, tubeShape, ac));
+   WALBERLA_CHECK(!scd.hasSecondaryContact());
+}
+
+void testCylinderCylindricalBoundaryContainmentDualRimContact()
+{
+   // A log lying across the tube (tilted, same convention as the primary containment test above) with
+   // both end-cap rims independently poking past the tube radius at once -- the "touches the arch at
+   // two points" case for a Cylinder floater specifically. Validated via invariants (own-rim
+   // membership, genuine overlap on both ends) rather than a hand-derived closed form, matching
+   // testCylinderCylindricalBoundaryContainmentContact's own reasoning: the exact farthest-angle
+   // solve is shared, already exercised elsewhere, and out of scope for this feature.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(4.6), real_t(0.2)));
+   cyl->setRotation(mesa_pd::Rot3(Vec3(real_t(0), real_t(1), real_t(0)), math::pi * real_t(0.17)));
+   auto tube = ps->create();
+   tube->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+
+   const mesa_pd::data::Cylinder cylShape(real_t(0.4), real_t(6)); // radius 0.4, height 6 (hh=3)
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(5), Vec3(real_t(1), real_t(0), real_t(0)));
+   tubeShape.setContainment(true);
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, cylShape, tubeShape, ac));
+
+   const mesa_pd::Vec3 logAxis = cyl->getRotation().getMatrix() * mesa_pd::Vec3(real_t(0), real_t(0), real_t(1));
+   auto checkOwnRim = [&](const mesa_pd::Vec3& cp, real_t expectedPenetration, const mesa_pd::Vec3& normal) {
+      const real_t         radialDist = std::sqrt(cp[1] * cp[1] + cp[2] * cp[2]);
+      WALBERLA_CHECK(radialDist > real_t(5));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(expectedPenetration, -(radialDist - real_t(5)), real_t(1e-6));
+      const mesa_pd::Vec3 rel        = cp - cyl->getPosition();
+      const real_t         axialT     = rel * logAxis;
+      const mesa_pd::Vec3 radialOnCyl = rel - axialT * logAxis;
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(radialOnCyl.length(), real_t(0.4), real_t(1e-6));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(axialT), real_t(3), real_t(1e-6)); // hh=3, always at an end
+      WALBERLA_CHECK(normal * mesa_pd::Vec3(real_t(0), cp[1], cp[2]) < real_t(0));   // inward
+   };
+
+   checkOwnRim(scd.getContactPoint(), scd.getPenetrationDepth(), scd.getContactNormal());
+   WALBERLA_CHECK(scd.hasSecondaryContact());
+   checkOwnRim(scd.getSecondaryContactPoint(), scd.getSecondaryPenetrationDepth(), scd.getSecondaryContactNormal());
+   // The two rims are genuinely different points (opposite ends of the log), not a duplicate report.
+   WALBERLA_CHECK((scd.getContactPoint() - scd.getSecondaryContactPoint()).length() > real_t(1));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Arch deck-fill / haunch solid geometry (SimulationParams.h: archDeckFillBoxGeometry,
+// archHaunchBoxGeometry). These are pure center/edgeLength math with no mesa_pd particle involved
+// -- SetupStages.h::createArchSolidElements is the only caller that turns the result into a real
+// FixedBox via createBox(). Covers: (1) the real bridge's own three arches produce the exact
+// deck-fill box the prm files' `deckTopZ 76;` was chosen to match, (2) the pre-existing "no opt-in"
+// default stays a no-op (backward compatibility), (3) this bridge's own haunch boxes are correctly
+// degenerate (its BodyBC abutments have zero width beyond the circular opening), (4) a synthetic
+// wider abutment produces real, correctly-placed haunch boxes, and (5) the resulting box actually
+// collides with a floater above the crown, and does NOT collide with one still inside the open bore.
+// ---------------------------------------------------------------------------------------------
+
+void testArchDeckFillBoxGeometryRealBridge()
+{
+   // Left/central/right arches, exactly as defined in prms/test_bridge_v1_*_gas.prm's ArchTunnels
+   // block, all with deckTopZ 76 (matching the BodyBC arch boxes' own max Z -- see the artifact's
+   // own derivation). yMin/yMax left at their defaults (center.y -+ radius) for all three.
+   const ArchTunnelParams left(Vector3< real_t >(0, 5, 56), real_t(5), real_t(61), real_t(67),
+                                std::numeric_limits< real_t >::quiet_NaN(), std::numeric_limits< real_t >::quiet_NaN(), real_t(76));
+   const ArchTunnelParams central(Vector3< real_t >(0, 30, 56), real_t(10), real_t(61), real_t(67),
+                                   std::numeric_limits< real_t >::quiet_NaN(), std::numeric_limits< real_t >::quiet_NaN(), real_t(76));
+   const ArchTunnelParams right(Vector3< real_t >(0, 55, 56), real_t(5), real_t(61), real_t(67),
+                                 std::numeric_limits< real_t >::quiet_NaN(), std::numeric_limits< real_t >::quiet_NaN(), real_t(76));
+
+   const auto leftBox = archDeckFillBoxGeometry(left);
+   WALBERLA_CHECK(leftBox.has_value());
+   // crownZ = 56+5 = 61; center Z = (61+76)/2 = 68.5; edgeLength Z = 76-61 = 15.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(leftBox->center, Vec3(real_t(64), real_t(5), real_t(68.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(leftBox->edgeLength, Vec3(real_t(6), real_t(10), real_t(15)), real_t(1e-9));
+
+   const auto centralBox = archDeckFillBoxGeometry(central);
+   WALBERLA_CHECK(centralBox.has_value());
+   // crownZ = 56+10 = 66; center Z = (66+76)/2 = 71; edgeLength Z = 76-66 = 10.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(centralBox->center, Vec3(real_t(64), real_t(30), real_t(71)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(centralBox->edgeLength, Vec3(real_t(6), real_t(20), real_t(10)), real_t(1e-9));
+
+   const auto rightBox = archDeckFillBoxGeometry(right);
+   WALBERLA_CHECK(rightBox.has_value());
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(rightBox->center, Vec3(real_t(64), real_t(55), real_t(68.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(rightBox->edgeLength, Vec3(real_t(6), real_t(10), real_t(15)), real_t(1e-9));
+}
+
+void testArchDeckFillBoxGeometryDefaultIsNoOp()
+{
+   // The 4-arg constructor (no deckTopZ given) is exactly what every ArchTunnels block that hasn't
+   // opted into deck-fill still uses -- deckTopZ defaults to the crown itself, so the box would have
+   // zero height. Confirms every pre-existing scenario keeps its exact prior behaviour (no box at all).
+   const ArchTunnelParams tunnel(Vector3< real_t >(0, 5, 56), real_t(5), real_t(61), real_t(67));
+   WALBERLA_CHECK(!archDeckFillBoxGeometry(tunnel).has_value());
+}
+
+void testArchBlockParamsDimsConversionMatchesRealBridge()
+{
+   // createArchBlock's dimension-based builder (SetupStages.h) takes base/xDim/yDim/zDim/radius
+   // instead of xMin/xMax/yMin/yMax/deckTopZ -- archBlockParams (SimulationParams.h) is the pure
+   // conversion between the two, checked here against the left arch's own real numbers: springing
+   // line at Z=56 (base), deck at Z=76 -> zDim=20 (NOT 15 -- zDim is measured from the springing
+   // line, not the crown, unlike deckTopZ which IS measured from world zero the same way center.z
+   // is), full opening width yDim=10 (2*radius, matching this bridge's own zero-haunch geometry),
+   // block thickness xDim=6 (61 to 67).
+   const auto tunnel = archBlockParams(Vector3< real_t >(64, 5, 56), real_t(6), real_t(10), real_t(20), real_t(5));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(tunnel.center, Vector3< real_t >(64, 5, 56), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.radius, real_t(5));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.xMin, real_t(61));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.xMax, real_t(67));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.yMin, real_t(0));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.yMax, real_t(10));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.deckTopZ, real_t(76));
+
+   // Feeding this straight into the already-tested deck-fill geometry function must reproduce
+   // exactly the same box as testArchDeckFillBoxGeometryRealBridge's own left-arch case -- confirms
+   // the dims-based builder and the prm-based path agree, not just that each half works alone.
+   const auto deckFill = archDeckFillBoxGeometry(tunnel);
+   WALBERLA_CHECK(deckFill.has_value());
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(deckFill->center, Vec3(real_t(64), real_t(5), real_t(68.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(deckFill->edgeLength, Vec3(real_t(6), real_t(10), real_t(15)), real_t(1e-9));
+}
+
+void testArchHaunchBoxGeometryRealBridgeIsDegenerate()
+{
+   // This bridge's own BodyBC arch boxes have Y-span EXACTLY equal to each arch's own diameter (no
+   // separate flat haunch wall beside the curve) -- confirmed directly against the BodyBC coordinates
+   // in prms/test_bridge_v1_*_gas.prm. yMin/yMax at their defaults must therefore make BOTH haunch
+   // sides degenerate for all three arches, for every one of this bridge's scenario prms.
+   const ArchTunnelParams left(Vector3< real_t >(0, 5, 56), real_t(5), real_t(61), real_t(67));
+   const ArchTunnelParams central(Vector3< real_t >(0, 30, 56), real_t(10), real_t(61), real_t(67));
+   const ArchTunnelParams right(Vector3< real_t >(0, 55, 56), real_t(5), real_t(61), real_t(67));
+
+   for (const auto& tunnel : { left, central, right })
+   {
+      WALBERLA_CHECK(!archHaunchBoxGeometry(tunnel, ArchHaunchSide::Left).has_value());
+      WALBERLA_CHECK(!archHaunchBoxGeometry(tunnel, ArchHaunchSide::Right).has_value());
+   }
+}
+
+void testArchHaunchBoxGeometryWidenedAbutment()
+{
+   // Synthetic scenario for an abutment wider than its own opening (not true of today's bridge, but
+   // a real future case per ArchTunnelParams's own comment) -- radius 5 opening at Y=5, abutment
+   // running Y=[-2,12] (3 LU wider on each side than the circular opening's own Y=[0,10] span).
+   const ArchTunnelParams tunnel(Vector3< real_t >(0, 5, 56), real_t(5), real_t(61), real_t(67), real_t(-2), real_t(12));
+
+   const auto leftHaunch = archHaunchBoxGeometry(tunnel, ArchHaunchSide::Left);
+   WALBERLA_CHECK(leftHaunch.has_value());
+   // width = (5-5) - (-2) = 2; center Y = -2 + 2/2 = -1; center Z = 56 + 5/2 = 58.5.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(leftHaunch->center, Vec3(real_t(64), real_t(-1), real_t(58.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(leftHaunch->edgeLength, Vec3(real_t(6), real_t(2), real_t(5)), real_t(1e-9));
+
+   const auto rightHaunch = archHaunchBoxGeometry(tunnel, ArchHaunchSide::Right);
+   WALBERLA_CHECK(rightHaunch.has_value());
+   // width = 12 - (5+5) = 2; center Y = 12 - 2/2 = 11.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(rightHaunch->center, Vec3(real_t(64), real_t(11), real_t(58.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(rightHaunch->edgeLength, Vec3(real_t(6), real_t(2), real_t(5)), real_t(1e-9));
+}
+
+void testArchDeckFillBoxCollidesSphereAboveCrown()
+{
+   // Left arch's own deck-fill box (see testArchDeckFillBoxGeometryRealBridge): center (64,5,68.5),
+   // edgeLength (6,10,15) -> half-extents (3,5,7.5) -> Z in [61,76]. A sphere centred just below the
+   // crown (Z=60.5, radius 1) reaches up to Z=61.5 -- 0.5 LU into the deck-fill box. This is exactly
+   // the case SetupStages.h::createArchSolidElements exists to catch: a floater kicked hard enough to
+   // reach above the crown while still inside the arch's own axial/Y span.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(64), real_t(5), real_t(60.5)));
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(64), real_t(5), real_t(68.5)));
+   box->setRotation(mesa_pd::Rot3());
+
+   const mesa_pd::data::Sphere sphereShape(real_t(1));
+   const mesa_pd::data::Box    boxShape(Vec3(real_t(6), real_t(10), real_t(15)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, sphereShape, boxShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), real_t(-0.5), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(-1)), real_t(1e-9));
+}
+
+void testArchDeckFillBoxNoContactInsideOpenBore()
+{
+   // Same deck-fill box as above; sphere safely below the crown (top of sphere at Z=60.5 < crownZ=61)
+   // -- must NOT register a contact against the deck-fill slab while merely passing through the open
+   // tunnel bore below it.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(64), real_t(5), real_t(60)));
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(64), real_t(5), real_t(68.5)));
+   box->setRotation(mesa_pd::Rot3());
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.5));
+   const mesa_pd::data::Box    boxShape(Vec3(real_t(6), real_t(10), real_t(15)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, boxShape, ac));
+}
+
 } // namespace antidunes
 } // namespace walberla
 
@@ -950,6 +1494,26 @@ int main(int argc, char** argv)
    testCylinderPillarBruteForceCrossCheck();
    testCylinderHalfSpaceContact();
    testCylinderHalfSpaceNoContact();
+   testSphereCylindricalBoundaryContainmentContact();
+   testSphereCylindricalBoundaryContainmentNoContact();
+   testSphereCylindricalBoundaryContainmentAxialBounds();
+   testSphereCylindricalBoundaryContainmentHalfClipExcludesBelow();
+   testSphereCylindricalBoundaryContainmentHalfClipStraddling();
+   testBoxCylindricalBoundaryContainmentContact();
+   testBoxCylindricalBoundaryContainmentNoContact();
+   testBoxCylindricalBoundaryContainmentRadialPreGate();
+   testCylinderCylindricalBoundaryContainmentContact();
+   testCylinderCylindricalBoundaryContainmentNoContact();
+   testBoxCylindricalBoundaryContainmentDualCornerContact();
+   testBoxCylindricalBoundaryContainmentSingleCornerNoSecondary();
+   testCylinderCylindricalBoundaryContainmentDualRimContact();
+   testArchDeckFillBoxGeometryRealBridge();
+   testArchDeckFillBoxGeometryDefaultIsNoOp();
+   testArchBlockParamsDimsConversionMatchesRealBridge();
+   testArchHaunchBoxGeometryRealBridgeIsDegenerate();
+   testArchHaunchBoxGeometryWidenedAbutment();
+   testArchDeckFillBoxCollidesSphereAboveCrown();
+   testArchDeckFillBoxNoContactInsideOpenBore();
 
    return EXIT_SUCCESS;
 }

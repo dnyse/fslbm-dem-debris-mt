@@ -27,6 +27,10 @@
 
 #include "Utility.h"
 
+#include <cmath>
+#include <limits>
+#include <optional>
+
 
 namespace walberla {
 namespace antidunes {
@@ -214,20 +218,118 @@ struct ArchTunnelParams {
    real_t            xMin;
    real_t            xMax;
 
+   // Optional solid-geometry extensions for useArchTunnelAsMesaPDObject's deck-fill/haunch DEM
+   // bodies (SetupStages.h::createArchSolidElements, called from setupParticles) -- NOT used by
+   // ComputeTunnelContacts or the curved containment body, only by those two additional solid
+   // pieces. All three default to reproducing "nothing extra" (no deck-fill, no haunch) so every
+   // existing ArchTunnels block that doesn't set them keeps its exact prior behaviour:
+   //   - yMin/yMax default to center.y -+ radius, i.e. the arch's own box-span exactly matches the
+   //     circular opening's own diameter (true for every arch in this project's bridge scenarios
+   //     today -- confirmed directly against their own BodyBC Y-spans) -- so the haunch boxes
+   //     Utility.h builds from these (constant-width = radius, safely never encroaching into the
+   //     true bore -- see that function's own comment for the derivation) come out zero-width and
+   //     are skipped. Set yMin < center.y-radius / yMax > center.y+radius for a scenario whose
+   //     abutment is wider than its own opening, to get real, correctly-sized haunch boxes.
+   //   - deckTopZ defaults to center.z+radius (the crown height itself), giving a zero-height (and
+   //     therefore skipped) deck-fill box. Set it to the real deck top (matching the fluid-side
+   //     BodyBC arch box's own max Z) to get a real solid slab from the crown up to the deck.
+   real_t            yMin;
+   real_t            yMax;
+   real_t            deckTopZ;
+
    ArchTunnelParams(const config::Config::BlockHandle& b)
    {
-      center = b.getParameter< Vector3< real_t > >("center");
-      radius = b.getParameter< real_t >           ("radius");
-      xMin   = b.getParameter< real_t >           ("xMin");
-      xMax   = b.getParameter< real_t >           ("xMax");
+      center   = b.getParameter< Vector3< real_t > >("center");
+      radius   = b.getParameter< real_t >           ("radius");
+      xMin     = b.getParameter< real_t >           ("xMin");
+      xMax     = b.getParameter< real_t >           ("xMax");
+      yMin     = b.getParameter< real_t >           ("yMin", center[1] - radius);
+      yMax     = b.getParameter< real_t >           ("yMax", center[1] + radius);
+      deckTopZ = b.getParameter< real_t >           ("deckTopZ", center[2] + radius);
    }
 
    // Direct-value constructor for callers with no prm block to parse from (e.g. DEMValidationScenarios.h's
-   // fluid-free local validation harness, which builds scenarios entirely in code).
-   ArchTunnelParams(const Vector3< real_t >& c, real_t r, real_t xmn, real_t xmx)
+   // fluid-free local validation harness, which builds scenarios entirely in code). yMin/yMax/deckTopZ
+   // default the same way the prm-parsing constructor does -- see that constructor's own comment.
+   ArchTunnelParams(const Vector3< real_t >& c, real_t r, real_t xmn, real_t xmx,
+      real_t ymn = std::numeric_limits< real_t >::quiet_NaN(),
+      real_t ymx = std::numeric_limits< real_t >::quiet_NaN(),
+      real_t deckZ = std::numeric_limits< real_t >::quiet_NaN())
       : center(c), radius(r), xMin(xmn), xMax(xmx)
+      , yMin(std::isnan(ymn) ? c[1] - r : ymn)
+      , yMax(std::isnan(ymx) ? c[1] + r : ymx)
+      , deckTopZ(std::isnan(deckZ) ? c[2] + r : deckZ)
    {}
 };
+
+// Pure center/edgeLength geometry for the deck-fill and haunch solid pieces described in
+// ArchTunnelParams's own comment above -- factored out of SetupStages.h::createArchSolidElements
+// specifically so this placement math is independently unit-testable (ContactDetectionTest.cpp)
+// without needing a live mesa_pd::data::ParticleStorage. Returns std::nullopt for a degenerate
+// (zero-or-negative-size) piece -- exactly the "nothing extra" backward-compatible default
+// described on ArchTunnelParams, so callers can skip createBox() outright rather than build a
+// zero-volume body.
+struct ArchSolidBox {
+   Vector3< real_t > center;
+   Vector3< real_t > edgeLength;
+};
+
+inline std::optional< ArchSolidBox > archDeckFillBoxGeometry(const ArchTunnelParams& tunnel)
+{
+   const real_t crownZ = tunnel.center[2] + tunnel.radius;
+   if (tunnel.deckTopZ <= crownZ + real_t(1e-6)) return std::nullopt;
+
+   const real_t midX = real_t(0.5) * (tunnel.xMin + tunnel.xMax);
+   const real_t lenX = tunnel.xMax - tunnel.xMin;
+   return ArchSolidBox{ Vector3< real_t >(midX, tunnel.center[1], real_t(0.5) * (crownZ + tunnel.deckTopZ)),
+                         Vector3< real_t >(lenX, tunnel.yMax - tunnel.yMin, tunnel.deckTopZ - crownZ) };
+}
+
+// Pure dims->ArchTunnelParams conversion for the dimension-based createArchBlock builder
+// (SetupStages.h): X/Y/Z extents + bore radius, rather than requiring the caller to pre-compute
+// xMin/xMax/yMin/yMax/deckTopZ by hand. `base` is the bottom CENTER of the block -- (X center, tube
+// cross-section Y center, springing-line Z) -- matching ArchTunnelParams.center's own convention
+// (its X is ignored; the tube axis is always world-X). Kept separate from particle creation (same
+// reasoning as archDeckFillBoxGeometry/archHaunchBoxGeometry above) so the dims->params arithmetic is
+// unit-testable without a live mesa_pd::data::ParticleStorage. Does NOT validate yDim>=2*radius /
+// zDim>=radius -- SetupStages.h::createArchBlock does that before calling this, since a pure function
+// like this one has no good way to fail loudly (WALBERLA_CHECK aborts the whole run, which a test
+// exploring invalid inputs on purpose would rather avoid).
+inline ArchTunnelParams archBlockParams(const Vector3< real_t >& base, real_t xDim, real_t yDim, real_t zDim, real_t radius)
+{
+   const real_t xHalf = real_t(0.5) * xDim;
+   const real_t yHalf = real_t(0.5) * yDim;
+   return ArchTunnelParams(base, radius, base[0] - xHalf, base[0] + xHalf,
+                            base[1] - yHalf, base[1] + yHalf, base[2] + zDim);
+}
+
+enum class ArchHaunchSide { Left, Right };
+
+// Left = the -Y side of the tunnel's own opening (toward yMin); Right = the +Y side (toward yMax).
+// Both sit beside the curve, spanning the same [center.z, center.z+radius] band as the curve's own
+// quarter-height (a conservative constant-width slab -- see ArchTunnelParams's own comment for why
+// this never encroaches into the true bore).
+inline std::optional< ArchSolidBox > archHaunchBoxGeometry(const ArchTunnelParams& tunnel, ArchHaunchSide side)
+{
+   const real_t midX = real_t(0.5) * (tunnel.xMin + tunnel.xMax);
+   const real_t lenX = tunnel.xMax - tunnel.xMin;
+   const real_t midZ = tunnel.center[2] + real_t(0.5) * tunnel.radius;
+
+   if (side == ArchHaunchSide::Left)
+   {
+      const real_t width = (tunnel.center[1] - tunnel.radius) - tunnel.yMin;
+      if (width <= real_t(1e-6)) return std::nullopt;
+      return ArchSolidBox{ Vector3< real_t >(midX, tunnel.yMin + real_t(0.5) * width, midZ),
+                            Vector3< real_t >(lenX, width, tunnel.radius) };
+   }
+   else
+   {
+      const real_t width = tunnel.yMax - (tunnel.center[1] + tunnel.radius);
+      if (width <= real_t(1e-6)) return std::nullopt;
+      return ArchSolidBox{ Vector3< real_t >(midX, tunnel.yMax - real_t(0.5) * width, midZ),
+                            Vector3< real_t >(lenX, width, tunnel.radius) };
+   }
+}
 
 struct FloatingSphereParams {
    Vector3< real_t > position;
@@ -665,6 +767,18 @@ struct ModelParams {
    bool        highAltitudeWaterScanEnabled;
    real_t      highAltitudeWaterThresholdZ;
 
+   // true  → each ArchTunnelParams entry (SimulationParams.h) is instantiated as a REAL mesa_pd body
+   //         (a CylindricalBoundary in containment mode -- see that shape's own doc comment and
+   //         SolidCylinderContactDetection's new containment overloads in ParticleKernels.h) at
+   //         setupParticles time, going through the exact same forEachParticlePairHalf +
+   //         LinearSpringDashpot two-particle contact/force pipeline piers already use. The old
+   //         one-sided ComputeTunnelContacts kernel is NOT constructed/called when this is true
+   //         (both active at once would double-apply the containment force for the same tunnel).
+   // false → (DEFAULT) exact pre-existing behaviour: arch tunnels are the one-sided
+   //         ComputeTunnelContacts kernel, no real mesa_pd body is created for them. Flip this back
+   //         to false to return to the known-working path if the real-object route misbehaves.
+   bool        useArchTunnelAsMesaPDObject;
+
    ModelParams(const config::Config::BlockHandle& b)
       : pdfReconstructionModel      { b.getParameter< std::string >("pdfReconstructionModel") }
       , pdfRefillingModel           { b.getParameter< std::string >("pdfRefillingModel") }
@@ -692,6 +806,7 @@ struct ModelParams {
       , logFloaterHistoryReleaseStepFilter{ b.getParameter< uint_t >("logFloaterHistoryReleaseStepFilter", uint_t(0)) }
       , highAltitudeWaterScanEnabled { b.getParameter< bool >       ("highAltitudeWaterScanEnabled", false) }
       , highAltitudeWaterThresholdZ  { b.getParameter< real_t >     ("highAltitudeWaterThresholdZ", real_t(0)) }
+      , useArchTunnelAsMesaPDObject  { b.getParameter< bool >       ("useArchTunnelAsMesaPDObject", false) }
    {
       if (usePureAnalyticalCylinder && !useAnalyticalContactDetection)
          WALBERLA_LOG_WARNING("usePureAnalyticalCylinder=true but useAnalyticalContactDetection=false -- "
