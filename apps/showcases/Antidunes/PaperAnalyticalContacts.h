@@ -682,8 +682,14 @@ inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& 
       result.contact  = true;
       result.overlap  = std::abs(zE);                                          // eq. 19
       result.normal   = math::sign(zCyl) * nHat;                               // eq. 20
-      const Vec3 eOnPlane = E - zE * nHat;
-      result.point    = eOnPlane - math::sign(zE) * real_t(0.5) * result.overlap * nHat; // eq. 21
+      // eq. 21 is z_E^P - sign(z_E^P)*0.5*delta, i.e. measured from E's OWN height, not from the
+      // plane (z=0). An earlier version first projected E onto the plane (eOnPlane = E - zE*nHat,
+      // height forced to exactly 0) before applying this offset, which silently shifts the result by
+      // an extra zE and places the point on the wrong side of the plane entirely -- e.g. zCyl=+2,
+      // zE=-1 (a genuine overlap, midpoint physically at z=-0.5) previously produced z=+0.5, outside
+      // the overlap region altogether. rimVsFaceOrBand's structurally identical face-edge branch
+      // (below) never had this bug, since it applies the offset to E directly; this now matches it.
+      result.point    = E - math::sign(zE) * real_t(0.5) * result.overlap * nHat; // eq. 21
       result.scenario = "edge-plane";
    }
    return result;

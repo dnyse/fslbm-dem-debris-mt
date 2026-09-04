@@ -1,0 +1,946 @@
+// thousand_spheres_two_pillars_slitpass_TEST_100floaters_res2x_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// ISOLATION TEST (4 of 4): RESOLUTION doubled relative to TEST_100floaters_gas.prm
+// (domain <160,75,180> -> <320,150,180>, X doubled, Y rescaled to 150 to satisfy
+// Utility.h's bed-consistency assertion, Z untouched -- same pattern as the
+// original 128->160 widening). Sphere radius kept LITERALLY at 1.0 LU
+// (unchanged) -- Pass-3 OFF (matching TEST_100floaters' crashing baseline
+// exactly, for a clean apples-to-apples comparison).
+//
+// IMPORTANT NUANCE: in this framework 1 LU is always exactly 1 lattice cell, so
+// a radius=1.0 sphere is ALWAYS 2 cells across, regardless of domain cell count
+// -- doubling domainSize[0] does NOT change how many cells resolve this
+// particular sphere. What it DOES change: scalingFactor (derived from
+// domainSize[0]) doubles, so avgParticleDiameter/liquidHeight/floorHeight (all
+// derived from it) also double -- avgParticleDiameter=20.00485,
+// liquidHeight=57.254, floorHeight=82.788, surface Z=140.04. This tests whether
+// resolving the AMBIENT physics (bed-particle scale, water depth) more finely
+// changes the outcome for the same literal radius=1.0 spheres -- a different
+// question from TEST_100floaters_r2/r3's "make the sphere itself bigger" tests.
+//
+// 100 spheres: one layer at Z=145 (above the new Z~140.04 surface), 10x10 grid,
+// X=[20,200], Y=[10,140] (both 2x the original footprint, matching the domain
+// scale). Pillars scaled 2x to center (276,38,90)/(276,112,90), radius
+// unchanged at 8.
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// 1000 SMALL SPHERES, ALL densityRatio=0.5, DYNAMICALLY-COMPUTED (non-overridden)
+// GRAVITY, all starting OUTSIDE/ABOVE water, dropped in 10 layers of 100 (one
+// layer released every 1000 timesteps) upstream of two cylinder pillars pushed
+// to the far downstream (right) end of a WIDENED domain, testing whether they
+// pass cleanly through the three slits (pillar-wall / inter-pillar / pillar-
+// wall) instead of clogging.
+//
+// v1 -> v2 changes, and why:
+//   - v1 released all 1000 spheres simultaneously at settlingSteps=300 (they
+//     straddled the free surface). That caused a fatal NaN-quaternion crash at
+//     step 321 (job 4056593) -- a real, previously-characterized instability
+//     from releasing many bodies at once (same root cause as this session's dry
+//     DEM validation work: runRotatingDrum's all-at-once release showed the same
+//     kind of energy spike that runPacking's one-at-a-time protocol never did).
+//   - Fix: ALL spheres now start well ABOVE the free surface (dry, in air, no
+//     initial fluid interaction at all), arranged in 10 Z-layers of 100 spheres
+//     each. Each layer's settlingSteps is offset by 1000 from the previous one
+//     (300, 1300, 2300, ..., 9300) -- lowest layer (closest to the water) drops
+//     first, staggering the total release into 10 events of 100 bodies instead
+//     of one event of 1000.
+//   - Domain widened in X (128->160). Y CANNOT be widened independently of X:
+//     Utility.h's getAvgDiameterScalingFactor derives scalingFactor purely from
+//     domainSize[0] (scalingFactor = domainSize[0] / (generationDomainSize_SI[0]
+//     * bedCopiesInX)), then asserts domainSize[1] == scalingFactor *
+//     generationDomainSize_SI[1] * bedCopiesInY EXACTLY -- an initial v2 attempt
+//     using Y=90 (a different widening ratio than X's 1.25x) failed this
+//     assertion immediately (job 4056668, <1s into the run: "Generated bed with
+//     copies and simulation domain do not match!", expected 75 got 90). Fixed
+//     by using Y=75 (the SAME 1.25x ratio as X: 60*1.25=75), cellsPerBlock Y
+//     25 (3*25=75, block COUNT unchanged at 4x3x6=72, still one node/72
+//     processes). This constraint applies even though useParticleBed=false
+//     here (no bed is actually loaded) -- the check runs unconditionally.
+//     Z (height) untouched, so the free-surface derivation below still holds.
+//
+// Free surface -- v3 -> v4 fix: avgParticleDiameter/liquidHeight/floorHeight are
+// NOT fixed constants, they're DERIVED from domainSize[0] via Utility.h's
+// scalingFactor = domainSize[0] / (generationDomainSize_SI[0] * bedCopiesInX).
+// v3 reused the reference run's numbers (avgParticleDiameter=8.00194, surface
+// Z=56.02) verbatim, but that reference used domainSize[0]=128, not this file's
+// widened 160 -- a 1.25x mismatch that silently shifted the REAL surface up to
+// Z~70, so v3's "above water" Z=60..87 layers actually started AT/NEAR the true
+// waterline. Result: catastrophic MEM force blowup (forceZ up to 1e+26, garbage)
+// within 17 steps of the first layer's release (job 4056761, step 317) ->
+// heap corruption -> SIGABRT. Rescaled correctly here for THIS file's actual
+// domainSize[0]=160: avgParticleDiameter = 8.00194*(160/128) = 10.0024,
+// liquidHeight = 10.0024*2.862 = 28.63, floorHeight = 10.0024*4.1393 = 41.41,
+// surface Z = floorHeight+liquidHeight = 70.03. All 10 sphere layers (Z=76..103)
+// now sit comfortably above that (previously Z=60..87, against the wrong 56.02).
+//
+// Pillars (in the corrected Y=75 domain, radius unchanged at 8, moved further
+// right into the wider X=160 domain -- unaffected by the surface-height fix,
+// CylinderPillars span the full Z=0..180 regardless):
+//   Pillar 1: center (138, 19, 90), r=8  -> occupies Y=11..27, wall gap 11 LU
+//   Pillar 2: center (138, 56, 90), r=8  -> occupies Y=48..64, wall gap 11 LU
+//   Inter-pillar gap: 21 LU (Y=27..48)
+// Sphere diameter 2.0 -- 5.5x+ margin on the tightest (11 LU) gap.
+//
+// 1000 spheres: 10 layers (Z=76,79,...,103) x 10x10 X-Y grid per layer,
+// X=[10,100] (well upstream/left of the X=138 pillars), Y=[5,70] (spans all
+// three lanes within the corrected Y=75 domain, clear of both walls). Grid
+// spacing (9.0 X, 6.5 Y, 3.0 Z-layer) all comfortably exceed the 2.0 sphere
+// diameter -- no overlap at spawn.
+//
+// PhysicsParameters: NO gravityOverride -- dynamically computed gravity.
+//
+// Domain: <160, 75, 180> / cellsPerBlock <40, 25, 30> = 4x3x6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 80, 50, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <320, 150, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         10000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+   // no gravityOverride -- dynamically computed gravity, per request
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 276, 38, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 276, 112, 90 >;
+      radius 8;
+   }
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      position     < 20.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 20.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 38.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 56.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 74.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 92.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 110.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 128.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 146.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 164.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 10.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 23.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 36.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 49.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 62.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 75.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 88.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 101.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 114.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+   FloatingSphere
+   {
+      position     < 182.0000, 127.0000, 145.0000 >;
+      radius       1.0;
+      densityRatio 0.5;
+      settlingSteps 300;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 276, 38, 0 >; max < 276, 38, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 276, 112, 0 >; max < 276, 112, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 74, 0 >;  max < 320, 75, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 150, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 320, 150, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

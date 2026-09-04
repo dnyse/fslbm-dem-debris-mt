@@ -1,0 +1,297 @@
+// thousand_logs_two_pillars_slitpass_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// Log-shaped variant of thousand_spheres_two_pillars_slitpass_collapsed_gas.prm: same domain, same
+// two pillars, same halved mean velocity (0.01), but 1000-log-scale FLOATING CYLINDERS ("logs")
+// instead of spheres -- radius 3, length 18 (diameter 6, 1:3 diameter:length aspect ratio), axis
+// <0,1,0>. Two prior versions of this file established that neither removing floater-overlap-at-
+// release (a fully non-overlapping 42-floater batch still crashed within ~284 steps of activation)
+// nor batch-size escalation (crashed at the SMALLEST batch tried, just 10 floaters, ~1000 steps
+// after release) explains the fluid rho->NaN / invalid-quaternion crash every dense release
+// scenario has hit. This version drops the batch-size search and instead fixes a real physics bug
+// found along the way: useHardcodedUnits was true, forcing viscosity/gravity/surfaceTension to
+// values calibrated for targetMeanVelocityMagnitude=0.02, while this scenario's own PID target is
+// 0.01 (half) -- since gravity/surfaceTension scale with U^2, that's a ~4x-too-strong gravity and
+// surface tension relative to what this scenario's actual flow should have. Now false, so
+// viscosity/relaxationRate/gravity/surfaceTension are properly derived from the real U=0.01 (and
+// this domain's own liquidHeight, not whatever domain the hardcoded reference values came from).
+// liquidHeight/floorHeight/absoluteLiquidHeight themselves are unaffected either way -- they're
+// purely geometric (avgParticleDiameter * factors), computed before this branch.
+//
+// Grid: the original overlapping pool -- 20 columns (X=10..95.5, step 4.5, narrower than the 6.0
+// diameter) x 5 rows (Y=7..67, step 15, narrower than the 18.0 length) x single Z=76 (above the
+// flat still-water surface at absoluteLiquidHeight=70.03, confirmed from a prior run's own DEVEL
+// log) = 100 positions, deliberately overlapping.
+//
+// Release schedule: SIMPLIFIED back to a single, un-staggered batch -- 10000-step flow-development
+// warmup (halved from 20000), then all 100 floaters activate together at step 10000. No more
+// per-batch settlingSteps ladder. 30000 total steps leaves 20000 steps after release to observe
+// outcome with the corrected physics units.
+//
+// SMALLER PRECURSOR RUN before committing to a long/multi-node log run (mirroring
+// thousand_spheres_two_pillars_slitpass_collapsed_gas.prm's own 200000-step/144-core run): single
+// node (cellsPerBlock <40,25,30>, 4x3x6=72 processes, matching the ORIGINAL single-node
+// decomposition, not the collapsed sphere run's 144-core one).
+//
+// Domain: <160, 75, 180> / cellsPerBlock <40, 25, 30> = 4x3x6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 40, 25, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <160, 75, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.01;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         30000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+   // no gravityOverride -- dynamically computed gravity, per request
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 138, 19, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 138, 56, 90 >;
+      radius 8;
+   }
+}
+
+FloatingCylinders
+{
+   FloatingCylinder { position < 10.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 14.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 19.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 23.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 28.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 32.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 37.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 41.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 46.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 50.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 55.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 59.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 64.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 68.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 73.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 77.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 82.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 86.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 91.0000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 95.5000, 7.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 10.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 14.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 19.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 23.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 28.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 32.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 37.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 41.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 46.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 50.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 55.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 59.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 64.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 68.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 73.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 77.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 82.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 86.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 91.0000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 95.5000, 22.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 10.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 14.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 19.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 23.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 28.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 32.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 37.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 41.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 46.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 50.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 55.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 59.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 64.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 68.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 73.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 77.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 82.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 86.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 91.0000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 95.5000, 37.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 10.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 14.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 19.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 23.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 28.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 32.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 37.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 41.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 46.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 50.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 55.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 59.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 64.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 68.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 73.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 77.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 82.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 86.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 91.0000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 95.5000, 52.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 10.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 14.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 19.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 23.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 28.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 32.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 37.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 41.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 46.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 50.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 55.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 59.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 64.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 68.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 73.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 77.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 82.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 86.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 91.0000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingCylinder { position < 95.5000, 67.0000, 76.0000 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePass3Reresolution          true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   // Left true: exercises the closed-form Cylinder x Cylinder path (PaperAnalyticalContacts.h),
+   // now fixed against the argument-order/ContactFilter double-accept race -- see
+   // ParticleKernels.h's SolidCylinderContactDetection Cylinder x Cylinder overload's
+   // uid-canonicalization comment.
+   useAnalyticalContactDetection  true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 138, 19, 0 >; max < 138, 19, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 138, 56, 0 >; max < 138, 56, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 37, 0 >;  max < 160, 38, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 75, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 160, 75, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

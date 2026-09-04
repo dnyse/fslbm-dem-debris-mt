@@ -1,0 +1,176 @@
+// static_h_sweep_default_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC-H SENSITIVITY SWEEP -- CONTROL variant. Identical to the validated
+// sphere_stillwater_gas.prm, EXCEPT the sphere starts already at 50% submersion (centre
+// z=56, no drop/fall phase) instead of being dropped ~6 LU -- one floating SPHERE, radius
+// 12, densityRatio 0.5, no flow, no pillars, which stays at ~50% submersion under
+// the MEM's default STATIC reference height H = absoluteLiquidHeight (~56.02, the
+// undisturbed flat still-water level — see SimulationParams.h::staticReferenceHeight()).
+// This file makes NO change to ModelParameters (staticReferenceHeightOverride stays at its
+// disabled default, -1) -- it exists purely as the CONTROL point in a sweep of sibling
+// files (static_h_sweep_h44/h48/h64/h68/dynamic_gas.prm) that deliberately mis-set H via
+// staticReferenceHeightOverride (or switch to useDynamicReferenceHeight) to see how much
+// the sphere's final settled submersion% (and the sphere's own [FloaterBuoyancy] log:
+// submersion=, centreDepthBelowSurface=, localSurfaceZ=) shifts away from this ~50%
+// baseline as a function of the H mismatch. Per SimpleBB's rhoHydStat model (see
+// sphere_drop_static_h_top_gas.prm's own derivation), a fully submerged/closed body feels
+// ~nothing from a constant H offset, but a floater straddling the surface (like this
+// half-density sphere at equilibrium) takes an unbalanced pressure on its open wetted cap
+// -- this sweep quantifies exactly how much.
+//
+//   • targetMeanVelocityMagnitude 0  → no driving flow (still water).
+//   • useHardcodedUnits true → viscosity / relaxationRate / gravity / surfaceTension
+//     keep their reference values instead of being derived from U (which is 0 here).
+//     Without this, U=0 would zero viscosity, gravity and surface tension.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         25000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   // Single sphere (radius 12), centred, starts ALREADY at 50% submersion (centre z=56, right
+   // at the undisturbed waterline absoluteLiquidHeight~56.02 -- no drop/fall phase). settlingSteps
+   // 0: force calc (whatever H this variant uses) is live from t=0, so any deviation from 50%
+   // submersion visible over the run is purely the H-mismatch effect, not settling dynamics.
+   // pinPosition true; pinAxes <1,1,0>: X/Y translation held at the starting position every
+   // DEM sub-cycle, Z left genuinely free -- the sphere can only move up/down, isolating the
+   // vertical submersion-equilibrium response from any lateral drift.
+   FloatingSphere { position < 64, 30, 56 >; radius 12; densityRatio 0.5; settlingSteps 0; pinPosition true; pinAxes <1,1,0>; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+
+   // CONTROL point of the sweep: no override, H = absoluteLiquidHeight (~56.02) as normal.
+   // staticReferenceHeightOverride -1;   (the disabled default -- left implicit/commented
+   //                                      out here since -1 IS the default; sibling sweep
+   //                                      files set this to a deliberately wrong H instead)
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

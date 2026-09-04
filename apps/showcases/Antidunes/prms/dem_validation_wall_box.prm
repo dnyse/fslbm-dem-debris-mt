@@ -1,0 +1,28 @@
+// DEM dry-run validation: box corner-first wall impact vs. the general rigid-body-impact solver's
+// zero-tangential-velocity limit, which AnalyticalSolutions.h::selfCheckHousnerRelativeError() confirms
+// reduces exactly to Housner (1963)'s rocking-block restitution r=(1-1.5*sin^2(alpha))^2. Sweeps tilt
+// angle about world Y. Gravity is off (idealised instantaneous-impact "throw", not a drop) -- tolerance
+// is looser than the sphere/cylinder cases since a real (finite-stiffness, sub-cycled) spring-dashpot
+// corner impact is a less clean instantaneous-impulse idealisation than the rotationally-symmetric cases.
+DEMValidation{
+    testCase wallImpactBox;
+
+    boxHalfExtents < 1.0, 2.0, 2.0 >;
+    density 1.0;
+    restitutionCoefficient 0.6;
+    frictionCoefficient 0.3;
+    poissonsRatio 0.22;
+    collisionTime 0.01;
+
+    impactSpeed 1.0;
+    tiltStartDeg 5.0;
+    tiltEndDeg 40.0;
+    tiltStepDeg 10.0;
+
+    // 0.3, same as the cylinder test: the same Cundall-Strack-vs-idealised-Coulomb friction gap
+    // (AnalyticalSolutions.h's calibration note) shows up here too -- observed empirically ~3-6% on
+    // translational velocity and ~9-29% on angular velocity across this tilt sweep.
+    toleranceRelError 0.3;
+    vtkSpacing 0;
+    outputBaseName wall_impact_box;
+}

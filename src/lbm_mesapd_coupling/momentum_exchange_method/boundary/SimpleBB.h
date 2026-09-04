@@ -39,6 +39,7 @@
 #include "mesa_pd/common/ParticleFunctions.h"
 #include "mesa_pd/data/IAccessor.h"
 
+#include "core/mpi/MPIManager.h"
 #include "stencil/Directions.h"
 
 #include <algorithm>
@@ -225,22 +226,39 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
    // mapped as this particle's obstacle and when this sweep actually runs. The WALBERLA_ASSERT above
    // only catches this in a Debug build -- in Release/RelWithDebInfo (i.e. every production run, and
    // the previous ASan run that WAS built RelWithDebInfo) it's compiled out, so an invalid index
-   // silently proceeded into getVelocityAtWFPoint() below, reading position/velocity through a
-   // garbage index -- an AddressSanitizer-confirmed heap-buffer-overflow (8 bytes before a
+   // would otherwise silently proceed into getVelocityAtWFPoint() below, reading position/velocity
+   // through a garbage index -- an AddressSanitizer-confirmed heap-buffer-overflow (8 bytes before a
    // ParticleStorage-backed vector's allocation), consistent with this project's own history of
    // heap-corruption / invalid-quaternion crashes whose symptom varied run to run depending on what
-   // happened to occupy the over-read memory. Treated the same as the dry-link case: this specific
-   // obstacle link contributes no momentum exchange this sub-step rather than reading garbage.
+   // happened to occupy the over-read memory.
+   //
+   // Originally this silently skipped the link (no momentum exchange contributed) to avoid the
+   // memory-unsafe read. That stopped the crash but not the underlying desync: silently dropping a
+   // subset of a particle's obstacle links -- while its OTHER links (mapped before the desync, or
+   // on other ranks) still contribute -- leaves reduceAndAvgHydroForces() with an internally
+   // inconsistent, partial momentum-exchange sum for that particle. Root-caused via a real crash
+   // (job 4166479, antidunes-bridge-lv3-DEBUG-widerstacks): this exact desync fired 30x on rank 39/57
+   // for one floating box at step 73525, and that box's hydrodynamic force was already |F_hydro|~1.2e7
+   // at the very next force reduction -- versus O(1e-4) every step prior. That corrupted force,
+   // applied for a full doDEMSubCycles() burst, launched the particle to absurd velocity, contaminated
+   // neighbouring particles through real contact, and ultimately produced the invalid (NaN) quaternion
+   // that aborted the run -- i.e. this guard was converting a memory-safety bug into a silent
+   // physics-corruption bug with the same downstream symptom. Promoted to a hard abort so the
+   // desync itself is caught at its source, with full diagnostic context, instead of manifesting
+   // steps later as an unexplained force/velocity blowup.
    if( particleIdx == ac_->getInvalidIdx() ) {
-      static uint_t staleParticleIdxLogCount = uint_t(0);
-      if( staleParticleIdxLogCount < uint_t(30) ) {
-         WALBERLA_LOG_WARNING("[STALE-PARTICLE-IDX] cell (" << nx << "," << ny << "," << nz
-            << ") is flagged as owned by particle uid=" << particleField_->get(nx,ny,nz)
-            << ", but that uid no longer maps to a valid local particle index -- skipping this "
-               "obstacle link's momentum exchange instead of reading through an invalid index.");
-         ++staleParticleIdxLogCount;
-      }
-      return;
+      WALBERLA_ABORT("[STALE-PARTICLE-IDX] rank=" << mpi::MPIManager::instance()->rank()
+         << " cell (" << nx << "," << ny << "," << nz << ") [near-boundary fluid cell ("
+         << x << "," << y << "," << z << "), dir=" << dir
+         << "] is flagged as owned by particle uid=" << particleField_->get(nx,ny,nz)
+         << ", but that uid no longer maps to a valid local particle index. The fluid-side "
+            "obstacle-cell mapping (particleField_) has desynced from mesa_pd's local particle "
+            "storage for this UID -- its storage slot was reused, migrated, or removed without "
+            "this cell's obstacle-ownership entry being refreshed. Silently skipping this link "
+            "would leave reduceAndAvgHydroForces() with a partial/inconsistent momentum-exchange "
+            "sum for this particle, which has been observed to produce a multi-order-of-magnitude "
+            "hydrodynamic force spike and a subsequent invalid-quaternion crash several steps "
+            "later -- aborting here instead, at the actual point of desync.");
    }
 
    // assumed boundary position

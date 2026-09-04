@@ -1,0 +1,236 @@
+// mixed_shape_sedimentation_showcase_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// PARTICLE IMPACT AND SEDIMENTATION AT A FREE SURFACE -- MIXED-SHAPE, SPARSE variant.
+//
+// Combines all three floater shapes validated individually in
+// sphere_sedimentation_showcase_gas.prm, box_sedimentation_showcase_gas.prm (v6)
+// and cylinder_sedimentation_showcase_gas.prm.
+//
+// ROOT-CAUSE FIX (supersedes the 54-floater SCRAMBLED grid, jobs 3858668/3858669):
+// that grid placed one sphere, one box AND one cylinder at every (X,Y) location,
+// differing only in Z (64/76/88) -- i.e. 3 objects stacked directly on top of
+// each other on the same vertical line. Released simultaneously from rest
+// (settlingSteps 0), the lowest object of each stack (only 8 LU above the
+// water) reached the free surface and decelerated while the two behind it
+// (20/32 LU up) were still accelerating in free-fall straight down onto it.
+// Log evidence (mix_sed_pil.log): by step ~1000 several floaters already show
+// wet=144/dry=108 (fully engaged with the surface) while their column-mates
+// still show wet=0/dry=0 (still falling, untouched); avgParticleVelocity goes
+// non-finite ("inf") for the first time immediately after, at step ~1000-1001
+// -- exactly the moment a dead-centre, head-on DEM contact between two
+// differently-shaped bodies becomes likely, right as the lower one is also
+// undergoing a sudden free-surface entry. Both the pillars and non-pillars
+// variants crashed identically at the same simulated time with overlapping
+// NaN cell coordinates, confirming this is a grid-geometry problem shared by
+// both, not a pillar or rank-boundary issue.
+//
+// Fix: every floater now gets its OWN, UNIQUE (X,Y) location -- no two
+// floaters ever share a column, so simultaneous free-fall can never produce a
+// head-on vertical collision. This unavoidably means far fewer floaters (9,
+// down from 54) since the previous design's density came entirely from
+// stacking; the tradeoff is deliberate given the user's explicit ask to
+// "reduce the number of shapes and increase the distance between them".
+//
+// Grid: ai in {0,1,2} selects the X-anchor (16/48/80, same 3 block centres as
+// every earlier version); ci in {0,1,2} selects a Y-replicate (10/30/50,
+// centre of each of the 3 Y-blocks, cellsPerBlock.y=20 -> seams at
+// 0/20/40/60). 3(ai) x 3(ci) = 9 grid points, each hosting exactly one
+// floater (no stacking):
+//   shape        = [sphere, box, cylinder][(ai + ci) % 3]
+//   densityRatio = [0.5, 1.0, 2.0][(ai + 2*ci) % 3]
+//   Z (drop hgt) = [64, 76, 88][(ai - ci) % 3]
+// Three independent Latin squares over the same (ai,ci) -> verified balanced
+// (3 of each shape, 3 of each density, 3 of each Z) and verified every shape
+// occurs at all 3 densities (not correlated) -- see generating script output.
+// No X-sub-offset any more (previous bi in {0,1}): using the anchor centres
+// directly nearly triples X rank-boundary clearance (16 LU vs the previous
+// design's 11 LU) as a side effect, and the nearest any two floaters now sit
+// is 20 LU apart in Y (or 32 LU in X) instead of the old design's Z=12/X=10
+// stacking spacing -- directly "increasing the distance between them".
+//
+// X = 16/48/80 (anchor centres), NOT 32/64/96: this file's own earlier crash
+// history (jobs 3854234 heap corruption / 3854357 SIGABRT, both traced to the
+// mesa_pd::mpi::ContactFilter rank-boundary race -- a contact whose position
+// coincides with an X rank/block seam, cellsPerBlock.x=32 -> seams at
+// x=0/32/64/96/128, can be independently accepted and double-applied by both
+// neighbouring ranks) is why 16/48/80 (16 LU clearance from every seam) are
+// kept unchanged here. block 96-128 (centre 112) is left unused, same as
+// every earlier version (reserved for the pillars variant).
+//
+// Shapes (same ~9 LU footprint as each shape's own dedicated showcase):
+//   sphere:   radius 4.5                        (diameter 9)
+//   box:      halfExtents <3.5, 7, 3.5>         (Z-depth 7, Y-depth 14)
+//   cylinder: radius 4.5, length 9, axis <0,1,0> (diameter 9, Y-length 9)
+// All floaters are free to translate and rotate (no pinning, no initial
+// tilt); they fall from rest and settle under gravity and buoyancy.
+//
+// Known residual risk, NOT addressed by this change (inherited from every
+// earlier version of this file): Z=64 and Z=88 sit only 4 and 2 LU
+// respectively from the Z-block boundaries at 60/90 (cellsPerBlock.z=30 ->
+// seams at 0/30/60/90/120/150/180); only Z=76 has generous (14 LU) clearance.
+// This is now purely a rank-boundary CONTACT concern (mesa_pd::mpi::ContactFilter),
+// not a collision-geometry one -- eliminating the vertical stacking above
+// removes the fall-into-each-other mechanism entirely, but a floater that
+// later drifts near Z=60/90 on its own could still in principle hit the
+// ContactFilter race. Flagged, not fixed (same physically-constrained
+// waterline-proximity reasoning as every earlier version of this file).
+//
+// timesteps 100000 (standard full-length run for this project's showcases).
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic — no side walls, only Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;              // see header comment -- full run, rank-boundary contact fix validated at 20000 steps
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere { position < 16, 10, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 48, 50, 88 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 80, 30, 76 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+}
+
+FloatingBoxes
+{
+   FloatingBox { position < 16, 30, 88 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 48, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 50, 64 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+}
+
+FloatingCylinders
+{
+   FloatingCylinder { position < 16, 50, 76 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 48, 30, 64 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 80, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+}
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   // Only Z (top/bottom) walls — X and Y are periodic (see BlockForestParameters),
+   // so N/S borders are intentionally omitted; setupBoundaryHandling auto-skips
+   // adding walls on periodic faces.
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;  // cell type per timestep: 1=liquid 2=interface 3=gas 4=noSlip 6=freeSlip/UBB
+                       // 7=UBB-inflow 8=pressure 9=pressure-outflow 10=outlet (VtkWriter.h)
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

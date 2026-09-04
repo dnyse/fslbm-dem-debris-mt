@@ -1,0 +1,30 @@
+// dem_validation_arch_tunnel_box.prm
+// Box variant of dem_validation_arch_tunnel.prm's shape sweep, using the log-jam bridge scenario's
+// ACTUAL log dimensions (halfExtents<6,1,1.5>, matching test_bridge_v1_lowwater_logjam_floaterlog_gas.prm)
+// and the real bridge's own left-arch tunnel radius (5) -- reproduces the exact geometry that fired the
+// ComputeTunnelContacts effR bug on job 4134552 (floater uid=144115188075855873, dist-to-axis=9.88 vs a
+// true ~3 LU gap, effR=6.26 from the box's own 12-LU length). Case 1 (containment) starts the box just
+// above where it should settle against the tunnel wall; if the old isotropic-effR bug were still active,
+// effR=6.26 > tunnelRadius=5 would make the body NEVER satisfy containment near the wall at all -- it
+// would get shoved to the exact axis every step regardless of position, and maxRadialReach would read
+// as if the box's CENTER sits at dist=0 with radial reach = effR = 6.26 > tunnelRadius+tolerance = 5.05,
+// i.e. a hard FAIL. With the fix (exact 8-corner farthest-point), the box's true cross-sectional
+// half-diagonal (sqrt(1^2+1.5^2)=1.803) is what matters, so it should settle normally and PASS.
+DEMValidation
+{
+   testCase archTunnelContainment;
+
+   shape box;
+   boxHalfExtents     <6, 1, 1.5>;
+   density            1.0;
+   restitutionCoefficient 0.5;
+   frictionCoefficient    0.3;
+   poissonsRatio           0.22;
+   collisionTime           0.01;
+
+   gravity            9.81;
+   tunnelRadius       5.0;
+   tunnelHalfSpan     10.0;
+   settleSteps        6000;
+   containmentTolerance 0.05;
+}

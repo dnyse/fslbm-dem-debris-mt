@@ -1,0 +1,183 @@
+// periodic_corner_stress_spheresonly_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// DEDICATED STRESS TEST for the mesa_pd sync desync chased in eighteen_stacked_release_pillar_
+// bogner_gas.prm ("Received invalid notification type", ParseMessage.h). Four crash repros of
+// the mixed-shape 18-stack all showed the same signature; the [SEND-HISTORY]/[PARSE-HISTORY]
+// diagnostics (SyncNextNeighbors.cpp / ParseMessage.h) narrowed it down across three rounds:
+// NOT a Box/Cylinder BaseShape pack asymmetry (job 3970084's implicated sender sent zero
+// box/cylinder ghost-copies all run), but a plain SPHERE (shapeType=1) with 7 SIMULTANEOUS ghost
+// owners, sitting exactly on the periodic-X seam (x=5.86, domain periodic in X only) AND exactly
+// on a Z-block boundary (z=60.0, cellsPerBlock z=30) while actively migrating ownership between
+// ranks (job 3970392).
+//
+// This file isolates that ONE condition -- a sphere with a high ghost-owner count repeatedly
+// crossing the periodic-X seam near a Z-block boundary -- with NOTHING else going on: same
+// domain/cellsPerBlock (so the block/rank topology, and therefore the exact periodic-corner
+// geometry, is IDENTICAL to where the bug was seen), but NO pillars (the original scenario's
+// pillars are a radius-8/14-LU-gap clogging trap that a radius-8 sphere can't pass without heavy
+// jamming, which would prevent it from ever completing a lap and returning to the seam) and only
+// a handful of free-floating spheres. If this reproduces the SAME "invalid notification type"
+// abort, the bug is confirmed shape-independent -- a latent SyncNextNeighbors/BufferSystem edge
+// case around high fan-out at a periodic-plus-block-boundary corner, and box/cylinder's role in
+// the original scenario is purely INDIRECT (changing settling/jamming dynamics enough that some
+// sphere ends up traveling all the way around and through that corner, something that apparently
+// never happens in the clean sphere-only 18-stack run, which jams everything at the pillars).
+//
+//   • 3 free-floating spheres (radius 8, densityRatio 0.5), all starting at x=2 (2 LU from the
+//     periodic seam at x=0/128) and z=55 (just below the flat-water reference absoluteLiquidHeight
+//     ≈56.02 for this liquidHeightFactor/floorHeightFactor pair -- close enough to its natural
+//     floating depth that it should drift right onto the z=60 Z-block boundary once buoyant, the
+//     same coincidence job 3970392's crash particle sat at). Spread in Y (10/30/50, 20-LU spacing,
+//     safe for radius-8 spheres) purely so three independent attempts run in one job.
+//   • initialVelocity <0.3,0,0>: a modest push (15x the background PID target 0.02, not the 100x+
+//     that would destabilize the local flow) so each sphere completes a lap of the 128-LU periodic
+//     domain roughly every ~425 steps even before hydrodynamic drag/buoyancy settle it toward the
+//     background flow speed -- many repeated passes through the seam over the run.
+//   • No settlingSteps/pinning -- fully free from step 0, no FIXED flag, immediately exposed to
+//     the periodic boundary on the very first laps while momentum is still highest.
+//   • No pillars, no BodyBC entries -- only the four flat T/B/N/S walls remain.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes (IDENTICAL topology
+// to eighteen_stacked_release_pillar_bogner_gas.prm, so rank 1's periodic-corner neighborhood is
+// the same rank 1 that was implicated twice there).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         60000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere { position < 2, 10, 55 >; radius 8; densityRatio 0.5; settlingSteps 0; initialVelocity < 0.3, 0, 0 >; }
+   FloatingSphere { position < 2, 30, 55 >; radius 8; densityRatio 0.5; settlingSteps 0; initialVelocity < 0.3, 0, 0 >; }
+   FloatingSphere { position < 2, 50, 55 >; radius 8; densityRatio 0.5; settlingSteps 0; initialVelocity < 0.3, 0, 0 >; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       5000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         density;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         combine CellBB_filter_2, liquidInterfaceFilter;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

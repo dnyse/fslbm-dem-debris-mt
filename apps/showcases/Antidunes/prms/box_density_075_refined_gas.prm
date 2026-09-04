@@ -1,0 +1,193 @@
+// box_density_075_refined_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// FEKKEN [2004] FLOATING-CUBE EQUILIBRATION — densityRatio 0.75, REFINED-RESOLUTION /
+// SHORTER-DOMAIN rerun of box_density_075_gas.prm. Same Fekken benchmark (cuboid, edges
+// 16x32x16 relative to the particle scale, free to rotate ONLY about its longitudinal (Y)
+// axis, released from a small 2.86 deg seed heel, predicted to settle at 26.565 deg from
+// upright), but:
+//
+//   • Resolution refined 1.5x in X/Y: domainSize.x 128->192, cellsPerBlock.x 32->48;
+//     domainSize.y 60->90, cellsPerBlock.y 20->30 (blocks-per-dim unchanged at 4x3, so
+//     process count in X/Y is identical -- this is purely "more cells per unit length",
+//     matching the same 1.5x technique validated on the 27-floater finegrid rerun this
+//     session). avgParticleDiameter (Utility.h::getAvgDiameterScalingFactor) is derived
+//     from domainSize[0]/generationDomainSize_SI[0], so it scales automatically with the
+//     new domainSize.x -- 8 -> 12 LU. Box geometry (halfExtents, position) is scaled by the
+//     SAME 1.5x to preserve the exact validated relative Fekken geometry at the new scale.
+//   • Domain height cut way down: this test has NO bed (useParticleBed false) and no wave
+//     propagation to worry about, so the original 56 LU of water + 124 LU of gas headspace
+//     (most of it inherited from the sedimentation-showcase convention, sized for a real
+//     granular bed that doesn't exist here) was mostly wasted. liquidHeightFactor 2.862 ->
+//     1.875 and floorHeightFactor 4.1393 -> 1.625 (sum 3.5, chosen to land on a clean
+//     absoluteLiquidHeight = 12*3.5 = 42 at the new avgParticleDiameter=12) cut the water
+//     depth to 42 LU. domainSize.z 180 -> 96 (cellsPerBlock.z 30->16, still 6 Z-blocks ->
+//     4x3x6=72 processes preserved): the box's half-diagonal at the new 1.5x scale is
+//     sqrt(12^2+24^2+12^2)~29.4 LU, so a full 45 deg heel (box_density_050's marginal case)
+//     swings the box through roughly [42-29.4, 42+29.4] = [12.6, 71.4] -- comfortably inside
+//     [0,96] with ~12.6 LU floor clearance and ~24.6 LU headspace above.
+//   • NET COMPUTE COST: the 1.5x X/Y refinement (2.25x more cells in the XY cross-section)
+//     outweighs the Z reduction (96/180 = 0.53x) -- net ~1.2x MORE total cells than the
+//     original box_density_075_gas.prm, despite the much shorter domain. Walltime bumped
+//     accordingly (see the matching sbatch script).
+//
+// Domain: <192, 90, 96> / cellsPerBlock <48, 30, 16> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 48, 30, 16 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic — no side walls, only Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <192, 90, 96>;
+   wavePeriods        1;
+   liquidHeightFactor 1.875;
+   floorHeightFactor  1.625;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         300000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // 1x2x1 cuboid (halfExtents 12x24x12 -> edges 24x48x24, the 1.5x-scaled Fekken
+      // geometry), long edge on Y (horizontal). densityRatio 0.75 -> Fekken-predicted
+      // stable heel: 26.565 deg from upright.
+      position             < 96, 45, 42 >;
+      halfExtents          < 12, 24, 12 >;
+      densityRatio         0.75;
+      settlingSteps        0;
+      initialTiltAngleDeg  2.86;   // small seed heel (Fekken), about the free Y axis
+      comOffsetZ           0;
+      pinPosition          true;
+      pinAxes              < 1, 1, 0 >;
+      pinRotation           true;
+      pinRotationAxes      < 1, 0, 1 >;   // free roll about Y (XZ plane); pin pitch (X) and yaw (Z)
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticBoxBuoyancy        true;   // exact clip drives the force -> plane export matches it exactly
+   boxPlaneFitBandFactor         2.0;    // widened reach (see changes.md box-stillwater-showcase investigation)
+   writeFloaterPlaneVTK          true;   // emit planeOrigin/planeNormal for the box
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   // Only Z (top/bottom) walls — X and Y are periodic (see BlockForestParameters),
+   // so N/S borders are intentionally omitted; setupBoundaryHandling auto-skips
+   // adding walls on periodic faces.
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Filters scaled 1.5x from the base file's <0,29,0>-<128,30,150> / <0,0,0>-<1,60,150>
+      // / <0,0,0>-<128,60,150>, with the Z max rescaled to the new domain (96 vs 180, same
+      // 5/6 fraction: 150/180 -> 80/96).
+      CellBB_filter_0 { min < 0, 44.25, 0 >;  max < 192, 45.75, 80 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;      max < 1.5, 90, 80 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;      max < 192, 90, 80 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

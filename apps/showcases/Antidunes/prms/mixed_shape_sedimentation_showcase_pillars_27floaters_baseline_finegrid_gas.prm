@@ -1,0 +1,239 @@
+// mixed_shape_sedimentation_showcase_pillars_27floaters_baseline_finegrid_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// PARTICLE IMPACT AND SEDIMENTATION AT A FREE SURFACE -- MIXED-SHAPE, WORKING-DENSITY-
+// ARRANGEMENT, PILLARS variant. RESOLUTION-REFINEMENT ISOLATION VARIANT of the 27-floater
+// NaN crash investigation: mixed_shape_sedimentation_showcase_pillars_27floaters_baseline_gas.prm
+// (27 floaters, sphere radius 4.5, targetMeanVelocityMagnitude 0.005 -- the exact same
+// physical setup as the proven-working base 27-floater file) crashed with a quaternion NaN
+// assertion at t~16518 (job 3885722) -- the EARLIEST and cleanest of four 27-floater
+// crashes, isolating floater COUNT alone (20->27) as the trigger, with no velocity or
+// size change involved. This file tests whether that crash is sensitive to spatial
+// discretization: every length in the domain (domainSize, cellsPerBlock, all floater/
+// pillar positions and sizes) is scaled by 1.5x, giving 1.5x more lattice cells per unit
+// length -- i.e. the SAME physical geometry and SAME number of MPI processes (72 =
+// 4x3x6 blocks, unchanged), just resolved 1.5x finer.
+//
+// SCALING METHODOLOGY (why 1.5x and what was/wasn't touched):
+// - domainSize <128,60,180> -> <192,90,270> and cellsPerBlock <32,20,30> -> <48,30,45>,
+//   chosen so cellsPerBlock stays integer in all 3 dims and blocks-per-dim (4,3,6=72
+//   processes) is UNCHANGED -- this is the "keep process count and physical size the
+//   same, just resolve finer" refinement the user asked for.
+// - Every floater/pillar position, radius, halfExtents, and length below is multiplied
+//   by 1.5 to preserve the exact same relative geometry at the finer resolution.
+// - liquidHeightFactor/floorHeightFactor are LEFT UNCHANGED: avgParticleDiameter (which
+//   they multiply) is derived in Utility.h::getAvgDiameterScalingFactor as
+//   domainSize[0]/generationDomainSize_SI[0] -- i.e. it scales automatically and exactly
+//   with domainSize[0], so liquidHeight/floorHeight/absoluteLiquidHeight all come out
+//   correctly rescaled with no changes needed here.
+// - useHardcodedUnits=true keeps viscosity/relaxationRate/gravity/surfaceTension as
+//   FIXED lattice-unit constants, and useParticleBed=false means the bed-only dx_SI/
+//   dt_SI/particleScalingFactor conversions (Utility.h/SetupStages.h) never feed into
+//   the actual dynamics here -- so this is NOT a rigorous physically-equivalent grid-
+//   convergence rescaling (gravity/viscosity/surface tension/target velocity stay the
+//   same LATTICE values, not rescaled for the new dx), it is a discretization-density
+//   diagnostic: does resolving the same geometry with more cells change whether/when
+//   this specific crash occurs.
+// - Consequence of leaving gravity_LU/velocity_LU fixed while distances grow 1.5x:
+//   floaters take longer (in lattice steps) to fall/drift the same relative distance
+//   (free-fall time ~sqrt(1.5)x, drift time ~1.5x), so settlingSteps is scaled 1.5x
+//   (10000->15000) and timesteps is raised to 40000 (comfortable margin over the
+//   ~16518*1.5..2 ~ 25000-33000 step range where the equivalent crash would be expected,
+//   while staying well inside the 4h walltime given the 3.375x more cells/rank this
+//   resolution needs -- full 100000 steps at this resolution would risk exceeding it).
+//
+// See mixed_shape_sedimentation_showcase_pillars_27floaters_baseline_gas.prm and
+// mixed_shape_sedimentation_showcase_pillars_gas.prm for the full crash/density-arrangement
+// history; everything non-geometric (BoundaryParameters structure, ModelParameters,
+// PIDParameters gains, physics Re/Fr/We/hardcoded constants) is otherwise identical.
+//
+// Domain: <192, 90, 270> / cellsPerBlock <48, 30, 45> = 4x3x6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 48, 30, 45 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <192, 90, 270>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.005;   // UNCHANGED lattice-unit value -- see header
+                                         // methodology note: not rescaled for the finer
+                                         // grid (this is a discretization-density probe,
+                                         // not a physically-equivalent refinement).
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         40000;               // see header methodology note: 1.5-2x margin over
+                                           // the expected equivalent-crash window, within the
+                                           // 4h walltime at this resolution's 3.375x cell cost
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// Pillars scaled 1.5x: center/radius from <112,15/45,90> r8 -> <168,22.5/67.5,135> r12.
+CylinderPillars
+{
+   CylinderPillar { center < 168, 22.5, 135 >; radius 12; }
+   CylinderPillar { center < 168, 67.5, 135 >; radius 12; }
+}
+
+FloatingSpheres
+{
+   FloatingSphere { position < 24, 15, 96 >; radius 6.75; densityRatio 0.5; settlingSteps 15000; }
+   FloatingSphere { position < 24, 45, 96 >; radius 6.75; densityRatio 0.5; settlingSteps 15000; }
+   FloatingSphere { position < 24, 75, 96 >; radius 6.75; densityRatio 0.5; settlingSteps 15000; }
+   FloatingSphere { position < 72, 15, 96 >; radius 6.75; densityRatio 1.0; settlingSteps 15000; }
+   FloatingSphere { position < 72, 45, 96 >; radius 6.75; densityRatio 1.0; settlingSteps 15000; }
+   FloatingSphere { position < 72, 75, 96 >; radius 6.75; densityRatio 1.0; settlingSteps 15000; }
+   FloatingSphere { position < 120, 15, 96 >; radius 6.75; densityRatio 2.0; settlingSteps 15000; }
+   FloatingSphere { position < 120, 45, 96 >; radius 6.75; densityRatio 2.0; settlingSteps 15000; }
+   FloatingSphere { position < 120, 75, 96 >; radius 6.75; densityRatio 2.0; settlingSteps 15000; }
+}
+
+FloatingBoxes
+{
+   FloatingBox { position < 24, 15, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 0.5; settlingSteps 15000; }
+   FloatingBox { position < 24, 45, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 0.5; settlingSteps 15000; }
+   FloatingBox { position < 24, 75, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 0.5; settlingSteps 15000; }
+   FloatingBox { position < 72, 15, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 1.0; settlingSteps 15000; }
+   FloatingBox { position < 72, 45, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 1.0; settlingSteps 15000; }
+   FloatingBox { position < 72, 75, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 1.0; settlingSteps 15000; }
+   FloatingBox { position < 120, 15, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 2.0; settlingSteps 15000; }
+   FloatingBox { position < 120, 45, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 2.0; settlingSteps 15000; }
+   FloatingBox { position < 120, 75, 114 >; halfExtents < 5.25, 10.5, 5.25 >; densityRatio 2.0; settlingSteps 15000; }
+}
+
+FloatingCylinders
+{
+   FloatingCylinder { position < 24, 15, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 15000; }
+   FloatingCylinder { position < 24, 45, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 15000; }
+   FloatingCylinder { position < 24, 75, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 15000; }
+   FloatingCylinder { position < 72, 15, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 15000; }
+   FloatingCylinder { position < 72, 45, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 15000; }
+   FloatingCylinder { position < 72, 75, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 15000; }
+   FloatingCylinder { position < 120, 15, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 15000; }
+   FloatingCylinder { position < 120, 45, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 15000; }
+   FloatingCylinder { position < 120, 75, 132 >; radius 6.75; length 13.5; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 15000; }
+}
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   // BodyBC entries scaled 1.5x along with CylinderPillars above (x=168, y=22.5/67.5,
+   // radius 12, Z spans the full new domain 0-270).
+   BodyBC { shape Cylinder; min < 168, 22.5, 0 >; max < 168, 22.5, 270 >; radius 12; NoSlip{} }
+   BodyBC { shape Cylinder; min < 168, 67.5, 0 >; max < 168, 67.5, 270 >; radius 12; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;
+      }
+
+      // CellBB filters scaled 1.5x from the base file's <0,29,0>-<128,30,150> /
+      // <0,0,0>-<1,60,150> / <0,0,0>-<128,60,150>.
+      CellBB_filter_0 { min < 0, 43.5, 0 >;  max < 192, 45, 225 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;     max < 1.5, 90, 225 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;     max < 192, 90, 225 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

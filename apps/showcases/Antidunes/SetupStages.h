@@ -792,6 +792,16 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
 // Called every timestep: releases any floating sphere or box whose settlingSteps have elapsed.
 // During the settling phase the floater is held FIXED so the FSLBM can establish a stable
 // fill-level / normal field around the contact line before the particle starts moving.
+//
+// Each release also inserts the UID into simObjs->freshlyActivatedFloaterUIDs, a debug/validation
+// hook (see that member's own doc comment, SimulationObjects.h) for a "flying floater" bug traced
+// to floaters being released directly on top of an already-active neighbour: rather than a
+// separate, necessarily-approximate geometric check here, this lets the floater fall into the
+// REAL contact detection it was excluded from while dormant (ComputeContacts, ParticleKernels.h,
+// same GJK/EPA/analytical dispatch used for actual physics) on the very next doDEMSubCycles() call
+// -- exact, not approximated, and with zero extra geometry code. ComputeContacts hard-aborts, with
+// full diagnostic detail, if it finds a genuine contact involving a UID in that set; the set is
+// cleared unconditionally at the end of that same doDEMSubCycles() call either way.
 void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams >& simParams,
                                    const std::shared_ptr< SimulationObjects >&       simObjs,
                                    const uint_t currentStep)
@@ -804,6 +814,8 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
       const auto& fsp = simParams->floatingSpheres[i];
       if (fsp.settlingSteps == uint_t(0) || currentStep != fsp.settlingSteps) continue;
       const walberla::id_t uid = simObjs->floaterUIDs[i];
+
+      simObjs->freshlyActivatedFloaterUIDs->insert(uid);
 
       simObjs->particleStorage->forEachParticle(
          false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
@@ -825,6 +837,8 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
       if (fbp.settlingSteps == uint_t(0) || currentStep != fbp.settlingSteps) continue;
       const walberla::id_t uid = simObjs->floaterBoxUIDs[i];
 
+      simObjs->freshlyActivatedFloaterUIDs->insert(uid);
+
       simObjs->particleStorage->forEachParticle(
          false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
          [uid](const size_t idx, auto& ac) {
@@ -844,6 +858,8 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
       const auto& fcp = simParams->floatingCylinders[i];
       if (fcp.settlingSteps == uint_t(0) || currentStep != fcp.settlingSteps) continue;
       const walberla::id_t uid = simObjs->floaterCylinderUIDs[i];
+
+      simObjs->freshlyActivatedFloaterUIDs->insert(uid);
 
       simObjs->particleStorage->forEachParticle(
          false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,

@@ -1,0 +1,1209 @@
+// box_sedimentation_showcase_analytical_1000floaters_realgravity_density05_50k_collapsed_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// COLLAPSED-PLANE, STAGGERED-DROP VARIANT of
+// box_sedimentation_showcase_analytical_1000floaters_realgravity_density05_20k_gas.prm (all boxes
+// densityRatio 0.5, which itself ran 1h10m and crashed at step 18000 -- vs. the mixed-density
+// scenario's steps 3315-4204 -- see that file's header). That variant kept the original 10x10x10
+// grid (10 Z-rows per X,Y column, all active from step 0). THIS variant collapses every column's
+// 10 Z-rows onto a single spawn plane at Z=64 (the original lowest row -- box bottom at Z=61,
+// comfortably above the waterline at Z=56.024) -- all 10 boxes per column share the EXACT SAME
+// spawn position. Only the first (index 0) of each stack starts active immediately
+// (settlingSteps 0); the other 9 use startInactive=true (excluded from both fluid mapping and DEM
+// contact while dormant -- see SimulationParams.h's FloatingBox::startInactive doc comment) with
+// settlingSteps staggered by 2000 apiece (2000, 4000, ..., 18000), so one box per column drops
+// every 2000 steps, 10 drops total, spanning steps 0-18000. By the time each successive box in a
+// stack releases, the previous one has fallen ~60-300+ LU clear (velocity ~0.03-0.15/step over
+// 2000 steps) -- no residual spawn-point overlap. timesteps raised to 50000 to leave ~30000 steps
+// of settled dynamics after the last drop (step 18000) to watch for the crash.
+//
+// GENUINE 10x10x10 GRID (1000 floaters) sibling of
+// box_sedimentation_showcase_analytical_125floaters_realgravity_gas.prm, same box size
+// (halfExtents <3, 9, 3>), same real Y-neighbour-contact design (not the single-Y-position v6
+// approach), same true g_SI=9.81 gravity. Domain scaled up proportionally in X and Y (160,160 ->
+// 320,320) to give the same 32 LU column/row spacing for 10 positions each instead of 5; Z is
+// UNCHANGED (180) since 10 rows at the same 11 LU spacing (64..163) still fit with 14 LU headroom
+// to the ceiling. cellsPerBlock scaled proportionally too (40,40,20 -> 80,80,20), so the process
+// count stays IDENTICAL at 144 (4x4x9) -- no new node/core budget needed versus the 125-floater run.
+//
+// SCALING: same avgParticleDiameterOverride/dxSIOverride as the 125-floater file (both decoupled
+// from domain size by design -- see that file's own header for the full derivation) --
+// avgParticleDiameter=8.001943372119138, dx_SI=0.000362694127490625, giving the identical
+// liquidHeight=22.9016, floorHeight=33.1224, absoluteLiquidHeight=56.024 as every sibling in this
+// family.
+//
+// GRAVITY: true g_SI=9.81 m/s^2, gravityOverride=2.1371500584054327e-05 -- IDENTICAL value to the
+// 125-floater file (same dx_SI/dt_SI, since domain height Z and the override scaling didn't
+// change). Eq. 10 (Buick & Greated 2000) incompressibility check: domainHeight(180) *
+// gravityOverride = 0.00385, still far under the required <<1/3 -- stable.
+//
+// GEOMETRY: X = 16/48/80/112/144/176/208/240/272/304 (10 columns, spacing 32, same convention as
+// the 125-floater file), Y = same 10 values (same spacing), Z = 64/75/86/97/108/119/130/141/152/163
+// (10 rows, spacing 11, same clearance convention -- top row's box edge sits at Z=166, 14 LU below
+// the domain ceiling at 180). 10x10x10 = 1000 boxes total.
+//
+// Densities: 5 distinct values, each assigned to TWO columns (columns 1&6, 2&7, 3&8, 4&9, 5&10) for
+// statistical redundancy -- 0.5, 0.75, 1.0, 1.5, 2.0 -- rather than spreading into 10 distinct
+// values; each density gets 2 columns x 10 Y-positions x 10 Z-rows = 200 floaters.
+//
+// Domain: <320, 320, 180> / cellsPerBlock <80, 80, 20> = 4x4x9 = 144 processes (2 nodes, multinode
+// partition, IDENTICAL resource footprint to the 125-floater run).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 80, 80, 20 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic — no side walls, only Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <320, 320, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         50000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;               // keep fixed reference viscosity/relaxationRate; only gravity overridden below
+   gravityOverride   2.1371500584054327e-05;  // true g_SI=9.81 m/s^2 -- see header derivation
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+   avgParticleDiameterOverride 8.001943372119138;  // see header -- matches the family's own scale
+   dxSIOverride                0.000362694127490625;
+}
+
+FloatingBoxes
+{
+   // ---- column x=16, densityRatio 0.5 ----
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 16, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=48, densityRatio 0.5 (uniform-density variant) ----
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 48, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=80, densityRatio 0.5 (uniform-density variant) ----
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 80, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=112, densityRatio 0.5 (uniform-density variant) ----
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 112, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=144, densityRatio 0.5 (uniform-density variant) ----
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 144, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=176, densityRatio 0.5 ----
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 176, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=208, densityRatio 0.5 (uniform-density variant) ----
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 208, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=240, densityRatio 0.5 (uniform-density variant) ----
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 240, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=272, densityRatio 0.5 (uniform-density variant) ----
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 272, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+
+   // ---- column x=304, densityRatio 0.5 (uniform-density variant) ----
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 16, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 48, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 80, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 112, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 144, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 176, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 208, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 240, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 272, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 2000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 4000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 6000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 8000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 10000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 12000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 14000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 16000; startInactive true; }
+   FloatingBox { position < 304, 304, 64 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 18000; startInactive true; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticalContactDetection true;  // see header note
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   // Only Z (top/bottom) walls — X and Y are periodic (see BlockForestParameters),
+   // so N/S borders are intentionally omitted; setupBoundaryHandling auto-skips
+   // adding walls on periodic faces.
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 0, 0, 0 >;   max < 320, 320, 175 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

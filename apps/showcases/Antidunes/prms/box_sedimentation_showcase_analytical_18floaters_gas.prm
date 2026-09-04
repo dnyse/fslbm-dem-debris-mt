@@ -1,0 +1,211 @@
+// box_sedimentation_showcase_analytical_18floaters_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// SCALED-UP VARIANT of box_sedimentation_showcase_analytical_gas.prm (v6, the clean-running
+// 9-box case): same domain/physics/X-column/density layout/methodology, but with box size
+// matched to thousand_cuboids_two_pillars_slitpass_gas.prm's halfExtents <3, 9, 3> (edge
+// lengths 6x18x6, long axis Y) instead of v6's own <3.5, 7, 3.5>, and DOUBLE the floater
+// count (9 -> 18).
+//
+// WHY Z-STACK DEPTH, NOT MORE X-COLUMNS OR Y-NEIGHBOURS: v6's whole point (see its own header
+// for the v1-v5 crash history) was isolating gravity-driven Z-stacking as the only contact
+// type -- single Y position per column, no Y-neighbour contacts at all -- after v4/v5 crashed
+// specifically when Y-neighbour contacts were introduced. To double the count without
+// reintroducing that risk, this file keeps the same 3 X-columns (32/64/96, same
+// light/neutral/heavy density mapping) and single Y=30, and instead doubles the STACK DEPTH
+// per column from 3 rows to 6 rows. Contact type is unchanged from v6: still only Z-stacking
+// within a column, nothing else.
+//
+// GEOMETRY: halfExtents <3, 9, 3> -> 6x6 LU X/Z cross-section (down from v6's 7x7), 18 LU
+// Y-length (up from v6's 14). Z-row spacing widened from v6's 12 LU (5 LU clearance against a
+// 7 LU Z-edge) to 11 LU (5 LU clearance against the new 6 LU Z-edge) -- same clearance
+// margin, scaled to the smaller cross-section. 6 rows per column: Z = 64/75/86/97/108/119
+// (vs. v6's 3 rows at 64/76/88) -- the bottom row starts at the same Z=64 v6 used (a few LU
+// above this scenario's own free surface, absoluteLiquidHeight=56.024 LU, so the whole stack
+// still starts in gas and drops through the interface, same "impact and sedimentation" setup
+// as v6), extending upward for the 3 additional rows. Y=30 (domain centre) with a half-extent
+// of 9 occupies Y=[21,39], comfortably inside the domain's Y=[0,60] with large margin either
+// side of the periodic wrap -- no self-overlap risk from the longer box.
+//
+// Layout: X = 32/64/96 (3 columns, densities 0.5/1.0/2.0, unchanged from v6), Y = 30 (single
+// position, no Y-neighbours), Z = 64/75/86/97/108/119 (6 rows per column). 18 boxes total.
+// Domain and process count unchanged: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 =
+// 72 processes.
+//
+// Densities: same convention as v6 -- each X-column is a single, uniform density shared by
+// all 6 rows in that column -- 0.5 (light) at x=32, 1.0 (neutral) at x=64, 2.0 (heavy) at
+// x=96. Boxes are free to translate and rotate (no pinning, no initial tilt); they fall and
+// settle into contact under gravity, isolated to one column per density.
+//
+// ModelParameters, physics, and everything else below are copied verbatim from
+// box_sedimentation_showcase_analytical_gas.prm -- only FloatingBoxes changed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic — no side walls, only Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   // ---- column x=32, densityRatio 0.5 (light) ----
+   FloatingBox { position < 32, 30, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 32, 30, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 32, 30, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 32, 30, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 32, 30, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 32, 30, 119 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+
+   // ---- column x=64, densityRatio 1.0 (neutral) ----
+   FloatingBox { position < 64, 30, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 64, 30, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 64, 30, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 64, 30, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 64, 30, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 64, 30, 119 >; halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+
+   // ---- column x=96, densityRatio 2.0 (heavy) ----
+   FloatingBox { position < 96, 30, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 96, 30, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 96, 30, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 96, 30, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 96, 30, 108 >; halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 96, 30, 119 >; halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticalContactDetection true;  // see header note
+   // Explicit (matches SimulationParams.h's own default as of the buoyancy-flag fix, stated here so
+   // this file's behaviour doesn't silently change if that default is ever revisited): this scenario
+   // mixes densityRatio 0.5/1.0/2.0 (light/neutral/heavy) columns specifically to see them separate by
+   // buoyancy -- without this pairing the light column gets NO net buoyant support at all and sinks
+   // like the heavy one, defeating the whole point of the test.
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   // Only Z (top/bottom) walls — X and Y are periodic (see BlockForestParameters),
+   // so N/S borders are intentionally omitted; setupBoundaryHandling auto-skips
+   // adding walls on periodic faces.
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;  // cell type per timestep: 1=liquid 2=interface 3=gas 4=noSlip 6=freeSlip/UBB
+                       // 7=UBB-inflow 8=pressure 9=pressure-outflow 10=outlet (VtkWriter.h)
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

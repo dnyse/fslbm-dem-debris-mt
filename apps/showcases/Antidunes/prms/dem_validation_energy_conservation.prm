@@ -1,0 +1,29 @@
+// DEM dry-run validation: Feng (2023)'s "energy-conserving contact" (ECC) criterion -- the theoretically
+// rigorous minimum bar for any contact model (Thirty years of developments in contact modelling of
+// non-spherical particles in DEM, Powder Technology... review, Sect. 6). restitutionCoefficient=1,
+// frictionCoefficient=0, no gravity: total kinetic energy must be conserved across an elastic collision,
+// for all 6 shape-pair combinations. Box-box and cylinder-cylinder additionally get a LIVE cross-check
+// of the not-yet-simulation-wired Kodam/Guo/Gottschalk closed forms in PaperAnalyticalContacts.h against
+// the production GJK/EPA geometry actually driving the dynamics (diagnostic only, logged as
+// paperAnalyticalMaxOverlapDelta -- does not change what drives the physics).
+DEMValidation{
+    testCase energyConservation;
+
+    sphereRadius 1.0;
+    boxHalfExtents < 1.0, 2.0, 2.0 >;
+    cylinderRadius 1.0;
+    cylinderLength 6.0;
+    density 1.0;
+
+    poissonsRatio 0.22;
+    collisionTime 0.01;
+
+    approachSpeed 1.0;
+    // See dem_validation_pair_restitution.prm's comment: kept small since there's no acceleration phase
+    // to wait out (no gravity here), just enough gap that no pair starts already in contact.
+    initialSeparation 8.0;
+
+    toleranceRelError 0.02;
+    vtkSpacing 0;
+    outputBaseName energy_conservation;
+}

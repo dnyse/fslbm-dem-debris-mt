@@ -1,0 +1,55 @@
+// DEM dry-run validation: Kodam et al. (2010) Part II Fig. 10 / Section 3.3 recreation -- ONE shape
+// dropped one at a time (random position near the top, negligible KE, random orientation) into a
+// genuinely circular container, measuring fill height and bulk solid fraction (their Eq. (7)). No
+// water/fluid coupling (fluid-free DEM dry-run). VTK output enabled -- see vtk-out/packing_single_shape/.
+//
+// Swap the shape by editing the `shape` key below to "sphere", "box", or "cylinder".
+//
+// EVERY VALUE BELOW IS TAKEN DIRECTLY FROM THE PAPER (real SI units -- metres, kg, seconds), so results
+// are directly comparable to Kodam et al.'s own Table 2 / Fig. 10 (cylinder: fill height error 5%,
+// bulkSolidFraction 0.589 sim / 0.617 experiment):
+//   - cylinderRadius/cylinderLength: Table 1, "Cylinder diameter"=8.0E-03m, "Cylinder length"=5.3E-03m.
+//   - density: Table 1, mass=3.1E-04kg / volume=2.664E-07m^3 = 1163.66 kg/m^3.
+//   - restitutionCoefficient/frictionCoefficient/poissonsRatio: Table 1, 0.85 / 0.5 / 0.35.
+//   - gravity: standard 9.81 m/s^2 (not explicitly restated in the paper, SI throughout).
+//   - containerRadius: Section 3.3, "internal diameter of 50.6mm" -> radius 0.0253m.
+//   - numParticles: Section 3.3, "A total of 250 cylindrical particles".
+//   - sphereRadius/boxHalfExtents: NOT in the paper (Kodam only tested the cylinder here) -- sized to the
+//     SAME volume as the cylinder (2.664E-07 m^3) so a shape-swapped run stays an apples-to-apples
+//     between-shapes comparison rather than an arbitrary size difference.
+// The ONE thing that cannot be made bit-for-bit identical: Kodam's Table 1 footnote calibrates a linear
+// spring/dashpot directly (k=4.0E-05 N/m, v=1.506 N/(s*m)) for their contact model; this engine's
+// DEMEngine/ComputeContacts (same production code as BedGeneration.cpp/Antidunes.cpp) instead derives
+// spring/damping from (restitutionCoefficient, collisionTime, poissonsRatio) via the Thornton et al.
+// relation -- the SAME calibration convention used everywhere else in this codebase. collisionTime below
+// (1.0E-04s) is chosen as a physically short, stiff contact appropriate for a mm-scale rigid plastic
+// particle -- short enough that packing fraction (governed by restitution/friction, not fine contact-time
+// detail) is not sensitive to it, not a literal reproduction of Kodam's reported k/v.
+DEMValidation{
+    testCase packingSingleShape;
+
+    shape cylinder;   // "sphere" | "box" | "cylinder"
+
+    numParticles 250;        // Kodam et al. Section 3.3: 250 cylindrical particles
+    sphereRadius 0.0039916;  // equal-volume sphere (Kodam only tested the cylinder)
+    boxHalfExtents < 0.0032172, 0.0032172, 0.0032172 >;  // equal-volume cube
+    cylinderRadius 0.004;    // Table 1: diameter 8.0E-03m
+    cylinderLength 0.0053;   // Table 1: length 5.3E-03m
+    density 1163.66;         // Table 1: mass 3.1E-04kg / volume 2.664E-07m^3
+
+    restitutionCoefficient 0.85;  // Table 1
+    frictionCoefficient 0.5;      // Table 1
+    poissonsRatio 0.35;           // Table 1
+    collisionTime 1.0e-4;         // see header note -- not a literal Kodam value, our model has no k/v input
+    gravity 9.81;
+
+    containerRadius 0.0253;  // Section 3.3: internal diameter 50.6mm
+    numWallSegments 32;
+
+    settleCheckEvery 300;
+    dropTimeoutSteps 80000;
+    maxSteps 8000000;
+
+    vtkSpacing 2000;
+    outputBaseName packing_single_shape;
+}

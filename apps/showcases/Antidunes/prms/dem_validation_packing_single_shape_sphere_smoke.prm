@@ -1,0 +1,33 @@
+// SMOKE TEST -- sphere variant of dem_validation_packing_single_shape.prm, cut way down (10 particles,
+// dropTimeoutSteps 5000 instead of 250/80000) just to check the sphere shape path works at all (creates
+// particles, settles, produces a sane, finite bulkSolidFraction) before committing to the full 24h,
+// 250-particle Kodam-exact run. Not a real Kodam comparison -- too few particles, too short a settle
+// timeout to trust the reported fraction as physically meaningful, purely a functional smoke test.
+DEMValidation{
+    testCase packingSingleShape;
+
+    shape sphere;
+
+    numParticles 10;
+    sphereRadius 0.0039916;
+    boxHalfExtents < 0.0032172, 0.0032172, 0.0032172 >;
+    cylinderRadius 0.004;
+    cylinderLength 0.0053;
+    density 1163.66;
+
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.5;
+    poissonsRatio 0.35;
+    collisionTime 1.0e-4;
+    gravity 9.81;
+
+    containerRadius 0.0253;
+    numWallSegments 32;
+
+    settleCheckEvery 100;
+    dropTimeoutSteps 5000;
+    maxSteps 50000;
+
+    vtkSpacing 200;
+    outputBaseName packing_single_shape_sphere_smoke;
+}

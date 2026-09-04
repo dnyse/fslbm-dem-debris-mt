@@ -1,0 +1,41 @@
+// Sphere variant of dem_validation_packing_single_shape.prm -- same Kodam et al. (2010) Fig. 10 /
+// Section 3.3 protocol and real-SI-unit parameters, but shape=sphere instead of cylinder. Kodam's paper
+// only tested the cylinder, so there is no literature reference number to compare against here -- this
+// run exists for the between-shapes comparison (sphere vs. cylinder vs. box, all equal-volume,
+// identical material/contact parameters), and because sphere-sphere contact detection is the simplest,
+// most thoroughly-tested pair type in this engine (unlike Cylinder-Cylinder, which falls through to the
+// generic GJK/EPA path -- see the rotating-drum energy-instability investigation), so this run also
+// serves as a control: does the same packingSingleShape scenario behave normally with the simplest
+// possible contact geometry, at the identical real-SI scale that recently made the cylinder variant only
+// create 100/250 particles with an unphysical bulkSolidFraction=1.34.
+//
+// See dem_validation_packing_single_shape.prm for the full value-by-value Kodam citation list --
+// everything here is identical except `shape` and `outputBaseName`.
+DEMValidation{
+    testCase packingSingleShape;
+
+    shape sphere;
+
+    numParticles 250;
+    sphereRadius 0.0039916;  // equal-volume sphere (2.664E-07 m^3, matching the cylinder's Table 1 volume)
+    boxHalfExtents < 0.0032172, 0.0032172, 0.0032172 >;
+    cylinderRadius 0.004;
+    cylinderLength 0.0053;
+    density 1163.66;
+
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.5;
+    poissonsRatio 0.35;
+    collisionTime 1.0e-4;
+    gravity 9.81;
+
+    containerRadius 0.0253;
+    numWallSegments 32;
+
+    settleCheckEvery 300;
+    dropTimeoutSteps 80000;
+    maxSteps 8000000;
+
+    vtkSpacing 2000;
+    outputBaseName packing_single_shape_sphere;
+}

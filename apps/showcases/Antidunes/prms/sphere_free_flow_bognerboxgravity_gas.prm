@@ -1,0 +1,192 @@
+// sphere_free_flow_bognerboxgravity_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// FREE-FLOATING SPHERE, BOGNER'S BOX-EXPERIMENT GRAVITY, BOGNER BUOYANCY, WITH FLOW.
+//
+// Direct sibling of sphere_dynamic_gravity_bogner_gas.prm (job 3947080) --
+// identical in every other respect (same domain, same free sphere with
+// pinPosition/pinRotation both false, same real mean flow
+// targetMeanVelocityMagnitude=0.02) -- except gravity and viscosity are now
+// OVERRIDDEN to Bogner & Rude (2013)'s own validated values from the floating-
+// cube equilibrium test (thesis Sec. 5.3.3):
+//   gravityOverride        7.5e-4;   // was dynamically computed, ~1.169e-5
+//   relaxationRateOverride 1.9;      // was dynamically computed, ~1.998 (tau=1/1.9=0.526)
+//
+// DOMAIN HEIGHT ALREADY MATCHES -- unlike the still-water 100-sphere/81-floater
+// showcases (which needed gravity RESCALED by 40/domainHeight to preserve
+// Bogner's own Eq. 10 stability margin, see those files' headers), this
+// domain's Z is already 40, exactly matching Bogner's own box-experiment
+// domain height -- so his raw g=7.5e-4 is used unscaled here, at the same
+// margin he himself validated it at (40*7.5e-4=0.03, ~9.0% of cs^2=1/3).
+//
+// NOVEL COMBINATION: none of the existing "Bogner gravity" files
+// (sphere_density_showcase_bogner_domain_matched_gas.prm, the
+// sphere_waterlevel_sweep_*_bogner_gas.prm trio) run with an active mean flow
+// -- they are all still water (targetMeanVelocityMagnitude=0). This file
+// combines Bogner's own validated gravity/viscosity regime with a real flow
+// AND a fully free (unpinned) floater for the first time, to see whether the
+// much stronger gravity (~64x the dynamic value) changes the oscillation
+// behaviour observed in the free, dynamic-gravity run (job 3947080: submersion
+// oscillated in a much tighter band around the correct 50% once the sphere was
+// freed, vs. wildly and >=50%-biased when pinned).
+//
+// Sphere: single FloatingSphere, densityRatio 0.5 -> Archimedes equilibrium
+// predicts 50% submerged, independent of gravity's magnitude in principle (the
+// force balance vSub/vFull = rho cancels g) -- gravity's magnitude should only
+// affect convergence speed/damping and numerical stability, not the target
+// equilibrium itself. This run isolates exactly that variable.
+//
+// timesteps 30000 (matches the sibling run).
+//
+// Domain: <96, 45, 40> / cellsPerBlock <16, 15, 10> = 6×3×4 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 16, 15, 10 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <96, 45, 40>;
+   wavePeriods        1;
+   liquidHeightFactor 3.3227;    // -> liquidHeight ~19.941 (same as sibling run)
+   floorHeightFactor  0.01;      // -> floorHeight ~0.060 (kept nonzero only to satisfy the != 0 assertion)
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.02;    // real mean flow active (E1), matches Antidunes_bogner.prm
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              30000;
+   Re                     3100;       // E1 (only used to compute surfaceTension via We; viscosity/gravity below are overridden)
+   Fr                     1.31;       // E1
+   We                     15.6188;    // E1
+   relaxationRateOverride 1.9;        // Bogner & Rude 2013's tau=1/1.9=0.526 (floating-cube validation)
+   gravityOverride        7.5e-4;     // Bogner & Rude 2013's own g -- domain height already matches (40), no rescale needed
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // densityRatio 0.5 -> Archimedes equilibrium: 50% submerged.
+      position     < 48, 22.5, 20 >;
+      radius       8;
+      densityRatio 0.5;
+      settlingSteps 0;
+      pinPosition  false;   // fully free: drifts with the flow, no axis held
+      pinRotation  false;   // fully free: rolls/tumbles under hydrodynamic torque
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+   writeFloaterPlaneVTK          true;   // emit planeOrigin/planeNormal for the sphere
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 22, 0 >;  max < 96, 23, 40 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 45, 40 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 96, 45, 40 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

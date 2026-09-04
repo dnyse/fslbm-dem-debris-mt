@@ -1,0 +1,197 @@
+// cuboid_stillwater_bognerboxgravity_3xsphere_d025_gas.prm
+// REPRODUCIBILITY VARIANT: DYNAMIC/NATIVE GRAVITY -- no gravityOverride or
+// relaxationRateOverride, useHardcodedUnits true. This is exactly "the values the dynamic
+// formulas... produce at the default config" (SimulationParams.h comment): viscosity=
+// 0.000214026, relaxationRate=1.99743, gravity=7.02618e-06 (g_SI~=1.36 m/s^2),
+// surfaceTension=0.000849592 -- a THIRD gravity magnitude, ~7.2x smaller than the solved
+// real-9.81 value and ~107x smaller than Bogner's own box value. Domain/shape/density
+// otherwise identical to the run that originally crashed.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// FREE-FLOATING Y-ELONGATED CUBOID, STILL WATER, BOGNER'S BOX-EXPERIMENT GRAVITY,
+// BOGNER BUOYANCY, SAME 3x-FAMILY DOMAIN/GRAVITY AS
+// sphere_stillwater_realgravity981_3xsphere_gas.prm.
+//
+// Direct companion to the sphere/cylinder study, same methodology: domain
+// <96,135,120>, cellsPerBlock <16,45,30>, Bogner & Rude (2013)'s own g=7.5e-4, tau=1.9, unscaled (not solved from
+// header for the full derivation), 50000 timesteps, densityRatio in
+// {0.25, 0.5, 0.75} across siblings.
+//
+// halfExtents <15,30,15>: an s x 2s x s box (s=30, full dims 30x60x30) matching
+// Bogner & Rude (2013)'s own free-floating-cube ratio (Sec. 5.3.3: a cube of side s
+// extruded to 2s x s x s along its rotation axis), rather than the earlier 48x48x60
+// box which matched the sphere/cylinder's cross-section but broke that 1:2:1 ratio.
+// Length kept at 60 LU to match the cylinder's length (a true s=48 box, matching
+// cross-section instead, would need Y=96). Cross-section (X,Z) is now 30x30, no
+// longer matching the sphere's 48-LU diameter. Centred at the same <48,67.5,60> the
+// sphere/cylinder used; length 60 leaves 37.5 LU clearance to each Y wall.
+//
+// Started with a small initialTiltAngleDeg=5 (roll about the long Y axis, i.e.
+// perturbed off its upright/face-down orientation) rather than upright (0) or the
+// 45 degree edge-down stress test used elsewhere (box_stillwater_showcase_gas.prm,
+// log_stillwater_gas.prm) -- the point here is a small-angle stability probe: does
+// the cuboid right itself back toward 0 degrees (GM>0) or diverge/settle at some
+// other equilibrium tilt, and how that depends on densityRatio. Fully free
+// (pinPosition/pinRotation false) so the righting behaviour is genuine, not
+// constrained. comOffsetZ 0 -- no artificial COM lowering, this is the "natural"
+// uniform-density cuboid case.
+//
+// tiltY is logged every evaluationFrequency steps by the existing [BoxBuoyancy]
+// evaluator (ParticleKernels.h) -- no code changes needed to extract the
+// equilibrium angle after the run; see the job's .out log.
+//
+// densityRatio 0.5 here; see the _d025/_d075 siblings for the other two densities.
+// Domain: <96, 135, 120> / cellsPerBlock <16, 45, 30> = 6×3×4 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 16, 45, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <96, 135, 120>;
+   wavePeriods        1;
+   liquidHeightFactor 9.9681;
+   floorHeightFactor  0.01;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              50000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;         // native/dynamic-equivalent gravity=7.02618e-06, NOT overridden to 9.81 or Bogner's box value
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 3;   // scaling-math lever only (useParticleBed false) -- see sphere sibling's header
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // densityRatio 0.25 -> Archimedes equilibrium: 25% submerged.
+      position             < 48, 67.5, 60 >;
+      halfExtents          < 15, 30, 15 >;
+      densityRatio         0.25;
+      settlingSteps        0;
+      initialTiltAngleDeg  5;
+      comOffsetZ           0;
+      pinPosition          false;   // fully free
+      pinRotation          false;   // fully free
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+      }
+
+      CellBB_filter_0 { min < 0, 67, 0 >;   max < 96, 68, 120 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;    max < 1, 135, 120 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;    max < 96, 135, 120 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

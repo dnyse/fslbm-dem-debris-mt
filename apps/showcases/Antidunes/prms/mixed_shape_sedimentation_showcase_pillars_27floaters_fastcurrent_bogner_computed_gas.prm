@@ -1,0 +1,230 @@
+// mixed_shape_sedimentation_showcase_pillars_27floaters_fastcurrent_bogner_computed_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// BOGNER MODEL variant of
+// mixed_shape_sedimentation_showcase_pillars_27floaters_fastcurrent_gas.prm --
+// unlike mixed_shape_sedimentation_showcase_pillars_27floaters_fastcurrent_bogner_gas.prm,
+// this file does NOT override gravity/relaxationRate. It keeps Re=3100/Fr=1.31
+// and lets ComputedParams derive gravity/relaxationRate normally (same physical
+// regime as every other antidune showcase in this project), and ONLY changes the
+// force-formulation switches:
+//
+//   useBognerThreePhaseMEM  true   -- no rhoHydStat subtraction in the MEM force
+//   useMemOnlyBuoyancy       true   -- no separate analytic vSub*g buoyancy channel;
+//                                     buoyant support comes solely from the MEM/
+//                                     hydrodynamic force
+//   useFillWeighting        true   -- Eq. 5.9's phi(x_b) blend (already the
+//                                     default; kept explicit for parity with the
+//                                     full-override variant)
+//
+// WHY: the full-override variant (gravityOverride 7.5e-4, relaxationRateOverride
+// 1.9 -- Bogner & Rude's own still-water validation values) was found to collapse
+// Re 3100->~52 and Fr 1.31->~0.15 (confirmed from a real run screenshot at 99k
+// steps: no sediment buildup in front of either pillar at all). Antidune bedform
+// growth specifically needs a near-critical/supercritical Fr so the free surface
+// and bed stay dynamically coupled; at Fr~0.15 that coupling is gone. Separately,
+// submerged particle weight scales directly with gravity, so the ~107x larger
+// overridden gravity raises the critical shear stress needed to entrain a grain
+// far above what this flow produces -- particles stop moving regardless of the
+// surface-bed coupling. Both effects independently suppress any bedload
+// transport/mound formation, so that variant is unsuitable for anything that
+// needs the bed to actually respond to the flow.
+//
+// This file isolates the OTHER half of the earlier request: keep the Bogner
+// force-formulation model (no rhoHydStat subtraction, no separate buoyancy
+// channel) but let physics stay exactly as computed by this project's normal
+// Re/Fr dimensionless-number pipeline, so Re/Fr similarity with every other
+// antidune showcase is preserved and bedform formation in front of the pillars
+// remains possible.
+//
+// Everything else (27-floater grid, pillar geometry, walled Y, domain,
+// targetMeanVelocityMagnitude 0.01, timesteps 100000) is unchanged from
+// mixed_shape_sedimentation_showcase_pillars_27floaters_fastcurrent_gas.prm.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4x3x6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;   // X periodic, Y walled (see BoundaryParameters N/S NoSlip below)
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.01;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;              // keep physical constants valid while U = 0
+   // NOTE: no gravityOverride / relaxationRateOverride here -- gravity and
+   // relaxationRate are derived normally from Re/Fr (see header).
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar { center < 112, 15, 90 >; radius 8; }
+   CylinderPillar { center < 112, 45, 90 >; radius 8; }
+}
+
+FloatingSpheres
+{
+   FloatingSphere { position < 16, 10, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 10000; }
+   FloatingSphere { position < 16, 30, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 10000; }
+   FloatingSphere { position < 16, 50, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 10000; }
+   FloatingSphere { position < 48, 10, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 10000; }
+   FloatingSphere { position < 48, 30, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 10000; }
+   FloatingSphere { position < 48, 50, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 10000; }
+   FloatingSphere { position < 80, 10, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 10000; }
+   FloatingSphere { position < 80, 30, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 10000; }
+   FloatingSphere { position < 80, 50, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 10000; }
+}
+
+FloatingBoxes
+{
+   FloatingBox { position < 16, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 10000; }
+   FloatingBox { position < 16, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 10000; }
+   FloatingBox { position < 16, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 10000; }
+   FloatingBox { position < 48, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 10000; }
+   FloatingBox { position < 48, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 10000; }
+   FloatingBox { position < 48, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 10000; }
+   FloatingBox { position < 80, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 10000; }
+   FloatingBox { position < 80, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 10000; }
+   FloatingBox { position < 80, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 10000; }
+}
+
+FloatingCylinders
+{
+   FloatingCylinder { position < 16, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; }
+   FloatingCylinder { position < 16, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; }
+   FloatingCylinder { position < 16, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 10000; }
+   FloatingCylinder { position < 48, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 10000; }
+   FloatingCylinder { position < 48, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 10000; }
+   FloatingCylinder { position < 48, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 10000; }
+   FloatingCylinder { position < 80, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 10000; }
+   FloatingCylinder { position < 80, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 10000; }
+   FloatingCylinder { position < 80, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 10000; }
+}
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;   // Eq. 5.9's phi(x_b) blend -- already the default, kept explicit here
+   useBognerThreePhaseMEM        true;   // no rhoHydStat subtraction at all (see header)
+   useMemOnlyBuoyancy             true;   // no separate vSub*g force channel -- buoyant support comes
+                                         // solely from the MEM/hydrodynamic force (see header)
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 112, 15, 0 >; max < 112, 15, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 112, 45, 0 >; max < 112, 45, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;  // cell type per timestep: 1=liquid 2=interface 3=gas 4=noSlip 6=freeSlip/UBB
+                       // 7=UBB-inflow 8=pressure 9=pressure-outflow 10=outlet (VtkWriter.h)
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

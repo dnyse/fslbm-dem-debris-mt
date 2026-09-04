@@ -1,0 +1,201 @@
+// sphere_drop_two_pillars_25k_halfspeed_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// Direct variant of sphere_drop_two_pillars_20k_gas.prm -- IDENTICAL scenario
+// (normal-size sphere, radius 10 LU; two normal-size cylinder pillars, radius 8 LU,
+// gap 14 LU < sphere diameter 20 LU, so the sphere wedges rather than passes
+// through; computed Re/Fr/We physics, no gravity/viscosity overrides), three
+// changes: settlingSteps (the "let the flow develop first" hold phase) 20000 ->
+// 25000, timesteps 50000 -> 100000 (so the free-floating window after release grows
+// from 30000 to 75000 steps, not just held constant), and current speed HALVED
+// (targetMeanVelocityMagnitude 0.02 -> 0.01).
+//
+// timesteps 100000 = 25000 held (flow develops, pillar pile-up forms at the now-
+// slower current) + 75000 free-floating after release.
+//
+// Halved current speed means the pillar-induced pile-up and wake will be
+// correspondingly weaker/slower to form -- the longer 25000-step hold (vs. 20000)
+// gives it more time to reach a comparable steady state before release, and the
+// much longer 75000-step free-floating window gives the sphere more time to drift
+// downstream and reach the pillars at the slower flow speed.
+//
+// PhysicsParameters is left with NO overrides (Re/Fr/We only) -- "computed values",
+// same as the original baseline: viscosity/relaxationRate/gravity/surfaceTension are
+// all derived from Re=3100/Fr=1.31/We=15.6188 by ComputedParams, not Bogner's
+// hardcoded g=7.5e-4/tau=1/1.9 (those are reserved for the *_bogner_domain_matched_gas.prm
+// single-floater equilibrium tests, which reproduce Bogner & Rude 2013 Sec. 3.3.1
+// literally; this pillar-wedging scenario has no equivalent in that paper, so there is
+// nothing to match it against).
+//
+// Geometry (waterline ≈ z=63 = absoluteLiquidHeight):
+//   • Sphere centre (30,30,78): bottom at z=68 (≈5 LU above waterline), centred in
+//     Y (y=30 ± 10 → y=[20,40], 20 LU from each NoSlip wall).
+//   • Pillars at (64,15,r=8) and (64,45,r=8). XY clearance from the sphere start:
+//     sqrt(34²+15²) ≈ 37.2 > r_sphere+r_pillar = 18 ✓ (no false contact at start).
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.01;   // half of the original current speed (0.02)
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;   // 25000 held + 75000 free-floating after release
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// Cylinder pillars — normal size, same geometry as the baseline.
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 64, 15, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 64, 45, 90 >;
+      radius 8;
+   }
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // Normal sphere: radius=10 LU. Centre (30,30,78): bottom at z=68 ≈ 5 LU above
+      // the free surface (z≈63). densityRatio 0.5 → ~50% submerged equilibrium at z≈63.
+      // settlingSteps=25000: the sphere is held FIXED for 25k steps (flow develops, water
+      // piles at the pillars), then released to drop onto / into the surface and drift
+      // downstream to wedge against the pillars.
+      position     < 30, 30, 78 >;
+      radius       10;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 15, 0 >; max < 64, 15, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 64, 45, 0 >; max < 64, 45, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // Y-midplane slab (centred in 60-cell domain), X=0 face slice, full XY volume up to z=150.
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

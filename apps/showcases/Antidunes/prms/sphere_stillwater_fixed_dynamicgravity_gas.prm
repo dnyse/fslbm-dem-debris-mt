@@ -1,0 +1,172 @@
+// sphere_stillwater_fixed_dynamicgravity_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// FREE-FLOATING SPHERE, STILL WATER, "FROZEN" DYNAMIC GRAVITY, BOGNER BUOYANCY.
+//
+// Third of the three-way still-water gravity comparison. Takes the gravity value
+// that sphere_dynamic_gravity_bogner_gas.prm (job 3947080) computed DYNAMICALLY
+// from Re/Fr/We/liquidHeight for the real-flow case -- gravity = (U/Fr)^2 /
+// liquidHeight = (0.02/1.31)^2 / 19.941 = 1.16888e-05 -- and uses it here as a
+// FIXED constant instead (gravityOverride), with everything else -- domain,
+// still water, free sphere, Bogner buoyancy -- identical to the other two
+// still-water siblings:
+//   sphere_stillwater_oldhardcoded_gas.prm      -- this project's own g=7.02618e-06
+//   sphere_stillwater_bognerboxgravity_gas.prm  -- Bogner & Rude's own g=7.5e-4
+//
+// Only gravity is fixed here (via gravityOverride); relaxationRate is left to
+// compute the same way as sphere_stillwater_oldhardcoded_gas.prm's
+// useHardcodedUnits branch, not pinned to job 3947080's own relaxationRate=1.99846
+// (that run's viscosity/relaxationRate were themselves dynamically computed for
+// the real-flow case, not part of "the gravity value" being carried over here).
+//
+// timesteps 30000. Domain: <96, 45, 40> / cellsPerBlock <16, 15, 10> = 6×3×4 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 16, 15, 10 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <96, 45, 40>;
+   wavePeriods        1;
+   liquidHeightFactor 3.3227;
+   floorHeightFactor  0.01;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              30000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;         // keep physical constants valid while U = 0
+   gravityOverride        1.16888e-05;  // job 3947080's dynamically computed g, now taken as fixed
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      position     < 48, 22.5, 20 >;
+      radius       8;
+      densityRatio 0.5;
+      settlingSteps 0;
+      pinPosition  false;
+      pinRotation  false;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+      }
+
+      CellBB_filter_0 { min < 0, 22, 0 >;  max < 96, 23, 40 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 45, 40 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 96, 45, 40 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

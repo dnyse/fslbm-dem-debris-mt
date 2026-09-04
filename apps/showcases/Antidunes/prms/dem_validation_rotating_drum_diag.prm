@@ -1,0 +1,40 @@
+// DIAGNOSTIC copy of dem_validation_rotating_drum.prm -- same real Kodam et al. (2010) SI-unit geometry/
+// material, but settleSteps cut way down (20000 instead of 400000) and tumbleRevolutions 0 (skip the
+// tumbling phase entirely) so this finishes in well under a minute instead of ~50 minutes. Purpose:
+// localize the settle-phase energy-monotonicity FAIL job 4049208 reported (worst checkpoint-to-checkpoint
+// relative energy increase = 4.32, i.e. +432%) by using the new per-checkpoint
+// "rotatingDrum settle step=... totalMechanicalEnergy=..." / "NEW WORST relative energy increase=..." log
+// lines added to DEMValidationScenarios.h's runRotatingDrum settle-phase loop. Not itself a pass/fail
+// scenario worth trusting for physics conclusions (too short to actually settle) -- purely a diagnostic
+// aid, do not archive/compare its results against Kodam's paper.
+DEMValidation{
+    testCase rotatingDrum;
+
+    shape cylinder;
+
+    numParticles 250;
+    sphereRadius 0.0039916;
+    boxHalfExtents < 0.0032172, 0.0032172, 0.0032172 >;
+    cylinderRadius 0.004;
+    cylinderLength 0.0053;
+    density 1163.66;
+
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.5;
+    poissonsRatio 0.35;
+    collisionTime 1.0e-4;
+    gravity 9.81;
+
+    drumRadius 0.050;
+    drumHalfLength 0.028;
+    numWallSegments 32;
+    rpm 25.0;
+
+    settleSteps 20000;      // cut from 400000 -- just need to catch the spike, not fully settle
+    tumbleRevolutions 0;    // skip tumbling phase entirely for this diagnostic run
+    numSnapshots 10;
+    numRadialBins 24;
+
+    vtkSpacing 500;
+    outputBaseName rotating_drum_diag;
+}

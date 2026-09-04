@@ -1,0 +1,197 @@
+// sphere_stillwater_realgravity981_3xsphere_d075_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// FREE-FLOATING SPHERE, STILL WATER, TRUE g=9.81 m/s^2 IN SI UNITS, BOGNER BUOYANCY,
+// SPHERE RADIUS 3x THE ORIGINAL FAMILY (8 -> 24 LU).
+//
+// Correction to the earlier "rescaled to real gravity" series (sphere_stillwater_
+// fixed_dynamicgravity_gas.prm, gravityOverride 1.16888e-05): that value was job 3947080's
+// dynamically-computed gravity, carried over unchanged -- it does NOT actually convert to
+// 9.81 m/s^2 under the current (rescaled) BedGeneration.prm. Checked directly against job
+// 3952542's own logged dx_SI=0.000483592 / dt_SI=4.99725e-05 (useHardcodedUnits ->
+// viscosity=0.000214026 fixed, both independent of sphere radius/domain Y-Z size, see below):
+//   g_SI = gravityOverride * dx_SI / dt_SI^2  =>  1.16888e-05 * ... = 2.264 m/s^2, not 9.81.
+// Solving g_SI = 9.81 for gravityOverride with the same dx_SI/dt_SI gives 5.06585e-05 -- that
+// is what's used here.
+//
+// SPHERE SIZE 3x: radius 8 -> 24 LU, at the SAME dx_SI as the whole sphere_stillwater_* family
+// (i.e. genuinely 3x bigger in real (SI) terms, not just 3x more lattice cells resolving the
+// same physical size). This only works because dx_SI is defined purely from domainSize[0] and
+// bedCopiesInX (getAvgDiameterScalingFactor, Utility.h) -- BOTH kept exactly as in the original
+// family (domainSize[0]=96, bedCopiesInX=1), so dx_SI/dt_SI/gravity-for-9.81 above are completely
+// unaffected by anything below. Y and Z were the only two directions that needed to grow to fit
+// the bigger sphere:
+//   • Y: WALBERLA_CHECK_EQUAL(scalingFactor * generationDomainSize_SI[1] * bedCopiesInY,
+//     domainSize[1]) (Utility.h:144) hard-locks domainSize[1] to a specific value once
+//     domainSize[0]/bedCopiesInX are fixed -- UNLESS bedCopiesInY is also scaled. Original:
+//     bedCopiesInY=1 => domainSize[1]=45 (exact). Setting bedCopiesInY=3 exactly triples the
+//     required domainSize[1] to 135, with no effect on scalingFactor/dx_SI (that check only
+//     involves domainSize[0]/bedCopiesInX). useParticleBed is false here (no bed physically
+//     used), so bedCopiesInY is purely a scaling-math lever, not an actual bed-tiling request.
+//   • Z: completely unconstrained by any check -- scaled 40 -> 120 (3x) directly, and
+//     liquidHeightFactor scaled 3.3227 -> 9.9681 (3x) so the water depth grows in proportion to
+//     the sphere too (avgParticleDiameter itself is UNCHANGED, since scalingFactor is unchanged --
+//     liquidHeight = avgParticleDiameter * liquidHeightFactor, so tripling liquidHeightFactor is
+//     what triples the actual liquid depth here).
+// Net: domain <96,45,40> -> <96,135,120> (9x cells, not 27x -- X untouched), cellsPerBlock
+// <16,15,10> -> <16,45,30> (same 6x3x4=72 blocks/processes as every other file in this family).
+// Sphere position <48,22.5,20> -> <48,67.5,60>: X unchanged (domain X unchanged), Y/Z scaled 3x
+// (Y to stay centred, Z to stay at the new water surface, absoluteLiquidHeight ~59.87).
+//
+// densityRatio 0.5 here; see the _d025/_d075 siblings for the other two densities (identical
+// file, only densityRatio differs, exactly mirroring the original 8-radius family's convention).
+//
+// timesteps 50000 (up from the original family's 30000, per this run's own request).
+// Domain: <96, 135, 120> / cellsPerBlock <16, 45, 30> = 6×3×4 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 16, 45, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <96, 135, 120>;
+   wavePeriods        1;
+   liquidHeightFactor 9.9681;    // 3.3227 * 3 -> liquid depth scales with the 3x sphere
+   floorHeightFactor  0.01;      // unchanged (negligible either way, kept nonzero for the != 0 assertion)
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              50000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;         // keep physical constants valid while U = 0; viscosity=0.000214026 fixed
+   gravityOverride        5.06585e-05;  // solved for g_SI = 9.81 m/s^2 against job 3952542's dx_SI/dt_SI (see header)
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 3;   // scaling-math lever only (useParticleBed false) -- triples the required domainSize[1]
+                      // without touching scalingFactor/dx_SI (see header)
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // densityRatio 0.5 -> Archimedes equilibrium: 50% submerged.
+      position     < 48, 67.5, 60 >;
+      radius       24;
+      densityRatio 0.75;
+      settlingSteps 0;
+      pinPosition  false;   // fully free
+      pinRotation  false;   // fully free
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+      }
+
+      CellBB_filter_0 { min < 0, 67, 0 >;   max < 96, 68, 120 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;    max < 1, 135, 120 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;    max < 96, 135, 120 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

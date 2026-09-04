@@ -1803,6 +1803,17 @@ void testCylinderPlaneEdge()
    WALBERLA_CHECK(gjk.contact);
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(2e-3));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
+
+   // Contact POINT, hand-computed directly from eq. 21 (z_E^P - sign(z_E^P)*0.5*delta, measured from
+   // E's own height): with this geometry, E = (-0.240192, 0, -0.416025) and overlap = 0.416025, giving
+   // point = (-0.240192, 0, -0.208013). Not cross-checked against gjk.point -- same convention
+   // difference as testCylinderPlaneFaceMatchesExisting (Kodam's own midpoint-of-overlap vs. GJK/EPA's
+   // wall-surface witness point) -- but this IS the check that would have caught the eOnPlane
+   // double-projection bug (previously (-0.240192, 0, +0.208013): the opposite sign, on the wrong side
+   // of the plane) before it shipped, since overlap/normal alone were already correct throughout.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point,
+      Vec3(real_t(-0.240192), real_t(0), real_t(-0.208013)), real_t(1e-3));
+
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Plane (edge, NEW coverage): overlap=" << kodam.overlap << " (agree)");
 }
 

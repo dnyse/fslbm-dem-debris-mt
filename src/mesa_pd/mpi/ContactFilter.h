@@ -26,6 +26,8 @@
 #include <core/logging/Logging.h>
 #include <core/mpi/MPIManager.h>
 
+#include <algorithm>
+
 namespace walberla {
 namespace mesa_pd {
 namespace mpi {
@@ -59,6 +61,32 @@ public:
                     Accessor& ac,
                     const Vec3& contactPoint,
                     const domain::IDomain& domain ) const;
+
+   // OFF (default) -> exact pre-existing behaviour: the local-remote/remote-remote (different-owner)
+   // rule (marked `*` in the doc comment below) accepts iff domain.isContainedInProcessSubdomain(myRank_,
+   // contactPoint) -- a PURELY LOCAL, PER-RANK geometric test using each rank's own independently
+   // computed contactPoint. Two ranks holding slightly different local views of the same pair (ghost-sync
+   // staleness, amplified by GJK/EPA's combinatorial sensitivity near ambiguous geometry -- see the
+   // investigation this flag came out of) can each compute a different contactPoint that independently
+   // satisfies its OWN rank's subdomain test, so both accept the same contact in the same cycle: a
+   // ContactHistoryNotification duplicate-insert crash (confirmed: job 4166652, Cylinder x Box pair
+   // straddling a rank boundary) and, more subtly, a silently doubled-then-partially-cancelled force
+   // contribution even when it doesn't crash (see ForceTorqueNotification's sum-based reduce).
+   // ON -> implements the doc comment's own documented-but-previously-unimplemented Option 2 `§` rule
+   // (primary case only -- see below) for exactly this branch: accept iff myRank_ == the SMALLER of
+   // ac.getOwner(idx1)/ac.getOwner(idx2). getOwner() is a stored, MPI-synced field (set once at particle
+   // creation/migration, not recomputed from position every sub-cycle), so every rank witnessing this
+   // pair computes the IDENTICAL answer -- no geometry, no possible disagreement, and (per
+   // SyncNextNeighbors' own blockSyncExtension margin, sized to the largest possible particle in a
+   // scenario) both true owners of any genuinely-touching pair are GUARANTEED to witness it via ghosting,
+   // so the smaller-owner rank always actually runs this filter for that pair. Does NOT implement the
+   // doc comment's secondary fallback ("if none of the owners witness the contact, the smallest rank
+   // witnessing it") -- that requires knowing the full witnessing-rank set, which needs communication
+   // this simple per-rank check doesn't have; a contact witnessed only by a third rank that owns neither
+   // particle (a genuine multi-rank domain-corner configuration) is not covered. Believed rare/absent in
+   // practice for real (non-degenerate) contacts given the ghosting guarantee above; flagged here as a
+   // known, documented limitation rather than silently assumed away.
+   bool useOwnerRankTiebreak = false;
 private:
    uint_t myRank_ = uint_c( walberla::mpi::MPIManager::instance()->rank() );
 };
@@ -133,6 +161,17 @@ inline bool ContactFilter::operator()( const size_t idx1,
       {
          WALBERLA_LOG_DETAIL( "Rejecting remote-remote contact since it will be a local-local contact at the owner process: " << contactPoint << "." );
          return false;
+      } else if( useOwnerRankTiebreak )
+      {
+         // See useOwnerRankTiebreak's own doc comment above for the full rationale.
+         const uint_t owner1 = ac.getOwner(idx1);
+         const uint_t owner2 = ac.getOwner(idx2);
+         if( myRank_ != std::min( owner1, owner2 ) )
+         {
+            WALBERLA_LOG_DETAIL( "Rejecting contact " << contactPoint << " -- not the smallest-rank owner "
+               "(owner1=" << owner1 << " owner2=" << owner2 << " myRank=" << myRank_ << ")." );
+            return false;
+         }
       } else
       {
          if( !domain.isContainedInProcessSubdomain(myRank_, contactPoint ) )

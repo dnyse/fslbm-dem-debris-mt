@@ -1,0 +1,47 @@
+BedGeneration{
+    // Bed-generation config for pont_ferroviere_rue_goffontaine_realscale_gas.prm's real-scale bridge
+    // domain. RESOLUTION now ~33 LU/m (domainSize <2688,1056,432>) -- chosen to fill a 64-node
+    // budget (multinode partition's max, MaxNodes=64) at ~6 hours for 50000 steps, giving ~115.8
+    // cells across the water depth -- finer than even the original `antidunes` branch's own 81-cell
+    // reference. cellsPerBlock <112,44,54> = 24x24x8 = 4608 processes = 64 nodes.
+    //
+    // domainX was nudged from the "exact" 8.1x-deck-width value (2673, which factors as 3^5*11 --
+    // awkward, since 4608=2^9*3^2 shares no factor of 11 with it, forcing X-block-count into {1,3,9}
+    // and absurdly elongated blocks) to 2688=2^7*3*7, which divides cleanly into 24 blocks of 112
+    // cells. This is a ~0.6% change to the upstream/downstream flow-development margin only -- it
+    // does not touch the bridge geometry itself (Y, Z are unaffected).
+    //
+    // ONLY domainSize_SI[1] changed from the project's default BedGeneration.prm: rescaled so
+    // scalingFactor = domainSize[0]/domainSize_SI[0] = 2688/0.046424848318763846 = 57900.03 satisfies
+    // uint_c(scalingFactor * domainSize_SI[1]) == domainSize[1] = 1056 exactly (with the same
+    // +0.3-cell safety margin the default file's own header explains). domainSize_SI[0], diameter_SI,
+    // domainSize_SI[2], blocks, generationSpacing_SI, and every other value are UNCHANGED from the
+    // proven default -- deliberately: the actual bed particles are never loaded
+    // (useParticleBed=false), so only the header's scalingFactor/avgDiameter math needs to be
+    // correct, not the settling physics itself.
+    //
+    // Resulting avgParticleDiameter = diameter_SI * scalingFactor = 0.0029015530199227404 * 57900.03
+    // = 168.0 (lattice units) exactly. BECAUSE domainX was nudged off the pure geometric scale
+    // (2688 vs the theoretical 2673), floorHeightFactor/liquidHeightFactor in the main prm were
+    // RE-SOLVED for this file (not reused unchanged like every earlier resolution bump was) --
+    // 0.405302 / 0.280234 -- so that 168.0 * (0.405302+0.280234) = 115.17 LU EXACTLY, still matching
+    // the real 3.49 m flood depth at this resolution (115.17/33 = 3.49 m).
+    domainSize_SI < 0.046424848318763846, 0.018243514612764227, 0.145077650996137 >;
+    blocks < 3, 2, 12 >;
+    diameter_SI 0.0029015530199227404;
+    gravity_SI 9.81;
+    densityFluid_SI 1000;
+    densityParticle_SI 2550;
+    generationSpacing_SI 0.005077717784864796;
+    initialVelocity_SI 1;
+    dt_SI 5e-5;
+    frictionCoefficient 0.5;
+    restitutionCoefficient 0.1;
+    collisionTime_SI 5e-4;
+    poissonsRatio 0.22;
+    timeSteps 10000;
+    visSpacing 100;
+    outFileName spheres_out_pont_ferroviere.dat;
+    denseBottomLayer False;
+    bottomLayerOffsetFactor 1.0;
+}

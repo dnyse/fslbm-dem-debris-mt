@@ -788,6 +788,17 @@ struct ModelParams {
    //         to false to return to the known-working path if the real-object route misbehaves.
    bool        useArchTunnelAsMesaPDObject;
 
+   // true  -> mesa_pd::mpi::ContactFilter::useOwnerRankTiebreak is set on every ComputeContacts/
+   //         ComputeLubrication instance: the local-remote/remote-remote ownership-arbitration rule
+   //         switches from the pre-existing per-rank geometric test (domain.isContainedInProcessSubdomain
+   //         on each rank's own independently-computed contactPoint -- provably able to disagree between
+   //         ranks, see ContactFilter.h's own doc comment) to a deterministic owner-rank-number tiebreak
+   //         (accept iff myRank == min(ac.getOwner(idx1), ac.getOwner(idx2))). Root-caused specifically
+   //         for job 4166652's ContactHistoryNotification duplicate-insert crash (Cylinder x Box pair
+   //         straddling a rank boundary).
+   // false -> (DEFAULT) exact pre-existing ContactFilter behaviour, unchanged.
+   bool        useContactFilterOwnerTiebreak;
+
    ModelParams(const config::Config::BlockHandle& b)
       : pdfReconstructionModel      { b.getParameter< std::string >("pdfReconstructionModel") }
       , pdfRefillingModel           { b.getParameter< std::string >("pdfRefillingModel") }
@@ -817,6 +828,7 @@ struct ModelParams {
       , highAltitudeWaterScanEnabled { b.getParameter< bool >       ("highAltitudeWaterScanEnabled", false) }
       , highAltitudeWaterThresholdZ  { b.getParameter< real_t >     ("highAltitudeWaterThresholdZ", real_t(0)) }
       , useArchTunnelAsMesaPDObject  { b.getParameter< bool >       ("useArchTunnelAsMesaPDObject", false) }
+      , useContactFilterOwnerTiebreak{ b.getParameter< bool >       ("useContactFilterOwnerTiebreak", false) }
    {
       if (usePureAnalyticalCylinder && !useAnalyticalContactDetection)
          WALBERLA_LOG_WARNING("usePureAnalyticalCylinder=true but useAnalyticalContactDetection=false -- "

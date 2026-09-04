@@ -1,0 +1,315 @@
+// mixed_shape_stillwater_81floaters_bogner_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// 81 MIXED FLOATERS (27 spheres + 27 boxes + 27 cylinders) dropped into STILL WATER,
+// using the project's own hardcoded reference units (viscosity=0.000214026,
+// relaxationRate=1.99743, gravity=7.02618e-06, surfaceTension=0.000849592 -- the
+// "useHardcodedUnits true" branch, U=0.02/Re=3100/Fr=1.31/We=15.6188 reference case,
+// NOT Bogner's own hardcoded tau=1/1.9/g=7.5e-4 -- see GRAVITY HISTORY below).
+//
+// GRAVITY HISTORY: the first version of this file used Bogner & Rude (2013)'s raw
+// g=7.5e-4 unchanged (job 3922028). It crashed at step 4288/100000 (~5 min in): a
+// particle's rotation quaternion went NaN (WALBERLA_CHECK in Quaternion.h:241),
+// preceded by a [MEM-WATCH] large-force warning on a particle already sitting on the
+// floor (pos z~3). Root cause: Bogner's incompressibility bound (Eq. 10 of
+// arXiv:1201.0351, citing Buick & Greated 2000, (lx,ly,lz)*a << cs^2=1/3) is
+// satisfied at only a ~9.0% margin in HIS OWN 40-cell-tall domain (40*7.5e-4=0.03),
+// but this file kept the full <128,60,180> domain (needed for drop height -- the
+// floater grid spans z=64 to z=88) while reusing his g unchanged, giving
+// 180*7.5e-4=0.135, a ~40% margin -- nowhere near "<<" cs^2, and unstable in
+// practice. A second version rescaled Bogner's gravity to 1.66667e-4 (preserving his
+// own 9.0% margin at this domain's height) -- this ran, but was later replaced (this
+// version) by switching to true g_SI=9.81: computed for this scenario's actual
+// spheres_out.dat/grid scale (dx_SI=3.62694e-4 m, dt_SI=1.15208e-3 s at tau=1.9),
+// gravityOverride would need to be 0.0359982 -- checked against Eq. 10 and found to
+// violate it by ~19x (180*0.036=6.46 vs the required <<1/3), i.e. guaranteed unstable,
+// so it was rejected without running. This file now uses the project's own
+// hardcoded-units reference gravity (7.02618e-06) instead of any Bogner or
+// true-g_SI value -- weaker than Bogner's rescaled value, so floaters settle even
+// more gradually.
+//
+// GEOMETRY -- reused VERBATIM from the original proven-clean 81-floater "clean-
+// factorial" grid (mixed_sed_worked.log, job 3856318, prm=mixed_shape_sedimentation_
+// showcase_gas.prm at the time; also mixed_sed2.log job 3854507, 20000-step variant --
+// both ran clean). Recovered directly from that log's own config echo (not retyped
+// by hand) and cross-checked here: 27+27+27=81. See
+// mixed_shape_sedimentation_showcase_pillars_gas.prm's header for the fuller history
+// of why the CURRENT mixed_shape_sedimentation_showcase_gas.prm only has 9 floaters
+// now (a later 54-floater SCRAMBLED-density variant of this grid crashed; the file
+// was reverted to a smaller 3x3 anchor grid rather than restoring the original 81).
+// This file restores that original, already-validated 81-floater layout as its own
+// showcase, unrelated to that crash investigation.
+//
+// 9 X-anchors (6/16/26/38/48/58/70/80/90) x 3 Y-replicates (10/30/50) x 3 shapes,
+// one sphere+box+cylinder stack per (X,Y). densityRatio constant per stack, set by
+// X-anchor block: 6/16/26 -> 0.5, 38/48/58 -> 1.0, 70/80/90 -> 2.0 (the "uniform"
+// density arrangement -- proven safe, unlike the scrambled/mixed variants).
+// Z fixed per shape: sphere 64, box 76, cylinder 88 (same ~9 LU footprint as each
+// shape's own dedicated showcase). No pillars, no flow forcing (still water,
+// targetMeanVelocityMagnitude 0) -- floaters simply fall from rest and settle by
+// buoyancy under the project's own hardcoded-units reference gravity (see GRAVITY
+// HISTORY above -- not Bogner's).
+//
+// BOGNER HARDCODED VALUES -- IMPORTANT CAVEAT: g=7.5e-4 and tau=1/1.9=0.526 are the
+// values Bogner & Rude (2013) used ONLY for their single three-cube rotational-
+// equilibrium test (Sec. 3.3.1, arXiv:1201.0351) -- a 130x40x40 domain with 3 boxes
+// heeled from upright, checking convergence to Fekken-predicted stable angles. Their
+// paper does NOT contain any multi-floater/swarm scenario resembling this 81-floater
+// grid -- checked directly against the paper's own section list (free-advection
+// single-sphere test at a DIFFERENT gravity, g=1e-5, Sec. 3.2.1; floating-cube
+// equilibrium at g=7.5e-4, Sec. 3.3.1; nothing else with rigid bodies). There is no
+// "similar showcase" in Bogner's own work to validate this specific combination
+// (many mixed-shape floaters + his gravity/viscosity) against -- this run applies
+// his validated single-object constants to a scenario he never tested, purely to see
+// how far mixed-shape multi-floater interactions extrapolate under that regime.
+//
+// ModelParameters: useBognerThreePhaseMEM + useMemOnlyBuoyancy both true (matching
+// every other *_bogner_*_gas.prm file) -- buoyancy support and torque come solely
+// from the raw MEM/hydrodynamic force+torque (no separate vSub/cbOff righting-torque
+// machinery), matching Bogner's Eq. 18 exactly.
+//
+// Domain: <128, 60, 180> / cellsPerBlock <32, 20, 30> = 4×3×6 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 30 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic — no side walls, only Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              100000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;        // project's own fixed reference units (viscosity=0.000214026,
+                                       // relaxationRate=1.99743, gravity=7.02618e-06,
+                                       // surfaceTension=0.000849592) instead of Bogner's hardcoded
+                                       // tau=1/1.9/g=7.5e-4 -- switched off per request; the true
+                                       // g_SI=9.81 value for this scenario's grid scale
+                                       // (gravityOverride=0.0359982, computed from this domain's
+                                       // spheres_out.dat) was checked and violates the LBM
+                                       // incompressibility bound (Eq. 10, Buick & Greated 2000:
+                                       // domainHeight*g << cs^2=1/3) by ~19x, so it was rejected as
+                                       // unusable rather than run.
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere { position < 6, 10, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 6, 30, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 6, 50, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 16, 10, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 16, 30, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 16, 50, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 26, 10, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 26, 30, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 26, 50, 64 >; radius 4.5; densityRatio 0.5; settlingSteps 0; }
+   FloatingSphere { position < 38, 10, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 38, 30, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 38, 50, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 48, 10, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 48, 30, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 48, 50, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 58, 10, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 58, 30, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 58, 50, 64 >; radius 4.5; densityRatio 1.0; settlingSteps 0; }
+   FloatingSphere { position < 70, 10, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 70, 30, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 70, 50, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 80, 10, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 80, 30, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 80, 50, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 90, 10, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 90, 30, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+   FloatingSphere { position < 90, 50, 64 >; radius 4.5; densityRatio 2.0; settlingSteps 0; }
+}
+
+FloatingBoxes
+{
+   FloatingBox { position < 6, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 6, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 6, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 26, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 26, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 26, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 38, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 38, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 38, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 48, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 48, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 48, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 58, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 58, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 58, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 70, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 70, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 70, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 80, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 80, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 80, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 90, 10, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 90, 30, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 90, 50, 76 >; halfExtents < 3.5, 7, 3.5 >; densityRatio 2.0; settlingSteps 0; }
+}
+
+FloatingCylinders
+{
+   FloatingCylinder { position < 6, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 6, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 6, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 16, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 16, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 16, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 26, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 26, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 26, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingCylinder { position < 38, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 38, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 38, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 48, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 48, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 48, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 58, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 58, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 58, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingCylinder { position < 70, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingCylinder { position < 70, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingCylinder { position < 70, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingCylinder { position < 80, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingCylinder { position < 80, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingCylinder { position < 80, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingCylinder { position < 90, 10, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingCylinder { position < 90, 30, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingCylinder { position < 90, 50, 88 >; radius 4.5; length 9; axis < 0, 1, 0 >; densityRatio 2.0; settlingSteps 0; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticalContactDetection true;   // closed-form Box-Box / Cylinder-Cylinder (Kodam et al. 2010
+                                         // + Guo et al. 2012) instead of GJK/EPA -- see
+                                         // PaperAnalyticalContacts.h; this scenario has 27 box-box and
+                                         // 27 cylinder-cylinder pairs stacked closely, so it exercises
+                                         // both analytical paths directly.
+   useBognerThreePhaseMEM        true;   // no rhoHydStat subtraction at all
+   useMemOnlyBuoyancy            true;   // (default) skips computeSubmergedVolumes()/Box() entirely --
+                                         // no vSub, no cbOff, no righting torque; force+torque are raw
+                                         // MEM only, matching Bogner's Eq. 18
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   // Only Z (top/bottom) walls — X and Y are periodic (see BlockForestParameters),
+   // so N/S borders are intentionally omitted; setupBoundaryHandling auto-skips
+   // adding walls on periodic faces.
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

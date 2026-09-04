@@ -1,0 +1,177 @@
+// sphere_stillwater_oldhardcoded_d025_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// FREE-FLOATING SPHERE, STILL WATER, THIS PROJECT'S OWN "OLD" HARDCODED GRAVITY,
+// BOGNER BUOYANCY.
+//
+// First of a three-way still-water sibling set to the free-flow gravity comparison
+// (jobs 3947080 / 3947124, see sphere_dynamic_gravity_bogner_gas.prm and
+// sphere_free_flow_bognerboxgravity_gas.prm): same domain, same free
+// (pinPosition/pinRotation both false) densityRatio-0.5 sphere, same Bogner
+// three-phase MEM buoyancy -- but targetMeanVelocityMagnitude=0 (still water,
+// no PID-driven flow at all) instead of a real mean flow, isolating the
+// hydrostatic buoyancy mechanism from any flow-induced unsteadiness.
+//
+// Gravity here is THIS project's own long-standing hardcoded reference constant:
+// useHardcodedUnits true, no gravityOverride -- reproduces gravity=7.02618e-06
+// (confirmed against box_025.log's own computed-params dump), the same value used
+// by sphere_density_showcase_gas.prm, box_density_*_gas.prm, and effectively every
+// non-Bogner-override showcase in this repo. Siblings:
+//   sphere_stillwater_bognerboxgravity_gas.prm      -- Bogner & Rude's own g=7.5e-4
+//   sphere_stillwater_fixed_dynamicgravity_gas.prm  -- job 3947080's dynamically
+//                                                       computed g=1.16888e-05,
+//                                                       now taken as a fixed constant
+//
+// timesteps 30000 (matches the free-flow siblings, for a directly comparable x-axis).
+//
+// Domain: <96, 45, 40> / cellsPerBlock <16, 15, 10> = 6×3×4 = 72 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 16, 15, 10 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <96, 45, 40>;
+   wavePeriods        1;
+   liquidHeightFactor 3.3227;    // -> liquidHeight ~19.941 (same as the free-flow siblings)
+   floorHeightFactor  0.01;      // -> floorHeight ~0.060 (kept nonzero only to satisfy the != 0 assertion)
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              30000;
+   Re                     3100;       // E1
+   Fr                     1.31;       // E1
+   We                     15.6188;    // E1
+   useHardcodedUnits      true;       // keep physical constants valid while U = 0; no override -> gravity=7.02618e-06
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      // densityRatio 0.25 -> Archimedes equilibrium: 25% submerged.
+      position     < 48, 22.5, 20 >;
+      radius       8;
+      densityRatio 0.25;
+      settlingSteps 0;
+      pinPosition  false;   // fully free
+      pinRotation  false;   // fully free
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+      }
+
+      CellBB_filter_0 { min < 0, 22, 0 >;  max < 96, 23, 40 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 45, 40 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 96, 45, 40 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

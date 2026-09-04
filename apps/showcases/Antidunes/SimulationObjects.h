@@ -99,6 +99,18 @@ struct SimulationObjects
    std::shared_ptr< std::unordered_set< walberla::id_t > >     dormantFloaterUIDs =
       std::make_shared< std::unordered_set< walberla::id_t > >();
 
+   // UIDs of floaters released from their dormant/settling phase THIS main step -- i.e. this is
+   // the very first doDEMSubCycles() call in which they participate in real contact detection.
+   // ComputeContacts (ParticleKernels.h) hard-aborts, with full diagnostic detail from the same
+   // exact GJK/EPA/analytical detection path used for real physics, if a genuine contact is found
+   // for a UID in this set -- proof (not an approximation) that a floater was released directly on
+   // top of an already-active neighbour. Populated by SetupStages::releaseSettledFloatingSpheres,
+   // cleared unconditionally at the end of each doDEMSubCycles() call (ParticleKernels.h) so it
+   // only ever covers the one main step immediately following release. Debug/validation tool, not
+   // a permanent production guard -- see the calling prm's own header.
+   std::shared_ptr< std::unordered_set< walberla::id_t > >     freshlyActivatedFloaterUIDs =
+      std::make_shared< std::unordered_set< walberla::id_t > >();
+
    // Boundary and flags ----------------------------------------------------------------------------------------------
    shared_ptr< AntidunesBoundaryHandling_T > antidunesBoundaryHandling;
    BlockDataID flagFieldID;

@@ -1,0 +1,35 @@
+// SMOKE TEST -- sphere variant of dem_validation_rotating_drum.prm, cut way down (settleSteps 20000
+// instead of 400000, tumbleRevolutions 0 -- same pattern as dem_validation_rotating_drum_diag.prm) just
+// to check the sphere shape path works at all before committing to the full 24h, 3-revolution Kodam-exact
+// run. Not a real Kodam comparison -- purely a functional smoke test.
+DEMValidation{
+    testCase rotatingDrum;
+
+    shape sphere;
+
+    numParticles 250;
+    sphereRadius 0.0039916;
+    boxHalfExtents < 0.0032172, 0.0032172, 0.0032172 >;
+    cylinderRadius 0.004;
+    cylinderLength 0.0053;
+    density 1163.66;
+
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.5;
+    poissonsRatio 0.35;
+    collisionTime 1.0e-4;
+    gravity 9.81;
+
+    drumRadius 0.050;
+    drumHalfLength 0.028;
+    numWallSegments 32;
+    rpm 25.0;
+
+    settleSteps 20000;
+    tumbleRevolutions 0;
+    numSnapshots 10;
+    numRadialBins 24;
+
+    vtkSpacing 500;
+    outputBaseName rotating_drum_sphere_smoke;
+}

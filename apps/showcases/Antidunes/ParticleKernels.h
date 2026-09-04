@@ -62,6 +62,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -1216,7 +1217,7 @@ public:
       stateFile_ << "mainStep,subCycle,observingRank,uid,ownerRank,isGhost,isLocal,shapeType,"
                     "posX,posY,posZ,velX,velY,velZ,angVelX,angVelY,angVelZ,forceX,forceY,forceZ,"
                     "torqueX,torqueY,torqueZ,hydroForceX,hydroForceY,hydroForceZ,"
-                    "hydroTorqueX,hydroTorqueY,hydroTorqueZ,fluidDensity\n";
+                    "hydroTorqueX,hydroTorqueY,hydroTorqueZ,fluidDensity,quatR,quatI,quatJ,quatK\n";
       stateFile_.flush();
    }
 
@@ -1294,6 +1295,11 @@ public:
       const auto& pos         = ac.getPosition(idx);
       const auto& hydroForce  = ac.getHydrodynamicForce(idx);
       const auto& hydroTorque = ac.getHydrodynamicTorque(idx);
+      // Quaternion (r,i,j,k), body->world -- added to let an independent, offline check reconstruct
+      // each floater's true oriented footprint (box corners / cylinder axis) at any logged instant,
+      // rather than assuming axis-aligned (wrong as soon as any contact has imparted torque -- see
+      // angVel above, which is often nonzero well before any "expected" collision).
+      const auto& quat = ac.getRotation(idx).getQuaternion();
       stateFile_ << mainStep << ',' << subCycle << ',' << mpi::MPIManager::instance()->rank() << ','
                  << ac.getUid(idx) << ',' << ac.getOwner(idx) << ','
                  << isSet(ac.getFlags(idx), GHOST) << ',' << !isSet(ac.getFlags(idx), GHOST) << ','
@@ -1305,7 +1311,8 @@ public:
                  << torque[0] << ',' << torque[1] << ',' << torque[2] << ','
                  << hydroForce[0] << ',' << hydroForce[1] << ',' << hydroForce[2] << ','
                  << hydroTorque[0] << ',' << hydroTorque[1] << ',' << hydroTorque[2] << ','
-                 << fluidDensity << '\n';
+                 << fluidDensity << ','
+                 << quat[0] << ',' << quat[1] << ',' << quat[2] << ',' << quat[3] << '\n';
       stateFile_.flush(); // same crash-survivability rationale as log() above
    }
 
@@ -1352,11 +1359,14 @@ private:
 
 class ComputeLubrication {
 public:
-   ComputeLubrication(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain, real_t viscosity)
+   ComputeLubrication(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain, real_t viscosity,
+      bool useContactFilterOwnerTiebreak = false)
       : domain_(domain)
       , lubricationCorrectionKernel_(viscosity,
          [](real_t r) { return (real_c(0.001) + real_c(0.00007) * r) * r; })
-   {}
+   {
+      contact_filter_.useOwnerRankTiebreak = useContactFilterOwnerTiebreak;
+   }
 
    // See ComputeContacts::setHistoryLogger/setStepInfo -- same wiring, same rationale.
    void setHistoryLogger(FloaterHistoryLogger* logger) { historyLogger_ = logger; }
@@ -1411,7 +1421,7 @@ public:
       real_t restitutionCoefficient, real_t kappa,
       real_t collisionTime, real_t particleTimestepSize, real_t frictionCoefficient,
       uint_t numParticleTypes = uint_t(2), bool useAnalyticalContactDetection = false,
-      bool usePureAnalyticalCylinder = false)
+      bool usePureAnalyticalCylinder = false, bool useContactFilterOwnerTiebreak = false)
       : domain_(domain)
       , collisionResponse_(numParticleTypes)
       , restitutionCoefficient_(restitutionCoefficient)
@@ -1424,6 +1434,7 @@ public:
             collisionResponse_.setFrictionCoefficientDynamic(t, u, frictionCoefficient);
       acd_.useAnalyticalContactDetection = useAnalyticalContactDetection;
       acd_.usePureAnalyticalCylinder     = usePureAnalyticalCylinder;
+      contact_filter_.useOwnerRankTiebreak = useContactFilterOwnerTiebreak;
 
       // Wire the optional ContactHistoryNotification diagnostic hook (see that file's own comment)
       // to acd_'s local per-pair detection-path record, so a [ContactHistory DUPLICATE] warning can
@@ -1432,9 +1443,15 @@ public:
       // ComputeContacts instance outlives the simulation.
       mesa_pd::contactHistoryDuplicateDiagnosticHook = [this](walberla::id_t a, walberla::id_t b) -> std::string {
          const std::string* path = acd_.lookupDetectionPath(a, b);
-         return path ? *path
-                      : std::string("not tracked locally on this rank this cycle "
-                                     "(not a Cylinder x Cylinder pair, or computed on a different rank)");
+         std::string result = path ? *path
+                                    : std::string("not tracked locally on this rank this cycle "
+                                                   "(not a Cylinder x Cylinder pair, or computed on a different rank)");
+         // See pairContactInputState_'s own doc comment: this rank's full local view of both particles'
+         // pose/velocity at the moment it fed the ContactFilter decision, if this rank computed this
+         // pair's contact at all this cycle.
+         if (const std::string* state = lookupContactInputState(a, b))
+            result += " || input state: " + *state;
+         return result;
       };
    }
 
@@ -1449,6 +1466,17 @@ public:
    void setHistoryLogger(FloaterHistoryLogger* logger) { historyLogger_ = logger; }
    void setStepInfo(uint_t mainStep, uint_t subCycle) { mainStep_ = mainStep; subCycle_ = subCycle; }
 
+   // Debug/validation hook for the "flying floater" release-time-overlap bug (see
+   // SimulationObjects::freshlyActivatedFloaterUIDs' own doc comment) -- nullptr/disabled by
+   // default, same spirit as historyLogger_ above. When set, and a genuine contact resolved below
+   // involves a UID in this set, that's proof positive (not an approximation) that a floater was
+   // released while already overlapping an active neighbour, using the exact same detection this
+   // contact was already going through anyway.
+   void setFreshlyActivatedUIDs(std::shared_ptr< std::unordered_set< walberla::id_t > > uids)
+   {
+      freshlyActivatedUIDs_ = std::move(uids);
+   }
+
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx1, const size_t idx2, ParticleAccessor_T& ac){
       // Box-Box (and every other convex pair without an analytic overload) is handled by the
@@ -1457,6 +1485,34 @@ public:
       acd_.resetSecondaryContact(); // acd_ is reused across every pair -- see that method's own comment
       if (double_cast_(idx1, idx2, ac, acd_, ac))
       {
+         // Capture this rank's full local input state for the ContactFilter decision about to be made,
+         // keyed by uid pair -- see pairContactInputState_'s own doc comment for why. Cheap (a handful
+         // of vector reads + a string build) and only ever surfaced later if a [ContactHistory DUPLICATE]
+         // actually fires for this exact pair, via contactHistoryDuplicateDiagnosticHook below.
+         {
+            const auto i1 = acd_.getIdx1();
+            const auto i2 = acd_.getIdx2();
+            std::ostringstream oss;
+            oss << "rank=" << walberla::mpi::MPIManager::instance()->rank()
+                << " | idx1: uid=" << ac.getUid(i1)
+                << " owner=" << ac.getOwner(i1)
+                << " ghost=" << (mesa_pd::data::particle_flags::isSet(ac.getFlags(i1), mesa_pd::data::particle_flags::GHOST) ? "yes" : "no")
+                << " pos=" << ac.getPosition(i1)
+                << " rot(quat)=" << ac.getRotation(i1).getQuaternion()
+                << " vel=" << ac.getLinearVelocity(i1)
+                << " angVel=" << ac.getAngularVelocity(i1)
+                << " | idx2: uid=" << ac.getUid(i2)
+                << " owner=" << ac.getOwner(i2)
+                << " ghost=" << (mesa_pd::data::particle_flags::isSet(ac.getFlags(i2), mesa_pd::data::particle_flags::GHOST) ? "yes" : "no")
+                << " pos=" << ac.getPosition(i2)
+                << " rot(quat)=" << ac.getRotation(i2).getQuaternion()
+                << " vel=" << ac.getLinearVelocity(i2)
+                << " angVel=" << ac.getAngularVelocity(i2)
+                << " | computed contactPoint=" << acd_.getContactPoint()
+                << " normal=" << acd_.getContactNormal()
+                << " penetration=" << acd_.getPenetrationDepth();
+            recordContactInputState(ac.getUid(i1), ac.getUid(i2), oss.str());
+         }
          if (contact_filter_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), *domain_))
          {
             // Detect degenerate contact geometry that would corrupt DEM integration
@@ -1473,6 +1529,38 @@ public:
                   "type(" << ac.getType(acd_.getIdx2()) << ",shapeType=" << s2 << ") pos=" << ac.getPosition(acd_.getIdx2()) << " | "
                   "normal=" << n << " penetration=" << acd_.getPenetrationDepth());
                return; // skip this contact to avoid NaN propagation
+            }
+
+            // Debug/validation hook for the "flying floater" release-time-overlap bug (see
+            // SimulationObjects::freshlyActivatedFloaterUIDs' own doc comment). uid1/uid2 only reach
+            // freshlyActivatedUIDs_ on the very first doDEMSubCycles() call after
+            // releaseSettledFloatingSpheres() unset FIXED -- so a genuine contact here, using the
+            // exact same GJK/EPA/analytical detection this pair was already going through, is direct
+            // proof (not an approximation) that the floater was released while already overlapping
+            // an active neighbour.
+            if (freshlyActivatedUIDs_)
+            {
+               const walberla::id_t uid1 = ac.getUid(acd_.getIdx1());
+               const walberla::id_t uid2 = ac.getUid(acd_.getIdx2());
+               if (freshlyActivatedUIDs_->count(uid1) > 0 || freshlyActivatedUIDs_->count(uid2) > 0)
+               {
+                  const auto s1 = ac.getBaseShape(acd_.getIdx1())
+                                     ? ac.getBaseShape(acd_.getIdx1())->getShapeType() : uint_t(999);
+                  const auto s2 = ac.getBaseShape(acd_.getIdx2())
+                                     ? ac.getBaseShape(acd_.getIdx2())->getShapeType() : uint_t(999);
+                  WALBERLA_ABORT(
+                     "[RELEASE-OVERLAP] Real contact detected (mainStep=" << mainStep_ << " subCycle="
+                     << subCycle_ << ") involving a just-released floater: "
+                     "uid=" << uid1 << " (shapeType=" << s1 << ", pos=" << ac.getPosition(acd_.getIdx1())
+                     << ", freshlyActivated=" << (freshlyActivatedUIDs_->count(uid1) > 0) << ")  <->  "
+                     "uid=" << uid2 << " (shapeType=" << s2 << ", pos=" << ac.getPosition(acd_.getIdx2())
+                     << ", freshlyActivated=" << (freshlyActivatedUIDs_->count(uid2) > 0) << "). "
+                     "penetration=" << acd_.getPenetrationDepth() << " normal=" << n
+                     << " contactPoint=" << acd_.getContactPoint() << ". "
+                     "This is the release-time insertion-overlap mechanism behind the 'flying floater' "
+                     "launches investigated in this scenario -- increase the release-timing stagger "
+                     "between floaters sharing this spawn point.");
+               }
             }
 
             // DIAGNOSTIC: flag an anomalously large (but finite, so the NaN guard above doesn't catch
@@ -1691,6 +1779,36 @@ private:
    FloaterHistoryLogger* historyLogger_ = nullptr;
    uint_t mainStep_ = uint_t(0);
    uint_t subCycle_ = uint_t(0);
+
+   // See setFreshlyActivatedUIDs()'s own doc comment above.
+   std::shared_ptr< std::unordered_set< walberla::id_t > > freshlyActivatedUIDs_;
+
+   // Diagnostic side-channel (local to this rank, not synced), mirroring SolidCylinderContactDetection's
+   // own pairDetectionPath/recordDetectionPath/lookupDetectionPath pattern: remembers, per uid pair, the
+   // FULL local input state (both particles' position/orientation/velocity, ghost-vs-real, owner rank)
+   // this rank fed into contact_filter_ this cycle. Added to answer a concrete question raised while
+   // investigating the mesa_pd::mpi::ContactFilter double-accept race (job 4166652, ContactHistoryNotification
+   // duplicate-insert crash on a Cylinder x Box pair straddling a rank boundary): the existing
+   // [ContactHistory DUPLICATE] diagnostic can show that two ranks disagreed, but not WHAT each rank's
+   // own local view of the two particles was at that moment -- i.e. whether the disagreement traces to
+   // genuinely different (ghost-stale) input positions, as the GJK/EPA-determinism argument predicts, or
+   // something else. Wired into contactHistoryDuplicateDiagnosticHook below (same call site as the
+   // existing detection-path lookup) so a future reproduction of this crash prints both ranks' full input
+   // state side by side.
+   void recordContactInputState(walberla::id_t uidA, walberla::id_t uidB, std::string state)
+   {
+      const auto key = uidA < uidB ? std::make_pair(uidA, uidB) : std::make_pair(uidB, uidA);
+      pairContactInputState_[key] = std::move(state);
+   }
+
+   const std::string* lookupContactInputState(walberla::id_t uidA, walberla::id_t uidB) const
+   {
+      const auto key = uidA < uidB ? std::make_pair(uidA, uidB) : std::make_pair(uidB, uidA);
+      const auto it = pairContactInputState_.find(key);
+      return it == pairContactInputState_.end() ? nullptr : &it->second;
+   }
+
+   std::map< std::pair< walberla::id_t, walberla::id_t >, std::string > pairContactInputState_;
 };
 
 
@@ -2689,7 +2807,8 @@ public:
       , pdfFieldID_(simObjs->pdfFieldID)
       , vvIntegratorPreForce(simParams->computed.particleTimestepSize)
       , vvIntegratorPostForce(simParams->computed.particleTimestepSize)
-      , computeLubrication(simObjs->mesapdDomain, simParams->computed.viscosity)
+      , computeLubrication(simObjs->mesapdDomain, simParams->computed.viscosity,
+         simParams->model.useContactFilterOwnerTiebreak)
       , computeContacts(
          simObjs->mesapdDomain,
          simParams->particle.restitutionCoefficient,
@@ -2699,8 +2818,10 @@ public:
          simParams->particle.frictionCoefficient,
          uint_t(5), // 5 types: 0=bed/wall, 1=sphere floater, 2=pillar, 3=box floater, 4=cylinder floater
          simParams->model.useAnalyticalContactDetection,
-         simParams->model.usePureAnalyticalCylinder)
+         simParams->model.usePureAnalyticalCylinder,
+         simParams->model.useContactFilterOwnerTiebreak)
       , dormantFloaterUIDs_(simObjs->dormantFloaterUIDs)
+      , freshlyActivatedFloaterUIDs_(simObjs->freshlyActivatedFloaterUIDs)
       , addExternalForces(
          simObjs->mesapdDomain,
          simObjs->acceleration,
@@ -2746,6 +2867,7 @@ public:
       floaterHistoryLogger_.init(simParams->model.floaterHistoryBaseFolder, simParams->model.logFloaterHistory);
       floaterHistoryLogger_.setMinStep(simParams->model.logFloaterHistoryStartStep);
       computeContacts.setHistoryLogger(&floaterHistoryLogger_);
+      computeContacts.setFreshlyActivatedUIDs(freshlyActivatedFloaterUIDs_);
       computeLubrication.setHistoryLogger(&floaterHistoryLogger_);
       if (computeTunnelContacts_) computeTunnelContacts_->setHistoryLogger(&floaterHistoryLogger_);
       if (simParams->model.logFloaterHistory)
@@ -3247,6 +3369,13 @@ public:
          syncCall();
          tp["MESAPD: syncCall 2"].end();
       }
+
+      // Debug/validation hook (see SimulationObjects::freshlyActivatedFloaterUIDs' own doc comment):
+      // only ever meant to cover the ONE main step immediately following a release, so whether or
+      // not ComputeContacts found (and aborted on) a real contact this step, nothing released in a
+      // PRIOR step should still be flagged going forward -- unconditional clear, every step.
+      if (freshlyActivatedFloaterUIDs_ && !freshlyActivatedFloaterUIDs_->empty())
+         freshlyActivatedFloaterUIDs_->clear();
    }
 
    // Holds selected TRANSLATIONAL DOFs of every pinPosition floater (sphere, box, or cylinder) while
@@ -4221,6 +4350,10 @@ private:
    // exclude dormant (startInactive, not yet at settlingSteps) floaters from DEM contact pairs here,
    // same as they're already excluded from fluid mapping.
    std::shared_ptr< std::unordered_set< walberla::id_t > > dormantFloaterUIDs_;
+   // Shared with SetupStages.h (see SimulationObjects::freshlyActivatedFloaterUIDs' own doc
+   // comment) -- wired into computeContacts (setFreshlyActivatedUIDs, constructor below) and
+   // cleared unconditionally at the end of every doDEMSubCycles() call.
+   std::shared_ptr< std::unordered_set< walberla::id_t > > freshlyActivatedFloaterUIDs_;
    // Built once in the constructor from ModelParams::logFloaterHistoryReleaseStepFilter (empty/unused
    // when that filter is 0); FloaterHistoryLogger keeps a raw pointer to this, so it must outlive it
    // (both are members of this same ParticleKernels instance, so that's automatic).

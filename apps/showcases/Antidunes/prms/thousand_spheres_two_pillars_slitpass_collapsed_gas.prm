@@ -1,0 +1,8267 @@
+// thousand_spheres_two_pillars_slitpass_collapsed_gas.prm  (derived from v5)
+// ─────────────────────────────────────────────────────────────────────────────
+// Variant of the v5 file below: targetMeanVelocityMagnitude halved (0.02 -> 0.01), a 25000-step
+// flow-development warmup before any sphere is active (all 1000 now startInactive), the 10 Z-layers
+// COLLAPSED onto the lowest layer's Z=76 (so all 100 X-Y grid positions now hold 10 fully-overlapping
+// spheres each, safe only because of startInactive -- see ParticleKernels.h/SetupStages.h's dormant-
+// floater mechanism), released one LAYER (~100 spheres) every 2000 steps instead of every 1000
+// (settlingSteps 25000, 27000, ..., 43000), and timesteps extended 100000 -> 200000.
+//
+// Run on 2 nodes / 144 cores (multinode partition, MinNodes=2 on this cluster) instead of the
+// original single-node 72: cellsPerBlock Z halved 30->15 (180/15=12 Z-blocks; 180 divides evenly),
+// giving 4x3x12=144 blocks. domainSize UNCHANGED (160,75,180) -- only the decomposition, not the
+// physical domain, needed to change to use the extra node.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// thousand_spheres_two_pillars_slitpass_gas.prm  (v5)
+// ─────────────────────────────────────────────────────────────────────────────
+// 1000 SMALL SPHERES, ALL densityRatio=0.5, DYNAMICALLY-COMPUTED (non-overridden)
+// GRAVITY, all starting OUTSIDE/ABOVE water, dropped in 10 layers of 100 (one
+// layer released every 1000 timesteps) upstream of two cylinder pillars pushed
+// to the far downstream (right) end of a WIDENED domain, testing whether they
+// pass cleanly through the three slits (pillar-wall / inter-pillar / pillar-
+// wall) instead of clogging.
+//
+// v1 -> v2 changes, and why:
+//   - v1 released all 1000 spheres simultaneously at settlingSteps=300 (they
+//     straddled the free surface). That caused a fatal NaN-quaternion crash at
+//     step 321 (job 4056593) -- a real, previously-characterized instability
+//     from releasing many bodies at once (same root cause as this session's dry
+//     DEM validation work: runRotatingDrum's all-at-once release showed the same
+//     kind of energy spike that runPacking's one-at-a-time protocol never did).
+//   - Fix: ALL spheres now start well ABOVE the free surface (dry, in air, no
+//     initial fluid interaction at all), arranged in 10 Z-layers of 100 spheres
+//     each. Each layer's settlingSteps is offset by 1000 from the previous one
+//     (300, 1300, 2300, ..., 9300) -- lowest layer (closest to the water) drops
+//     first, staggering the total release into 10 events of 100 bodies instead
+//     of one event of 1000.
+//   - Domain widened in X (128->160). Y CANNOT be widened independently of X:
+//     Utility.h's getAvgDiameterScalingFactor derives scalingFactor purely from
+//     domainSize[0] (scalingFactor = domainSize[0] / (generationDomainSize_SI[0]
+//     * bedCopiesInX)), then asserts domainSize[1] == scalingFactor *
+//     generationDomainSize_SI[1] * bedCopiesInY EXACTLY -- an initial v2 attempt
+//     using Y=90 (a different widening ratio than X's 1.25x) failed this
+//     assertion immediately (job 4056668, <1s into the run: "Generated bed with
+//     copies and simulation domain do not match!", expected 75 got 90). Fixed
+//     by using Y=75 (the SAME 1.25x ratio as X: 60*1.25=75), cellsPerBlock Y
+//     25 (3*25=75, block COUNT unchanged at 4x3x6=72, still one node/72
+//     processes). This constraint applies even though useParticleBed=false
+//     here (no bed is actually loaded) -- the check runs unconditionally.
+//     Z (height) untouched, so the free-surface derivation below still holds.
+//
+// Free surface -- v3 -> v4 fix: avgParticleDiameter/liquidHeight/floorHeight are
+// NOT fixed constants, they're DERIVED from domainSize[0] via Utility.h's
+// scalingFactor = domainSize[0] / (generationDomainSize_SI[0] * bedCopiesInX).
+// v3 reused the reference run's numbers (avgParticleDiameter=8.00194, surface
+// Z=56.02) verbatim, but that reference used domainSize[0]=128, not this file's
+// widened 160 -- a 1.25x mismatch that silently shifted the REAL surface up to
+// Z~70, so v3's "above water" Z=60..87 layers actually started AT/NEAR the true
+// waterline. Result: catastrophic MEM force blowup (forceZ up to 1e+26, garbage)
+// within 17 steps of the first layer's release (job 4056761, step 317) ->
+// heap corruption -> SIGABRT. Rescaled correctly here for THIS file's actual
+// domainSize[0]=160: avgParticleDiameter = 8.00194*(160/128) = 10.0024,
+// liquidHeight = 10.0024*2.862 = 28.63, floorHeight = 10.0024*4.1393 = 41.41,
+// surface Z = floorHeight+liquidHeight = 70.03. All 10 sphere layers (Z=76..103)
+// now sit comfortably above that (previously Z=60..87, against the wrong 56.02).
+//
+// v4 -> v5 fix: TEST_100floaters (100 spheres, radius=1.0, Pass-3 off, otherwise
+// identical to this scenario) crashed with heap corruption ("corrupted size vs.
+// prev_size") at step ~1487, right at a dense flood of "Bogner state selection
+// ... FormerMO neighbour ... falling back to interface" reconstruction log
+// lines across multiple ranks within milliseconds -- a real memory-safety bug
+// in that fallback path, apparently triggered more easily by small/thin
+// particle geometry. Isolated via a systematic test matrix (0 floaters: pass;
+// 100 @ r=1.0 Pass-3 off: crash; 100 @ r=1.0 domain-resolution-doubled Pass-3
+// off: crash again, same signature -- rules out resolution; 100 @ r=3.0 Pass-3
+// on: pass, but confounded two changes; 100 @ r=2.0 Pass-3 off: PASS, cleanly
+// isolating that SIZE ALONE fixes it, Pass-3 not required). Radius bumped
+// 1.0 -> 2.0 (diameter 2.0 -> 4.0) here as the confirmed fix; Pass-3 kept ON
+// anyway (harmless, matches the one other passing config, no reason to turn it
+// back off). zStep bumped 3.0 -> 5.0 to keep adjacent Z-layers (same X,Y reused
+// per layer) safely separated given the larger diameter (was overlapping at
+// spawn: 3.0 LU layer spacing < 4.0 LU diameter, a bug introduced by the radius
+// bump that would otherwise have gone unnoticed).
+//
+// Pillars (in the corrected Y=75 domain, radius unchanged at 8, moved further
+// right into the wider X=160 domain -- unaffected by the surface-height fix,
+// CylinderPillars span the full Z=0..180 regardless):
+//   Pillar 1: center (138, 19, 90), r=8  -> occupies Y=11..27, wall gap 11 LU
+//   Pillar 2: center (138, 56, 90), r=8  -> occupies Y=48..64, wall gap 11 LU
+//   Inter-pillar gap: 21 LU (Y=27..48)
+// Sphere diameter 4.0 -- 2.75x+ margin on the tightest (11 LU) gap.
+//
+// 1000 spheres: 10 layers (Z=76,81,...,121) x 10x10 X-Y grid per layer,
+// X=[10,100] (well upstream/left of the X=138 pillars), Y=[5,70] (spans all
+// three lanes within the corrected Y=75 domain, clear of both walls). Grid
+// spacing (9.0 X, 6.5 Y, 5.0 Z-layer) all comfortably exceed the 4.0 sphere
+// diameter -- no overlap at spawn.
+//
+// PhysicsParameters: NO gravityOverride -- dynamically computed gravity.
+//
+// Domain: <160, 75, 180> / cellsPerBlock <40, 25, 15> = 4x3x12 = 144 processes (2 nodes)
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 40, 25, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <160, 75, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.01;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         200000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+   // no gravityOverride -- dynamically computed gravity, per request
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar
+   {
+      center < 138, 19, 90 >;
+      radius 8;
+   }
+   CylinderPillar
+   {
+      center < 138, 56, 90 >;
+      radius 8;
+   }
+}
+
+FloatingSpheres
+{
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 25000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 27000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 29000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 31000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 33000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 35000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 37000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 39000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 41000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 10.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 19.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 28.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 37.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 46.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 55.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 64.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 73.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 82.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 5.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 11.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 18.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 24.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 31.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 37.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 44.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 50.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 57.0000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+   FloatingSphere
+   {
+      position     < 91.0000, 63.5000, 76.0000 >;
+      radius       2.0;
+      densityRatio 0.5;
+      settlingSteps 43000;
+   startInactive true;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   // Activated as the standard default for this scenario family: TEST_100floaters_r3 (radius 3.0,
+   // Pass-3 on) passed cleanly where TEST_100floaters (radius 1.0, Pass-3 off) crashed with heap
+   // corruption right at a "Bogner state selection ... FormerMO neighbour" reconstruction line.
+   usePass3Reresolution          true;
+   // Explicit now (matches SimulationParams.h's own default as of the buoyancy-flag fix, but stated
+   // here so this file's behaviour doesn't silently change if that default is ever revisited): without
+   // this pairing, densityRatio=0.5 floaters have NO net buoyant support at all (rhoHydStat still
+   // subtracted from the MEM force, but the separate analytic vSub*g channel also dropped) and sink to
+   // the domain floor regardless of density -- confirmed via this scenario's own floater VTK output
+   // before this flag was added (several floaters at Z~4-6, well below the free surface).
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 138, 19, 0 >; max < 138, 19, 180 >; radius 8; NoSlip{} }
+   BodyBC { shape Cylinder; min < 138, 56, 0 >; max < 138, 56, 180 >; radius 8; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      CellBB_filter_0 { min < 0, 37, 0 >;  max < 160, 38, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 75, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 160, 75, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}
