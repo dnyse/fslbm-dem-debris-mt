@@ -799,6 +799,20 @@ struct ModelParams {
    // false -> (DEFAULT) exact pre-existing ContactFilter behaviour, unchanged.
    bool        useContactFilterOwnerTiebreak;
 
+   // true  → (DEFAULT) exact pre-existing behaviour: reduceAndAvgHydroForces() (ParticleKernels.h)
+   //         blends this step's freshly-reduced hydrodynamic force/torque with the PREVIOUS step's via
+   //         AverageHydrodynamicForceTorqueKernel -- F = 0.5*(F(t)+F(t-Δt)), a rolling average (Ladd
+   //         1994, "Numerical simulations of particulate suspensions via a discretized Boltzmann
+   //         equation"). Watanabe et al. 2023 (Eq. 48-49, citing Aidun et al. 1998) use the identical
+   //         mechanism "to improve the stability of the fluid-solid coupling with floating objects" --
+   //         this codebase already had it wired in unconditionally before this flag existed.
+   // false → skip the averaging kernel: DEM sees the raw just-reduced hydrodynamic force for this step,
+   //         undamped by the previous step's value. A/B-testing knob for whether the averaging is
+   //         actually load-bearing for this codebase's STALE-PARTICLE-IDX/runaway-force crash family, or
+   //         masking a different problem (see ParticleKernels.h's [TOTAL-FORCE-THRESHOLD]/[VELOCITY-JUMP]
+   //         diagnostics).
+   bool        useHydrodynamicForceTimeAveraging;
+
    ModelParams(const config::Config::BlockHandle& b)
       : pdfReconstructionModel      { b.getParameter< std::string >("pdfReconstructionModel") }
       , pdfRefillingModel           { b.getParameter< std::string >("pdfRefillingModel") }
@@ -829,6 +843,7 @@ struct ModelParams {
       , highAltitudeWaterThresholdZ  { b.getParameter< real_t >     ("highAltitudeWaterThresholdZ", real_t(0)) }
       , useArchTunnelAsMesaPDObject  { b.getParameter< bool >       ("useArchTunnelAsMesaPDObject", false) }
       , useContactFilterOwnerTiebreak{ b.getParameter< bool >       ("useContactFilterOwnerTiebreak", false) }
+      , useHydrodynamicForceTimeAveraging{ b.getParameter< bool >   ("useHydrodynamicForceTimeAveraging", true) }
    {
       if (usePureAnalyticalCylinder && !useAnalyticalContactDetection)
          WALBERLA_LOG_WARNING("usePureAnalyticalCylinder=true but useAnalyticalContactDetection=false -- "

@@ -44,10 +44,12 @@
 #include "ParticleKernels.h"
 #include "PaperAnalyticalContacts.h"
 
+#include <mesa_pd/collision_detection/GeneralContactDetection.h>
 #include <mesa_pd/data/ParticleAccessor.h>
 #include <mesa_pd/data/ParticleStorage.h>
 #include <mesa_pd/data/shape/Box.h>
 #include <mesa_pd/data/shape/Cylinder.h>
+#include <mesa_pd/data/shape/CylindricalBoundary.h>
 #include <mesa_pd/data/shape/HalfSpace.h>
 
 #include <core/Environment.h>
@@ -1827,6 +1829,159 @@ void testCylinderPlaneEdgeNoContact()
           .contact);
 }
 
+//======================================================================================================================
+// Box x ArchTunnel (CylindricalBoundary containment mode) -- hand-derived vs. the production
+// containment override (SolidCylinderContactDetection, ParticleKernels.h) vs. mesa_pd's OWN generic
+// GJK-based CylindricalBoundary path (GeneralContactDetection, called directly).
+//
+// IMPORTANT CAVEAT, read before trusting/extending this comparison: mesa_pd's generic
+// CylindricalBoundary path (GeneralContactDetection.h) reads ONLY the shape's radius and axis -- it
+// has NO notion whatsoever of isContainment()/axial bounds/half-clip (grep-confirmed: none of those
+// three fields is referenced anywhere in that file). It happens to already compute the same core
+// containment quantity our custom override does: whether the OTHER body's farthest point, in the
+// direction of that body's own radial offset from the axis, exceeds the boundary radius (this is
+// mesa_pd's own long-standing generic behaviour for this shape, predating Antidunes' own
+// isContainment()/axial-bounds/half-clip extension -- see CylindricalBoundary.h's own doc comment).
+// For an UNROTATED box, a single support-function query in that one fixed direction provably returns
+// the SAME farthest corner an exhaustive per-corner search would, because the farthest corner's
+// per-axis sign always matches the box centre's own offset sign in each dimension. That is WHY the
+// two paths agree in the specific configuration below -- NOT because they are generally
+// interchangeable for arch-tunnel geometry. They are NOT, once axial bounds or the half-clip actually
+// exclude part of the tunnel (the generic path would keep reporting a contact there; the production
+// override correctly reports none), or once the box is rotated (a single support-function direction
+// no longer necessarily matches the true farthest corner the way it does here).
+//======================================================================================================================
+
+//! HAND-DERIVED geometry. Tunnel: axis=+X through the origin, radius=10, axially bounded to
+//! [-10,10] (comfortably containing the box's own +-1 x-extent, so axial clipping never triggers),
+//! half-clipped to the +z side (comfortably satisfied -- the box sits entirely at z=8.5..10.5, all
+//! > 0). Box: centre (0, 0.3, 9.5), axis-aligned (identity rotation), halfExtents (1,1,1). The 0.3
+//! y-offset is deliberate, chosen to make the (y,z) sign combination that maximises radial distance
+//! UNAMBIGUOUS (see below) while still leaving x -- the tunnel's own axis -- degenerate on purpose,
+//! to exercise the secondary-contact path deliberately (see the two "by hand" derivations below).
+//!
+//! By hand: every corner's radial distance-from-axis is sqrt((0.3+-1)^2 + (9.5+-1)^2) (x drops out
+//! entirely -- the tunnel's axis IS the box's own x-axis). The 4 (y,z) sign combinations give
+//! 49.49, 81.49, 50.69, 82.69 -- wait, using the ACTUAL corner coordinates (y=0.3+-1, z=9.5+-1):
+//!   (y=-0.7,z=8.5): 0.49+72.25=72.74        (y=-0.7,z=10.5): 0.49+110.25=110.74
+//!   (y=1.3, z=8.5): 1.69+72.25=73.94        (y=1.3, z=10.5): 1.69+110.25=111.94  <- unique max
+//! sqrt(111.94) ~= 10.5802 -- overlap = sqrt(111.94)-10 ~= 0.5802 (comfortably under the 1.0 LU
+//! envelope clamp, so the raw unclamped value is asserted). Because x contributes nothing to radial
+//! distance, BOTH x=-1 and x=+1 corners at (y=1.3,z=10.5) tie exactly at this same max. Tracing the
+//! production code's own sx/sy/sz loop (sx outermost, both loops -1 before +1, STRICT > comparisons)
+//! by hand: x=-1 is reached first and becomes "worst"; x=+1, reached last, ties that same value --
+//! not strictly greater, so it never replaces "worst" -- but IS strictly greater than whatever was
+//! sitting in "second" at that point, so it displaces it into "second". I.e. this one configuration
+//! deliberately exercises BOTH the primary AND the secondary-contact code path in a single test, with
+//! both contacts sharing the identical overlap/radial-distance by construction.
+void testArchTunnelBoxContainmentHandDerived()
+{
+   using namespace mesa_pd::data;
+
+   const real_t tunnelRadius = real_t(10);
+   CylindricalBoundary tunnel(tunnelRadius, Vec3(real_t(1), real_t(0), real_t(0)));
+   tunnel.setContainment(true);
+   tunnel.setAxialBounds(real_t(-10), real_t(10));
+   tunnel.setHalfClipNormal(Vec3(real_t(0), real_t(0), real_t(1)));
+
+   const Vec3 boxPos(real_t(0), real_t(0.3), real_t(9.5));
+   const Box  box(Vec3(real_t(2), real_t(2), real_t(2))); // ctor takes FULL edge length -> halfExtents (1,1,1)
+
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+   auto boxP = ps->create(); // idx 0 -- matches operator()'s own (Box, CylindricalBoundary) argument order
+   boxP->setPosition(boxPos);
+   boxP->setRotation(Rot3());
+   auto tunnelP = ps->create(); // idx 1
+   tunnelP->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   tunnelP->setRotation(Rot3());
+
+   // --- hand-derived expected values -------------------------------------------------------------
+   const real_t expectedRadial  = std::sqrt(real_t(111.94)); // sqrt(1.3^2 + 10.5^2)
+   const real_t expectedOverlap = expectedRadial - tunnelRadius;
+   WALBERLA_CHECK_GREATER(expectedOverlap, real_t(0)); // sanity: genuinely penetrating
+   WALBERLA_CHECK_LESS(expectedOverlap, real_t(1));    // sanity: under the envelope clamp
+
+   const Vec3 expectedWorstCorner(real_t(-1), real_t(1.3), real_t(10.5));  // x=-1: found first -> "worst"
+   const Vec3 expectedSecondCorner(real_t(1), real_t(1.3), real_t(10.5));  // x=+1: ties, found last -> "second"
+   const Vec3 expectedOutward(real_t(0), real_t(1.3), real_t(10.5));       // radial part (x removed); SAME for both
+   const Vec3 expectedNormal = -expectedOutward / expectedRadial;         // -outHat, points inward toward the axis
+
+   // --- production containment override (SolidCylinderContactDetection -- ALWAYS analytic for this
+   // shape pair regardless of useAnalyticalContactDetection; see that overload's own comment) -------
+   SolidCylinderContactDetection prod;
+   const bool prodContact = prod(0, 1, box, tunnel, ac);
+   WALBERLA_CHECK(prodContact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.getPenetrationDepth(), -expectedOverlap, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.getContactNormal(), expectedNormal, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.getContactPoint(), expectedWorstCorner, real_t(1e-3));
+   WALBERLA_LOG_INFO_ON_ROOT("ArchTunnel containment (box, hand-derived): overlap="
+      << -prod.getPenetrationDepth() << " (expected " << expectedOverlap << ", agree)");
+
+   // Secondary contact: the tied x=+1 corner, per the by-hand loop trace above. Same overlap/radial
+   // distance as the primary by construction; only the contact POINT's x differs.
+   WALBERLA_CHECK(prod.hasSecondaryContact());
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.getSecondaryPenetrationDepth(), -expectedOverlap, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.getSecondaryContactNormal(), expectedNormal, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.getSecondaryContactPoint(), expectedSecondCorner, real_t(1e-3));
+
+   // --- mesa_pd's OWN generic GJK-based CylindricalBoundary path, called DIRECTLY (bypassing
+   // SolidCylinderContactDetection's override entirely) -- see this section's own header comment for
+   // exactly why this comparison is valid here and not in general. -----------------------------------
+   mesa_pd::collision_detection::GeneralContactDetection generic;
+   const bool genericContact = generic(0, 1, box, tunnel, ac);
+   WALBERLA_CHECK(genericContact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(generic.getPenetrationDepth(), -expectedOverlap, real_t(1e-3));
+   // NORMAL SIGN CONVENTION DIFFERS, confirmed by actually running this (not just theorised): the
+   // overlap MAGNITUDE agrees with the hand-derivation exactly (as predicted -- see this section's own
+   // header comment for why), but mesa_pd's generic path reports its normal pointing AWAY from the
+   // axis (its own long-standing exterior-pillar convention: "a body collides with the pillar from
+   // OUTSIDE", per CylindricalBoundary.h's own doc comment), whereas our custom containment override
+   // deliberately flips it to point INWARD, toward the axis (the physically correct push-back
+   // direction for a body trying to escape a containing tube). Negating the generic path's normal
+   // before comparing, same as this file's own established convention elsewhere for a documented sign
+   // difference (see this file's top comment re: PaperAnalyticalContacts.h vs SolidCylinderContactDetection).
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(-generic.getContactNormal()[1], expectedNormal[1], real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(-generic.getContactNormal()[2], expectedNormal[2], real_t(1e-3));
+   // x is deliberately NOT compared: the generic path's support-function direction has an EXACT-ZERO
+   // x component (the axial component is subtracted out before the support() call), so which of the
+   // box's two tied x=-+1 corners its support function returns for that direction is implementation-
+   // defined -- unlike the production path's own deterministic, loop-order-derived choice above.
+   WALBERLA_LOG_INFO_ON_ROOT("ArchTunnel containment (box) vs mesa_pd's own generic GJK path: overlap="
+      << -generic.getPenetrationDepth() << " (expected " << expectedOverlap
+      << ", agree on magnitude; normal sign flipped -- exterior-pillar vs containment convention, see comment)");
+}
+
+//! Sanity companion: move the box safely INSIDE the tunnel (radial distance from axis well under the
+//! radius everywhere) -- both paths must agree there is NO contact.
+void testArchTunnelBoxContainmentNoContact()
+{
+   using namespace mesa_pd::data;
+
+   const real_t tunnelRadius = real_t(10);
+   CylindricalBoundary tunnel(tunnelRadius, Vec3(real_t(1), real_t(0), real_t(0)));
+   tunnel.setContainment(true);
+   tunnel.setAxialBounds(real_t(-10), real_t(10));
+   tunnel.setHalfClipNormal(Vec3(real_t(0), real_t(0), real_t(1)));
+
+   const Box box(Vec3(real_t(2), real_t(2), real_t(2))); // halfExtents (1,1,1)
+
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+   auto boxP = ps->create();
+   boxP->setPosition(Vec3(real_t(0), real_t(0), real_t(2))); // farthest corner radial dist = sqrt(1^2+3^2) ~= 3.16 << 10
+   boxP->setRotation(Rot3());
+   auto tunnelP = ps->create();
+   tunnelP->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   tunnelP->setRotation(Rot3());
+
+   SolidCylinderContactDetection prod;
+   WALBERLA_CHECK(!prod(0, 1, box, tunnel, ac));
+
+   mesa_pd::collision_detection::GeneralContactDetection generic;
+   WALBERLA_CHECK(!generic(0, 1, box, tunnel, ac));
+}
+
 } // namespace test
 } // namespace paper_analytical
 } // namespace antidunes
@@ -1896,6 +2051,10 @@ int main(int argc, char** argv)
    testCylinderPlaneBandNoContact();
    testCylinderPlaneEdge();
    testCylinderPlaneEdgeNoContact();
+
+   // Box x ArchTunnel (CylindricalBoundary containment mode)
+   testArchTunnelBoxContainmentHandDerived();
+   testArchTunnelBoxContainmentNoContact();
 
    return EXIT_SUCCESS;
 }

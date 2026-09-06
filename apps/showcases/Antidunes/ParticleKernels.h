@@ -65,6 +65,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 
 namespace walberla {
@@ -2837,6 +2838,7 @@ public:
       , acceleration_(simObjs->acceleration)
       , memReferenceHeight_(simObjs->memReferenceHeight)
       , useDynamicReferenceHeight_(simParams->model.useDynamicReferenceHeight)
+      , useHydrodynamicForceTimeAveraging_(simParams->model.useHydrodynamicForceTimeAveraging)
    {
       // useArchTunnelAsMesaPDObject (see its own doc comment, SimulationParams.h): arch tunnels are
       // then real mesa_pd bodies created in SetupStages.h::setupParticles, going through the standard
@@ -3152,11 +3154,31 @@ public:
             lbm_mesapd_coupling::InitializeHydrodynamicForceTorqueForAveragingKernel{}, *particleAccessor);
       }
 
-      tp["MESAPD: AverageHydrodynamicForceTorqueKernel"].start();
-      particleStorage->forEachParticle(useOpenMP,
-         mesa_pd::kernel::SelectLocal(), *particleAccessor,
-         lbm_mesapd_coupling::AverageHydrodynamicForceTorqueKernel{}, *particleAccessor);
-      tp["MESAPD: AverageHydrodynamicForceTorqueKernel"].end();
+      // ModelParameters.useHydrodynamicForceTimeAveraging (see its own doc comment, SimulationParams.h):
+      // AverageHydrodynamicForceTorqueKernel blends this step's freshly-reduced force/torque with the
+      // PREVIOUS step's (F = 0.5*(F(t)+F(t-Δt)), rolling average, Ladd 1994) -- the same mechanism
+      // Watanabe et al. 2023 (Eq. 48-49, citing Aidun et al. 1998) use "to improve the stability of the
+      // fluid-solid coupling with floating objects". DEFAULT true keeps this codebase's pre-existing
+      // always-on behaviour; set false to feed DEM the raw just-reduced force undamped (still swaps
+      // old<-new below regardless, so old values stay valid if this is flipped back on mid-investigation).
+      if (useHydrodynamicForceTimeAveraging_)
+      {
+         tp["MESAPD: AverageHydrodynamicForceTorqueKernel"].start();
+         particleStorage->forEachParticle(useOpenMP,
+            mesa_pd::kernel::SelectLocal(), *particleAccessor,
+            lbm_mesapd_coupling::AverageHydrodynamicForceTorqueKernel{}, *particleAccessor);
+         tp["MESAPD: AverageHydrodynamicForceTorqueKernel"].end();
+      }
+      else
+      {
+         particleStorage->forEachParticle(useOpenMP,
+            mesa_pd::kernel::SelectLocal(), *particleAccessor,
+            [](size_t idx, auto& ac) {
+               ac.setOldHydrodynamicForce(idx, ac.getHydrodynamicForce(idx));
+               ac.setOldHydrodynamicTorque(idx, ac.getHydrodynamicTorque(idx));
+            },
+            *particleAccessor);
+      }
    }
 
    template< typename TP >
@@ -3190,6 +3212,78 @@ public:
       const bool logForcesThisStep = (stepCounter_ % evalFrequency_ == uint_t(0));
       for (auto subCycle = uint_t(0); subCycle < numSubCycles; ++subCycle)
       {
+         // TEMP DIAGNOSTIC (remove after investigation): [GHOST-VANISHED] snapshot. Captures, once per
+         // main step (subCycle==0, BEFORE this step's own DEM subcycles/syncCalls touch anything), the
+         // full set of floater UIDs this rank can currently see AT ALL -- local owned OR ghost --
+         // i.e. exactly the population MovingParticleMapping iterated (via SelectAll, ac_->size()) the
+         // last time the fluid-obstacle map (particleField_) was refreshed. That refresh only happens
+         // once per MAIN timestep (timeloopAfterDEM, AFTER all 40 subcycles below), so if a ghost this
+         // rank held at refresh time gets dropped by any of THIS step's syncCalls before the next
+         // refresh, particleField_ is left holding a UID this rank can no longer resolve -- the exact
+         // STALE-PARTICLE-IDX precondition, and one the LOCAL-only [SUBCYCLE-LEFT-RANK] check above
+         // cannot see, since a dropped ghost need not have moved far (or at all) itself.
+         if (subCycle == uint_t(0))
+         {
+            ghostMappingSnapshot_.clear();
+            particleStorage->forEachParticle(useOpenMP,
+               [](size_t idx, auto& ac) {
+                  const uint_t t = ac.getType(idx);
+                  return t == uint_t(1) || t == uint_t(3) || t == uint_t(4); // sphere/box/cylinder floaters
+               },
+               *particleAccessor,
+               [this](size_t idx, auto& ac) { ghostMappingSnapshot_.insert(ac.getUid(idx)); },
+               *particleAccessor);
+         }
+
+         // TEMP DIAGNOSTIC (remove after investigation): [VELOCITY-JUMP] -- catches the ONSET of a
+         // runaway, not just its aftermath. Every routine per-floater log (BoxForces/BoxTorque) only
+         // fires once per evalFrequency_ (1000 steps), so a corruption that starts and escalates
+         // WITHIN that window is invisible until the next 1000-step snapshot already shows it fully
+         // blown up (exactly what happened investigating job 4179027: normal at step 59000, ~100x
+         // torque jump at step 60000, no visibility into which step in between it actually started or
+         // how fast it grew). This runs once per MAIN step (subCycle==0, using each floater's velocity
+         // as left by the END of the PREVIOUS main step, before this step's own integration touches
+         // it), comparing against lastVelocityForJumpCheck_ and logging if the per-MAIN-STEP change
+         // exceeds a threshold far above ordinary floater dynamics (observed normal steps: |v| changes
+         // by <<0.001 LU/step per 1000-step window in this scenario) but far below an already-runaway
+         // value (observed post-corruption: tens to hundreds of LU/step) -- 0.05 LU/step/mainstep gives
+         // ~2 orders of magnitude of margin on both sides. Throttled per rank.
+         if (subCycle == uint_t(0))
+         {
+            static uint_t velocityJumpLogCount = uint_t(0);
+            constexpr real_t velocityJumpThreshold = real_t(0.05);
+            particleStorage->forEachParticle(useOpenMP,
+               [](size_t idx, auto& ac) {
+                  using namespace mesa_pd::data::particle_flags;
+                  if (isSet(ac.getFlags(idx), GHOST)) return false;
+                  const uint_t t = ac.getType(idx);
+                  return t == uint_t(1) || t == uint_t(3) || t == uint_t(4); // sphere/box/cylinder floaters
+               },
+               *particleAccessor,
+               [this](size_t idx, auto& ac) {
+                  const walberla::id_t uid = ac.getUid(idx);
+                  const auto& vel = ac.getLinearVelocity(idx);
+                  auto it = lastVelocityForJumpCheck_.find(uid);
+                  if (it != lastVelocityForJumpCheck_.end())
+                  {
+                     const real_t deltaV = (vel - it->second).length();
+                     if (deltaV > velocityJumpThreshold && velocityJumpLogCount < uint_t(50))
+                     {
+                        WALBERLA_LOG_WARNING("[VELOCITY-JUMP] rank=" << mpi::MPIManager::instance()->rank()
+                           << " uid=" << uid << " step=" << stepCounter_
+                           << " prevVel=" << it->second << " newVel=" << vel
+                           << " |deltaV|=" << deltaV << " pos=" << ac.getPosition(idx)
+                           << " -- velocity changed by more than " << velocityJumpThreshold
+                           << " LU/step over this ONE main step -- catches the onset of a runaway, not "
+                              "just its aftermath.");
+                        ++velocityJumpLogCount;
+                     }
+                  }
+                  lastVelocityForJumpCheck_[uid] = vel;
+               },
+               *particleAccessor);
+         }
+
          // Log the per-floater force breakdown once per eval step (only on the first sub-cycle).
          addExternalForces.setLogForces(logForcesThisStep && subCycle == uint_t(0));
          // DEM/MEM-WATCH sub-cycle index (see AddExternalForces::setSubCycle) -- unconditional, every
@@ -3207,10 +3301,87 @@ public:
             vvIntegratorPreForce, *particleAccessor);
          tp["MESAPD: VelocityVerletPreForceUpdate"].end();
 
+         // TEMP DIAGNOSTIC (remove after investigation): [SUBCYCLE-LEFT-RANK] -- checks whether pure
+         // DEM-subcycle physics (the position update just above) has already moved a LOCAL floater
+         // outside every block this rank owns, BEFORE this subcycle's syncCall() below has a chance
+         // to hand ownership off. The fluid-side obstacle mapping / ghost-sync architecture implicitly
+         // assumes a particle can't move far enough in a single subcycle to leave its owning rank's
+         // territory before the next sync catches up (see the STALE-PARTICLE-IDX investigation, job
+         // 4175896) -- this fires the instant that assumption breaks, so a run's log can be checked
+         // for whether this precedes (and how closely, in step/subCycle terms) a STALE-PARTICLE-IDX
+         // abort. Throttled per rank. Local blocks only (blockForest_->begin()/end() iterates blocks
+         // this process owns), so this is a real "left every block I own" check, not a heuristic.
+         {
+            static uint_t leftRankLogCount = uint_t(0);
+            particleStorage->forEachParticle(useOpenMP,
+               [](size_t idx, auto& ac) {
+                  using namespace mesa_pd::data::particle_flags;
+                  if (isSet(ac.getFlags(idx), GHOST)) return false;
+                  const uint_t t = ac.getType(idx);
+                  return t == uint_t(1) || t == uint_t(3) || t == uint_t(4); // sphere/box/cylinder floaters
+               },
+               *particleAccessor,
+               [this, subCycle](size_t idx, auto& ac) {
+                  const auto& pos = ac.getPosition(idx);
+                  real_t minSqDist = std::numeric_limits< real_t >::max();
+                  for (auto blockIt = blockForest_->begin(); blockIt != blockForest_->end(); ++blockIt)
+                  {
+                     const real_t d = blockIt->getAABB().sqDistance(pos);
+                     if (d < minSqDist) minSqDist = d;
+                     if (minSqDist <= real_t(0)) break;
+                  }
+                  static uint_t& logCount = leftRankLogCount;
+                  if (minSqDist > real_t(0) && logCount < uint_t(50))
+                  {
+                     WALBERLA_LOG_WARNING("[SUBCYCLE-LEFT-RANK] rank=" << mpi::MPIManager::instance()->rank()
+                        << " uid=" << ac.getUid(idx) << " step=" << stepCounter_ << " subCycle=" << subCycle
+                        << " pos=" << pos << " vel=" << ac.getLinearVelocity(idx)
+                        << " distanceOutsideNearestLocalBlock=" << std::sqrt(minSqDist)
+                        << " -- this floater's position is now outside every block this rank owns, "
+                           "BEFORE this sub-cycle's syncCall() has had a chance to hand off ownership.");
+                     ++logCount;
+                  }
+               },
+               *particleAccessor);
+         }
+
          // synchronize -----------------------------------------------------------------
          tp["MESAPD: syncCall 1"].start();
          syncCall();
          tp["MESAPD: syncCall 1"].end();
+
+         // TEMP DIAGNOSTIC (remove after investigation): [GHOST-VANISHED] check -- see
+         // ghostMappingSnapshot_'s own capture-site comment above. After THIS sub-cycle's syncCall(),
+         // check every UID this rank could see at the start of the main step: if uidToIdx() now comes
+         // back invalid, this rank just lost its only visibility (ghost or local) into a particle that
+         // particleField_ may still be citing as a cell's obstacle owner. Most hits here are expected/
+         // benign (ordinary ghost churn as particles drift near a block boundary) -- the point is
+         // cross-referencing UID + step + subCycle against the eventual STALE-PARTICLE-IDX abort's own
+         // uid/step, not that every hit is itself a problem. Erased from the snapshot once reported so
+         // each UID logs at most once per main step. Throttled per rank.
+         {
+            static uint_t ghostVanishedLogCount = uint_t(0);
+            for (auto it = ghostMappingSnapshot_.begin(); it != ghostMappingSnapshot_.end(); )
+            {
+               const walberla::id_t uid = *it;
+               if (particleAccessor->uidToIdx(uid) == particleAccessor->getInvalidIdx())
+               {
+                  if (ghostVanishedLogCount < uint_t(50))
+                  {
+                     WALBERLA_LOG_WARNING("[GHOST-VANISHED] rank=" << mpi::MPIManager::instance()->rank()
+                        << " uid=" << uid << " step=" << stepCounter_ << " subCycle=" << subCycle
+                        << " -- this rank can no longer see this UID at all (local or ghost), but "
+                           "particleField_ may still reference it from the last mapping sweep.");
+                     ++ghostVanishedLogCount;
+                  }
+                  it = ghostMappingSnapshot_.erase(it);
+               }
+               else
+               {
+                  ++it;
+               }
+            }
+         }
 
          // TEMP DIAGNOSTIC (remove after investigation): [MIGRATION-NAN] -- see lastKnownOwner_'s own
          // doc comment. Fires the first time a LOCAL floater's hydrodynamicForce/oldHydrodynamicForce
@@ -3353,6 +3524,50 @@ public:
          tp["MESAPD: ReduceProperty(ForceTorque)"].start();
          mesa_pd::mpi::ReduceProperty{}.operator()< mesa_pd::ForceTorqueNotification >(*particleStorage);
          tp["MESAPD: ReduceProperty(ForceTorque)"].end();
+
+         // TEMP DIAGNOSTIC (remove after investigation): [TOTAL-FORCE-THRESHOLD] -- checks the FULLY
+         // ACCUMULATED per-subcycle force (every contact + lubrication + tunnel contact + external
+         // force this floater received this subcycle, already cross-rank reduced above), UNLIKE
+         // [STRONG-CONTACT-FORCE] which only ever looks at ONE contact's own force delta against
+         // STRONG_FORCE_THRESHOLD=0.1. Several simultaneous contacts (e.g. a floater squeezed by
+         // multiple neighbours at once in a congested pile) can each stay individually under 0.1 --
+         // and under EVERY other existing per-contact threshold -- while still summing to something
+         // well above baseline, invisibly to every diagnostic added so far. This runs exactly once per
+         // subcycle, right where ac.getForceRef/getTorqueRef hold that final total, immediately before
+         // VelocityVerletPostForceUpdate consumes and resets them. Threshold (0.03) chosen well above
+         // ordinary baseline (gravity+buoyancy+hydro for a floater in this scenario is O(1e-4..1e-3),
+         // confirmed from routine BoxForces logging) but below STRONG_FORCE_THRESHOLD's own 0.1, so it
+         // specifically covers the gap between "ordinary" and "a single contact already flagged it
+         // anyway". Throttled per rank.
+         {
+            static uint_t totalForceLogCount = uint_t(0);
+            particleStorage->forEachParticle(useOpenMP,
+               [](size_t idx, auto& ac) {
+                  using namespace mesa_pd::data::particle_flags;
+                  if (isSet(ac.getFlags(idx), GHOST)) return false;
+                  const uint_t t = ac.getType(idx);
+                  return t == uint_t(1) || t == uint_t(3) || t == uint_t(4); // sphere/box/cylinder floaters
+               },
+               *particleAccessor,
+               [this, subCycle](size_t idx, auto& ac) {
+                  constexpr real_t TOTAL_FORCE_THRESHOLD = real_t(0.03);
+                  const mesa_pd::Vec3& totalForce = ac.getForceRef(idx);
+                  if (totalForce.length() > TOTAL_FORCE_THRESHOLD && totalForceLogCount < uint_t(100))
+                  {
+                     WALBERLA_LOG_WARNING("[TOTAL-FORCE-THRESHOLD] rank=" << mpi::MPIManager::instance()->rank()
+                        << " uid=" << ac.getUid(idx) << " step=" << stepCounter_ << " subCycle=" << subCycle
+                        << " pos=" << ac.getPosition(idx) << " vel=" << ac.getLinearVelocity(idx)
+                        << " totalForceThisSubCycle=" << totalForce << " |total|=" << totalForce.length()
+                        << " totalTorqueThisSubCycle=" << ac.getTorqueRef(idx)
+                        << " hydroForce=" << ac.getHydrodynamicForce(idx)
+                        << " -- fully-accumulated per-subcycle force exceeds " << TOTAL_FORCE_THRESHOLD
+                        << " even though no single contact may have (see [STRONG-CONTACT-FORCE]'s own"
+                           " per-contact-only threshold) -- catches summed-small-overlaps launches.");
+                     ++totalForceLogCount;
+                  }
+               },
+               *particleAccessor);
+         }
 
          // velocity verlet post-force (update velocities) ------------------------------
          tp["MESAPD: VelocityVerletPostForceUpdate"].start();
@@ -4335,6 +4550,16 @@ private:
    // correct value the OLD owner computed at the top of the step. UID -> last-observed owner rank.
    std::unordered_map< walberla::id_t, int > lastKnownOwner_;
 
+   // TEMP DIAGNOSTIC (remove after investigation): [GHOST-VANISHED] -- see doDEMSubCycles' own
+   // capture-site comment. Snapshot (rebuilt fresh each main step, at subCycle==0) of every floater
+   // UID this rank can see at all (local or ghost), i.e. exactly the population the last fluid-
+   // obstacle mapping sweep iterated.
+   std::unordered_set< walberla::id_t > ghostMappingSnapshot_;
+
+   // TEMP DIAGNOSTIC (remove after investigation): [VELOCITY-JUMP] -- see doDEMSubCycles' own
+   // capture-site comment. UID -> velocity as observed at the start of the previous main step.
+   std::unordered_map< walberla::id_t, Vector3< real_t > > lastVelocityForJumpCheck_;
+
    // kernels — declaration order must match initializer-list order to avoid -Wreorder
    mesa_pd::kernel::VelocityVerletPreForceUpdate vvIntegratorPreForce;
    mesa_pd::kernel::VelocityVerletPostForceUpdate vvIntegratorPostForce;
@@ -4374,6 +4599,10 @@ private:
    // it has no PDF/reconstruction feedback — see the [DynamicH] log / changes.md for the 2026-07 history.
    std::shared_ptr< real_t >                          memReferenceHeight_;
    bool                                                useDynamicReferenceHeight_ = false;
+
+   // ModelParameters.useHydrodynamicForceTimeAveraging (see its own doc comment, SimulationParams.h):
+   // gates the AverageHydrodynamicForceTorqueKernel call in reduceAndAvgHydroForces() below.
+   bool                                                useHydrodynamicForceTimeAveraging_ = true;
 };
 
 } // namespace antidunes

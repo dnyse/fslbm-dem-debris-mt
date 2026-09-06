@@ -1,0 +1,295 @@
+// toy_pole_forest_driftwood_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW TOY SCENARIO -- a "tsunami protection forest" (a staggered field of standing poles) hit by
+// drifting cuboid debris, based on reference imagery the user shared: a laboratory-scale tsunami/
+// driftwood-vs-coastal-forest study (2 cm x 2 cm x 15/20 cm wood logs against a staggered 2-row
+// forest of 8 poles). This is a GEOMETRICALLY NEW scenario -- no piers/arches/deck at all, just 8
+// freestanding cylindrical poles, no bridge structure. Everything else (domain scale, water level,
+// PID flow driving, DEM tuning, box floater size) is reused verbatim from the already-validated
+// toy-bridge family (test_bridge_v1_..._lowwater_gas.prm, job 4167764 COMPLETED cleanly) rather than
+// re-derived, since this is explicitly a first-try toy setup.
+//
+// TWO DELIBERATE SIMPLIFICATIONS, per direct request:
+//   1. NOT modeling an actual tsunami wave (a dry-bed initial condition with a wave front rushing in,
+//      as in the reference figures). That is a substantially different problem (dam-break/runup
+//      initial condition, no periodic PID-driven flow). Instead, water is set up exactly like every
+//      other bridge/toy scenario in this project: a pre-filled domain with a steady, PID-driven mean
+//      flow (targetMeanVelocityMagnitude=0.01, same as the toy-bridge family) -- i.e. treat this as a
+//      steady current flowing through the pole forest, not an impulsive tsunami surge.
+//   2. Cuboids are released only AFTER an initial settling window (first wave at t=8000), so the
+//      steady flow has time to establish its own pattern around the pole forest (wake/backwater
+//      structure) before any debris arrives -- debris meets an already-developed flow field, not a
+//      transient startup.
+//
+// GEOMETRY: 8 poles (matching the reference figure's own "number of poles is 8" caption), 2 staggered
+// rows so the forest has no clear straight-through gap: row A at X=60 (Y=12,24,36,48), row B at X=70
+// (Y=18,30,42,54, offset by half the 12-LU row-A spacing). Pole radius=3 (thinner than the bridge's
+// own pier radius=5, to read as "sticks" rather than "piers", per the reference imagery). Poles are
+// simple freestanding cylinders (NO connecting box, unlike the bridge's stadium-shaped piers) --
+// CylinderPillars (DEM side) + one plain BodyBC Cylinder per pole (LBM side), each capped at Z=60
+// (comfortably above the ~49-56 LU water level, well below the domain top at 90).
+//
+// DEBRIS: 24 total cuboids (halfExtents<6,1,1.5>, densityRatio 0.6 -- identical box size/density to
+// every prior validated toy-bridge scenario), 4 upstream aim points (X=15, Y=12/24/36/48 -- aimed
+// directly at row A's own Y-positions, so each stream of cuboids meets row A first and may then reach
+// row B behind it), 6 waves per point at a 9000-step gap starting at t=8000 (last release t=53000) --
+// this exact gap/box-size/target-velocity combination was directly validated this session (toy
+// trunk-first-staggered scenario, jobs 4176072/4176138, both COMPLETED cleanly with zero RELEASE-
+// OVERLAP/STALE-PARTICLE-IDX) as sufficient separation between waves sharing one spawn point.
+//
+// PHYSICS/DEM: liquidHeightFactor=2.0 (absoluteLiquidHeight~49.1, the already-validated "lowwater"
+// tier), numSubCycles=40, restitutionCoefficient=0.3, useAnalyticalContactDetection=true (Box x Box
+// and Box x CylindricalBoundary are both analytic in this codebase regardless -- no GJK anywhere in
+// this scenario, matching the "nogjk" family's proven-safe combination). No arches exist here, so
+// useArchTunnelAsMesaPDObject / ArchTunnels are omitted entirely (not applicable).
+//
+// timesteps=80000: last release at 53000 + ~27000 steps of post-release observation.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;  // validated safe tier (test_bridge_v1_..._lowwater_gas.prm, job 4167764)
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.01;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         80000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+   // no gravityOverride -- dynamically computed gravity
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.3; // wet/waterlogged wood-wood -- these are floating logs, soaked, not dry timber
+   numSubCycles 40;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// 8 freestanding "forest" poles, 2 staggered rows -- see this file's own header for the layout.
+// center Z is cosmetic (CylindricalBoundary is infinite along its axis).
+CylinderPillars
+{
+   CylinderPillar { center < 60, 12, 30 >; radius 3; }
+   CylinderPillar { center < 60, 24, 30 >; radius 3; }
+   CylinderPillar { center < 60, 36, 30 >; radius 3; }
+   CylinderPillar { center < 60, 48, 30 >; radius 3; }
+   CylinderPillar { center < 70, 18, 30 >; radius 3; }
+   CylinderPillar { center < 70, 30, 30 >; radius 3; }
+   CylinderPillar { center < 70, 42, 30 >; radius 3; }
+   CylinderPillar { center < 70, 54, 30 >; radius 3; }
+}
+
+// Debris: 4 aim points (X=15) aimed at row A's own Y-positions, 6 waves each, 9000-step gap starting
+// at t=8000 -- see this file's own header for the validation this gap/box-size combo is based on.
+FloatingBoxes
+{
+   // aim point Y=12 -> row A pole 1
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps   8000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  26000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  35000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  44000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  53000; startInactive true; }
+
+   // aim point Y=24 -> row A pole 2
+   FloatingBox { position < 15, 24, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps   8000; startInactive true; }
+   FloatingBox { position < 15, 24, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingBox { position < 15, 24, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  26000; startInactive true; }
+   FloatingBox { position < 15, 24, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  35000; startInactive true; }
+   FloatingBox { position < 15, 24, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  44000; startInactive true; }
+   FloatingBox { position < 15, 24, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  53000; startInactive true; }
+
+   // aim point Y=36 -> row A pole 3
+   FloatingBox { position < 15, 36, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps   8000; startInactive true; }
+   FloatingBox { position < 15, 36, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingBox { position < 15, 36, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  26000; startInactive true; }
+   FloatingBox { position < 15, 36, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  35000; startInactive true; }
+   FloatingBox { position < 15, 36, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  44000; startInactive true; }
+   FloatingBox { position < 15, 36, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  53000; startInactive true; }
+
+   // aim point Y=48 -> row A pole 4
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps   8000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  26000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  35000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  44000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  53000; startInactive true; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;  // Box x Box -> boxBoxSAT; Box x CylindricalBoundary is
+                                        // analytic regardless (SolidCylinderContactDetection
+                                        // override) -- no GJK anywhere in this scenario.
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePass3Reresolution          true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   logFloaterHistory             false;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+
+   // pole 1 (row A, Y=12)
+   BodyBC
+   {
+      shape Cylinder; min < 60, 12, 0 >; max < 60, 12, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 2 (row A, Y=24)
+   BodyBC
+   {
+      shape Cylinder; min < 60, 24, 0 >; max < 60, 24, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 3 (row A, Y=36)
+   BodyBC
+   {
+      shape Cylinder; min < 60, 36, 0 >; max < 60, 36, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 4 (row A, Y=48)
+   BodyBC
+   {
+      shape Cylinder; min < 60, 48, 0 >; max < 60, 48, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 5 (row B, Y=18)
+   BodyBC
+   {
+      shape Cylinder; min < 70, 18, 0 >; max < 70, 18, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 6 (row B, Y=30)
+   BodyBC
+   {
+      shape Cylinder; min < 70, 30, 0 >; max < 70, 30, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 7 (row B, Y=42)
+   BodyBC
+   {
+      shape Cylinder; min < 70, 42, 0 >; max < 70, 42, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 8 (row B, Y=54)
+   BodyBC
+   {
+      shape Cylinder; min < 70, 54, 0 >; max < 70, 54, 60 >; radius 3;
+      NoSlip{}
+   }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;  // cell type per timestep: 1=liquid 2=interface 3=gas 4=noSlip 6=freeSlip/UBB
+                       // 7=UBB-inflow 8=pressure 9=pressure-outflow 10=outlet (VtkWriter.h) -- lets
+                       // the pole forest (all NoSlip=4) be isolated directly in ParaView (Threshold
+                       // filter on mapped_flag == 4), independent of the water.
+      }
+
+      CellBB_filter_0 { min < 0, 0, 0 >; max < 128, 60, 90 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

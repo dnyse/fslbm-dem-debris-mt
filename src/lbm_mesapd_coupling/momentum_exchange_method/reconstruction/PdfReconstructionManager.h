@@ -690,69 +690,6 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             (*reconstructor_)(block, x, y, z, pdfField, particleIdx, *ac_);
             reseedHydrostatic(x, y, z);
 
-            // [RECON-DENSITY-CHECK] VERIFY the fill-blind over-density hypothesis with real numbers.
-            // EquilibriumReconstructor just set this freed cell to ρ = unweighted mean of its domain
-            // (liquid+interface) neighbours' getDensity — and interface cells report ρ≈1 no matter how
-            // EMPTY they are (their partial volume lives in the fill field φ, which the reconstructor
-            // ignores). Here we recompute that unweighted ρ AND the fill-weighted ρ = Σφρ/Σφ that the
-            // proposed fix would use. If the cell sits at the waterline (low-φ interface neighbours) the
-            // two diverge sharply → the assigned ρ≈1 is the phantom-force source the MEM then reads.
-            if constexpr (!std::is_void_v< ScalarField_T >)
-            if (fillField != nullptr)
-            {
-               const real_t rhoAssigned = pdfField->getDensity(x, y, z);
-               real_t sumRho     = real_t(0);
-               real_t sumPhiRho  = real_t(0);
-               real_t sumPhi     = real_t(0);
-               real_t minIntfPhi = real_t(1);
-               uint_t nDom  = uint_t(0);
-               uint_t nIntf = uint_t(0);
-               uint_t nLiq  = uint_t(0);
-               for (int dz = -1; dz <= 1; ++dz)
-                  for (int dy = -1; dy <= 1; ++dy)
-                     for (int dx = -1; dx <= 1; ++dx)
-                     {
-                        if (dx == 0 && dy == 0 && dz == 0) continue;
-                        const cell_idx_t nx = x + cell_idx_c(dx);
-                        const cell_idx_t ny = y + cell_idx_c(dy);
-                        const cell_idx_t nz = z + cell_idx_c(dz);
-                        if (!boundaryHandling->isDomain(Cell(nx, ny, nz))) continue;
-                        const real_t rn = pdfField->getDensity(nx, ny, nz);
-                        const real_t pn = fillField->get(nx, ny, nz);
-                        sumRho += rn;
-                        sumPhiRho += pn * rn;
-                        sumPhi += pn;
-                        ++nDom;
-                        if (isFlagSet(flagField->get(nx, ny, nz), bognerInterface)) { ++nIntf; if (pn < minIntfPhi) minIntfPhi = pn; }
-                        if (isFlagSet(flagField->get(nx, ny, nz), bognerLiquid)) ++nLiq;
-                     }
-               const real_t rhoUnw = (nDom > uint_t(0)) ? sumRho / real_c(nDom) : real_t(1);
-               const real_t rhoW   = (sumPhi > real_t(1e-6)) ? sumPhiRho / sumPhi : real_t(0);
-
-               // Smoking gun: high density was assigned, but the fill-weighted value is much lower AND
-               // the neighbourhood is dominated by partially-empty interface cells (i.e. the waterline).
-               if (rhoAssigned > real_t(0.8) && rhoW < real_t(0.6) && nIntf > nLiq)
-               {
-                  static uint_t reconDensLogCount = uint_t(0);
-                  ++reconDensLogCount;
-                  if (reconDensLogCount <= uint_t(20) || (reconDensLogCount % uint_t(5000) == uint_t(0)))
-                  {
-                     const auto&  aabb = block->getAABB();
-                     const real_t cdx  = aabb.xSize() / real_c(flagField->xSize());
-                     WALBERLA_LOG_WARNING("[RECON-DENSITY-CHECK] (#" << reconDensLogCount << ") world≈("
-                        << (aabb.xMin() + (real_c(x) + real_t(0.5)) * cdx) << ","
-                        << (aabb.yMin() + (real_c(y) + real_t(0.5)) * cdx) << ","
-                        << (aabb.zMin() + (real_c(z) + real_t(0.5)) * cdx) << ")"
-                        << "  rhoAssigned=" << rhoAssigned << "  rhoUnweighted=" << rhoUnw
-                        << "  rhoFillWeighted=" << rhoW << "  domainNbrs=" << nDom
-                        << "  interfaceNbrs=" << nIntf << " (minPhi=" << minIntfPhi << ")"
-                        << "  liquidNbrs=" << nLiq
-                        << "  --> FILL-BLIND OVER-DENSITY: reconstructor assigned ρ≈1 at the waterline;"
-                           " the fill-weighted ρ would be " << rhoW << " (the phantom-force source).");
-                  }
-               }
-            }
-
             if (conserveMomentumWhenRestoring_ && pdfField->isInInnerPart(Cell(x, y, z)))
             {
                Vector3< real_t > force      = pdfField->getMomentumDensity(x, y, z);
