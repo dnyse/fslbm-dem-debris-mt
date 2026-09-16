@@ -65,13 +65,17 @@ void ObstacleFillLevelSweep< Stencil_T, FlagField_T, ScalarField_T, VectorField_
          // D3Q27 sum). In that case fall back to an equal-weight average of fluid-neighbour
          // fill levels instead of the normal-weighted projection.
          // Log once per cell so we know when the former assertion would have fired.
+         // Logging disabled (this session): fires for dozens of cells every timestep and, combined
+         // with WALBERLA_LOG_DEVEL's uncached ignore-regex check (never gated by WALBERLA_LOGLEVEL,
+         // see Logging::isInIgnoreCallerPaths), was both flooding sbatch-output past the shared
+         // /home quota AND measurably slowing every run down even when suppressed via regex.
          const real_t obstNormalSqrLen = obstacleNormalField->get(x, y, z).sqrLength();
          if (obstNormalSqrLen <= real_c(0))
          {
-            WALBERLA_LOG_DEVEL_ON_ROOT("ObstacleFillLevelSweep: zero obstacle normal at cell ("
-                                       << x << "," << y << "," << z
-                                       << ") — using equal-weight fill-level average "
-                                       << "(former CHECK_GREATER assertion would have fired here).");
+            // WALBERLA_LOG_DEVEL_ON_ROOT("ObstacleFillLevelSweep: zero obstacle normal at cell ("
+            //                            << x << "," << y << "," << z
+            //                            << ") — using equal-weight fill-level average "
+            //                            << "(former CHECK_GREATER assertion would have fired here).");
          }
 
          real_t sum       = real_c(0);

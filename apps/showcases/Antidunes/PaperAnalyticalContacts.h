@@ -18,10 +18,14 @@
 //!        papers, for the shape pairs SolidCylinderContactDetection (ParticleKernels.h) currently
 //!        resolves via the generic GJK/EPA fallback: Box x Box and Cylinder x Cylinder.
 //!
-//! NOT used by the simulation. Nothing in BuildTimeloop.h / SetupStages.h / ParticleKernels.h
-//! includes this header. It exists purely so a dedicated test (PaperAnalyticalContactTest.cpp) can
-//! compare these closed forms against SolidCylinderContactDetection's existing GJK/EPA results for
-//! identical geometry.
+//! USED BY THE SIMULATION, opt-in: ParticleKernels.h's ComputeContacts includes this header and calls
+//! cylinderCylinderContact/cylinderCylinderResultIsUncertain directly, gated behind the runtime prm
+//! flag ModelParameters.useAnalyticalContactDetection (default false -- GJK/EPA-only unless a scenario
+//! explicitly turns this on). When on, a result cylinderCylinderResultIsUncertain flags still falls
+//! back to GJK/EPA UNLESS ModelParameters.usePureAnalyticalCylinder is ALSO set, which trusts the flagged
+//! analytical answer with no safety net -- see ComputeContacts::operator()'s own comment for the exact
+//! tiering. PaperAnalyticalContactTest.cpp additionally compares these closed forms against
+//! SolidCylinderContactDetection's GJK/EPA results directly, standalone from the production dispatch.
 //!
 //! -------------------------------------------------------------------------------------------------
 //! Box x Box: Gottschalk, S., Lin, M. C., & Manocha, D. (1996). "OBBTree: A Hierarchical Structure
@@ -106,6 +110,7 @@
 #include <complex>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace walberla
 {
@@ -130,6 +135,64 @@ struct ContactResult
    const char* scenario = "none";
 };
 
+namespace detail
+{
+//! Closest points between two finite line segments P1->Q1 and P2->Q2 -- the standard closed-form
+//! algorithm (Ericson, "Real-Time Collision Detection" 2004, Section 5.1.9, ClosestPtSegmentSegment),
+//! no iteration. Defined here (before boxBoxSAT, which needs it for its own useRoundedCorners option)
+//! rather than down in the cylinder-cylinder section further below, where the squared-distance-only
+//! wrapper closestDistanceSqBetweenSegments (used by the cylinder-cylinder capsule bound) still lives.
+inline void closestPointsBetweenSegments(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec3& q2,
+                                          Vec3& outC1, Vec3& outC2)
+{
+   const Vec3   d1  = q1 - p1;
+   const Vec3   d2  = q2 - p2;
+   const Vec3   r   = p1 - p2;
+   const real_t a   = d1 * d1;
+   const real_t e   = d2 * d2;
+   const real_t f   = d2 * r;
+   const real_t eps = real_t(1e-14);
+
+   real_t s, t;
+   if (a <= eps && e <= eps) { s = t = real_t(0); }
+   else if (a <= eps)
+   {
+      s = real_t(0);
+      t = std::clamp(f / e, real_t(0), real_t(1));
+   }
+   else
+   {
+      const real_t c = d1 * r;
+      if (e <= eps)
+      {
+         t = real_t(0);
+         s = std::clamp(-c / a, real_t(0), real_t(1));
+      }
+      else
+      {
+         const real_t b     = d1 * d2;
+         const real_t denom = a * e - b * b; // always >= 0 (Cauchy-Schwarz); 0 exactly when parallel
+         s = (denom > eps) ? std::clamp((b * f - c * e) / denom, real_t(0), real_t(1)) : real_t(0);
+         t = (b * s + f) / e;
+
+         if (t < real_t(0))
+         {
+            t = real_t(0);
+            s = std::clamp(-c / a, real_t(0), real_t(1));
+         }
+         else if (t > real_t(1))
+         {
+            t = real_t(1);
+            s = std::clamp((b - c) / a, real_t(0), real_t(1));
+         }
+      }
+   }
+
+   outC1 = p1 + d1 * s;
+   outC2 = p2 + d2 * t;
+}
+} // namespace detail
+
 //======================================================================================================================
 // Box x Box -- Gottschalk, Lin & Manocha (1996), Section 5
 //======================================================================================================================
@@ -139,8 +202,55 @@ struct ContactResult
 //! Normal convention matches SolidCylinderContactDetection's pairwise overloads: points from B
 //! (2nd argument) toward A (1st argument), e.g. testSphereSphereContact's contactNormal = -dir
 //! where the 2nd sphere sits along +dir from the 1st.
+//!
+//! useRoundedCorners/roundingRadius (both default OFF/0, exact pre-existing behaviour otherwise):
+//! mitigation for the corner/edge contact-normal discontinuity documented for polyhedral DEM (Lu,
+//! Third & Müller 2015, Chem. Eng. Sci. 127, Fig. 3/Section 2.1.3, citing Fraige et al. 2008a) and
+//! reproduced directly against this project's own production parameters by
+//! DEMValidationScenarios.h's runCornerNormalDiscontinuity (47.7% spurious kinetic-energy gain with
+//! this OFF). SAT's 15 candidate axes give a genuinely discontinuous winning normal near a
+//! near-degenerate edge-edge/vertex configuration -- a tiny relative rotation can flip which of two
+//! nearly-tied axes has the smaller gap, snapping the reported normal to a different direction between
+//! consecutive sub-cycles. Treating each box as the Minkowski sum of the sharp box with a small ball of
+//! radius `roundingRadius` (a "rounded box"/spherosimplex, Lu et al.'s Table 2/3) removes this
+//! discontinuity at its source for the specific case that actually triggers it -- an EDGE-vs-EDGE
+//! winning axis: instead of trusting SAT's raw cross-product axis direction (fixed, box-orientation-
+//! relative, and what flips discontinuously), the normal is recomputed as the vector between the
+//! ACTUAL closest points on the two finite edge SEGMENTS involved (closestPointsBetweenSegments above)
+//! -- a quantity that varies smoothly as either box translates/rotates, by the standard continuity
+//! property of the distance between two convex sets away from measure-zero symmetric configurations.
+//! Face-axis wins are left untouched (already smooth: a box has only 3 fixed face normals, 90 degrees
+//! apart, essentially never near-tied against each other in a way that matters physically). The
+//! overlap is inflated by 2*roundingRadius for EVERY winning-axis case (not just edge-edge), matching
+//! the actual Minkowski-sum geometry of two rounded boxes each dilated by roundingRadius.
+//! maxOverlapCap (default: no cap, exact pre-existing behaviour): clamps the reported overlap to at
+//! most this value. See boxBoxMultiPointContacts' own header comment for the full rationale -- SAT's
+//! overlap is bounded only by whichever half-extent happens to win as the separating axis, which for
+//! two DEEPLY interpenetrating boxes (a jam, or a floater released directly on top of a neighbour) can
+//! legitimately reach that entire half-extent, producing a spring force far stronger than any shallow,
+//! near-degenerate contact this project's contact model was ever tuned against.
+//!
+//! previousNormal/hysteresisMargin (default: nullptr/no hysteresis, exact pre-existing behaviour):
+//! the OTHER candidate fix for the same axis-flip discontinuity useRoundedCorners targets, requested
+//! directly after this session's own diagnosis of the defect -- a "sticky" axis selection instead of
+//! geometric rounding. Every candidate axis with gap within hysteresisMargin (relative) of the TRUE
+//! minimum gap is treated as "competitive"; among those, the one whose properly-signed normal aligns
+//! best with previousNormal is used, even if it is not the strict argmin. This directly targets the
+//! chatter itself (two nearly-tied axes flip-flopping every sub-cycle) without inflating the overlap
+//! the way useRoundedCorners' Minkowski-sum correction does -- see this project's own
+//! multiPointDeepOverlapStability/EdgeCases finding that useRoundedCorners, despite fixing the
+//! axis-tie case cleanly, is CATASTROPHICALLY worse than doing nothing on a shape-mismatched deep
+//! overlap (+884% on "plank-vs-near-cube-deep") -- a side effect hysteresis has no mechanism to
+//! reproduce, since it never changes the reported overlap magnitude, only WHICH already-valid axis is
+//! reported. Caller owns the persistence (previousNormal is read-only here) -- see
+//! SolidCylinderContactDetection's own boxBoxHysteresisNormal_ map (ParticleKernels.h) for how
+//! production keys this per uid-pair across sub-cycles.
 inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& halfA, const Vec3& posB,
-                                const Mat3& RB, const Vec3& halfB)
+                                const Mat3& RB, const Vec3& halfB, bool useRoundedCorners = false,
+                                real_t roundingRadius = real_t(0),
+                                real_t maxOverlapCap = std::numeric_limits< real_t >::max(),
+                                const Vec3* previousNormal = nullptr,
+                                real_t hysteresisMargin = real_t(0.15))
 {
    Vec3 axesA[3], axesB[3];
    for (uint_t i = 0; i < 3; ++i)
@@ -151,15 +261,22 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
 
    const Vec3 T = posB - posA;
 
-   real_t minGap  = std::numeric_limits< real_t >::max();
-   Vec3   bestAxis(real_t(1), real_t(0), real_t(0));
-   real_t bestRa = real_t(0), bestRb = real_t(0);
-   bool   found = false;
+   // Every valid (non-separating) candidate axis is kept, not just the running minimum -- hysteresis
+   // below needs to compare ALL competitive candidates against previousNormal, not only the argmin.
+   struct Candidate
+   {
+      Vec3   axis;
+      real_t gap;
+      real_t ra, rb;
+      int    edgeIA, edgeJB; // -1,-1 = face-of-A or face-of-B axis, see useRoundedCorners' own comment
+   };
+   std::vector< Candidate > candidates;
+   candidates.reserve(15);
 
-   // Returns false the instant a separating axis is found (boxes proven disjoint); otherwise folds
-   // this axis's gap into the running minimum (the minimum-overlap axis is the contact normal /
-   // penetration-depth choice -- see class-level comment on this being the standard MTD extension).
-   auto testAxis = [&](Vec3 L) -> bool {
+   // Returns false the instant a separating axis is found (boxes proven disjoint); otherwise records
+   // this axis as a valid candidate (see Candidate's own comment on why ALL are kept, not just the
+   // running minimum).
+   auto testAxis = [&](Vec3 L, int ia, int jb) -> bool {
       const real_t len = L.length();
       if (len < real_t(1e-10)) return true; // degenerate (near-parallel edges) -- not a valid axis
 
@@ -175,40 +292,1053 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
 
       if (gap < real_t(0)) return false; // separating axis -- disjoint
 
-      if (gap < minGap)
-      {
-         minGap   = gap;
-         bestAxis = L;
-         bestRa   = ra;
-         bestRb   = rb;
-         found    = true;
-      }
+      candidates.push_back(Candidate{ L, gap, ra, rb, ia, jb });
       return true;
    };
 
    for (int i = 0; i < 3; ++i)
-      if (!testAxis(axesA[i])) return ContactResult{};
+      if (!testAxis(axesA[i], -1, -1)) return ContactResult{};
    for (int i = 0; i < 3; ++i)
-      if (!testAxis(axesB[i])) return ContactResult{};
+      if (!testAxis(axesB[i], -1, -1)) return ContactResult{};
    for (int i = 0; i < 3; ++i)
       for (int j = 0; j < 3; ++j)
-         if (!testAxis(axesA[i] % axesB[j])) return ContactResult{};
+         if (!testAxis(axesA[i] % axesB[j], i, j)) return ContactResult{};
 
-   WALBERLA_ASSERT(found);
+   WALBERLA_ASSERT(!candidates.empty());
+
+   size_t bestIdx = 0;
+   for (size_t i = 1; i < candidates.size(); ++i)
+      if (candidates[i].gap < candidates[bestIdx].gap) bestIdx = i;
+   const real_t minGap = candidates[bestIdx].gap;
+
+   if (previousNormal != nullptr && previousNormal->sqrLength() > real_t(1e-12))
+   {
+      const Vec3   prevN          = previousNormal->getNormalizedIfNotZero();
+      real_t       bestAlignment  = real_t(-2); // below any real cosine, so the loop always picks something
+      size_t       hysteresisIdx  = bestIdx;
+      const real_t competitiveGap = minGap * (real_t(1) + hysteresisMargin);
+      for (size_t i = 0; i < candidates.size(); ++i)
+      {
+         if (candidates[i].gap > competitiveGap) continue; // not close enough to the true minimum to matter
+         const real_t signI = (T * candidates[i].axis >= real_t(0)) ? real_t(1) : real_t(-1);
+         const Vec3   nI    = -signI * candidates[i].axis;
+         const real_t align = nI * prevN;
+         if (align > bestAlignment)
+         {
+            bestAlignment = align;
+            hysteresisIdx = i;
+         }
+      }
+      bestIdx = hysteresisIdx;
+   }
+
+   const Candidate& best    = candidates[bestIdx]; // NOT necessarily the global minimum once hysteresis has acted
+   const Vec3&      bestAxis = best.axis;
+   const real_t     bestRa = best.ra, bestRb = best.rb;
+   const int         edgeIA = best.edgeIA, edgeJB = best.edgeJB;
 
    const real_t sign   = (T * bestAxis >= real_t(0)) ? real_t(1) : real_t(-1);
-   const Vec3   normal = -sign * bestAxis;
+   Vec3         normal = -sign * bestAxis;
 
    ContactResult result;
    result.contact  = true;
-   result.overlap  = minGap;
-   result.normal   = normal;
+   result.overlap  = best.gap;
    result.scenario = "SAT";
    // Supplementary contact point (NOT from the paper, see class-level comment): midpoint between
    // the two boxes' extreme points along the winning axis. Only the component along `bestAxis` is
    // geometrically well-defined for a flush face-face/edge-edge configuration.
    result.point = real_t(0.5) * (posA + posB) + real_t(0.5) * sign * (bestRa - bestRb) * bestAxis;
+
+   if (useRoundedCorners && edgeIA >= 0)
+   {
+      // Edge-vs-edge winning axis: rebuild the two specific finite edge SEGMENTS involved (the edge of
+      // A running along axesA[edgeIA], the edge of B running along axesB[edgeJB]) and use the vector
+      // between their actual closest points as the normal instead of the raw (discontinuous) SAT axis
+      // -- see this function's own header comment for the derivation. Each edge's OTHER two axes are
+      // offset by the sign of that axis's projection onto T (A) / -T (B), which selects the specific
+      // one of the four axis-parallel edges that faces the other box.
+      const uint_t edgeIAu = uint_t(edgeIA), edgeJBu = uint_t(edgeJB);
+      Vec3         edgeCenterA = posA;
+      for (uint_t o = 0; o < 3; ++o)
+      {
+         if (o == edgeIAu) continue;
+         edgeCenterA += (axesA[o] * T >= real_t(0) ? real_t(1) : real_t(-1)) * halfA[o] * axesA[o];
+      }
+      Vec3 edgeCenterB = posB;
+      for (uint_t p = 0; p < 3; ++p)
+      {
+         if (p == edgeJBu) continue;
+         edgeCenterB += (axesB[p] * T >= real_t(0) ? real_t(-1) : real_t(1)) * halfB[p] * axesB[p];
+      }
+      const Vec3 halfEdgeA = halfA[edgeIAu] * axesA[edgeIAu];
+      const Vec3 halfEdgeB = halfB[edgeJBu] * axesB[edgeJBu];
+
+      Vec3 closestA, closestB;
+      detail::closestPointsBetweenSegments(edgeCenterA - halfEdgeA, edgeCenterA + halfEdgeA,
+                                            edgeCenterB - halfEdgeB, edgeCenterB + halfEdgeB, closestA,
+                                            closestB);
+      const Vec3   diff = closestA - closestB; // points from B's edge toward A's edge
+      const real_t len  = diff.length();
+      if (len > real_t(1e-10))
+      {
+         normal       = diff / len;
+         result.point = real_t(0.5) * (closestA + closestB);
+      }
+   }
+
+   result.normal = normal;
+   if (useRoundedCorners) result.overlap += real_t(2) * roundingRadius;
+   result.overlap = std::min(result.overlap, maxOverlapCap);
    return result;
+}
+
+//! Closed-form (non-iterative) distance between two solid oriented boxes -- the analytical
+//! alternative to running mesa_pd's GJK/EPA with a margin for useSpheroBoxContact (see
+//! ModelParameters::useSpheroBoxAnalytical's own doc comment, SimulationParams.h). Ported from
+//! David Eberly's GeometricTools library (github.com/davideberly/GeometricTools,
+//! GTE/Mathematics/{DistPointCanonicalBox,DistLine3CanonicalBox3,DistSegment3CanonicalBox3,
+//! DistPlane3CanonicalBox3,DistRectangle3CanonicalBox3,DistRectangle3OrientedBox3,
+//! DistOrientedBox3OrientedBox3}.h) -- the line-vs-box case dispatch (faceCase/doQuery3D/2D/1D/0D
+//! below) is documented there as being from Section 10.9.4 "Linear Component to Oriented
+//! Bounding Box" of Schneider, P.J. & Eberly, D.H. (2002) "Geometric Tools for Computer
+//! Graphics", Morgan Kaufmann. Every function here is a DETERMINISTIC, finite case dispatch --
+//! no simplex refinement, no convergence tolerance, no epsilon-loop -- unlike GJK/EPA, which is
+//! why this exists as a toggle: it targets the exact same (point,normal,overlap) triplet GJK/EPA
+//! produces for a spherosimplex contact, but via closed-form geometry instead of iteration.
+namespace eberly_box_distance
+{
+
+inline Vec3 clampToCanonicalBox(const Vec3& point, const Vec3& extent)
+{
+   Vec3 c;
+   for (int i = 0; i < 3; ++i) c[i] = std::max(-extent[i], std::min(extent[i], point[i]));
+   return c;
+}
+
+// ---- Line vs canonical (axis-aligned, origin-centred) box: Schneider & Eberly Section 10.9.4 ----
+struct LineBoxResult
+{
+   real_t parameter   = real_t(0);
+   Vec3   closestBox;  // in the SAME (possibly axis-reflected) frame `origin` is passed in
+   real_t sqrDistance = real_t(0);
+};
+
+// direction[i0] is strictly positive here (the line crosses the x[i0]=+extent[i0] face plane);
+// resolves which of the up-to-9 sub-regions of that face's exterior the closest point falls in.
+inline void faceCase(int i0, int i1, int i2, Vec3& origin, const Vec3& direction, const Vec3& PmE,
+                      const Vec3& extent, LineBoxResult& result)
+{
+   const Vec3 PpE = origin + extent;
+   if (direction[i0] * PpE[i1] >= direction[i1] * PmE[i0])
+   {
+      if (direction[i0] * PpE[i2] >= direction[i2] * PmE[i0])
+      {
+         origin[i0] = extent[i0];
+         origin[i1] -= direction[i1] * PmE[i0] / direction[i0];
+         origin[i2] -= direction[i2] * PmE[i0] / direction[i0];
+         result.parameter = -PmE[i0] / direction[i0];
+      }
+      else
+      {
+         real_t lenSqr = direction[i0] * direction[i0] + direction[i2] * direction[i2];
+         real_t tmp = lenSqr * PpE[i1] - direction[i1] * (direction[i0] * PmE[i0] + direction[i2] * PpE[i2]);
+         if (tmp <= real_t(2) * lenSqr * extent[i1])
+         {
+            real_t t = tmp / lenSqr;
+            lenSqr += direction[i1] * direction[i1];
+            real_t tmp2 = PpE[i1] - t;
+            real_t delta = direction[i0] * PmE[i0] + direction[i1] * tmp2 + direction[i2] * PpE[i2];
+            result.parameter = -delta / lenSqr;
+            result.sqrDistance += PmE[i0] * PmE[i0] + tmp2 * tmp2 + PpE[i2] * PpE[i2] + delta * result.parameter;
+            origin[i0] = extent[i0]; origin[i1] = t - extent[i1]; origin[i2] = -extent[i2];
+         }
+         else
+         {
+            lenSqr += direction[i1] * direction[i1];
+            real_t delta = direction[i0] * PmE[i0] + direction[i1] * PmE[i1] + direction[i2] * PpE[i2];
+            result.parameter = -delta / lenSqr;
+            result.sqrDistance += PmE[i0] * PmE[i0] + PmE[i1] * PmE[i1] + PpE[i2] * PpE[i2] + delta * result.parameter;
+            origin[i0] = extent[i0]; origin[i1] = extent[i1]; origin[i2] = -extent[i2];
+         }
+      }
+   }
+   else
+   {
+      if (direction[i0] * PpE[i2] >= direction[i2] * PmE[i0])
+      {
+         real_t lenSqr = direction[i0] * direction[i0] + direction[i1] * direction[i1];
+         real_t tmp = lenSqr * PpE[i2] - direction[i2] * (direction[i0] * PmE[i0] + direction[i1] * PpE[i1]);
+         if (tmp <= real_t(2) * lenSqr * extent[i2])
+         {
+            real_t t = tmp / lenSqr;
+            lenSqr += direction[i2] * direction[i2];
+            real_t tmp2 = PpE[i2] - t;
+            real_t delta = direction[i0] * PmE[i0] + direction[i1] * PpE[i1] + direction[i2] * tmp2;
+            result.parameter = -delta / lenSqr;
+            result.sqrDistance += PmE[i0] * PmE[i0] + PpE[i1] * PpE[i1] + tmp2 * tmp2 + delta * result.parameter;
+            origin[i0] = extent[i0]; origin[i1] = -extent[i1]; origin[i2] = t - extent[i2];
+         }
+         else
+         {
+            lenSqr += direction[i2] * direction[i2];
+            real_t delta = direction[i0] * PmE[i0] + direction[i1] * PpE[i1] + direction[i2] * PmE[i2];
+            result.parameter = -delta / lenSqr;
+            result.sqrDistance += PmE[i0] * PmE[i0] + PpE[i1] * PpE[i1] + PmE[i2] * PmE[i2] + delta * result.parameter;
+            origin[i0] = extent[i0]; origin[i1] = -extent[i1]; origin[i2] = extent[i2];
+         }
+      }
+      else
+      {
+         real_t lenSqr = direction[i0] * direction[i0] + direction[i2] * direction[i2];
+         real_t tmp = lenSqr * PpE[i1] - direction[i1] * (direction[i0] * PmE[i0] + direction[i2] * PpE[i2]);
+         if (tmp >= real_t(0))
+         {
+            if (tmp <= real_t(2) * lenSqr * extent[i1])
+            {
+               real_t t = tmp / lenSqr;
+               lenSqr += direction[i1] * direction[i1];
+               real_t tmp2 = PpE[i1] - t;
+               real_t delta = direction[i0] * PmE[i0] + direction[i1] * tmp2 + direction[i2] * PpE[i2];
+               result.parameter = -delta / lenSqr;
+               result.sqrDistance += PmE[i0] * PmE[i0] + tmp2 * tmp2 + PpE[i2] * PpE[i2] + delta * result.parameter;
+               origin[i0] = extent[i0]; origin[i1] = t - extent[i1]; origin[i2] = -extent[i2];
+            }
+            else
+            {
+               lenSqr += direction[i1] * direction[i1];
+               real_t delta = direction[i0] * PmE[i0] + direction[i1] * PmE[i1] + direction[i2] * PpE[i2];
+               result.parameter = -delta / lenSqr;
+               result.sqrDistance += PmE[i0] * PmE[i0] + PmE[i1] * PmE[i1] + PpE[i2] * PpE[i2] + delta * result.parameter;
+               origin[i0] = extent[i0]; origin[i1] = extent[i1]; origin[i2] = -extent[i2];
+            }
+            return;
+         }
+         lenSqr = direction[i0] * direction[i0] + direction[i1] * direction[i1];
+         tmp = lenSqr * PpE[i2] - direction[i2] * (direction[i0] * PmE[i0] + direction[i1] * PpE[i1]);
+         if (tmp >= real_t(0))
+         {
+            if (tmp <= real_t(2) * lenSqr * extent[i2])
+            {
+               real_t t = tmp / lenSqr;
+               lenSqr += direction[i2] * direction[i2];
+               real_t tmp2 = PpE[i2] - t;
+               real_t delta = direction[i0] * PmE[i0] + direction[i1] * PpE[i1] + direction[i2] * tmp2;
+               result.parameter = -delta / lenSqr;
+               result.sqrDistance += PmE[i0] * PmE[i0] + PpE[i1] * PpE[i1] + tmp2 * tmp2 + delta * result.parameter;
+               origin[i0] = extent[i0]; origin[i1] = -extent[i1]; origin[i2] = t - extent[i2];
+            }
+            else
+            {
+               lenSqr += direction[i2] * direction[i2];
+               real_t delta = direction[i0] * PmE[i0] + direction[i1] * PpE[i1] + direction[i2] * PmE[i2];
+               result.parameter = -delta / lenSqr;
+               result.sqrDistance += PmE[i0] * PmE[i0] + PpE[i1] * PpE[i1] + PmE[i2] * PmE[i2] + delta * result.parameter;
+               origin[i0] = extent[i0]; origin[i1] = -extent[i1]; origin[i2] = extent[i2];
+            }
+            return;
+         }
+         lenSqr += direction[i2] * direction[i2];
+         real_t delta = direction[i0] * PmE[i0] + direction[i1] * PpE[i1] + direction[i2] * PpE[i2];
+         result.parameter = -delta / lenSqr;
+         result.sqrDistance += PmE[i0] * PmE[i0] + PpE[i1] * PpE[i1] + PpE[i2] * PpE[i2] + delta * result.parameter;
+         origin[i0] = extent[i0]; origin[i1] = -extent[i1]; origin[i2] = -extent[i2];
+      }
+   }
+}
+
+inline void lineDoQuery3D(Vec3& origin, const Vec3& direction, const Vec3& extent, LineBoxResult& result)
+{
+   const Vec3 PmE = origin - extent;
+   const real_t prodDxPy = direction[0] * PmE[1], prodDyPx = direction[1] * PmE[0];
+   if (prodDyPx >= prodDxPy)
+   {
+      const real_t prodDzPx = direction[2] * PmE[0], prodDxPz = direction[0] * PmE[2];
+      if (prodDzPx >= prodDxPz) faceCase(0, 1, 2, origin, direction, PmE, extent, result);
+      else faceCase(2, 0, 1, origin, direction, PmE, extent, result);
+   }
+   else
+   {
+      const real_t prodDzPy = direction[2] * PmE[1], prodDyPz = direction[1] * PmE[2];
+      if (prodDzPy >= prodDyPz) faceCase(1, 2, 0, origin, direction, PmE, extent, result);
+      else faceCase(2, 0, 1, origin, direction, PmE, extent, result);
+   }
+}
+
+inline void lineDoQuery2D(int i0, int i1, int i2, Vec3& origin, const Vec3& direction,
+                           const Vec3& extent, LineBoxResult& result)
+{
+   const real_t PmE0 = origin[i0] - extent[i0], PmE1 = origin[i1] - extent[i1];
+   const real_t prod0 = direction[i1] * PmE0, prod1 = direction[i0] * PmE1;
+   if (prod0 >= prod1)
+   {
+      origin[i0] = extent[i0];
+      const real_t PpE1 = origin[i1] + extent[i1];
+      const real_t delta = prod0 - direction[i0] * PpE1;
+      if (delta >= real_t(0))
+      {
+         const real_t lenSqr = direction[i0] * direction[i0] + direction[i1] * direction[i1];
+         result.sqrDistance += delta * delta / lenSqr;
+         origin[i1] = -extent[i1];
+         result.parameter = -(direction[i0] * PmE0 + direction[i1] * PpE1) / lenSqr;
+      }
+      else
+      {
+         origin[i1] -= prod0 / direction[i0];
+         result.parameter = -PmE0 / direction[i0];
+      }
+   }
+   else
+   {
+      origin[i1] = extent[i1];
+      const real_t PpE0 = origin[i0] + extent[i0];
+      const real_t delta = prod1 - direction[i1] * PpE0;
+      if (delta >= real_t(0))
+      {
+         const real_t lenSqr = direction[i0] * direction[i0] + direction[i1] * direction[i1];
+         result.sqrDistance += delta * delta / lenSqr;
+         origin[i0] = -extent[i0];
+         result.parameter = -(direction[i0] * PpE0 + direction[i1] * PmE1) / lenSqr;
+      }
+      else
+      {
+         origin[i0] -= prod1 / direction[i1];
+         result.parameter = -PmE1 / direction[i1];
+      }
+   }
+   if (origin[i2] < -extent[i2])
+   {
+      const real_t delta = origin[i2] + extent[i2];
+      result.sqrDistance += delta * delta;
+      origin[i2] = -extent[i2];
+   }
+   else if (origin[i2] > extent[i2])
+   {
+      const real_t delta = origin[i2] - extent[i2];
+      result.sqrDistance += delta * delta;
+      origin[i2] = extent[i2];
+   }
+}
+
+inline void lineDoQuery1D(int i0, int i1, int i2, Vec3& origin, const Vec3& direction,
+                           const Vec3& extent, LineBoxResult& result)
+{
+   result.parameter = (extent[i0] - origin[i0]) / direction[i0];
+   origin[i0] = extent[i0];
+   for (int i : { i1, i2 })
+   {
+      if (origin[i] < -extent[i]) { const real_t d = origin[i] + extent[i]; result.sqrDistance += d * d; origin[i] = -extent[i]; }
+      else if (origin[i] > extent[i]) { const real_t d = origin[i] - extent[i]; result.sqrDistance += d * d; origin[i] = extent[i]; }
+   }
+}
+
+inline void lineDoQuery0D(Vec3& origin, const Vec3& extent, LineBoxResult& result)
+{
+   for (int i = 0; i < 3; ++i)
+   {
+      if (origin[i] < -extent[i]) { const real_t d = origin[i] + extent[i]; result.sqrDistance += d * d; origin[i] = -extent[i]; }
+      else if (origin[i] > extent[i]) { const real_t d = origin[i] - extent[i]; result.sqrDistance += d * d; origin[i] = extent[i]; }
+   }
+}
+
+//! Distance between a line (origin + t*direction) and a canonical (origin-centred,
+//! axis-aligned) box. Returns the line parameter t and the closest box point; `origin` is
+//! reflected into the first octant internally and un-reflected before returning.
+inline LineBoxResult lineCanonicalBox(const Vec3& lineOrigin, const Vec3& lineDirection, const Vec3& extent)
+{
+   LineBoxResult result;
+   Vec3 origin = lineOrigin, direction = lineDirection;
+   bool reflect[3] = { false, false, false };
+   for (int i = 0; i < 3; ++i)
+      if (direction[i] < real_t(0)) { origin[i] = -origin[i]; direction[i] = -direction[i]; reflect[i] = true; }
+
+   if (direction[0] > real_t(0))
+   {
+      if (direction[1] > real_t(0))
+      {
+         if (direction[2] > real_t(0)) lineDoQuery3D(origin, direction, extent, result);
+         else lineDoQuery2D(0, 1, 2, origin, direction, extent, result);
+      }
+      else
+      {
+         if (direction[2] > real_t(0)) lineDoQuery2D(0, 2, 1, origin, direction, extent, result);
+         else lineDoQuery1D(0, 1, 2, origin, direction, extent, result);
+      }
+   }
+   else
+   {
+      if (direction[1] > real_t(0))
+      {
+         if (direction[2] > real_t(0)) lineDoQuery2D(1, 2, 0, origin, direction, extent, result);
+         else lineDoQuery1D(1, 0, 2, origin, direction, extent, result);
+      }
+      else
+      {
+         if (direction[2] > real_t(0)) lineDoQuery1D(2, 0, 1, origin, direction, extent, result);
+         else lineDoQuery0D(origin, extent, result);
+      }
+   }
+
+   for (int i = 0; i < 3; ++i) if (reflect[i]) origin[i] = -origin[i];
+   result.closestBox = origin;
+   return result;
+}
+
+// ---- Segment vs canonical box: clamp the line result's parameter into [0,1] ----
+struct SegmentBoxResult
+{
+   real_t parameter   = real_t(0);
+   Vec3   closestSeg;
+   Vec3   closestBox;
+   real_t sqrDistance = real_t(0);
+};
+
+inline SegmentBoxResult segmentCanonicalBox(const Vec3& p0, const Vec3& p1, const Vec3& extent)
+{
+   SegmentBoxResult result;
+   const Vec3 dir = p1 - p0;
+   const auto lb = lineCanonicalBox(p0, dir, extent);
+   if (lb.parameter >= real_t(0) && lb.parameter <= real_t(1))
+   {
+      result.parameter = lb.parameter;
+      result.closestSeg = p0 + lb.parameter * dir;
+      result.closestBox = lb.closestBox;
+      result.sqrDistance = lb.sqrDistance;
+   }
+   else
+   {
+      const Vec3& endpoint = (lb.parameter < real_t(0)) ? p0 : p1;
+      result.parameter = (lb.parameter < real_t(0)) ? real_t(0) : real_t(1);
+      result.closestSeg = endpoint;
+      result.closestBox = clampToCanonicalBox(endpoint, extent);
+      const Vec3 diff = endpoint - result.closestBox;
+      result.sqrDistance = diff * diff;
+   }
+   return result;
+}
+
+// ---- Plane vs canonical box ----
+struct PlaneBoxResult
+{
+   Vec3 closestPlane;
+   Vec3 closestBox;
+};
+
+inline void planeDoQuery3D(const Vec3& origin, const Vec3& normal, const Vec3& extent, PlaneBoxResult& result)
+{
+   const real_t dmin = -(normal * (extent + origin));
+   if (dmin >= real_t(0)) { result.closestPlane = -extent - dmin * normal; result.closestBox = -extent; return; }
+   const real_t dmax = normal * (extent - origin);
+   if (dmax <= real_t(0)) { result.closestPlane = extent - dmax * normal; result.closestBox = extent; return; }
+   const real_t s = real_t(2) * dmin / (dmin - dmax) - real_t(1);
+   result.closestPlane = s * extent;
+   result.closestBox = result.closestPlane;
+}
+
+inline void planeDoQuery2D(int i0, int i1, int i2, const Vec3& origin, const Vec3& normal,
+                            const Vec3& extent, PlaneBoxResult& result)
+{
+   const real_t dmin = -(normal[i0] * (extent[i0] + origin[i0]) + normal[i1] * (extent[i1] + origin[i1]));
+   if (dmin >= real_t(0))
+   {
+      result.closestPlane[i0] = -extent[i0] - dmin * normal[i0];
+      result.closestPlane[i1] = -extent[i1] - dmin * normal[i1];
+      result.closestPlane[i2] = extent[i2];
+      result.closestBox[i0] = -extent[i0]; result.closestBox[i1] = -extent[i1]; result.closestBox[i2] = extent[i2];
+      return;
+   }
+   const real_t dmax = normal[i0] * (extent[i0] - origin[i0]) + normal[i1] * (extent[i1] - origin[i1]);
+   if (dmax <= real_t(0))
+   {
+      result.closestPlane[i0] = extent[i0] - dmax * normal[i0];
+      result.closestPlane[i1] = extent[i1] - dmax * normal[i1];
+      result.closestPlane[i2] = extent[i2];
+      result.closestBox[i0] = extent[i0]; result.closestBox[i1] = extent[i1]; result.closestBox[i2] = extent[i2];
+      return;
+   }
+   const real_t s = real_t(2) * dmin / (dmin - dmax) - real_t(1);
+   result.closestPlane[i0] = s * extent[i0]; result.closestPlane[i1] = s * extent[i1]; result.closestPlane[i2] = extent[i2];
+   result.closestBox = result.closestPlane;
+}
+
+inline void planeDoQuery1D(int i0, int i1, int i2, const Vec3& origin, const Vec3& extent, PlaneBoxResult& result)
+{
+   result.closestPlane[i0] = origin[i0]; result.closestPlane[i1] = extent[i1]; result.closestPlane[i2] = extent[i2];
+   result.closestBox[i0] = std::max(-extent[i0], std::min(extent[i0], origin[i0]));
+   result.closestBox[i1] = extent[i1]; result.closestBox[i2] = extent[i2];
+}
+
+//! Distance between a plane (through `pointOnPlane`, unit normal `planeNormal`) and a canonical
+//! box; only the two closest points are needed here (the case dispatch mirrors planeDoQuery3D
+//! reflected into the first octant of normal-space).
+inline PlaneBoxResult planeCanonicalBox(const Vec3& planeNormal, const Vec3& pointOnPlane, const Vec3& extent)
+{
+   PlaneBoxResult result;
+   const real_t d = planeNormal * pointOnPlane;
+   Vec3 origin = d * planeNormal;
+   Vec3 normal = planeNormal;
+   bool reflect[3] = { false, false, false };
+   for (int i = 0; i < 3; ++i)
+      if (normal[i] < real_t(0)) { origin[i] = -origin[i]; normal[i] = -normal[i]; reflect[i] = true; }
+
+   if (normal[0] > real_t(0))
+   {
+      if (normal[1] > real_t(0))
+      {
+         if (normal[2] > real_t(0)) planeDoQuery3D(origin, normal, extent, result);
+         else planeDoQuery2D(0, 1, 2, origin, normal, extent, result);
+      }
+      else
+      {
+         if (normal[2] > real_t(0)) planeDoQuery2D(0, 2, 1, origin, normal, extent, result);
+         else planeDoQuery1D(0, 1, 2, origin, extent, result);
+      }
+   }
+   else
+   {
+      if (normal[1] > real_t(0))
+      {
+         if (normal[2] > real_t(0)) planeDoQuery2D(1, 2, 0, origin, normal, extent, result);
+         else planeDoQuery1D(1, 2, 0, origin, extent, result);
+      }
+      else
+      {
+         if (normal[2] > real_t(0)) planeDoQuery1D(2, 0, 1, origin, extent, result);
+         else { result.closestPlane = pointOnPlane; result.closestBox = clampToCanonicalBox(pointOnPlane, extent); }
+      }
+   }
+
+   for (int i = 0; i < 3; ++i)
+      if (reflect[i]) { result.closestPlane[i] = -result.closestPlane[i]; result.closestBox[i] = -result.closestBox[i]; }
+   return result;
+}
+
+// ---- Rectangle (center, two unit in-plane axes, two extents) vs canonical box ----
+struct RectangleBoxResult
+{
+   Vec3   closestRect;
+   Vec3   closestBox;
+   real_t sqrDistance = real_t(0);
+};
+
+inline RectangleBoxResult rectangleCanonicalBox(const Vec3& rectCenter, const Vec3& axis0, const Vec3& axis1,
+                                                 real_t ext0, real_t ext1, const Vec3& extent)
+{
+   RectangleBoxResult result;
+   const Vec3 normal = (axis0 % axis1).getNormalizedIfNotZero();
+   const auto pb = planeCanonicalBox(normal, rectCenter, extent);
+   const Vec3 delta = pb.closestPlane - rectCenter;
+   const real_t s0 = axis0 * delta, s1 = axis1 * delta;
+
+   if (std::fabs(s0) <= ext0 && std::fabs(s1) <= ext1)
+   {
+      result.closestRect = pb.closestPlane;
+      result.closestBox = pb.closestBox;
+      const Vec3 diff = result.closestRect - result.closestBox;
+      result.sqrDistance = diff * diff;
+      return result;
+   }
+
+   // The closest plane point falls outside the rectangle -- the true closest point must then
+   // lie on one of the rectangle's 4 edges (checked exhaustively; matches the reference
+   // implementation's own TODO note that a cheaper clamp is not known to always be correct).
+   const Vec3 verts[4] = { rectCenter - ext0 * axis0 - ext1 * axis1, rectCenter + ext0 * axis0 - ext1 * axis1,
+                            rectCenter - ext0 * axis0 + ext1 * axis1, rectCenter + ext0 * axis0 + ext1 * axis1 };
+   const int edges[4][2] = { { 0, 1 }, { 2, 3 }, { 0, 2 }, { 1, 3 } };
+   bool have = false;
+   for (const auto& e : edges)
+   {
+      const auto sb = segmentCanonicalBox(verts[e[0]], verts[e[1]], extent);
+      if (!have || sb.sqrDistance < result.sqrDistance)
+      {
+         have = true;
+         result.sqrDistance = sb.sqrDistance;
+         result.closestRect = sb.closestSeg;
+         result.closestBox = sb.closestBox;
+      }
+   }
+   return result;
+}
+
+//! Rectangle (world-space center/axes/extents) vs a general oriented box: transform into the
+//! box's own local frame (making it canonical), solve there, transform the result back.
+inline RectangleBoxResult rectangleOrientedBox(const Vec3& rectCenter, const Vec3& rectAxis0,
+                                                const Vec3& rectAxis1, real_t ext0, real_t ext1,
+                                                const Vec3& boxPos, const Mat3& boxR, const Vec3& boxHalf)
+{
+   const Mat3 boxRT = boxR.getTranspose();
+   const Vec3 localCenter = boxRT * (rectCenter - boxPos);
+   const Vec3 localAxis0 = boxRT * rectAxis0;
+   const Vec3 localAxis1 = boxRT * rectAxis1;
+
+   auto local = rectangleCanonicalBox(localCenter, localAxis0, localAxis1, ext0, ext1, boxHalf);
+
+   RectangleBoxResult result;
+   result.closestRect = boxPos + boxR * local.closestRect;
+   result.closestBox  = boxPos + boxR * local.closestBox;
+   result.sqrDistance = local.sqrDistance;
+   return result;
+}
+
+struct BoxBoxResult
+{
+   Vec3   closestA, closestB;
+   real_t distance = real_t(0);
+};
+
+//! Closed-form minimum distance (and closest point pair) between two solid oriented boxes:
+//! decompose each box's boundary into its 6 faces (3 axis pairs x 2 signs), run
+//! rectangleOrientedBox for each of those 12 face-vs-other-box queries, keep the global
+//! minimum. Complete and exact for two SEPARATED (or exactly touching) convex boxes -- every
+//! possible closest-feature pair (vertex-vertex, vertex-edge, vertex-face, edge-edge, edge-face,
+//! face-face) is covered because the decomposition spans each box's entire boundary.
+inline BoxBoxResult boxBoxDistance(const Vec3& posA, const Mat3& RA, const Vec3& halfA,
+                                    const Vec3& posB, const Mat3& RB, const Vec3& halfB)
+{
+   BoxBoxResult best;
+   bool have = false;
+   Vec3 axesA[3], axesB[3];
+   for (int i = 0; i < 3; ++i)
+   {
+      axesA[i] = Vec3(RA(0, i), RA(1, i), RA(2, i));
+      axesB[i] = Vec3(RB(0, i), RB(1, i), RB(2, i));
+   }
+
+   auto consider = [&](const RectangleBoxResult& r, bool swapped) {
+      if (!have || r.sqrDistance < best.distance * best.distance)
+      {
+         have = true;
+         best.distance = std::sqrt(r.sqrDistance);
+         best.closestA = swapped ? r.closestBox : r.closestRect;
+         best.closestB = swapped ? r.closestRect : r.closestBox;
+      }
+   };
+
+   // Faces of A vs box B.
+   for (int i0 = 2, i1 = 0, i2 = 1; i1 < 3; i2 = i0, i0 = i1++)
+   {
+      const Vec3 scaled = halfA[i2] * axesA[i2];
+      auto rPlus  = rectangleOrientedBox(posA + scaled, axesA[i0], axesA[i1], halfA[i0], halfA[i1], posB, RB, halfB);
+      auto rMinus = rectangleOrientedBox(posA - scaled, axesA[i0], axesA[i1], halfA[i0], halfA[i1], posB, RB, halfB);
+      consider(rPlus, false);
+      consider(rMinus, false);
+   }
+   // Faces of B vs box A.
+   for (int i0 = 2, i1 = 0, i2 = 1; i1 < 3; i2 = i0, i0 = i1++)
+   {
+      const Vec3 scaled = halfB[i2] * axesB[i2];
+      auto rPlus  = rectangleOrientedBox(posB + scaled, axesB[i0], axesB[i1], halfB[i0], halfB[i1], posA, RA, halfA);
+      auto rMinus = rectangleOrientedBox(posB - scaled, axesB[i0], axesB[i1], halfB[i0], halfB[i1], posA, RA, halfA);
+      consider(rPlus, true);
+      consider(rMinus, true);
+   }
+   return best;
+}
+
+} // namespace eberly_box_distance
+
+//! Analytical (closed-form, non-GJK) spherosimplex contact for two boxes rounded by `radius`
+//! each (combined dilation 2*radius) -- the analytical counterpart to the GJK/EPA-with-margin
+//! path useSpheroBoxContact normally uses. See ModelParameters::useSpheroBoxAnalytical's own doc
+//! comment (SimulationParams.h). Normal convention matches boxBoxSAT: points from B (2nd
+//! argument) toward A (1st argument).
+inline ContactResult boxBoxSpheroAnalytical(const Vec3& posA, const Mat3& RA, const Vec3& halfA,
+                                             const Vec3& posB, const Mat3& RB, const Vec3& halfB,
+                                             real_t radius)
+{
+   const auto d = eberly_box_distance::boxBoxDistance(posA, RA, halfA, posB, RB, halfB);
+   ContactResult result; // default-constructed: contact=false
+   // Defensive: the ported case dispatch has measure-zero configurations (exact axis-aligned
+   // ties, e.g. two perfectly coincident boxes) where floating-point round-off can push a
+   // boundary-equality check to the wrong side and enter a division branch with a near-zero
+   // denominator. Rather than propagate a NaN/Inf into the simulation, treat a non-finite
+   // result as "detection failed this sub-cycle" (no contact) -- safe because a genuine deep
+   // contact will be detected again next sub-cycle once the exact tie has moved.
+   if (!std::isfinite(d.distance)) return result;
+   const real_t overlap = real_t(2) * radius - d.distance;
+   if (overlap <= real_t(0)) return result;
+
+   const Vec3   diff = d.closestA - d.closestB;
+   const real_t len  = diff.length();
+   if (!std::isfinite(len)) return ContactResult{};
+   result.contact  = true;
+   result.overlap  = overlap;
+   result.normal   = (len > real_t(1e-10)) ? diff / len : Vec3(0, 0, 1);
+   result.scenario = "EberlyBoxBoxSphero";
+   result.point    = real_t(0.5) * (d.closestA + d.closestB);
+   return result;
+}
+
+//! One vertex-in-the-other-box overlap, for boxBoxMultiPointContacts below.
+struct BoxVertexContact
+{
+   Vec3   point;
+   Vec3   normal; // points OUT of the box the vertex is embedded in, toward the vertex's own box
+   real_t overlap;
+   // Stable identity for the SAME physical vertex across sub-cycles: 0-7 = one of A's 8 corners
+   // (encoded as 4*(sx>0)+2*(sy>0)+1*(sz>0) in A's own body frame), 8-15 = the equivalent for B's
+   // corners. A vertex's IDENTITY never changes between sub-cycles (it's always "A's +x+y+z corner"),
+   // only whether it happens to be embedded and how deep -- this lets a persistent contact manifold
+   // (ParticleKernels.h's useContactManifold) match this sub-cycle's points to last sub-cycle's by
+   // exact identity instead of a fragile world-distance threshold.
+   int identity = -1;
+};
+
+//! Multi-point Box x Box contact: tests all 8 vertices of A against B and all 8 vertices of B against
+//! A (the "simple particle geometry" polyhedron test described in Lu et al. 2015, Section 2.2.3 --
+//! "it is first assessed whether any vertex from one cube falls inside the other cube and vice versa"),
+//! returning one BoxVertexContact per vertex actually found embedded in the other box. Mitigation for
+//! the SAME literature-documented defect as boxBoxSAT's useRoundedCorners (see that function's own
+//! comment), via the OTHER remedy the review names specifically for this failure mode (Fraige et al.
+//! 2008a/2008b): "a multi-point contact concept... multiple simultaneous contacts are modelled. This
+//! 'stabilizes' the collision... and effectively prevents a sudden change of the contact force (both
+//! direction and amplitude) over the contact region" -- resolving several simultaneously-overlapping
+//! vertices each with their own local normal/overlap, rather than the single SAT-chosen deepest point/
+//! axis, means no single sub-cycle-to-sub-cycle axis flip can dominate the total force by itself.
+//! Deliberately independent of boxBoxSAT/useRoundedCorners -- either mitigation can be enabled alone or
+//! together (see ModelParameters.useMultiPointBoxContact/useRoundedBoxCorners, both togglable).
+//!
+//! maxOverlapCap (default: no cap, exact pre-existing behaviour): clamps EACH vertex's own overlap to
+//! at most this value before it is returned. Unlike boxBoxSAT (one overlap number, one force), this
+//! function can return several simultaneously-embedded vertices, each contributing its OWN independent
+//! spring force in ComputeContacts (ParticleKernels.h) at its OWN world point -- and each is bounded
+//! only by min(halfBox) with no shared cap across points, so under deep interpenetration (a real jam,
+//! or a floater released directly on top of a neighbour -- see the RELEASE-OVERLAP diagnostic) a single
+//! vertex can carry an overlap approaching the box's own half-extent, applied at a point that may sit
+//! far from the centroid -- exactly the ingredient for a large, badly-placed spurious torque.
+//! DEMValidationScenarios.h's multiPointDeepOverlapStability/Fuzz/EdgeCases scenarios confirm this
+//! directly: useMultiPointBoxContact, uncapped, can inject MORE energy than plain boxBoxSAT at
+//! identical deep-overlap geometry that a real production jam produces (e.g. the "grazing-plank-stack"
+//! edge case, +618% vs baseline's -0.9%) -- precisely the geometry this mitigation was meant to help,
+//! not hurt. Capping brings deep-overlap behaviour back in line with what the underlying contact model
+//! was actually tuned for (shallow, near-degenerate contact), at the cost of under-representing the
+//! true geometric overlap once a vertex is embedded deeper than the cap -- an intentional trade-off:
+//! a bounded, physically-plausible force beats an unbounded, geometrically-exact one that can inject
+//! spurious energy.
+inline std::vector< BoxVertexContact > boxBoxMultiPointContacts(
+   const Vec3& posA, const Mat3& RA, const Vec3& halfA, const Vec3& posB, const Mat3& RB, const Vec3& halfB,
+   real_t maxOverlapCap = std::numeric_limits< real_t >::max())
+{
+   std::vector< BoxVertexContact > out;
+
+   auto testVerticesAgainstBox = [&](const Vec3& posV, const Mat3& RV, const Vec3& halfV, const Vec3& posBox,
+                                      const Mat3& RBox, const Vec3& halfBox, real_t sign) {
+      Vec3 axesV[3], axesBox[3];
+      for (uint_t i = 0; i < 3; ++i)
+      {
+         axesV[i]   = Vec3(RV(0, i), RV(1, i), RV(2, i));
+         axesBox[i] = Vec3(RBox(0, i), RBox(1, i), RBox(2, i));
+      }
+      for (int sx = -1; sx <= 1; sx += 2)
+         for (int sy = -1; sy <= 1; sy += 2)
+            for (int sz = -1; sz <= 1; sz += 2)
+            {
+               const Vec3 vertex = posV + real_t(sx) * halfV[0] * axesV[0] + real_t(sy) * halfV[1] * axesV[1] +
+                                   real_t(sz) * halfV[2] * axesV[2];
+               const Vec3 rel = vertex - posBox;
+               real_t     local[3];
+               for (uint_t k = 0; k < 3; ++k)
+                  local[k] = rel * axesBox[k];
+               if (std::abs(local[0]) > halfBox[0] || std::abs(local[1]) > halfBox[1] ||
+                   std::abs(local[2]) > halfBox[2])
+                  continue; // this vertex is outside the box -- no contact from it
+
+               // Embedded: penetration is the SMALLEST distance to any of the box's 3 pairs of faces
+               // (the same "deepest point" logic Lu et al. Section 2.1.3 describes for polygon vertex-
+               // in-polygon contacts), and the outward normal is that face's own normal, signed to
+               // point away from the box (toward the embedded vertex's own body).
+               real_t bestOverlap = std::numeric_limits< real_t >::max();
+               uint_t bestAxis    = 0;
+               real_t bestSign    = real_t(1);
+               for (uint_t k = 0; k < 3; ++k)
+               {
+                  const real_t overlapK = halfBox[k] - std::abs(local[k]);
+                  if (overlapK < bestOverlap)
+                  {
+                     bestOverlap = overlapK;
+                     bestAxis    = k;
+                     bestSign    = (local[k] >= real_t(0)) ? real_t(1) : real_t(-1);
+                  }
+               }
+               BoxVertexContact c;
+               c.point    = vertex;
+               c.normal   = sign * bestSign * axesBox[bestAxis];
+               c.overlap  = std::min(bestOverlap, maxOverlapCap);
+               c.identity = (sign > real_t(0) ? 0 : 8) + (sx > 0 ? 4 : 0) + (sy > 0 ? 2 : 0) + (sz > 0 ? 1 : 0);
+               out.push_back(c);
+            }
+   };
+
+   // A's vertices embedded in B: normal points from B toward A (this file's convention, see boxBoxSAT's
+   // own header comment) -- i.e. away from B, toward the vertex's own box (A), sign=+1 with bestSign
+   // already pointing away from B's centre along the box's own local axis.
+   testVerticesAgainstBox(posA, RA, halfA, posB, RB, halfB, real_t(1));
+   // B's vertices embedded in A: normal must still point from B toward A, i.e. TOWARD A's centre here
+   // (away from A would be backwards for this pairing) -- sign=-1 flips bestSign's "away from the
+   // embedding box" convention to match.
+   testVerticesAgainstBox(posB, RB, halfB, posA, RA, halfA, real_t(-1));
+
+   return out;
+}
+
+namespace detail
+{
+//! Clips a world-space segment (p,q) against a box's own local extent [-half,half] (standard slab/
+//! Liang-Barsky parametric clip). Returns false if the segment misses the box entirely; otherwise
+//! outTMin/outTMax give the surviving parameter range along p+t*(q-p), t in [0,1].
+inline bool clipSegmentToBoxLocal(const Vec3& p, const Vec3& q, const Vec3& pos, const Mat3& R,
+                                    const Vec3& half, real_t& outTMin, real_t& outTMax)
+{
+   Vec3 axes[3];
+   for (uint_t i = 0; i < 3; ++i)
+      axes[i] = Vec3(R(0, i), R(1, i), R(2, i));
+   const Vec3 relP(( p - pos) * axes[0], (p - pos) * axes[1], (p - pos) * axes[2]);
+   const Vec3 relQ(( q - pos) * axes[0], (q - pos) * axes[1], (q - pos) * axes[2]);
+
+   real_t tmin = real_t(0), tmax = real_t(1);
+   for (uint_t k = 0; k < 3; ++k)
+   {
+      const real_t d = relQ[k] - relP[k];
+      if (std::abs(d) < real_t(1e-14))
+      {
+         if (relP[k] < -half[k] || relP[k] > half[k]) return false; // parallel to slab, outside it
+         continue;
+      }
+      real_t t1 = (-half[k] - relP[k]) / d;
+      real_t t2 = (half[k] - relP[k]) / d;
+      if (t1 > t2) std::swap(t1, t2);
+      tmin = std::max(tmin, t1);
+      tmax = std::min(tmax, t2);
+      if (tmin > tmax) return false;
+   }
+   outTMin = tmin;
+   outTMax = tmax;
+   return true;
+}
+} // namespace detail
+
+//! Literal replica of Fraige, Langston & Chen (2008), Powder Technology 186(3):224-240, Section 3.3
+//! ("Modelling cube geometry") / Figs. 3-5 -- a DIFFERENT, standalone option from
+//! boxBoxMultiPointContacts above (which only implements the paper's vertex-in-box step, sourced
+//! secondhand via Lu, Third & Muller 2015's literature review). This function additionally implements
+//! the two contact modes the paper describes but boxBoxMultiPointContacts does not (Fig. 5's edge-edge
+//! and edge-face cases -- geometries where two boxes overlap with NEITHER box having a vertex embedded
+//! in the other, e.g. two elongated boxes crossing like an "X"), plus the paper's own near-corner
+//! normal blend (Fig. 4b: "vertex near corner or edge of I" switches the normal from the nearest-face
+//! rule to the direction from I's CENTRE to the vertex, specifically to avoid a discontinuity as the
+//! nearest-face choice flips right at a corner -- the same normal-discontinuity defect
+//! boxBoxSAT::useRoundedCorners and this file's useAxisHysteresis mitigation target via completely
+//! different mechanisms).
+//!
+//! Kept entirely independent of boxBoxMultiPointContacts (own vertex test, own identity numbering) so
+//! enabling this new option can never change useMultiPointBoxContact's already-validated behaviour.
+//!
+//! Contact-point/normal/overlap rules, exactly as the paper describes them:
+//!  - Vertex-in-box (Fig. 4): unchanged from boxBoxMultiPointContacts EXCEPT for the near-corner blend
+//!    (see above). "Near a corner/edge" is interpreted as: at least 2 of the vertex's 3 per-axis
+//!    clearances from the embedding box's own faces are within 5% of that axis's half-extent (a vertex
+//!    can only be simultaneously close to 2+ faces near where those faces meet, i.e. an edge or
+//!    corner) -- matching the paper's own "within 0.05 of this transformed scale" threshold (Fig. 4's
+//!    own caption), generalised from the 2D illustration (where "near corner" is the only such case) to
+//!    3D (where 2 faces meet at an edge, 3 at a corner).
+//!  - Edge-face (Fig. 5b): for each edge of one box NEITHER of whose own endpoints is already embedded
+//!    in the other box (avoiding double-counting what the vertex step above already resolves), clip the
+//!    edge segment against the other box's local extent; a nonzero-length surviving sub-segment is a
+//!    genuine edge-face contact, point = its midpoint ("centre of edge-length overlap part", the
+//!    paper's own phrase), normal/overlap = the nearest-face rule evaluated at that midpoint.
+//!  - Edge-edge (Fig. 5a): for every pair of edges (one from each box) where NEITHER endpoint of either
+//!    edge is already embedded in the other box, find the closest points between the two finite
+//!    segments (closestPointsBetweenSegments); if each closest point actually lies inside the OTHER
+//!    box (mutual embedding -- true interpenetration, not just proximity), record a contact at their
+//!    midpoint with normal = the two edges' own cross product ("normal to both edges", the paper's own
+//!    phrase), signed toward A.
+inline std::vector< BoxVertexContact > boxBoxFraigeMultiPointContacts(
+   const Vec3& posA, const Mat3& RA, const Vec3& halfA, const Vec3& posB, const Mat3& RB, const Vec3& halfB,
+   real_t maxOverlapCap = std::numeric_limits< real_t >::max())
+{
+   std::vector< BoxVertexContact > out;
+
+   Vec3 axesA[3], axesB[3];
+   for (uint_t i = 0; i < 3; ++i)
+   {
+      axesA[i] = Vec3(RA(0, i), RA(1, i), RA(2, i));
+      axesB[i] = Vec3(RB(0, i), RB(1, i), RB(2, i));
+   }
+
+   //! World-space endpoints of edge `edgeIdx` (0-11) of a box: edgeIdx = axis*4 + 2*(su>0) + (sv>0),
+   //! where `axis` is the axis the edge runs ALONG and (u,v) are the other two axes in cyclic order.
+   auto edgeSegment = [](const Vec3& pos, const Vec3 axes[3], const Vec3& half, int edgeIdx, Vec3& outP,
+                          Vec3& outQ) {
+      const uint_t axis  = uint_t(edgeIdx / 4);
+      const int    combo = edgeIdx % 4;
+      const uint_t u     = (axis + 1) % 3;
+      const uint_t v     = (axis + 2) % 3;
+      const real_t su    = (combo & 2) ? real_t(1) : real_t(-1);
+      const real_t sv    = (combo & 1) ? real_t(1) : real_t(-1);
+      outP = pos + su * half[u] * axes[u] + sv * half[v] * axes[v] - half[axis] * axes[axis];
+      outQ = outP + real_t(2) * half[axis] * axes[axis];
+   };
+
+   //! Is world point `p` inside box (pos,axes,half)? Same test boxBoxMultiPointContacts' own vertex
+   //! step uses -- shared here to decide whether an edge's endpoint is already vertex-resolved.
+   auto isInsideBox = [](const Vec3& p, const Vec3& pos, const Vec3 axes[3], const Vec3& half) {
+      const Vec3 rel = p - pos;
+      for (uint_t k = 0; k < 3; ++k)
+         if (std::abs(rel * axes[k]) > half[k]) return false;
+      return true;
+   };
+
+   // --- Vertex-in-box, both directions (Fig. 4), with the near-corner normal blend added -----------
+   auto testVertices = [&](const Vec3& posV, const Mat3& RV, const Vec3& halfV, const Vec3& posBox,
+                            const Mat3& RBox, const Vec3& halfBox, real_t sign, int identityBase) {
+      Vec3 axesV[3], axesBox[3];
+      for (uint_t i = 0; i < 3; ++i)
+      {
+         axesV[i]   = Vec3(RV(0, i), RV(1, i), RV(2, i));
+         axesBox[i] = Vec3(RBox(0, i), RBox(1, i), RBox(2, i));
+      }
+      for (int sx = -1; sx <= 1; sx += 2)
+         for (int sy = -1; sy <= 1; sy += 2)
+            for (int sz = -1; sz <= 1; sz += 2)
+            {
+               const Vec3 vertex = posV + real_t(sx) * halfV[0] * axesV[0] + real_t(sy) * halfV[1] * axesV[1] +
+                                   real_t(sz) * halfV[2] * axesV[2];
+               const Vec3 rel = vertex - posBox;
+               real_t     local[3];
+               for (uint_t k = 0; k < 3; ++k)
+                  local[k] = rel * axesBox[k];
+               if (std::abs(local[0]) > halfBox[0] || std::abs(local[1]) > halfBox[1] ||
+                   std::abs(local[2]) > halfBox[2])
+                  continue;
+
+               real_t bestOverlap = std::numeric_limits< real_t >::max();
+               uint_t bestAxis    = 0;
+               real_t bestSign    = real_t(1);
+               int    nearCount   = 0;
+               for (uint_t k = 0; k < 3; ++k)
+               {
+                  const real_t clearanceK = halfBox[k] - std::abs(local[k]);
+                  if (clearanceK < real_t(0.05) * halfBox[k]) ++nearCount;
+                  if (clearanceK < bestOverlap)
+                  {
+                     bestOverlap = clearanceK;
+                     bestAxis    = k;
+                     bestSign    = (local[k] >= real_t(0)) ? real_t(1) : real_t(-1);
+                  }
+               }
+               BoxVertexContact c;
+               c.point   = vertex;
+               c.overlap = std::min(bestOverlap, maxOverlapCap);
+               if (nearCount >= 2)
+               {
+                  // Near a corner/edge of the box (2+ faces simultaneously close, Fig. 4b): blend to
+                  // the radial direction from the box's own centre to the vertex instead of the single
+                  // nearest-face axis, which is what actually flips discontinuously right at a corner.
+                  const real_t relLen = rel.length();
+                  c.normal = (relLen > real_t(1e-10)) ? sign * (rel / relLen) : sign * bestSign * axesBox[bestAxis];
+               }
+               else { c.normal = sign * bestSign * axesBox[bestAxis]; }
+               c.identity = identityBase + (sx > 0 ? 4 : 0) + (sy > 0 ? 2 : 0) + (sz > 0 ? 1 : 0);
+               out.push_back(c);
+            }
+   };
+   testVertices(posA, RA, halfA, posB, RB, halfB, real_t(1), 0);
+   testVertices(posB, RB, halfB, posA, RA, halfA, real_t(-1), 8);
+
+   // --- Edge-face (Fig. 5b): edges of one box whose own endpoints are NOT already vertex-embedded ---
+   auto testEdgeFace = [&](const Vec3& posEdgeOwner, const Vec3 axesEdgeOwner[3], const Vec3& halfEdgeOwner,
+                            const Vec3& posBox, const Mat3& RBox, const Vec3& halfBox, const Vec3 axesBox[3],
+                            real_t sign, int identityBase) {
+      for (int e = 0; e < 12; ++e)
+      {
+         Vec3 p, q;
+         edgeSegment(posEdgeOwner, axesEdgeOwner, halfEdgeOwner, e, p, q);
+         if (isInsideBox(p, posBox, axesBox, halfBox) || isInsideBox(q, posBox, axesBox, halfBox))
+            continue; // already resolved by the vertex step above
+
+         real_t tmin, tmax;
+         if (!detail::clipSegmentToBoxLocal(p, q, posBox, RBox, halfBox, tmin, tmax)) continue;
+         if (tmax - tmin < real_t(1e-9)) continue; // touches at a single point only -- not a real overlap
+
+         const Vec3 mid = p + real_t(0.5) * (tmin + tmax) * (q - p);
+         const Vec3 rel = mid - posBox;
+         real_t     local[3];
+         for (uint_t k = 0; k < 3; ++k)
+            local[k] = rel * axesBox[k];
+
+         real_t bestOverlap = std::numeric_limits< real_t >::max();
+         uint_t bestAxis    = 0;
+         real_t bestSign    = real_t(1);
+         for (uint_t k = 0; k < 3; ++k)
+         {
+            const real_t clearanceK = halfBox[k] - std::abs(local[k]);
+            if (clearanceK < bestOverlap)
+            {
+               bestOverlap = clearanceK;
+               bestAxis    = k;
+               bestSign    = (local[k] >= real_t(0)) ? real_t(1) : real_t(-1);
+            }
+         }
+         BoxVertexContact c;
+         c.point    = mid;
+         c.normal   = sign * bestSign * axesBox[bestAxis];
+         c.overlap  = std::min(bestOverlap, maxOverlapCap);
+         c.identity = identityBase + e;
+         out.push_back(c);
+      }
+   };
+   // A's edges against B: normal points from B toward A, i.e. away from B (sign=+1, matching the
+   // vertex step's own convention above).
+   testEdgeFace(posA, axesA, halfA, posB, RB, halfB, axesB, real_t(1), 16);
+   // B's edges against A: normal must still point from B toward A, i.e. TOWARD A here (sign=-1).
+   testEdgeFace(posB, axesB, halfB, posA, RA, halfA, axesA, real_t(-1), 28);
+
+   // --- Edge-edge (Fig. 5a): genuine crossing, neither edge's endpoints already vertex-embedded -----
+   for (int ea = 0; ea < 12; ++ea)
+   {
+      Vec3 pa, qa;
+      edgeSegment(posA, axesA, halfA, ea, pa, qa);
+      if (isInsideBox(pa, posB, axesB, halfB) || isInsideBox(qa, posB, axesB, halfB)) continue;
+
+      for (int eb = 0; eb < 12; ++eb)
+      {
+         Vec3 pb, qb;
+         edgeSegment(posB, axesB, halfB, eb, pb, qb);
+         if (isInsideBox(pb, posA, axesA, halfA) || isInsideBox(qb, posA, axesA, halfA)) continue;
+
+         Vec3 c1, c2;
+         detail::closestPointsBetweenSegments(pa, qa, pb, qb, c1, c2);
+         // Mutual embedding of the two closest points is what distinguishes a genuine interpenetrating
+         // crossing from two edges that merely pass near each other without overlapping.
+         if (!isInsideBox(c1, posB, axesB, halfB) || !isInsideBox(c2, posA, axesA, halfA)) continue;
+
+         const Vec3   dirA = (qa - pa);
+         const Vec3   dirB = (qb - pb);
+         Vec3         n    = dirA % dirB; // cross product -- "normal to both edges" (paper's own phrase)
+         const real_t nLen = n.length();
+         if (nLen < real_t(1e-10)) continue; // near-parallel edges: cross product degenerate, skip
+         n /= nLen;
+         if (n * (posA - posB) < real_t(0)) n = -n; // sign toward A, this file's own convention
+
+         const Vec3   relB = c2 - posB;
+         const Vec3   relA = c1 - posA;
+         real_t       clearB = std::numeric_limits< real_t >::max();
+         real_t       clearA = std::numeric_limits< real_t >::max();
+         for (uint_t k = 0; k < 3; ++k)
+         {
+            clearB = std::min(clearB, halfB[k] - std::abs(relB * axesB[k]));
+            clearA = std::min(clearA, halfA[k] - std::abs(relA * axesA[k]));
+         }
+
+         BoxVertexContact c;
+         c.point    = real_t(0.5) * (c1 + c2);
+         c.normal   = n;
+         c.overlap  = std::min(std::min(clearA, clearB), maxOverlapCap);
+         c.identity = 40 + ea * 12 + eb;
+         out.push_back(c);
+      }
+   }
+
+   return out;
 }
 
 //======================================================================================================================
@@ -253,8 +1383,13 @@ inline real_t closestThetaOnCircleToPointClosedForm(const Vec3& C, const Vec3& u
 //! used on; 60 leaves comfortable margin. Validated against the previous golden-section
 //! implementation across thousands of random configurations (see git history / PR description) to
 //! confirm this replacement produces the same answers, not just plausible-looking ones.
+// maxIterations: default 30 (see below) preserves current behaviour for every one of this function's
+// existing call sites (none pass this argument). Exposed as a parameter (not just a local constant)
+// specifically so PaperAnalyticalContactTest.cpp can A/B/C-compare 30 against the original 60 directly
+// on identical trials -- see testEdgeEdgeFastReferenceAccuracy10k / any 3-way iteration-count
+// comparison built on top of it.
 inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
-                                      std::complex< real_t > roots[4])
+                                      std::complex< real_t > roots[4], int maxIterations = 30)
 {
    const real_t b3 = c3 / c4, b2 = c2 / c4, b1 = c1 / c4, b0 = c0 / c4;
    auto         poly = [&](std::complex< real_t > z) {
@@ -272,7 +1407,17 @@ inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1,
       p *= base;
    }
 
-   for (int it = 0; it < 60; ++it)
+   // Default 30 (down from the original 60): this file's own comment above already documented that
+   // convergence to double precision was empirically observed within ~20-30 iterations, with 60 kept
+   // purely as "comfortable margin" -- i.e. the original count was never load-bearing for correctness,
+   // just headroom. Halving it (to the upper end of the already-observed-sufficient range, not the
+   // aggressive low end) roughly halves the cost of every quartic solve in this file
+   // (closestThetaOnCircleToLine, allCriticalThetasOnEllipseToOrigin, and everything built on them:
+   // band-edge, special-contact, edge-edge, face-edge). Re-validated against the full
+   // PaperAnalyticalContactTest.cpp suite (fuzz tests included) after this change, not just asserted
+   // from the original comment's claim -- see also the direct 30-vs-60 A/B comparison enabled by this
+   // being a parameter now, not a hardcoded constant.
+   for (int it = 0; it < maxIterations; ++it)
    {
       std::complex< real_t > next[4];
       for (int i = 0; i < 4; ++i)
@@ -287,6 +1432,392 @@ inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1,
    }
 }
 
+//! One real root of the depressed-then-un-depressed real cubic t^3 + a*t^2 + b*t + c = 0. A real cubic
+//! always has at least one real root, so this never needs to return a complex value -- used below only
+//! to pick a resolvent-cubic root for solveQuarticFerrari, which needs exactly one (any one) real root,
+//! not all three. Branches between Cardano's formula (one-real-root case, safe/direct) and the
+//! trigonometric form (three-real-roots case, avoids the cube root of a near-zero or catastrophically
+//! cancelling complex quantity that Cardano's formula would otherwise hit) -- precisely the kind of
+//! discriminant-sign branch that solveQuarticDurandKerner's own comment calls out as Ferrari's method's
+//! weak point; isolating it to a single real root of a cubic (rather than needing all 4 roots of the
+//! quartic to come out of the same branch) is the most that can be done to contain it.
+inline real_t solveRealCubicOneRealRoot(real_t a, real_t b, real_t c)
+{
+   const real_t p      = b - a * a / real_t(3);
+   const real_t q      = real_t(2) * a * a * a / real_t(27) - a * b / real_t(3) + c;
+   const real_t offset = -a / real_t(3);
+
+   const real_t discriminant = q * q / real_t(4) + p * p * p / real_t(27);
+   if (discriminant >= real_t(0))
+   {
+      const real_t sqrtDisc = std::sqrt(discriminant);
+      const real_t u1       = std::cbrt(-q / real_t(2) + sqrtDisc);
+      const real_t u2       = std::cbrt(-q / real_t(2) - sqrtDisc);
+      return u1 + u2 + offset;
+   }
+   // Three real roots: p is necessarily < 0 here (discriminant < 0 forces it), so -p/3 > 0 and the
+   // sqrt below is safe.
+   const real_t r   = std::sqrt(-p * p * p / real_t(27));
+   const real_t phi = std::acos(std::clamp(-q / (real_t(2) * r), real_t(-1), real_t(1)));
+   const real_t u    = real_t(2) * std::sqrt(-p / real_t(3)) * std::cos(phi / real_t(3));
+   return u + offset;
+}
+
+//! Real roots of c4*t^4 + c3*t^3 + c2*t^2 + c1*t + c0 = 0 via Ferrari's closed-form method: depress to
+//! y^4 + p*y^2 + q*y + r (x = y - c3/(4*c4)), solve the resolvent cubic
+//! m^3 + p*m^2 + (p^2/4 - r)*m - q^2/8 = 0 for one real root m (solveRealCubicOneRealRoot), then factor
+//! the quartic into two quadratics via that m and solve each in closed form. No iteration at all --
+//! O(1) instead of solveQuarticDurandKerner's fixed 30 sweeps -- but see that function's own comment
+//! for why this file uses Durand-Kerner in production: the resolvent cubic's discriminant sign is a
+//! genuine branch (handled here, but still a branch), and this closed form loses accuracy near
+//! clustered/repeated quartic roots in a way the iterative methods degrade more gracefully from.
+//! Exists ONLY for the direct time/accuracy comparison against Durand-Kerner and Aberth-Ehrlich
+//! (QuarticSolverComparisonTest.cpp) -- not wired into any production call site.
+inline void solveQuarticFerrari(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
+                                 std::complex< real_t > roots[4])
+{
+   const real_t b3 = c3 / c4, b2 = c2 / c4, b1 = c1 / c4, b0 = c0 / c4;
+
+   const real_t p = b2 - real_t(3) * b3 * b3 / real_t(8);
+   const real_t q = b3 * b3 * b3 / real_t(8) - b3 * b2 / real_t(2) + b1;
+   const real_t r = -real_t(3) * b3 * b3 * b3 * b3 / real_t(256) + b3 * b3 * b2 / real_t(16) -
+                     b3 * b1 / real_t(4) + b0;
+   const real_t shift = -b3 / real_t(4);
+
+   // Biquadratic special case (q == 0, i.e. the depressed quartic has no odd-degree term): solving the
+   // resolvent cubic here would hit m=0 (or a spurious nonzero root that still works, but needlessly),
+   // since the general construction below divides by q. Solving y^4+p*y^2+r=0 directly as a quadratic
+   // in y^2 sidesteps that degeneracy entirely rather than special-casing sqrt2m~=0 further down.
+   if (std::abs(q) < real_t(1e-13) * std::max(real_t(1), std::abs(p)))
+   {
+      const std::complex< real_t > disc =
+         std::sqrt(std::complex< real_t >(p * p - real_t(4) * r, real_t(0)));
+      const std::complex< real_t > ySq1 = (-p + disc) / real_t(2);
+      const std::complex< real_t > ySq2 = (-p - disc) / real_t(2);
+      const std::complex< real_t > y1 = std::sqrt(ySq1), y2 = std::sqrt(ySq2);
+      roots[0] = y1 + shift;
+      roots[1] = -y1 + shift;
+      roots[2] = y2 + shift;
+      roots[3] = -y2 + shift;
+      return;
+   }
+
+   const real_t m = solveRealCubicOneRealRoot(p, p * p / real_t(4) - r, -q * q / real_t(8));
+
+   const std::complex< real_t > sqrt2m = std::sqrt(std::complex< real_t >(real_t(2) * m, real_t(0)));
+   const std::complex< real_t > qTerm  = q / (real_t(2) * sqrt2m);
+
+   auto solveQuadratic = [](std::complex< real_t > B, std::complex< real_t > C,
+                             std::complex< real_t >& r1, std::complex< real_t >& r2) {
+      const std::complex< real_t > disc = std::sqrt(B * B - real_t(4) * C);
+      r1                                = (-B + disc) / real_t(2);
+      r2                                = (-B - disc) / real_t(2);
+   };
+
+   std::complex< real_t > y1, y2, y3, y4;
+   solveQuadratic(-sqrt2m, std::complex< real_t >(p / real_t(2) + m) + qTerm, y1, y2);
+   solveQuadratic(sqrt2m, std::complex< real_t >(p / real_t(2) + m) - qTerm, y3, y4);
+
+   roots[0] = y1 + shift;
+   roots[1] = y2 + shift;
+   roots[2] = y3 + shift;
+   roots[3] = y4 + shift;
+}
+
+//! Real roots of c4*t^4 + c3*t^3 + c2*t^2 + c1*t + c0 = 0 via the Aberth-Ehrlich (Ehrlich-Aberth)
+//! method: same simultaneous-refinement family as solveQuarticDurandKerner (all 4 roots updated
+//! together each sweep, no resolvent-cubic branching), but each step applies a full Newton correction
+//! w_i = P(x_i)/P'(x_i) with an Aberth correction term (the sum of reciprocal distances to the other
+//! current root estimates) rather than Durand-Kerner's plain Weierstrass product-of-differences
+//! correction. This gives locally cubic convergence per root (vs Durand-Kerner's quadratic), so it
+//! should in principle reach the same accuracy in fewer sweeps -- exactly what
+//! QuarticSolverComparisonTest.cpp checks directly, both at matched iteration count (30) and at a
+//! reduced count, rather than assuming the textbook convergence-order claim carries over unchanged to
+//! this file's specific coefficient scales. Not wired into any production call site.
+inline void solveQuarticAberthEhrlich(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
+                                       std::complex< real_t > roots[4], int maxIterations = 30)
+{
+   const real_t b3 = c3 / c4, b2 = c2 / c4, b1 = c1 / c4, b0 = c0 / c4;
+   auto         poly = [&](std::complex< real_t > z) {
+      return ((z + b3) * z + b2) * z * z + b1 * z + b0;
+   };
+   auto dpoly = [&](std::complex< real_t > z) {
+      return ((real_t(4) * z + real_t(3) * b3) * z + real_t(2) * b2) * z + b1;
+   };
+
+   const real_t scale = real_t(1) + std::pow(std::max(std::max(std::abs(b3), std::abs(b2)),
+                                                        std::max(std::abs(b1), std::abs(b0))),
+                                              real_t(0.25));
+   const std::complex< real_t > base(real_t(0.4), real_t(0.9)); // same seed as Durand-Kerner
+   std::complex< real_t >       p = base;
+   for (int k = 0; k < 4; ++k)
+   {
+      roots[k] = scale * p;
+      p *= base;
+   }
+
+   for (int it = 0; it < maxIterations; ++it)
+   {
+      std::complex< real_t > w[4];
+      for (int i = 0; i < 4; ++i)
+      {
+         const std::complex< real_t > dz = dpoly(roots[i]);
+         w[i] = (std::abs(dz) > real_t(1e-300)) ? poly(roots[i]) / dz : std::complex< real_t >(0);
+      }
+      std::complex< real_t > next[4];
+      for (int i = 0; i < 4; ++i)
+      {
+         std::complex< real_t > sumRecip(real_t(0), real_t(0));
+         for (int j = 0; j < 4; ++j)
+            if (j != i) sumRecip += real_t(1) / (roots[i] - roots[j]);
+         const std::complex< real_t > denom = real_t(1) - w[i] * sumRecip;
+         next[i] = (std::abs(denom) > real_t(1e-300)) ? roots[i] - w[i] / denom : roots[i] - w[i];
+      }
+      for (int i = 0; i < 4; ++i)
+         roots[i] = next[i];
+   }
+}
+
+//! Selects which of the three quartic solvers above (see QuarticSolverComparisonTest.cpp for the
+//! time/accuracy comparison that motivated exposing this as a real runtime choice, not just leaving
+//! Ferrari/Aberth-Ehrlich as dead code): DurandKerner is production's unchanged default; Ferrari and
+//! AberthEhrlich are opt-in alternatives threaded through closestThetaOnCircleToLine / findRimCrossing /
+//! cylinderCylinderContact's own solver-choice parameters, same pattern as useFastEdgeEdgeReference.
+enum class QuarticSolverMethod
+{
+   DurandKerner,
+   Ferrari,
+   AberthEhrlich
+};
+
+//! Dispatches to one of the three quartic solvers by QuarticSolverMethod tag, so every call site needs
+//! only one solver-choice parameter instead of duplicating itself per method. maxIterations is ignored
+//! for Ferrari (closed-form, nothing to iterate).
+inline void solveQuarticGeneric(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
+                                 std::complex< real_t > roots[4], QuarticSolverMethod method,
+                                 int maxIterations = 30)
+{
+   switch (method)
+   {
+   case QuarticSolverMethod::Ferrari:
+      solveQuarticFerrari(c4, c3, c2, c1, c0, roots);
+      return;
+   case QuarticSolverMethod::AberthEhrlich:
+      solveQuarticAberthEhrlich(c4, c3, c2, c1, c0, roots, maxIterations);
+      return;
+   default:
+      solveQuarticDurandKerner(c4, c3, c2, c1, c0, roots, maxIterations);
+      return;
+   }
+}
+
+//! Closed-form global minimizer of theta -> x(theta)^2+y(theta)^2, where x(theta)=x0+a*cos(theta),
+//! y(theta)=y0+b*sin(theta) traces an ellipse (semi-axes a,b, centre (x0,y0)) -- i.e. the closest
+//! point on an ellipse to the ORIGIN. This is the same problem as Feng, Han & Owen (2017)'s Appendix
+//! A ("A generic contact detection framework for cylindrical particles in discrete element
+//! modelling," Comput. Methods Appl. Mech. Engrg. 315, 632-651), used there to test a cylinder's
+//! base-disc edge (projected as an ellipse into the OTHER cylinder's cross-sectional plane) against
+//! that other cylinder's radius.
+//!
+//! Re-derived here from scratch rather than transcribing that paper's own Appendix A coefficients:
+//! the intermediate step there ("F(theta) = -a*x0*sin(theta)+b*y0*cos(theta) = -a*x*x'+b*y*y'", then
+//! "F(theta)=0 gives a*x*x'=b*y*y'") is inconsistent with its own stated substitution x'=cos(theta),
+//! y'=sin(theta) two lines above it -- substituting directly gives a*x0*y'=b*y0*x', not a*x*x'=b*y*y'.
+//! Rather than risk propagating whichever side of that inconsistency is the actual typo, this
+//! rederives the quartic independently (exactly the same Weierstrass-substitution technique as
+//! closestThetaOnCircleToLine below) and validates it against a brute-force numeric sweep in
+//! PaperAnalyticalContactTest.cpp before trusting it anywhere else.
+//!
+//! f(theta) = (x0+a*cos theta)^2 + (y0+b*sin theta)^2; F(theta) = f'(theta)/2 =
+//! -a*x0*sin(theta) + b*y0*cos(theta) + (b^2-a^2)*sin(theta)*cos(theta) -- a mix of first- and
+//! second-harmonic terms. Substituting t=tan(theta/2) and clearing denominators gives a quartic in t
+//! with no cubic-resolvent branching needed (Durand-Kerner, same as every other quartic in this file).
+//! All (up to 5, including the t->infinity/theta=pi point the Weierstrass substitution can't reach
+//! directly) real critical thetas of theta -> x(theta)^2+y(theta)^2 -- i.e. every local min AND max
+//! on the ellipse, not just the global minimum. Needed by the constrained version of this search
+//! (closestThetaOnEllipseWithinAxialRange below): when the unconstrained global minimum falls outside
+//! a required range, the CONSTRAINED minimum is generically at another critical point or at the
+//! range boundary, not simply "no valid point at all."
+inline void allCriticalThetasOnEllipseToOrigin(real_t a, real_t b, real_t x0, real_t y0,
+                                                real_t (&thetasOut)[5], int& countOut)
+{
+   countOut          = 1;
+   thetasOut[0]      = math::pi;
+
+   const real_t c4 = -b * y0;
+   const real_t c3 = real_t(2) * (a * a - b * b - a * x0);
+   const real_t c1 = real_t(-2) * (a * a - b * b + a * x0);
+   const real_t c0 = b * y0;
+
+   const bool   c4Vanishes = std::abs(c4) < real_t(1e-14) * std::max(real_t(1), std::abs(c0));
+   const real_t c4Safe     = c4Vanishes ? (std::abs(c4) > real_t(1e-30) ? c4 : real_t(1e-14)) : c4;
+
+   std::complex< real_t > roots[4];
+   solveQuarticDurandKerner(c4Safe, c3, real_t(0), c1, c0, roots);
+   for (const auto& r : roots)
+      if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
+         thetasOut[countOut++] = real_t(2) * std::atan(r.real());
+}
+
+//! See allCriticalThetasOnEllipseToOrigin's own comment: this is just its global-minimum reduction,
+//! kept as the simple entry point for callers (and the brute-force cross-check test) that don't need
+//! the constrained search.
+inline real_t closestThetaOnEllipseToOrigin(real_t a, real_t b, real_t x0, real_t y0)
+{
+   auto distSq = [&](real_t theta) {
+      const real_t x = x0 + a * std::cos(theta);
+      const real_t y = y0 + b * std::sin(theta);
+      return x * x + y * y;
+   };
+
+   real_t thetas[5];
+   int    count;
+   allCriticalThetasOnEllipseToOrigin(a, b, x0, y0, thetas, count);
+
+   real_t bestTheta = thetas[0];
+   real_t bestVal   = distSq(bestTheta);
+   for (int i = 1; i < count; ++i)
+   {
+      const real_t val = distSq(thetas[i]);
+      if (val < bestVal)
+      {
+         bestVal   = val;
+         bestTheta = thetas[i];
+      }
+   }
+   return bestTheta;
+}
+
+//! Closest point on the ellipse to the origin, CONSTRAINED to the sub-arc where a second quantity,
+//! zHost(theta) = zC + zA*cos(theta) + zB*sin(theta) (itself just a first-harmonic function of theta,
+//! since it's the axial coordinate of the same rim point along a fixed third direction), stays within
+//! [-zHalfRange, zHalfRange]. This is the exact fix for the gap Feng et al. (2017) themselves flag in
+//! their own unconstrained version of this check ("the master cylinder is implicitly assumed
+//! infinitely long, and no consideration is given to a possible overlap between the base discs") --
+//! but cutting the OTHER way from how they describe it: their concern is a false POSITIVE (finding a
+//! close point that's actually beyond the host's finite end); fuzz-testing this implementation found
+//! the reverse is at least as important in practice -- a false NEGATIVE, where the unconstrained
+//! global minimum falls just outside the valid range while a nearby, still-overlapping point on the
+//! same ellipse remains within it. Solving the constrained problem in closed form (rather than simply
+//! rejecting the unconstrained answer) closes both directions at once.
+//!
+//! Returns false if the valid sub-arc is empty (the entire rim lies outside the host's finite range).
+inline bool closestThetaOnEllipseWithinAxialRange(real_t a, real_t b, real_t x0, real_t y0, real_t zC,
+                                                   real_t zA, real_t zB, real_t zHalfRange, real_t& thetaOut)
+{
+   auto distSq = [&](real_t theta) {
+      const real_t x = x0 + a * std::cos(theta);
+      const real_t y = y0 + b * std::sin(theta);
+      return x * x + y * y;
+   };
+   auto zHost = [&](real_t theta) { return zC + zA * std::cos(theta) + zB * std::sin(theta); };
+   auto inRange = [&](real_t theta) { return std::abs(zHost(theta)) < zHalfRange; };
+
+   const real_t zAmag = std::sqrt(zA * zA + zB * zB);
+
+   bool   have = false;
+   real_t bestVal = real_t(0);
+   auto   consider = [&](real_t theta) {
+      if (!inRange(theta)) return;
+      const real_t val = distSq(theta);
+      if (!have || val < bestVal)
+      {
+         have     = true;
+         bestVal  = val;
+         thetaOut = theta;
+      }
+   };
+
+   // Candidate set 1: the unconstrained critical points (global/local minima AND maxima) that
+   // happen to already satisfy the range constraint.
+   real_t thetas[5];
+   int    count;
+   allCriticalThetasOnEllipseToOrigin(a, b, x0, y0, thetas, count);
+   for (int i = 0; i < count; ++i)
+      consider(thetas[i]);
+
+   // Candidate set 2: the range boundary itself. zHost(theta) = +-zHalfRange is a plain
+   // R*cos(theta-phi) = k first-harmonic equation (no quartic needed) -- if |k/R| > 1 the entire rim
+   // lies on one side (either always in range, already covered by set 1, or never in range, and this
+   // loop simply adds nothing).
+   if (zAmag > real_t(1e-12))
+   {
+      const real_t phi = std::atan2(zB, zA);
+      for (real_t target : { zHalfRange, -zHalfRange })
+      {
+         const real_t k = (target - zC) / zAmag;
+         if (std::abs(k) <= real_t(1))
+         {
+            const real_t delta = std::acos(std::clamp(k, real_t(-1), real_t(1)));
+            consider(phi + delta);
+            consider(phi - delta);
+         }
+      }
+   }
+
+   return have;
+}
+
+//! Feng, Han & Owen (2017) Appendix B: intersection points between a circle of radius R at the
+//! origin and an ellipse (semi-axes a, b, centre (x0,y0)) -- i.e. where the ellipse's rim actually
+//! CROSSES the circle boundary, as opposed to closestThetaOnEllipseToOrigin's closest-POINT problem.
+//! Returns up to 4 real thetas via thetasOut/countOut (countOut may be 0, 2, or 4; a tangency counts
+//! as a repeated root).
+//!
+//! Re-derived from scratch rather than transcribed from the paper's own printed equations, which
+//! have two internal inconsistencies here: (1) the circle is introduced as "radius r" but then
+//! written as x^2+y^2=1 (not r^2), while the resulting quartic's own a0=r^2(1-tau^2) coefficient only
+//! makes sense if the circle equation actually was x^2+y^2=r^2; (2) Appendix C's eq. (33), a
+//! one-line derivation from its own eq. (31)-(32) just above it, drops a minus sign (redoing that
+//! one line independently does not reproduce what eq. (33) prints). Given two independent
+//! transcription errors already found in this paper (see closestThetaOnEllipseToOrigin's own
+//! comment for a third, in Appendix A), this quartic is derived fresh here and cross-checked at
+//! theta=0, pi, and pi/2 (each independently re-deriving the corresponding coefficient) before ever
+//! being trusted, then validated against a brute-force numeric sweep in
+//! PaperAnalyticalContactTest.cpp, the same policy as every other quartic in this file.
+//!
+//! Derivation: substituting the ellipse's own parametrisation into x^2+y^2=R^2 and expanding
+//! cos^2(theta), sin^2(theta) via the double-angle identities gives a mix of first- and second-
+//! harmonic terms in theta, exactly the same shape as every other trig equation in this file;
+//! substituting t=tan(theta/2) and clearing denominators gives:
+inline void intersectEllipseWithCircle(real_t a, real_t b, real_t x0, real_t y0, real_t R,
+                                        real_t (&thetasOut)[4], int& countOut)
+{
+   countOut = 0;
+
+   const real_t c4 = (x0 - a) * (x0 - a) + y0 * y0 - R * R; // = value at theta=pi (t -> infinity)
+   const real_t c0 = (x0 + a) * (x0 + a) + y0 * y0 - R * R; // = value at theta=0 (t=0)
+   const real_t c3 = real_t(4) * b * y0;
+   const real_t c1 = c3;
+   const real_t c2 = real_t(2) * x0 * x0 + real_t(2) * y0 * y0 - real_t(2) * R * R - real_t(2) * a * a +
+                      real_t(4) * b * b;
+
+   // theta=pi is itself an exact root exactly when c4=0 (the point at theta=pi lies on the circle);
+   // the Weierstrass substitution can't reach it as a finite t, so it must be added explicitly rather
+   // than relying on solveQuarticDurandKerner to find it as t->infinity.
+   if (std::abs(c4) < real_t(1e-12) * std::max(real_t(1), std::abs(c0)))
+   {
+      thetasOut[countOut++] = math::pi;
+      // Remaining roots solve the cubic c3 t^3 + c2 t^2 + c1 t + c0 = 0 -- reuse the quartic solver
+      // with c4 nudged to a small epsilon (same technique used throughout this file), which just
+      // sends one of the four roots towards a very large |t| (theta -> pi again, already added).
+      const real_t c4Safe = real_t(1e-14);
+      std::complex< real_t > roots[4];
+      solveQuarticDurandKerner(c4Safe, c3, c2, c1, c0, roots);
+      for (const auto& r : roots)
+         if (countOut < 4 && std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())) &&
+             std::abs(r.real()) < real_t(1e6)) // exclude the spurious large-|t| root standing in for pi
+            thetasOut[countOut++] = real_t(2) * std::atan(r.real());
+      return;
+   }
+
+   std::complex< real_t > roots[4];
+   solveQuarticDurandKerner(c4, c3, c2, c1, c0, roots);
+   for (const auto& r : roots)
+      if (countOut < 4 && std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
+         thetasOut[countOut++] = real_t(2) * std::atan(r.real());
+}
+
 //! Closed-form global minimizer of theta -> |P(theta) - closest point on the given infinite line|,
 //! where P(theta) = C + R*cos(theta)*u + R*sin(theta)*v traces a circle of radius R centred at C in
 //! the plane spanned by (u, v). This is the paper's own quartic-in-sin(theta) (eq. 74-77 / 82-85,
@@ -298,8 +1829,16 @@ inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1,
 //! and each real root (plus theta=pi, the t->infinity point this substitution can't reach directly)
 //! is evaluated against the true squared-distance to pick the global minimum among what are, in
 //! general, 1-2 minima and 1-2 maxima of this function on the circle.
+// maxIterations forwarded to solveQuarticDurandKerner (default 30, unchanged behaviour for every
+// existing caller that doesn't pass it) -- see that function's own comment.
+// quarticSolver: default changed to Ferrari (this session, after QuarticSolverComparisonTest.cpp's
+// synthetic-quartic comparison and PaperAnalyticalContactTest.cpp's edge-edge N-way comparison on real
+// geometry both showed it ~2.3x faster than Durand-Kerner with bit-identical-or-indistinguishable
+// accuracy) -- see QuarticSolverMethod's own comment. Durand-Kerner/Aberth-Ehrlich remain fully
+// available via this parameter, not deleted.
 inline real_t closestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
-                                          const Vec3& linePos, const Vec3& lineDir)
+                                          const Vec3& linePos, const Vec3& lineDir, int maxIterations = 30,
+                                          QuarticSolverMethod quarticSolver = QuarticSolverMethod::Ferrari)
 {
    const Vec3   a  = C - linePos;
    const real_t M  = real_t(2) * R * (a * u);
@@ -361,7 +1900,7 @@ inline real_t closestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec
       // consider() naturally handles like any other candidate.
       const real_t            c4Safe = std::abs(c4) > real_t(1e-30) ? c4 : real_t(1e-14);
       std::complex< real_t >  roots[4];
-      solveQuarticDurandKerner(c4Safe, c3, c2, c1, c0, roots);
+      solveQuarticGeneric(c4Safe, c3, c2, c1, c0, roots, quarticSolver, maxIterations);
       for (const auto& r : roots)
          if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
             consider(real_t(2) * std::atan(r.real()));
@@ -369,7 +1908,7 @@ inline real_t closestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec
    }
 
    std::complex< real_t > roots[4];
-   solveQuarticDurandKerner(c4, c3, c2, c1, c0, roots);
+   solveQuarticGeneric(c4, c3, c2, c1, c0, roots, quarticSolver, maxIterations);
    for (const auto& r : roots)
       if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
          consider(real_t(2) * std::atan(r.real()));
@@ -503,13 +2042,65 @@ struct RimCrossing
    Vec3 A, B;
 };
 
+// useFastReference: OPTIONAL simplification #1 from this session's own performance investigation
+// (see CylinderCylinderContactBenchmark.cpp's file header) -- thetaRef exists PURELY as a tie-break
+// among point A's (up to 4) candidate roots (see this function's own RimCrossing comment above: "the
+// choice here... matches the... regime", i.e. this file's own predecessor's heuristic, not something
+// Kodam's or Guo's paper specifies at all). false (DEFAULT, unchanged behaviour) computes it via
+// closestThetaOnCircleToLine -- the exact closest point on the rim to target's full axis LINE, itself
+// a second 60(30)-iteration Durand-Kerner quartic solve, on top of point A's own. true replaces that
+// with closestThetaOnCircleToPoint (a single atan2, already validated closed-form -- see that
+// function's own comment: "turned out to have an even simpler exact answer, no polynomial at all"),
+// using target's CENTRE POSITION as a cheap stand-in reference point instead of its full axis line --
+// geometrically a different (cheaper, approximate) reference, not merely a faster way to compute the
+// SAME reference, so this is genuinely an accuracy/speed trade-off, not a free simplification. Old
+// path kept fully intact (not deleted) specifically so the two can be A/B compared for accuracy --
+// see PaperAnalyticalContactTest.cpp's fuzz suite, run against both settings.
+// maxIterations forwarded to every Durand-Kerner/Aberth-Ehrlich solve this function performs (thetaRef
+// when NOT useFastReference, and point A's own quartic always) -- default 30, unchanged behaviour for
+// both of this function's existing callers (cylinderCylinderContact's edge-edge branch, which now
+// forwards its own maxIterations parameter -- see that function's own comment).
+// quarticSolver: forwarded to both of this function's own quartic solves (thetaRef's, when not using
+// the fast point-based reference, and point A's own) -- default Ferrari (see closestThetaOnCircleToLine's
+// own comment for why); see QuarticSolverMethod's own comment.
+// candidateCountA/candidateCountB: OPTIONAL diagnostic out-parameters (default nullptr, zero effect on
+// production behaviour) -- count how many candidate thetas pass EACH of point A's/B's own containment
+// checks, independent of thetaRef's tie-break, to answer directly whether that tie-break (and by
+// extension thetaRef's own quartic, when not using the fast reference) is ever actually load-bearing
+// for real geometry, or whether at most one candidate ever survives in practice. See
+// PaperAnalyticalContactTest.cpp's testThetaRefTieBreakNecessity10k, which found 0/832 real calls ever
+// had more than one candidate for EITHER point.
+// lazyThetaRef: OPTIONAL simplification (this session, on top of #1 above) -- defers thetaRef's
+// computation until AFTER point A's (and, if needed, point B's) candidates are actually collected, and
+// only computes it AT ALL if either list ends up with more than one entry (the collect-then-select
+// restructuring below is mathematically identical to the old inline considerA/considerB running-best
+// tracking either way -- same traversal order, same strict "<" tie-break, so ties resolve to the same
+// candidate). Default changed to true this session, after testThetaRefTieBreakNecessity10k found this
+// is NEVER needed on real geometry (0/832 calls ever had >1 candidate for either point) and
+// testLazyThetaRefAccuracy10k confirmed bit-identical results with it enabled. false (the original
+// eager behaviour, unconditional thetaRef computation up front) remains fully available.
 inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                     const Vec3& targetPos, const Vec3& eTarget, real_t targetRadius,
-                                    real_t targetHalfLength)
+                                    real_t targetHalfLength, bool useFastReference = false,
+                                    int maxIterations = 30,
+                                    QuarticSolverMethod quarticSolver = QuarticSolverMethod::DurandKerner,
+                                    int* candidateCountA = nullptr, int* candidateCountB = nullptr,
+                                    bool lazyThetaRef = true)
 {
+   if (candidateCountA) *candidateCountA = 0;
+   if (candidateCountB) *candidateCountB = 0;
    RimCrossing out;
 
-   const real_t thetaRef = closestThetaOnCircleToLine(C, u, v, R, targetPos, eTarget);
+   real_t thetaRef         = real_t(0);
+   bool   thetaRefComputed = false;
+   auto   ensureThetaRef   = [&]() {
+      if (thetaRefComputed) return;
+      thetaRef = useFastReference
+         ? closestThetaOnCircleToPoint(C, u, v, R, targetPos)
+         : closestThetaOnCircleToLine(C, u, v, R, targetPos, eTarget, maxIterations, quarticSolver);
+      thetaRefComputed = true;
+   };
+   if (!lazyThetaRef) ensureThetaRef(); // EAGER (default): unconditional, matches original cost exactly.
 
    auto pointAt = [&](real_t theta) { return C + R * std::cos(theta) * u + R * std::sin(theta) * v; };
    auto radialSqToAxis = [&](const Vec3& P) {
@@ -525,6 +2116,8 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
    };
 
    // --- Point A: rim crosses target's infinite lateral surface (eq. 83). ------------------------
+   // The quartic below is Kodam's own eq. 83 -- unavoidable, unaffected by lazyThetaRef. What changes
+   // is only WHEN (if ever) thetaRef is computed to pick among the candidates this produces.
    const Vec3   a  = C - targetPos;
    const real_t A0 = a * eTarget;
    const real_t A1 = u * eTarget;
@@ -542,34 +2135,52 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
    const real_t c1 = real_t(2) * Np + real_t(4) * Q2;
    const real_t c0 = K2 + Mp + P2;
 
-   bool   haveA = false;
-   real_t bestDiffA = std::numeric_limits< real_t >::max();
-   real_t thetaA     = real_t(0);
-
-   auto considerA = [&](real_t theta) {
+   // Every candidate theta passing containment is collected here FIRST (independent of thetaRef, which
+   // this containment check never references) -- at most 5: up to 4 quartic roots plus theta=pi.
+   real_t candidatesA[5];
+   int    numA = 0;
+   auto   collectA = [&](real_t theta) {
       const Vec3 P = pointAt(theta);
       if (std::abs(radialSqToAxis(P) - targetRadius * targetRadius) >
           real_t(1e-6) * std::max(real_t(1), targetRadius * targetRadius))
          return;
       if (std::abs(axialToAxis(P)) >= targetHalfLength) return;
-      const real_t d = angDiff(theta, thetaRef);
-      if (d < bestDiffA)
-      {
-         bestDiffA = d;
-         thetaA    = theta;
-         haveA     = true;
-      }
+      if (numA < 5) candidatesA[numA++] = theta;
    };
 
    if (std::abs(c4) > real_t(1e-12) * std::max(real_t(1), std::abs(c0)))
    {
       std::complex< real_t > roots[4];
-      solveQuarticDurandKerner(c4, c3, c2, c1, c0, roots);
+      solveQuarticGeneric(c4, c3, c2, c1, c0, roots, quarticSolver, maxIterations);
       for (const auto& r : roots)
          if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
-            considerA(real_t(2) * std::atan(r.real()));
+            collectA(real_t(2) * std::atan(r.real()));
    }
-   considerA(math::pi); // t -> infinity point the Weierstrass substitution can't reach directly
+   collectA(math::pi); // t -> infinity point the Weierstrass substitution can't reach directly
+
+   if (candidateCountA) *candidateCountA = numA;
+
+   // Selection: 0 candidates -> no point A at all; exactly 1 -> thetaRef is irrelevant, skip it
+   // entirely (this is the actual savings when lazyThetaRef); >1 -> thetaRef genuinely needed to break
+   // the tie (computed here, lazily, the FIRST time this ever actually happens for either point).
+   bool   haveA  = false;
+   real_t thetaA = real_t(0);
+   if (numA == 1) { thetaA = candidatesA[0]; haveA = true; }
+   else if (numA > 1)
+   {
+      ensureThetaRef();
+      real_t bestDiffA = std::numeric_limits< real_t >::max();
+      for (int i = 0; i < numA; ++i)
+      {
+         const real_t d = angDiff(candidatesA[i], thetaRef);
+         if (d < bestDiffA)
+         {
+            bestDiffA = d;
+            thetaA    = candidatesA[i];
+            haveA     = true;
+         }
+      }
+   }
 
    if (!haveA) return out;
    out.A = pointAt(thetaA);
@@ -584,23 +2195,36 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
    const real_t phi   = std::atan2(A2, A1);
    const real_t delta = std::acos(std::clamp(rhs / Amag, real_t(-1), real_t(1)));
 
-   bool   haveB = false;
-   real_t bestDiffB = std::numeric_limits< real_t >::max();
-   real_t thetaB     = real_t(0);
-
-   auto considerB = [&](real_t theta) {
+   real_t candidatesB[2];
+   int    numB = 0;
+   auto   collectB = [&](real_t theta) {
       const Vec3 P = pointAt(theta);
       if (radialSqToAxis(P) >= targetRadius * targetRadius) return;
-      const real_t d = angDiff(theta, thetaRef);
-      if (d < bestDiffB)
-      {
-         bestDiffB = d;
-         thetaB    = theta;
-         haveB     = true;
-      }
+      if (numB < 2) candidatesB[numB++] = theta;
    };
-   considerB(phi + delta);
-   considerB(phi - delta);
+   collectB(phi + delta);
+   collectB(phi - delta);
+
+   if (candidateCountB) *candidateCountB = numB;
+
+   bool   haveB  = false;
+   real_t thetaB = real_t(0);
+   if (numB == 1) { thetaB = candidatesB[0]; haveB = true; }
+   else if (numB > 1)
+   {
+      ensureThetaRef(); // no-op if point A's own selection already computed it above
+      real_t bestDiffB = std::numeric_limits< real_t >::max();
+      for (int i = 0; i < numB; ++i)
+      {
+         const real_t d = angDiff(candidatesB[i], thetaRef);
+         if (d < bestDiffB)
+         {
+            bestDiffB = d;
+            thetaB    = candidatesB[i];
+            haveB     = true;
+         }
+      }
+   }
 
    if (!haveB) return out;
    out.B       = pointAt(thetaB);
@@ -629,6 +2253,126 @@ inline Vec3 rimPointTowardPlane(const CylinderState& cyl, const Vec3& planePos, 
 
    return cyl.pos + math::sign(zCyl) * cyl.radius * radialAwayFromPlane -
           math::sign(zCyl) * math::sign(axisDotN) * halfL * eZ;
+}
+
+//! Kodam et al. (2010) eq. 40-44: exact face-band contact point, replacing an earlier version of
+//! this file that approximated it by reusing the face-face/band-band-parallel point construction
+//! (faceFaceStyleContactPoint) with 2*cj.radius substituted for the radial overlap -- verified by
+//! hand against the paper's own PDF (Kodam, Bharadwaj, Curtis, Hancock & Wassgren (2010), Chemical
+//! Engineering Science 65(22), 5852-5862) to be a materially different point in general, not merely
+//! a stylistic simplification: for PaperAnalyticalContactTest.cpp's own testCylinderCylinderFaceBand
+//! geometry, the approximation returns cylinder i's own axis (0,0) purely because that test happens
+//! to use equal radii (ci.radius == cj.radius, cancelling eq. 43's (Ri-Rj) term to zero); the exact
+//! construction below returns (0, 0.45) instead -- offset toward cylinder j's actual centre, as
+//! physically expected.
+//!
+//! `relI` is cylinder j's centre in cylinder i's body frame (so cylinder i's near face lies at
+//! z = sign(relI[2])*halfLi); `axisJInI` is cylinder j's axis expressed in the SAME frame; `halfLj`
+//! is cylinder j's half-length; `Ri` is cylinder i's radius; `overlap` is the already-computed axial
+//! overlap (eq. 38). Returns the contact point in cylinder i's body frame (caller transforms to
+//! world via ci.pos + ci.R * result).
+//!
+//! Eq. 40-41 construct line AB by taking cylinder j's own centreline and translating it (purely
+//! along cylinder i's z-axis, NOT radially -- there is no cj.radius term in eq. 40-41 at all) onto
+//! cylinder i's near face plane. Eq. 42/43 place the contact point at AB's own midpoint when AB lies
+//! fully inside i's face disc (radius Ri); eq. 44 places it at the midpoint of B and the disc-
+//! boundary crossing point D when AB pokes out through one end, a line-circle intersection the paper
+//! declines to spell out ("the solution is straightforward and will not be presented here"). Solved
+//! here directly via the standard finite line-segment/circle intersection quadratic, which reduces
+//! exactly to eq. 43 (both endpoints inside -> tLo=-halfLj, tHi=halfLj -> midpoint = AB's own centre)
+//! and eq. 44 (one endpoint inside -> tLo or tHi = the surviving endpoint, the other = the crossing
+//! point) in their respective regimes, and additionally covers a case neither eq. 42 nor eq. 44
+//! explicitly names -- AB poking out through BOTH ends (a long, narrow cylinder j straddling a much
+//! smaller face i, as in the geometry above) -- by midpointing the two crossing points instead.
+inline Vec3 faceBandContactPoint(const Vec3& relI, const Vec3& axisJInI, real_t halfLj, real_t Ri,
+                                  real_t halfLi, real_t overlap)
+{
+   const real_t faceZ = math::sign(relI[2]) * halfLi;
+   const real_t cx = relI[0], cy = relI[1];
+   const real_t ux = axisJInI[0], uy = axisJInI[1];
+
+   const real_t k  = ux * ux + uy * uy;
+   const real_t m  = cx * ux + cy * uy;
+   const real_t c2 = cx * cx + cy * cy - Ri * Ri;
+
+   real_t tLo = -halfLj, tHi = halfLj; // fallback assumption: fully inside (eq. 43)
+   if (k > real_t(1e-12))
+   {
+      const real_t disc = m * m - k * c2;
+      bool         clampToNearest = (disc < real_t(0));
+      if (!clampToNearest)
+      {
+         const real_t sq = std::sqrt(disc);
+         const real_t t1 = (-m - sq) / k, t2 = (-m + sq) / k; // t1 <= t2: infinite-line/disc crossings
+         tLo = std::max(t1, -halfLj);
+         tHi = std::min(t2, halfLj);
+         clampToNearest = (tLo >= tHi); // no surviving overlap on the finite segment
+      }
+      if (clampToNearest)
+      {
+         // Shouldn't occur given the caller's own containment gate (eq. 34/36/37) already established
+         // a real contact; if floating-point edge cases ever land here anyway, degrade gracefully to
+         // the point on the finite segment nearest cylinder i's axis rather than an undefined chord.
+         const real_t tNear = std::clamp(-m / k, -halfLj, halfLj);
+         tLo = tHi = tNear;
+      }
+   }
+
+   const real_t tMid = real_t(0.5) * (tLo + tHi);
+   const real_t pz   = faceZ - math::sign(relI[2]) * real_t(0.5) * overlap;
+   return Vec3(cx + tMid * ux, cy + tMid * uy, pz);
+}
+
+//! Closest squared distance between two finite line segments P1->Q1 and P2->Q2 -- thin wrapper around
+//! detail::closestPointsBetweenSegments (defined near the top of this file, before boxBoxSAT, since
+//! that function needs it too -- kept as its own entry point since most callers, e.g. the
+//! cylinder-cylinder capsule bound below, only need the distance, not the witness points).
+inline real_t closestDistanceSqBetweenSegments(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec3& q2)
+{
+   Vec3 c1, c2;
+   closestPointsBetweenSegments(p1, q1, p2, q2, c1, c2);
+   return (c1 - c2).sqrLength();
+}
+
+//! The two endpoints of a cylinder's own axis segment (its centreline), in world coordinates.
+inline void cylinderAxisEndpoints(const CylinderState& c, Vec3& p0, Vec3& p1)
+{
+   const Vec3 halfAxis = (real_t(0.5) * c.length) * c.axis();
+   p0                  = c.pos - halfAxis;
+   p1                  = c.pos + halfAxis;
+}
+
+//! An oriented box's own support-function value (half-width of its projection) along a given WORLD
+//! direction -- dirWorld MUST be unit length. Standard OBB-projection formula (the same one full SAT
+//! uses internally for each of its 15 candidate axes, here applied to just ONE direction): the box's
+//! projected half-extent is the sum of each local half-extent weighted by how aligned that local axis
+//! is with dirWorld.
+inline real_t boxSupportAlongDirection(const Vec3& halfExtents, const Mat3& R, const Vec3& dirWorld)
+{
+   return halfExtents[0] * std::abs(dirWorld * Vec3(R(0, 0), R(1, 0), R(2, 0))) +
+          halfExtents[1] * std::abs(dirWorld * Vec3(R(0, 1), R(1, 1), R(2, 1))) +
+          halfExtents[2] * std::abs(dirWorld * Vec3(R(0, 2), R(1, 2), R(2, 2)));
+}
+
+//! CONSERVATIVE box-box separation test using only ONE candidate separating axis (the line between
+//! the two centres) instead of full SAT's 15 -- cheap (a handful of dot products, no iteration), at
+//! the cost of completeness: unlike full SAT, this can produce false NEGATIVES (says "can't rule out
+//! contact" for a pair that's actually separated along some other axis, e.g. a true edge-edge
+//! separating axis this never tests), but per the separating-axis theorem it can NEVER produce a
+//! false positive rejection -- if the two boxes' projections onto this one legitimate candidate axis
+//! don't overlap, the boxes themselves provably don't overlap, regardless of what any other axis
+//! would have shown. Intended purely as a cheap Layer 1 pre-filter ahead of the real (exact) boxBoxSAT
+//! test, exactly mirroring closestDistanceSqBetweenSegments's role for cylinders -- NOT a replacement
+//! for SAT, which remains the sole source of truth for actual contact/overlap/normal.
+inline bool boxesDefinitelySeparatedAlongCenterLine(const Vec3& posA, const Mat3& RA, const Vec3& halfA,
+                                                     const Vec3& posB, const Mat3& RB, const Vec3& halfB)
+{
+   const Vec3   delta = posB - posA;
+   const real_t dist  = delta.length();
+   if (dist < real_t(1e-12)) return false; // coincident centres -- can't determine anything from this axis
+   const Vec3 dir = delta / dist;
+   const real_t reach = boxSupportAlongDirection(halfA, RA, dir) + boxSupportAlongDirection(halfB, RB, dir);
+   return dist > reach;
 }
 } // namespace detail
 
@@ -691,6 +2435,81 @@ inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& 
       // (below) never had this bug, since it applies the offset to E directly; this now matches it.
       result.point    = E - math::sign(zE) * real_t(0.5) * result.overlap * nHat; // eq. 21
       result.scenario = "edge-plane";
+   }
+   return result;
+}
+
+//! Sphere-Cylinder contact -- NOT part of Kodam et al. or Guo et al. (neither paper addresses mixed
+//! shape pairs at all); developed for this project, unlike sphere-sphere and sphere-box, which predate
+//! it in mesa_pd's own AnalyticCollisionFunctions.h (detectSphereSphereCollision/detectSphereBoxCollision,
+//! S. Eibl 2019). Exact and closed-form, and -- like boxBoxSAT -- needs no GJK/EPA fallback at all: the
+//! cylinder's own closest-point-to-an-external-point mapping (the natural "clamp" counterpart to its
+//! own support mapping, exactly the relationship detectSphereBoxCollision's box clamp has to the box's
+//! own support mapping) is a COMPLETE, exact solution to the sphere-cylinder minimum-translation-
+//! distance problem, not a named-scenario heuristic the way Kodam et al.'s cylinder-cylinder dispatch
+//! is -- there is no configuration this construction fails to cover, so unlike cylinderCylinderContact
+//! it carries no companion "is this result uncertain" gate.
+//!
+//! Convention matches this file throughout: normal points from the 2nd argument (the cylinder) toward
+//! the 1st (the sphere); overlap positive = penetrating.
+inline ContactResult sphereCylinderContact(const Vec3& spherePos, real_t sphereRadius, const CylinderState& cyl)
+{
+   ContactResult result;
+   result.scenario = "sphere-cylinder";
+
+   const Vec3   eZ    = cyl.axis();
+   const real_t halfL = real_t(0.5) * cyl.length;
+   const Vec3   rel   = spherePos - cyl.pos;      // sphere centre relative to cylinder centre, world frame
+   const real_t z     = rel * eZ;                  // axial component
+   const Vec3   radialVec = rel - z * eZ;           // radial component, world frame
+   const real_t rho   = radialVec.length();
+
+   // Arbitrary but well-defined radial direction for the degenerate case (sphere centre exactly ON
+   // the cylinder's own axis, rho=0) -- same "pick any consistent perpendicular" resolution already
+   // used throughout this file (detail::perpendicularBasis) rather than leaving a 0/0 direction.
+   Vec3 uArb, vArb;
+   detail::perpendicularBasis(eZ, uArb, vArb);
+   const Vec3 radialDir = (rho > real_t(1e-12)) ? radialVec / rho : uArb;
+
+   if (rho > cyl.radius || std::abs(z) > halfL)
+   {
+      // Sphere centre outside the (solid, capped) cylinder: closest surface point is the independent
+      // radial/axial clamp -- covers band, cap, and rim proximity uniformly, with no separate case
+      // count the way a box's 3 independent per-axis clamps need (a cylinder has only two surface
+      // families, band and cap, instead of three pairs of faces).
+      const real_t rhoC = std::min(rho, cyl.radius);
+      const real_t zC   = std::clamp(z, -halfL, halfL);
+      const Vec3   q    = rhoC * radialDir + zC * eZ; // closest point, relative to cylinder centre
+
+      const Vec3   diff = rel - q;
+      const real_t dist = diff.length();
+
+      result.contact = dist < sphereRadius;
+      result.overlap = sphereRadius - dist;
+      result.normal  = (dist > real_t(1e-9)) ? diff / dist : radialDir;
+      result.point   = cyl.pos + q;
+   }
+   else
+   {
+      // Sphere centre embedded inside the cylinder: push out through whichever surface (band or
+      // nearer cap) has the least remaining clearance, the same "closest way out" logic
+      // detectSphereBoxCollision uses for an embedded sphere centre, generalized from 3 face pairs
+      // to this shape's 2 surface families.
+      const real_t radialClearance = cyl.radius - rho;
+      const real_t axialClearance  = halfL - std::abs(z);
+
+      result.contact = true;
+      if (radialClearance < axialClearance)
+      {
+         result.normal  = radialDir;
+         result.overlap = radialClearance + sphereRadius;
+      }
+      else
+      {
+         result.normal  = math::sign(z) * eZ;
+         result.overlap = axialClearance + sphereRadius;
+      }
+      result.point = spherePos;
    }
    return result;
 }
@@ -816,7 +2635,37 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
 //! Cylinder-cylinder contact: dispatches across all 7 scenarios in Fig. 9 (face-face, face-band,
 //! face-edge, band-band parallel, band-band skewed, band-edge, edge-edge), in the order the paper
 //! presents them. `i`/`j` naming mirrors the paper; `ci` is the 1st argument, `cj` the 2nd.
-inline ContactResult cylinderCylinderContact(const CylinderState& ci, const CylinderState& cj)
+// useFastEdgeEdgeReference: forwarded to findRimCrossing's own useFastReference (see that function's
+// own comment) for the edge-edge branch's two rim-crossing calls -- default false, i.e. UNCHANGED
+// behaviour for every existing caller. Has no effect on any scenario other than edge-edge.
+// maxIterations: forwarded ONLY to the edge-edge branch's two findRimCrossing calls below (NOT to
+// band-edge/special-contact/face-edge's own quartic solves inside rimVsFaceOrBand, which still use
+// that function's own unparameterized default of 30 regardless of what's passed here). Default 30
+// (unchanged behaviour); exposed so PaperAnalyticalContactTest.cpp can run a genuine 3-way comparison
+// on edge-edge specifically (original 60 vs current-default 30-with-old-reference vs
+// 30-with-new-reference) on IDENTICAL trials in one process, instead of separate builds/runs.
+// quarticSolver: this PARAMETER is forwarded ONLY to the edge-edge branch's two findRimCrossing calls
+// (same scoping as maxIterations above -- rimVsFaceOrBand's own quartic solves never see whatever is
+// passed HERE). Default changed to Ferrari (from DurandKerner) this session -- since that is also
+// closestThetaOnCircleToLine's own new default, rimVsFaceOrBand's unparameterized calls (band-edge,
+// special-contact) pick up Ferrari too, transitively, not via this parameter's forwarding but via that
+// function's own default. Net effect: EVERY quartic solve in this file's cylinder-cylinder dispatch now
+// defaults to Ferrari, validated across all scenarios (not just edge-edge) by
+// testCylinderCylinderFullComparisonAndHybridFeasibility, run at 10000 trials for this change. See
+// QuarticSolverComparisonTest.cpp for the standalone time/accuracy comparison (synthetic quartics,
+// known ground-truth roots) that motivated exposing this here, and
+// PaperAnalyticalContactTest.cpp's edge-edge N-way comparison for the same check against real
+// cylinder-cylinder geometry and GJK/EPA.
+// lazyThetaRef: forwarded to the edge-edge branch's two findRimCrossing calls (same scoping as
+// maxIterations/quarticSolver above -- rimVsFaceOrBand is unaffected). Default changed to true this
+// session (same as findRimCrossing's own default -- see that function's own comment for the empirical
+// finding, 0/832 real calls ever needed thetaRef at all, and testLazyThetaRefAccuracy10k's confirmation
+// of bit-identical results). false (the original eager behaviour) remains fully available.
+inline ContactResult cylinderCylinderContact(const CylinderState& ci, const CylinderState& cj,
+                                              bool useFastEdgeEdgeReference = false, int maxIterations = 30,
+                                              detail::QuarticSolverMethod quarticSolver =
+                                                 detail::QuarticSolverMethod::Ferrari,
+                                              bool lazyThetaRef = true)
 {
    const Vec3   eI = ci.axis(), eJ = cj.axis();
    const Vec3   relI  = ci.R.getTranspose() * (cj.pos - ci.pos); // cylinder j's centre in i's body frame (eq. 23-25)
@@ -889,17 +2738,11 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
             // toward j (cj is the cylinder approaching ci's face here), so negated for the same
             // reason as face-face/band-band-parallel above.
             result.normal   = ci.R * Vec3(real_t(0), real_t(0), -math::sign(zIJ));
-            // Contact point: the paper places it midway along line AB (cylinder j's band-edge
-            // line, eq. 40-41), clamped into cylinder i's face -- distinguishing whether AB lies
-            // fully (eq. 42-43) or only partially (eq. 44) inside the face. The "partially inside"
-            // sub-case needs a line-circle intersection the paper explicitly omits ("the solution
-            // is straightforward and will not be presented here"). Rather than silently guess at
-            // that omitted derivation, both sub-cases are approximated here by the same
-            // radial/axial split formula used for face-face and band-band-parallel
-            // (faceFaceStyleContactPoint) -- exact for the "fully inside" case, an approximation
-            // for "partially inside" (flagged, not hidden).
-            result.point    = ci.pos + ci.R * faceFaceStyleContactPoint(relI, ci.radius, cj.length,
-                                                                         result.overlap, real_t(2) * cj.radius);
+            // Contact point: eq. 40-44, via detail::faceBandContactPoint (see its own comment for
+            // the derivation, including the line-circle intersection eq. 44 declines to spell out).
+            const Vec3 axisJInI = ci.R.getTranspose() * eJ;
+            result.point    = ci.pos + ci.R * detail::faceBandContactPoint(relI, axisJInI, halfLj,
+                                                                            ci.radius, halfLi, result.overlap);
             result.scenario = "face-band";
             return result;
          }
@@ -1026,11 +2869,14 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
       const Vec3 capJ = cj.pos + math::sign((ci.pos - cj.pos) * eJ) * halfLj * eJ;
       const Vec3 capI = ci.pos + math::sign((cj.pos - ci.pos) * eI) * halfLi * eI;
 
-      const detail::RimCrossing jVsI = detail::findRimCrossing(capJ, uJ, vJ, cj.radius, ci.pos, eI, ci.radius, halfLi);
+      const detail::RimCrossing jVsI =
+         detail::findRimCrossing(capJ, uJ, vJ, cj.radius, ci.pos, eI, ci.radius, halfLi, useFastEdgeEdgeReference,
+                                  maxIterations, quarticSolver, nullptr, nullptr, lazyThetaRef);
       if (jVsI.contact)
       {
          const detail::RimCrossing iVsJ =
-            detail::findRimCrossing(capI, uI, vI, ci.radius, cj.pos, eJ, cj.radius, halfLj);
+            detail::findRimCrossing(capI, uI, vI, ci.radius, cj.pos, eJ, cj.radius, halfLj, useFastEdgeEdgeReference,
+                                     maxIterations, quarticSolver, nullptr, nullptr, lazyThetaRef);
          if (iVsJ.contact)
          {
             // eq. 87-92: lines through chord AB (rim j) and chord CD (rim i).
@@ -1061,7 +2907,19 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
                   result.overlap  = dist; // contact already established geometrically above (unlike
                                            // the old proximity-only test), so d_perp here is a
                                            // genuine (small, near-first-contact) penetration estimate
-                  result.normal   = (Pi - Pj).getNormalizedOrZero();
+                  // Pi is on rim i, positioned where rim i crosses INTO cylinder j (so physically near
+                  // cj); Pj is on rim j, positioned where rim j crosses INTO cylinder i (so physically
+                  // near ci). This file's convention is "normal points toward the 1st argument (ci)"
+                  // (see the face-face branch's own comment) -- i.e. from the cj-side point toward the
+                  // ci-side point, which is Pj-Pi, NOT Pi-Pj. A 5000-trial fuzz run confirmed this was
+                  // backwards UNIVERSALLY (213/213 edge-edge firings had their normal within 20 degrees
+                  // of exactly antiparallel to GJK/EPA's, never just off by a little) -- currently
+                  // harmless in production only because cylinderCylinderResultIsUncertain's Tier 2
+                  // circumscribing-sphere bound already flags every edge-edge firing as uncertain (its
+                  // characteristically small near-first-contact overlap never survives that loose
+                  // bound), so the hybrid always substitutes GJK/EPA's own (correct) normal anyway --
+                  // see PaperAnalyticalContactTest.cpp's edge-edge sign-check diagnostic.
+                  result.normal   = (Pj - Pi).getNormalizedOrZero();
                   result.point    = real_t(0.5) * (Pi + Pj); // eq. 101
                   result.scenario = "edge-edge";
                }
@@ -1080,8 +2938,6 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
 //! for the specific geometries this was calibrated and tested against (cylinderCylinderContactHybrid
 //! and its accompanying tests).
 //!
-//! Two independent triggers:
-//!
 //! TIER 1 (dispatch found nothing, but the bodies are close enough that a real contact is
 //! plausible): a cheap bounding-sum gate -- centre-to-centre distance vs. the sum of both cylinders'
 //! "reach" (radius + half-length each, i.e. the distance at which even a fully-extended,
@@ -1089,67 +2945,393 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
 //! bounding check DEM codes already use before ever calling fine contact detection (cf. Guo et al.
 //! 2012 Section 2.1's circumscribing-sphere/cube coarse detection) -- deliberately loose, so it will
 //! flag plenty of genuinely-separated pairs too; that's fine here since triggering it only means
-//! "double-check with GJK/EPA", not "report a contact".
+//! "double-check with GJK/EPA", not "report a contact". A 10000-trial fuzz run found this catches
+//! 99.2% of the "no scenario matched at all" gap correctly (the residual 0.8% are real contacts this
+//! bound still misses -- see PaperAnalyticalContactTest.cpp's dispatch-gap characterisation -- but
+//! those are always resolved correctly downstream anyway, since GJK/EPA IS the fallback).
 //!
-//! TIER 2 (dispatch found a contact of a scenario type demonstrated -- by PaperAnalyticalContactTest
-//! .cpp's randomized fuzz test, testCylinderCylinderRandomizedFuzz -- to sometimes report a WRONG
-//! answer, including reporting contact where GJK/EPA finds none at all): cross-check the reported
-//! overlap against each cylinder's CIRCUMSCRIBING SPHERE overlapping the other's face plane. A
-//! cylinder of radius r and half-length h fits entirely inside a sphere of radius sqrt(r^2+h^2)
-//! centred at its own centre -- ALWAYS true regardless of orientation, so "circumscribing-sphere
-//! overlap of the other cylinder's face plane" is a valid (if loose) UPPER BOUND on how much that
-//! cylinder could possibly be penetrating, independent of tilt angle. If this bound exceeds what the
-//! scenario actually reported, more penetration than the analytical answer accounts for is
-//! geometrically possible -- so the reported number (or its very existence) should not be trusted.
+//! NOTE: Kodam et al. 2010's own ten equations (Part I) only ever test for POSITIVE contact -- none
+//! of them is a "definitely separated" fast path. Their own Section 4 conclusion recommends adding
+//! "an intermediate detection scheme such as a bounding sphere or rectangular prism" ON TOP of their
+//! algorithms for efficiency, without specifying one -- this Tier 1 gate, and ParticleKernels.h's own
+//! separate, TIGHTER per-pair reject (circumscribing-sphere sum, sqrt(radius^2+halfLength^2) each,
+//! run BEFORE cylinderCylinderContact is even called) are this codebase's own answer to that
+//! recommendation, not anything derived from the paper itself. Because that outer reject is strictly
+//! tighter than this Tier 1 bound (r+L/2 per side is always >= sqrt(r^2+(L/2)^2) per side), any pair
+//! that ever reaches this Tier 1 check has, by construction, already passed the outer guard -- so this
+//! check can never actually reject anything in production; every "no scenario matched" case
+//! unconditionally falls back to GJK/EPA. Most of those calls are expected to be genuine non-contacts
+//! (pairs within possible-touch range but not actually touching -- normal DEM broad-phase population,
+//! not a sign anything is wrong), not real contacts the dispatch is silently missing -- see
+//! ParticleKernels.h's ContactDetectionStats::cylFallbackTier1GjkFoundContact/GjkFoundNoContact
+//! counters, added specifically to measure that split from real runs instead of assuming it.
 //!
-//! Originally this only covered face-edge/special-contact/band-edge (the three scenarios where a
-//! WRONG MAGNITUDE was already known, from hand-picked test geometries, because the true closest
-//! feature can be on a curved band neither Kodam et al. nor Guo et al.'s corrections ever search).
-//! band-band-skewed and edge-edge were excluded, on the belief they were "fully verified against
-//! GJK/EPA with no open discrepancy" -- the fuzz test disproved that directly: with separation
-//! sampled near the true GJK/EPA contact boundary (5000 random cylinder pairs, realistic overlap
-//! depth), band-band-skewed and edge-edge produced ~8% FALSE POSITIVES -- reporting contact for
-//! pairs GJK/EPA confirms are genuinely separated -- every single one silently trusted by this
-//! function exactly because they were excluded from Tier 2. They are no longer excluded.
+//! special-contact: unconditional distrust. This scenario's own overlap formula (Guo et al. 2012,
+//! Table 1: the axial distance from a single rim point to the host's face, delta_a) is Guo's fix for
+//! this configuration's DETECTION -- ensuring it isn't silently dropped or misclassified as
+//! band-edge -- not a claim about magnitude accuracy, and Guo's own paper never validates it as one.
+//! Verified independently three ways for the hand-picked test geometry
+//! (testCylinderCylinderSpecialContact): Kodam/Guo reports 0.181, GJK/EPA reports ~0.610, and a
+//! THIRD, fully independent brute-force minimum-translation-distance search directly over each
+//! cylinder's own support function (no dependency on either implementation -- see
+//! testCylinderCylinderSpecialContactBruteForceMTD) finds 0.6095, matching GJK/EPA almost exactly and
+//! confirming Guo's own formula genuinely underestimates by >3x. A 10000-trial fuzz run found this
+//! scenario wrong 93% of the time it fires, the single largest concentrated error source in the raw
+//! analytical dispatch -- and it is rare enough (under 2% of all real contacts) that routing it to
+//! GJK/EPA unconditionally costs almost nothing.
 //!
-//! face-face and band-band-parallel remain excluded: those two apply only under the near-exact-
-//! parallel-axis precondition (eq. 22, checked to 1e-8), where the closed form is a direct algebraic
-//! solution with no curved-band/rim search involved at all -- the fuzz test's own results confirm
-//! they're never the source of a mismatch (all logged mismatches are band-band-skewed or edge-edge).
+//! EVERY OTHER SCENARIO IS TRUSTED DIRECTLY, WITH NO FURTHER CHECK. This function used to also run a
+//! Tier 2: a circumscribing-sphere magnitude cross-check applied to every non-exempt scenario
+//! (face-edge/band-edge/edge-edge, plus band-band-skewed/face-band whenever the fuzz suite found
+//! those unreliable too), falling back whenever a looser upper bound suggested more overlap was
+//! geometrically possible than what was reported. It was REMOVED (see PaperAnalyticalContactTest.cpp,
+//! testCylinderCylinderFullComparisonAndHybridFeasibility's history) once a dedicated 5000/10000-trial
+//! master comparison showed:
+//!   (a) it pushed the GJK/EPA fallback rate to ~90% -- for most trials, the closed-form dispatch was
+//!       being computed and then thrown away, defeating most of the point of having one;
+//!   (b) it is structurally ONE-SIDED: "is MORE overlap possible than what was reported?" reliably
+//!       catches UNDERESTIMATES (band-edge/edge-edge/face-edge/special-contact's typical failure
+//!       mode), but has no mechanism at all for OVERESTIMATES. A dedicated deep/degenerate-overlap
+//!       stress test (testCylinderCylinderLargeOverlapDegenerateStress, deliberately pushed to 30%-
+//!       150% of the smaller radius -- well past the 15% "realistic" cap every other fuzz test in
+//!       this file uses) found a case where the FULL hybrid, Tier 2 included, still returned an
+//!       overlap ~4.7x too large (372.6% relative error) because the bad value itself already
+//!       exceeded Tier 2's own bound, making "is more possible?" trivially false. Tier 2 was
+//!       therefore providing a false sense of safety it could not actually deliver in exactly the
+//!       regime (large errors) that mattered most.
+//! Dropping Tier 2 and keeping only Tier 1 plus special-contact's unconditional routing reduces the
+//! GJK/EPA fallback rate to ~3.3% (from ~90%), at the cost of a residual wrong-magnitude rate of
+//! ~2.3-2.5% of all genuine contacts -- entirely concentrated in band-edge/edge-edge/face-edge, where
+//! the errors are modest (median ~2.7% relative, max ~13.5% absolute in a 10000-trial run) rather
+//! than the severe (>90%) errors special-contact alone used to produce. face-face, band-band-parallel
+//! and band-band-skewed remain provably exact under their own preconditions regardless (see their own
+//! branch comments above), so trusting them directly was never in question.
+// useTightTier1: OPTIONAL simplification (this session) -- default false reproduces the ORIGINAL
+// Tier 1 bound exactly (centre-to-centre distance vs. radius+halfLength sum per side). true replaces
+// it with detail::closestDistanceSqBetweenSegments's capsule bound: the two cylinders' own AXIS
+// SEGMENTS vs. the sum of their radii, instead of collapsing each cylinder to a sphere first. Still
+// fully conservative (never wrongly declares "definitely separated" for a real contact -- see that
+// function's own comment for why), but strictly tighter for any cylinder with length > 0, which is
+// every cylinder this file is ever used on. The original bound is ALSO provably redundant in
+// production regardless of this flag: ParticleKernels.h's own outer per-pair reject (circumscribing-
+// sphere sum) always runs first and is strictly tighter than the original center-distance Tier 1
+// bound, so any pair that ever reaches this check has already passed a stricter version of it -- the
+// original Tier 1 can never actually reject anything. useTightTier1=true is the first version of this
+// check that can. Old bound kept fully intact (not deleted) so the two can be A/B compared -- see
+// PaperAnalyticalContactTest.cpp's testTightTier1Accuracy10k.
+// skipTier1: OPTIONAL (this session) -- default false runs Tier 1 as normal (either bound above).
+// true skips the dispatch-gap check ENTIRELY -- no distance computation of any kind, "no contact" is
+// trusted immediately. This is NOT a general-purpose speedup: it is only correct when a sufficiently
+// tight Layer 1 pre-filter (ParticleKernels.h's own cheap reject, ModelParameters.useTightLayer1) has
+// ALREADY run upstream and rejected every pair that could possibly need this check -- proven via the
+// triangle inequality (see useTightTier1's own comment: any pair passing the tight Layer 1 bound also
+// passes -- i.e. is never rejected by -- Tier 1's own bound, tight OR original), and confirmed
+// empirically (job 4194491: cylTier1CheaplyProvedSeparated=0 at every interval with both flags on).
+// Using skipTier1=true WITHOUT a tight Layer 1 filter upstream would silently trust "no contact" for
+// pairs Tier 1 would otherwise have caught -- a real correctness risk, not just a missed optimization.
 inline bool cylinderCylinderResultIsUncertain(const CylinderState& ci, const CylinderState& cj,
-                                               const ContactResult& analytical)
+                                               const ContactResult& analytical, bool useTightTier1 = false,
+                                               bool skipTier1 = false)
 {
    if (!analytical.contact)
    {
+      if (skipTier1) return false; // Tier 1 disabled entirely -- see this function's own comment above.
+      if (useTightTier1)
+      {
+         Vec3 p0i, p1i, p0j, p1j;
+         detail::cylinderAxisEndpoints(ci, p0i, p1i);
+         detail::cylinderAxisEndpoints(cj, p0j, p1j);
+         const real_t reach = ci.radius + cj.radius;
+         return detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) < reach * reach;
+      }
       const real_t centreDist = (cj.pos - ci.pos).length();
       const real_t reach = ci.radius + cj.radius + real_t(0.5) * ci.length + real_t(0.5) * cj.length;
-      return centreDist < reach; // Tier 1
+      return centreDist < reach; // Tier 1 (original, loose center-distance bound)
    }
 
-   const bool isFullyVerifiedScenario =
-      std::string(analytical.scenario) == "face-face" || std::string(analytical.scenario) == "band-band-parallel";
-   if (isFullyVerifiedScenario) return false;
-
-   auto circumscribingSphereOverlapOfOtherFace = [](const CylinderState& probe, const CylinderState& host) {
-      const real_t circumRadius = std::sqrt(probe.radius * probe.radius +
-                                             real_t(0.25) * probe.length * probe.length);
-      // Use whichever of host's two face planes probe's centre is nearer to -- the relevant one.
-      const Vec3   eHost  = host.axis();
-      const real_t halfLh = real_t(0.5) * host.length;
-      const Vec3   topFace = host.pos + halfLh * eHost;
-      const Vec3   botFace = host.pos - halfLh * eHost;
-      const real_t zTop = std::abs((probe.pos - topFace) * eHost);
-      const real_t zBot = std::abs((probe.pos - botFace) * eHost);
-      const real_t zFace = std::min(zTop, zBot);
-      return circumRadius - zFace; // Tier 2, per-direction
-   };
-
-   const real_t maxPossibleJ = circumscribingSphereOverlapOfOtherFace(cj, ci); // cj's reach into ci's face
-   const real_t maxPossibleI = circumscribingSphereOverlapOfOtherFace(ci, cj); // ci's reach into cj's face
-
-   return (maxPossibleJ > analytical.overlap) || (maxPossibleI > analytical.overlap); // Tier 2
+   return std::string(analytical.scenario) == "special-contact";
 }
 
 } // namespace paper_analytical
+
+//======================================================================================================================
+// Cylinder x Cylinder, ALTERNATIVE method -- Feng, Y.T., Han, K., & Owen, D.R.J. (2017). "A generic
+// contact detection framework for cylindrical particles in discrete element modelling." Computer
+// Methods in Applied Mechanics and Engineering, 315, 632-651.
+//
+// Unlike paper_analytical::cylinderCylinderContact (Kodam et al. 2010 / Guo et al. 2012), which
+// enumerates 7 named scenarios and searches specific rim/edge candidate points for each, this method
+// never enumerates scenarios at all: it builds a 4-parameter local frame from the shortest line
+// segment between the two cylinder AXES (Sec. 2), then reduces "does cylinder j's rim get within
+// radius of cylinder i's axis" to a closed-form closest-point-on-an-ellipse-to-the-origin problem
+// (Sec. 3.1, Appendix A) -- the paper's own motivation for this is explicitly the same rim-vs-band
+// gap this codebase's own testing independently found in Kodam/Guo: "the computations of the contact
+// overlap and contact normal for most of the identified cases are often of an ad-hoc nature... the
+// inappropriate choice of a contact normal may introduce superficial energy into the system."
+//
+// SCOPE, deliberately limited relative to the full paper:
+//  - Implements Sec. 3.1's non-overlap check (Step 1 interior contact, Step 3 base-disc-vs-axis
+//    quartic check) as a genuine existence + approximate overlap test. Step 2 (the profile-rectangle
+//    early-reject) is skipped -- the paper itself positions it purely as a speed optimisation ahead
+//    of Step 3, not something Step 3's own correctness depends on.
+//  - Does NOT implement Sec. 3.3/3.4's full layered/edge overlap-REGION representation. Instead, of
+//    the (up to 4) base-disc-vs-axis candidates Step 3 considers, whichever has the largest
+//    penetration is used directly for overlap/point -- an approximation, not the paper's own
+//    region-based quantity, flagged here exactly as this file flags its other approximations.
+//  - The contact normal uses Theorem 1's own PHYSICAL statement (the normal must pass through both
+//    cylinder axes) re-derived directly as the cross product of the two axis-plane normals, rather
+//    than transcribing the paper's eq. (23): that equation's two claimed-equal forms use n_{p1} in
+//    one and an apparently-mistyped "n_p" (missing its "2" subscript, or a rendering artefact) in the
+//    other, and independently deriving eq. (33) from the paper's OWN clearly-stated eq. (29)/(31)
+//    produces the opposite sign from what eq. (33) itself prints. Rather than propagate whichever
+//    side of that inconsistency is the actual typo, the normal below is derived fresh from the
+//    unambiguous physical statement instead (see fengContactNormal's own comment).
+//  - Exact axis-parallel configurations (cos(alpha) ~ 1) are explicitly out of scope, matching the
+//    paper's own Sec. 2 scoping ("cos alpha = 1... is a special case that will be considered
+//    [separately]") -- paper_analytical's face-face/band-band-parallel branches already handle that
+//    case exactly, or GJK/EPA.
+//======================================================================================================================
+namespace feng2017
+{
+using mesa_pd::Mat3;
+using mesa_pd::Vec3;
+using paper_analytical::ContactResult;
+using paper_analytical::CylinderState;
+using paper_analytical::detail::closestThetaOnEllipseToOrigin;
+using paper_analytical::detail::closestThetaOnEllipseWithinAxialRange;
+using paper_analytical::detail::intersectEllipseWithCircle;
+
+//! Theorem 1 (Contact Normal Theorem), re-derived from the paper's own physical statement rather
+//! than its eq. (23) (see the namespace-level comment for why): the normal line through contact
+//! point `p` must lie in the plane containing `p` and cylinder 1's axis (normal to that plane:
+//! np1 = n1 x (c1-p), exactly the paper's own eq. (30)/(36) definition) AND in the analogous plane
+//! for cylinder 2's axis (normal np2 = n2 x (c2-p)). A direction lying in both planes must be
+//! perpendicular to both planes' normals, i.e. n = np1 x np2 -- symmetric in the two cylinders,
+//! unlike eq. (23)'s asymmetric t-parametrised construction, and needing no separate "prove the
+//! first part similarly" step the paper's own proof leaves to the reader.
+inline Vec3 fengContactNormal(const Vec3& p, const Vec3& n1, const Vec3& c1, const Vec3& n2, const Vec3& c2)
+{
+   const Vec3 np1 = n1 % (c1 - p);
+   const Vec3 np2 = n2 % (c2 - p);
+   Vec3       n   = (np1 % np2).getNormalizedIfNotZero(); // zero iff p, axis 1 and axis 2 are
+                                                            // co-planar -- Theorem 1's own documented
+                                                            // exceptional case
+   // n x (-n) are both valid solutions of "perpendicular to both plane normals" -- orient toward
+   // cylinder 1, matching this file's own "points toward the 1st argument" convention (established
+   // for every paper_analytical scenario and sphere-sphere alike).
+   if (n * (c1 - c2) < real_t(0)) n = -n;
+   return n;
+}
+
+//! `debugClosestMissGap`, when non-null, is set to the smallest (distToAxis - hostRadius) found
+//! across every Step-3 candidate that had a genuinely axial-range-valid closest point (i.e.
+//! closestThetaOnEllipseWithinAxialRange succeeded), or left at +infinity if NONE of the 4
+//! candidates ever had a valid one at all. Diagnostic only, purely to distinguish "missed by a
+//! hair" (a small positive gap: a legitimately-in-range candidate came close but not close enough)
+//! from "no candidate ever qualified" (a structural gap -- +infinity) when this disagrees with an
+//! independent reference. Does not affect `result`.
+inline ContactResult fengCylinderCylinderContact(const CylinderState& c1, const CylinderState& c2,
+                                                  real_t* debugClosestMissGap = nullptr)
+{
+   ContactResult result;
+   real_t        closestMissGap = std::numeric_limits< real_t >::max();
+
+   const Vec3 n1 = c1.axis();
+   Vec3       n2 = c2.axis();
+   real_t     cosAlpha = n1 * n2;
+   if (cosAlpha < real_t(0))
+   {
+      n2 = -n2;
+      cosAlpha = -cosAlpha;
+   }
+   if (cosAlpha > real_t(1) - real_t(1e-6))
+   {
+      result.scenario = "feng-parallel-unsupported"; // out of scope, see namespace comment
+      return result;
+   }
+
+   const real_t sinAlpha = std::sqrt(std::max(real_t(0), real_t(1) - cosAlpha * cosAlpha));
+   const Vec3   ex  = (n2 % n1).getNormalized();  // eq. (2): common-perpendicular direction
+   const Vec3   ey1 = n1 % ex;                    // eq. (3)/(6): cylinder 1's own local y-axis
+   const Vec3   ey2 = n2 % ex;                    // cylinder 2's own local y-axis
+
+   const Vec3   c2c1 = c2.pos - c1.pos;
+   const real_t d  = ex * c2c1;                   // eq. (4): signed shortest distance between axes
+   const real_t t1 = n1 * c2c1;
+   const real_t t2 = n2 * c2c1;
+   const real_t s1 = (t1 - t2 * cosAlpha) / (sinAlpha * sinAlpha); // eq. (7)
+   const real_t s2 = -(t2 + t1 * cosAlpha) / (sinAlpha * sinAlpha);
+
+   const real_t h1 = real_t(0.5) * c1.length, h2 = real_t(0.5) * c2.length;
+
+   // --- Step 1: interior contact (Sec. 3.1) -- the closest-approach points o1, o2 between the two
+   // infinite axes both fall within the cylinders' own finite half-lengths. -----------------------
+   if (std::abs(d) < c1.radius + c2.radius && std::abs(s1) < h1 && std::abs(s2) < h2)
+   {
+      const Vec3 o1 = c1.pos + s1 * n1;
+      const Vec3 o2 = c2.pos + s2 * n2;
+      result.contact  = true;
+      result.overlap  = (c1.radius + c2.radius) - std::abs(d);
+      result.point    = real_t(0.5) * (o1 + o2);
+      result.normal   = fengContactNormal(result.point, n1, c1.pos, n2, c2.pos);
+      if (result.normal.sqrLength() < real_t(1e-12)) result.normal = math::sign(-d) * ex; // co-planar
+                                                                                            // fallback
+      result.scenario = "feng-interior";
+      return result;
+   }
+   if (std::abs(d) >= c1.radius + c2.radius) return result; // axes too far apart, definitely separated
+
+   // --- Step 3: base-disc-vs-axis quartic check (Sec. 3.1, Appendix A) -----------------------------
+   // Up to 4 candidates: each of the two cylinders' two base-disc rims, projected as an ellipse into
+   // the OTHER cylinder's cross-sectional plane, checked against that other cylinder's radius. See
+   // this function's own derivation (namespace comment) for why the ellipse's semi-axes are exactly
+   // (probeRadius, probeRadius*cosAlpha) and why the ellipse parameter equals the true 3D rim angle
+   // directly (ex, ey_host, and ey_probe share a common perpendicular decomposition).
+   struct Candidate
+   {
+      bool        valid   = false;
+      real_t      overlap = real_t(0);
+      Vec3        point, normal;
+      const char* kind = "feng-rim-edge"; // vs. "feng-rim-face" -- see the two tryDisc branches below;
+                                            // kept distinct so their reliability can be measured
+                                            // separately (they have different failure profiles).
+   };
+   Candidate best;
+
+   auto tryDisc = [&](const Vec3& hostPos, const Vec3& hostN, const Vec3& hostEx, const Vec3& hostEy,
+                       real_t hostRadius, real_t hostHalfLen, const Vec3& probeEy, const Vec3& baseCentre,
+                       real_t probeRadius) {
+      const real_t a = probeRadius, b = probeRadius * cosAlpha;
+      const real_t x0 = hostEx * (baseCentre - hostPos);
+      const real_t y0 = hostEy * (baseCentre - hostPos);
+      const real_t zC = hostN * (baseCentre - hostPos);
+
+      // Face-type candidate (Kodam's "face-band" mechanism: probe's flat disc INTERIOR, not its rim,
+      // is the closest feature) -- third attempt, using Appendix B to detect the case properly rather
+      // than inferring it from Appendix A alone.
+      //   Attempt 1: "origin inside the ellipse", disc-centre axial reference (zC). Net regression:
+      //     309->467 total mismatches (245 new false positives).
+      //   Attempt 2: added the "closest boundary point clears hostRadius" guard, and corrected the
+      //     axial reference to zHostAtOrigin (the disc PLANE's crossing point at host's axis, not the
+      //     disc's own centre). Net regression: 309->339 total mismatches (53 new false positives).
+      // Both attempts used a SINGLE axial reference point, when the disc is a tilted plane whose
+      // axial position along host varies continuously across it. This attempt instead uses
+      // intersectEllipseWithCircle (Appendix B) as the authoritative containment DETECTOR (zero real
+      // roots at radius hostRadius means the boundary genuinely never crosses -- either fully inside
+      // or fully outside, with no ambiguity left to a separate closed-form guess), and computes the
+      // full RANGE of axial positions the disc's plane spans across host's entire cross-section
+      // (not one point) for the overlap magnitude.
+      {
+         real_t crossings[4];
+         int    crossingCount;
+         intersectEllipseWithCircle(a, b, x0, y0, hostRadius, crossings, crossingCount);
+         const real_t insideParam = (a > real_t(1e-12) && b > real_t(1e-12))
+                                        ? (x0 * x0) / (a * a) + (y0 * y0) / (b * b)
+                                        : real_t(2);
+         if (crossingCount == 0 && insideParam < real_t(1))
+         {
+            // No crossing anywhere on the rim, AND host's own axis point lies inside the ellipse ->
+            // the rim never dips inside hostRadius (checked next) means host's ENTIRE cross-section,
+            // not just its axis, is swallowed by the disc.
+            const real_t thetaU          = closestThetaOnEllipseToOrigin(a, b, x0, y0);
+            const real_t xU              = x0 + a * std::cos(thetaU);
+            const real_t yU              = y0 + b * std::sin(thetaU);
+            const real_t boundaryMinDist = std::sqrt(xU * xU + yU * yU);
+            if (boundaryMinDist > hostRadius)
+            {
+               // z1(x1,y1) on the disc's plane is LINEAR in (x1,y1) (see the derivation in the
+               // conversation this was worked out in): z1 = zHostAtOrigin + x1*uA + y1*(uB/cosAlpha).
+               // Its extreme values over host's entire cross-sectional disk (radius hostRadius,
+               // centred at the origin) occur at the disk boundary in the gradient direction:
+               // zHostAtOrigin +- hostRadius*|gradient|. Using the RANGE this spans (not a single
+               // point) is the correction over both earlier attempts.
+               const real_t uA = hostN * hostEx, uB = hostN * probeEy;
+               const real_t sAtOrigin = -x0, tAtOrigin = -y0 / cosAlpha;
+               const real_t zHostAtOrigin = zC + sAtOrigin * uA + tAtOrigin * uB;
+               const real_t gradMag = std::sqrt(uA * uA + (uB / cosAlpha) * (uB / cosAlpha));
+               const real_t zMin = zHostAtOrigin - hostRadius * gradMag;
+               const real_t zMax = zHostAtOrigin + hostRadius * gradMag;
+               // Point in [zMin, zMax] closest to host's own centre (z1=0) -- the most-overlapping
+               // slice of the disc's coverage relative to host's finite extent.
+               const real_t zBest = std::clamp(real_t(0), zMin, zMax);
+
+               const real_t faceOverlap = hostHalfLen - std::abs(zBest);
+               if (faceOverlap > real_t(0) && (!best.valid || faceOverlap > best.overlap))
+               {
+                  const real_t zSigned   = math::sign(zBest) * (hostHalfLen - real_t(0.5) * faceOverlap);
+                  const Vec3   facePoint = hostPos + zSigned * hostN;
+                  best.valid   = true;
+                  best.overlap = faceOverlap;
+                  best.point   = facePoint;
+                  best.kind    = "feng-rim-face";
+                  best.normal  = fengContactNormal(facePoint, n1, c1.pos, n2, c2.pos);
+                  if (best.normal.sqrLength() < real_t(1e-12))
+                     best.normal = (-math::sign(zBest) * hostN).getNormalizedIfNotZero();
+               }
+            }
+         }
+      }
+
+      // zHost(theta) = hostN . (rimPoint(theta) - hostPos): the SAME rim point's axial position along
+      // the host's own axis, as a function of the SAME theta -- also just a first-harmonic function,
+      // since rimPoint(theta) is itself a first-harmonic function of theta. Constraining the ellipse
+      // search to where |zHost(theta)| < hostHalfLen (rather than solving unconstrained and rejecting
+      // the answer if it lands outside that range) is the fix for the false-negative gap fuzz-testing
+      // found in the unconstrained version -- see closestThetaOnEllipseWithinAxialRange's own comment.
+      const real_t zA = probeRadius * (hostN * hostEx);
+      const real_t zB = probeRadius * (hostN * probeEy);
+
+      real_t theta;
+      if (!closestThetaOnEllipseWithinAxialRange(a, b, x0, y0, zC, zA, zB, hostHalfLen, theta))
+         return; // the ENTIRE rim lies outside the host's finite length -- genuinely no candidate at
+                  // all here (NOT tracked in closestMissGap: the unconstrained minimum's own gap is
+                  // meaningless here precisely because it's known to lie outside the valid range)
+
+      // theta is simultaneously the ellipse parameter AND the true 3D angle around the probe's own
+      // base-disc rim (both bases share the same (ex, ey_probe) orthonormal in-plane frame), so the
+      // actual 3D rim point is reconstructed directly, with no separate inverse mapping needed.
+      const Vec3   rimPoint = baseCentre + probeRadius * (std::cos(theta) * hostEx + std::sin(theta) * probeEy);
+      const real_t zHost    = hostN * (rimPoint - hostPos);
+
+      const Vec3   radial     = (rimPoint - (hostPos + zHost * hostN));
+      const real_t distToAxis = radial.length();
+      closestMissGap = std::min(closestMissGap, distToAxis - hostRadius);
+      if (distToAxis >= hostRadius) return;
+
+      const real_t overlap = hostRadius - distToAxis;
+      if (!best.valid || overlap > best.overlap)
+      {
+         Vec3 radialHat = radial.getNormalizedIfNotZero(); // points from host axis toward the rim
+                                                             // point (i.e. away from host)
+         if (radialHat * (c1.pos - c2.pos) < real_t(0)) radialHat = -radialHat; // orient toward c1,
+                                                                                  // same convention as
+                                                                                  // fengContactNormal
+         best.valid   = true;
+         best.overlap = overlap;
+         best.point   = rimPoint - real_t(0.5) * overlap * radialHat;
+         best.normal  = fengContactNormal(best.point, n1, c1.pos, n2, c2.pos);
+         if (best.normal.sqrLength() < real_t(1e-12)) best.normal = radialHat; // co-planar fallback
+      }
+   };
+
+   tryDisc(c1.pos, n1, ex, ey1, c1.radius, h1, ey2, c2.pos + h2 * n2, c2.radius);
+   tryDisc(c1.pos, n1, ex, ey1, c1.radius, h1, ey2, c2.pos - h2 * n2, c2.radius);
+   tryDisc(c2.pos, n2, ex, ey2, c2.radius, h2, ey1, c1.pos + h1 * n1, c1.radius);
+   tryDisc(c2.pos, n2, ex, ey2, c2.radius, h2, ey1, c1.pos - h1 * n1, c1.radius);
+
+   if (best.valid)
+   {
+      result.contact  = true;
+      result.overlap  = best.overlap;
+      result.point    = best.point;
+      result.normal   = best.normal;
+      result.scenario = best.kind; // "feng-rim-edge" or "feng-rim-face" -- see Candidate's own comment
+   }
+   if (debugClosestMissGap) *debugClosestMissGap = closestMissGap;
+   return result;
+}
+
+} // namespace feng2017
+
 } // namespace antidunes
 } // namespace walberla

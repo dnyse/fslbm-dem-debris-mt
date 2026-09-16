@@ -246,6 +246,176 @@ class BedloadTransportEvaluator
 };
 
 
+// Thesis item 3 (THESIS_PLAN.md): measures a developing clog's backwater effect directly, rather than
+// only observing it visually -- tracks local water elevation and pressure at two explicit probe
+// points (e.g. upstream/downstream of a pier or other obstruction; the caller decides where these are
+// via prm, this evaluator has no notion of "obstruction" itself, so it works equally for a no-clog
+// open-channel reference run with no obstruction at all).
+//
+// `columnPrefix` (2026-09-14, per Schalko, Follett & Nepf 2023, Water Resources Research -- a
+// lateral-gap logjam study directly analogous to a two-pillar-with-a-gap geometry): that paper found
+// real lateral variation in water depth (~7.5%+-1.8%) between a partial-width obstruction's own
+// blocked-flow region and the open gap beside it, and took SEPARATE longitudinal profiles at each --
+// the gap centerline alone is not representative of the pillar-face region where the actual backwater
+// pile-up is expected to be strongest. Two instances of this evaluator, each with its own
+// `columnPrefix` (e.g. "clog" for the existing gap-centerline probe pair, "clogPillar" for a second
+// pair placed at the pillar's own Y), can therefore coexist and write to distinct dataCols columns
+// without collision -- see BuildTimeloop.h's own wiring.
+//
+// Elevation: sum of the fill level over Z (skipping solid/moving-obstacle cells) for every (x,y) in a
+// small XY window around the probe, averaged over the window -- the same "integrate fill over the
+// column" technique AverageDataSliceEvaluator already uses above, which for a flat, non-solid column
+// gives exactly the local liquid depth (fully-liquid cells contribute 1 each, the single interface
+// cell contributes its fractional fill -- no separate free-surface search/reconstruction needed).
+//
+// Pressure: lattice pressure p=(rho-1)/3 (c_s^2=1/3 convention, matching DataInitialization.h's own
+// HydrostaticDensityFtor) read at the probe's EXACT cell (the caller is expected to place probes at a
+// sensible submerged position via prm) -- reported both raw and as "excess" over the plain
+// hydrostatic reference rho_hyd(z)=1+3*a_z*(z-H) at that same position (same formula/inputs as
+// HydrostaticDensityFtor, inlined here rather than depending on DataInitialization.h to avoid an
+// otherwise-unnecessary include), since the raw number is dominated by local water depth while the
+// excess isolates the obstruction/backwater-driven component.
+template< typename AntidunesBoundaryHandling_T, typename PdfField_T, typename FlagField_T, typename ScalarField_T >
+class ClogMeasurementEvaluator
+{
+ public:
+   ClogMeasurementEvaluator(const shared_ptr< StructuredBlockStorage >& blocks, const ConstBlockDataID& flagFieldID,
+                            const ConstBlockDataID& fillFieldID, const ConstBlockDataID& pdfFieldID,
+                            const Vector3< real_t >& upstreamPos, const Vector3< real_t >& downstreamPos,
+                            real_t probeHalfWidthXY, const shared_ptr< Vector3< real_t > >& acceleration,
+                            real_t absoluteLiquidHeight, const shared_ptr< DataCols >& dataCols, uint_t frequency,
+                            std::string columnPrefix = "clog")
+      : blocks_(blocks), flagFieldID_(flagFieldID), fillFieldID_(fillFieldID), pdfFieldID_(pdfFieldID),
+        upstreamPos_(upstreamPos), downstreamPos_(downstreamPos), probeHalfWidthXY_(probeHalfWidthXY),
+        acceleration_(acceleration), absoluteLiquidHeight_(absoluteLiquidHeight), dataCols_(dataCols),
+        frequency_(frequency), executionCounter_(uint_c(0)), columnPrefix_(std::move(columnPrefix))
+   {}
+
+   void operator()()
+   {
+      if (frequency_ == uint_c(0)) { return; }
+
+      if (executionCounter_ % frequency_ == uint_c(0))
+      {
+         compute();
+         writeToFile();
+      }
+
+      ++executionCounter_;
+   }
+
+   real_t hydrostaticPressure(const Vector3< real_t >& pos) const
+   {
+      // p = (rho_hyd - 1) / 3, rho_hyd(z) = 1 + 3*a_z*(z-H)  =>  p_hyd(z) = a_z*(z-H)
+      return (*acceleration_)[2] * (pos[2] - absoluteLiquidHeight_);
+   }
+
+   // Sum of the fill level over Z (skipping solid/moving-obstacle cells) for every (x,y) column whose
+   // center falls within probeHalfWidthXY_ of probePos, averaged over the number of such columns --
+   // gives the local liquid depth at the probe, per the class-level comment above.
+   real_t elevationAt(const Vector3< real_t >& probePos) const
+   {
+      real_t sum = real_t(0);
+
+      for (auto block = blocks_->begin(); block != blocks_->end(); ++block)
+      {
+         const FlagField_T* const flagField   = block->getData< const FlagField_T >(flagFieldID_);
+         const ScalarField_T* const fillField = block->getData< const ScalarField_T >(fillFieldID_);
+
+         const auto solidMO     = flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID);
+         const auto solidNoSlip = flagField->getFlag(AntidunesBoundaryHandling_T::noSlipFlagID);
+
+         CellInterval xyz = flagField->xyzSize();
+         Cell globalCell;
+
+         for (auto cell : xyz)
+         {
+            blocks_->transformBlockLocalToGlobalCell(globalCell, *block, cell);
+            if (std::abs(real_c(globalCell.x()) - probePos[0]) > probeHalfWidthXY_) continue;
+            if (std::abs(real_c(globalCell.y()) - probePos[1]) > probeHalfWidthXY_) continue;
+            if (flagField->isFlagSet(cell, solidMO) || flagField->isFlagSet(cell, solidNoSlip)) continue;
+
+            sum += fillField->get(cell);
+         }
+      }
+
+      // number of (x,y) columns in the probe window -- computed analytically (not counted during the
+      // scan above) so it is independent of block decomposition/rank ownership.
+      const int halfW          = int_c(std::floor(probeHalfWidthXY_));
+      const uint_t columnCount = uint_c((2 * halfW + 1) * (2 * halfW + 1));
+
+      mpi::reduceInplace(sum, mpi::SUM);
+      return columnCount > 0 ? sum / real_c(columnCount) : real_t(0);
+   }
+
+   void compute()
+   {
+      upstreamElevation_   = elevationAt(upstreamPos_);
+      downstreamElevation_ = elevationAt(downstreamPos_);
+
+      upstreamPressure_   = real_t(0);
+      downstreamPressure_ = real_t(0);
+
+      const Cell upstreamGlobalCell(cell_idx_c(upstreamPos_[0]), cell_idx_c(upstreamPos_[1]), cell_idx_c(upstreamPos_[2]));
+      const Cell downstreamGlobalCell(cell_idx_c(downstreamPos_[0]), cell_idx_c(downstreamPos_[1]), cell_idx_c(downstreamPos_[2]));
+
+      for (auto block = blocks_->begin(); block != blocks_->end(); ++block)
+      {
+         const FlagField_T* const flagField = block->getData< const FlagField_T >(flagFieldID_);
+         const PdfField_T* const pdfField   = block->getData< const PdfField_T >(pdfFieldID_);
+         const CellInterval xyz              = flagField->xyzSize();
+
+         Cell localCell;
+         blocks_->transformGlobalToBlockLocalCell(localCell, *block, upstreamGlobalCell);
+         if (xyz.contains(localCell)) { upstreamPressure_ = (pdfField->getDensity(localCell) - real_t(1)) / real_t(3); }
+
+         blocks_->transformGlobalToBlockLocalCell(localCell, *block, downstreamGlobalCell);
+         if (xyz.contains(localCell)) { downstreamPressure_ = (pdfField->getDensity(localCell) - real_t(1)) / real_t(3); }
+      }
+
+      mpi::reduceInplace(upstreamPressure_, mpi::SUM);
+      mpi::reduceInplace(downstreamPressure_, mpi::SUM);
+      // note: only root process has the complete information!
+   }
+
+   void writeToFile()
+   {
+      WALBERLA_ROOT_SECTION()
+      {
+         dataCols_->add(columnPrefix_ + "UpstreamElevation", upstreamElevation_);
+         dataCols_->add(columnPrefix_ + "DownstreamElevation", downstreamElevation_);
+         dataCols_->add(columnPrefix_ + "UpstreamPressure", upstreamPressure_);
+         dataCols_->add(columnPrefix_ + "DownstreamPressure", downstreamPressure_);
+         dataCols_->add(columnPrefix_ + "UpstreamExcessPressure", upstreamPressure_ - hydrostaticPressure(upstreamPos_));
+         dataCols_->add(columnPrefix_ + "DownstreamExcessPressure", downstreamPressure_ - hydrostaticPressure(downstreamPos_));
+      }
+   }
+
+ private:
+   shared_ptr< StructuredBlockStorage > blocks_;
+   const ConstBlockDataID flagFieldID_;
+   const ConstBlockDataID fillFieldID_;
+   const ConstBlockDataID pdfFieldID_;
+
+   Vector3< real_t > upstreamPos_;
+   Vector3< real_t > downstreamPos_;
+   real_t            probeHalfWidthXY_;
+
+   shared_ptr< Vector3< real_t > > acceleration_;
+   real_t absoluteLiquidHeight_;
+
+   real_t upstreamElevation_;
+   real_t downstreamElevation_;
+   real_t upstreamPressure_;
+   real_t downstreamPressure_;
+
+   shared_ptr< DataCols > dataCols_;
+   uint_t frequency_;
+   uint_t executionCounter_;
+   std::string columnPrefix_;
+};
+
+
 template< typename ParticleAccessor_T >
 class TotalHydrodynamicForceEvaluator
 {
@@ -279,7 +449,16 @@ class TotalHydrodynamicForceEvaluator
          if (!isSet(ac_->getFlags(i), mesa_pd::data::particle_flags::GHOST) &&
             !isSet(ac_->getFlags(i), mesa_pd::data::particle_flags::GLOBAL))
          {
-            totalHydrodynamicForce_ += ac_->getHydrodynamicForce(i);
+            // NOT getHydrodynamicForce(i): this evaluator runs in timeloopEval, which executes
+            // AFTER ParticleKernels::resetHydroForces() has already zeroed HydrodynamicForce/Torque
+            // for the step (Antidunes.cpp's per-timestep order: reduceAndAvgHydroForces ->
+            // doDEMSubCycles -> resetHydroForces -> timeloopAfterDEM -> timeloopEval). Reading it
+            // here always summed to exactly zero, for every particle, every step, regardless of
+            // buoyancy model (ResetHydrodynamicForceTorqueKernel.h resets unconditionally).
+            // OldHydrodynamicForce is set to this same step's real (optionally time-averaged, see
+            // useHydrodynamicForceTimeAveraging) value inside reduceAndAvgHydroForces() and is never
+            // touched by the reset kernel, so it still holds the correct value here.
+            totalHydrodynamicForce_ += ac_->getOldHydrodynamicForce(i);
             maxParticlePosZ_ = std::max(ac_->getPosition(i)[2], maxParticlePosZ_);
          }
       }

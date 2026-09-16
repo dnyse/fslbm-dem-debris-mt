@@ -1,0 +1,2 @@
+// See DEMValidationScenarios.h::runMultiPointBoxContactFuzz for what this checks.
+DEMValidation{ testCase multiPointBoxContactFuzz; }

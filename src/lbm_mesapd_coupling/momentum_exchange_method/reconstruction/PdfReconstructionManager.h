@@ -617,14 +617,18 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             if (inner) ++convIntfUnknown_;
             static uint_t provisionalLogCount = uint_t(0);
             ++provisionalLogCount;
+            // Logging disabled (this session): fires for dozens of cells every timestep and, combined
+            // with the uncached ignore-regex check every WALBERLA_LOG_INFO call pays regardless of
+            // whether the message is filtered (see Logging::isInIgnoreCallerPaths), was both flooding
+            // sbatch-output past the shared /home quota AND measurably slowing every run down.
             if (provisionalLogCount <= uint_t(20) || (provisionalLogCount % uint_t(5000) == uint_t(0)))
             {
-               WALBERLA_LOG_INFO("Bogner state selection: cell (" << cx << ", " << cy << ", " << cz << ") has "
-                  << unknownNbr << " unclassified FormerMO neighbour(s); "
-                  << (usePass3Reresolution_
-                         ? "provisionally interface pending Pass-3 re-resolution."
-                         : "falling back to interface instead of liquid to preserve the liquid/gas separation "
-                           "invariant."));
+               // WALBERLA_LOG_INFO("Bogner state selection: cell (" << cx << ", " << cy << ", " << cz << ") has "
+               //    << unknownNbr << " unclassified FormerMO neighbour(s); "
+               //    << (usePass3Reresolution_
+               //           ? "provisionally interface pending Pass-3 re-resolution."
+               //           : "falling back to interface instead of liquid to preserve the liquid/gas separation "
+               //             "invariant."));
             }
          }
          else if (hasGas && !hasLiquid && hasUnknown)
@@ -633,14 +637,15 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             if (inner) ++convIntfUnknownGas_;
             static uint_t provisionalGasLogCount = uint_t(0);
             ++provisionalGasLogCount;
+            // Logging disabled (this session): same reason as the symmetric liquid case above.
             if (provisionalGasLogCount <= uint_t(20) || (provisionalGasLogCount % uint_t(5000) == uint_t(0)))
             {
-               WALBERLA_LOG_INFO("Bogner state selection: cell (" << cx << ", " << cy << ", " << cz << ") has "
-                  << unknownNbr << " unclassified FormerMO neighbour(s); "
-                  << (usePass3Reresolution_
-                         ? "provisionally interface pending Pass-3 re-resolution."
-                         : "falling back to interface instead of gas to preserve the liquid/gas separation "
-                           "invariant."));
+               // WALBERLA_LOG_INFO("Bogner state selection: cell (" << cx << ", " << cy << ", " << cz << ") has "
+               //    << unknownNbr << " unclassified FormerMO neighbour(s); "
+               //    << (usePass3Reresolution_
+               //           ? "provisionally interface pending Pass-3 re-resolution."
+               //           : "falling back to interface instead of gas to preserve the liquid/gas separation "
+               //             "invariant."));
             }
          }
          else

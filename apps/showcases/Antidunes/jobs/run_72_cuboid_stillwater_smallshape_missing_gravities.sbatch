@@ -36,7 +36,7 @@ PRM_DIR="$REPO/apps/showcases/Antidunes/prms"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 
 if [[ -n "$HPCVAULT" ]]; then
-    ARCHIVE_ROOT="$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_$STAMP"
+    ARCHIVE_ROOT="$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_$STAMP"
 else
     ARCHIVE_ROOT="$BIN_DIR/archive/$STAMP"
 fi
@@ -46,7 +46,7 @@ mkdir -p "$ARCHIVE_ROOT"
 
 archive_outputs() {  # $1 = label
     for d in vtk-out eval snapshots; do
-        [[ -d "$BIN_DIR/$d" ]] && mv "$BIN_DIR/$d" "$ARCHIVE_ROOT/${1}_$d"
+        [[ -d "$BIN_DIR/$d" ]] && mkdir -p "$ARCHIVE_ROOT/$1" && mv "$BIN_DIR/$d" "$ARCHIVE_ROOT/$1/$d"
     done
 }
 

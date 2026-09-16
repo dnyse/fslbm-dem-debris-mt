@@ -1,0 +1,49 @@
+BedGeneration{
+    // Thesis item 1b (MEM vs. analytical buoyancy comparison, THESIS_PLAN.md) -- scaling-reference bed
+    // for the R=1 (baseline) resolution level. Per explicit instruction, this replaces the
+    // avgParticleDiameterOverride/dxSIOverride shortcut used in an earlier draft: the Antidunes prms at
+    // this resolution read their avgParticleDiameter/dx_SI NATURALLY from this file's header via
+    // Utility.h::getAvgDiameterScalingFactor, exactly like production scenarios do.
+    //
+    // diameter_SI reused VERBATIM from the real production BedGeneration.prm (same physical particle
+    // scale as every other scenario in this project). domainSize_SI[0]==domainSize_SI[1] EXACTLY (both
+    // 0.017409318) because the target Antidunes domain at R=1 has a SQUARE cross-section
+    // (<48,48,96> -- periodic in both X and Y for this test, see THESIS_PLAN.md), which makes
+    // Utility.h::getAvgDiameterScalingFactor's uint_c(scalingFactor*generationDomainSize_SI[1]) ==
+    // domainSize[1] integer-match assertion satisfied EXACTLY (no "+0.3 cell" floating-point safety
+    // margin needed here, unlike production's own 128:60 non-square ratio -- see that file's own
+    // header comment for why that margin exists there).
+    //
+    // Solved domainSize_SI[0] so avgDiameter(LU) comes out at exactly 8.0 for the R=1 Antidunes domain
+    // (domainSize[0]_LU=48): domainSize_SI[0] = diameter_SI * 48 / 8 = 0.017409318.
+    // Predicted scalingFactor = 48/0.017409318 = 2757.587, predicted dx_SI = 1/2757.587 = 0.00036265,
+    // predicted gravityOverride (for the Antidunes prms' PhysicsParameters) = 9.81*dt_SI^2/dx_SI ≈
+    // 2.13699e-05 (dt_SI = viscosity_LU/viscosity_SI * dx_SI^2, viscosity_LU=0.000214026 under
+    // useHardcodedUnits=true, same Re/Fr/We as item 1a's own established calibration). These are
+    // TARGETS -- diameter_SI in the real output header is the actual average over all generated
+    // spheres (each jittered +-10% around the input below), so the final gravityOverride must be
+    // confirmed against the real generated spheres_out_buoyancy_r1.dat before being trusted, per
+    // THESIS_PLAN.md's own verification steps.
+    //
+    // generationSpacing_SI = diameter_SI*1.2 (tighter than production's 1.75x -- deliberately, to fit
+    // more particles in this much smaller generation domain: ~125 particles expected, versus ~40 at
+    // production's own spacing ratio, for a tighter statistical average).
+    domainSize_SI < 0.017409318, 0.017409318, 0.034818636 >;
+    blocks < 3, 2, 12 >;
+    diameter_SI 0.0029015530199227404;
+    gravity_SI 9.81;
+    densityFluid_SI 1000;
+    densityParticle_SI 2550;
+    generationSpacing_SI 0.0034818636239;
+    initialVelocity_SI 1;
+    dt_SI 5e-5;
+    frictionCoefficient 0.5;
+    restitutionCoefficient 0.1;
+    collisionTime_SI 5e-4;
+    poissonsRatio 0.22;
+    timeSteps 10000;
+    visSpacing 100;
+    outFileName spheres_out_buoyancy_r1.dat;
+    denseBottomLayer False;
+    bottomLayerOffsetFactor 1.0;
+}

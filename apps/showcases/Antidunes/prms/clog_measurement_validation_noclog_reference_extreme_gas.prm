@@ -1,0 +1,182 @@
+// clog_measurement_validation_noclog_reference_extreme_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// Thesis item 3 (THESIS_PLAN.md): the no-clog reference counterpart to the "extreme"
+// clog_measurement_validation_extreme_pidon/pidoff_gas.prm pair -- same doubled domain/pillar
+// geometry, but NO floating spheres at all (like the small clog_measurement_validation_noclog_
+// reference_gas.prm is to the small sanity-clog pair). Establishes the baseline needed for the
+// reference-subtracted afflux metric (THESIS_PLAN.md item 3) at the extreme scale.
+//
+// Domain <768, 40, 90>: X DOUBLED from the small scenario's 384 (every X-valued position below --
+// pillars, probes, release zone -- is simply the small scenario's own X doubled, which preserves every
+// relative distance/margin exactly: e.g. pillars at the new domain's exact midpoint (384, same as the
+// small scenario's pillars sitting at ITS domain's exact midpoint 192), so this is a clean geometric
+// scale-up, not a redesign). Y=40 and the pier gap (still 6 LU, still < the unchanged 8 LU sphere
+// diameter) are left UNCHANGED -- only X grows, giving 2x the queueing/pile-up room without touching
+// the "one sphere physically cannot pass" guarantee the small scenario's own geometry relies on.
+// Z=90 unchanged (same low-water convention as the small scenario, see its own header for why).
+// periodicity <1,0,0> (X periodic, Y walled), same as every two-pillar scenario in this project.
+//
+// cellsPerBlock unchanged <64,20,15> -> numBlocks (768/64, 40/20, 90/15) = (12, 2, 6) = 144 ranks
+// (2x the small scenario's 72) -- 2 nodes on the multinode partition, not 1 (see
+// jobs/run_144_clog_measurement_validation_extreme_all.sbatch).
+//
+// Physics (targetMeanVelocityMagnitude, PID gains, Re/Fr/We, avgParticleDiameterOverride/dxSIOverride,
+// densityRatio, liquidHeightFactor, floorHeightFactor) are IDENTICAL to the small scenario -- this is a
+// pure geometry/debris-count scale-up of the same physical setup, not a different flow regime.
+//
+// timesteps 97500 = last release (72500) + a 25000-step interaction/settling tail (a bit more than the
+// small scenario's own ~20000-step tail, since 3x the debris plausibly needs longer to reach whatever
+// final jam state it settles into).
+//
+// ClogMeasurement probes: upstream X=280, downstream X=500 -- the small scenario's own X=140/250,
+// doubled (i.e. the same 52/58 LU offset from the pier center, scaled with everything else). Pillar-
+// face probe pair (see EvaluationParameters below) at the same doubled X, Y=11 (unchanged, matching the
+// left CylinderPillar's own unchanged Y center) -- see the small scenario's own header for the Schalko,
+// Follett & Nepf (2023) citation motivating this second pair.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 20, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 false;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <768, 40, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.04;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+   enabled                     true;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         97500;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+   // no gravityOverride -- dynamically computed, see file header
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;   // never opened -- see avgParticleDiameterOverride below
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8.001943372119138;
+   dxSIOverride                0.000362694127490625;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar { center < 384, 11, 45 >; radius 6; }
+   CylinderPillar { center < 384, 29, 45 >; radius 6; }
+}
+
+
+
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+
+   ClogMeasurement
+   {
+      upstreamPos       < 280, 20, 40 >;
+      downstreamPos      < 500, 20, 40 >;
+      probeHalfWidthXY   2;
+
+      // Second probe pair at the pillar's own Y (=11) instead of the gap centreline (Y=20) -- see the
+      // small clog_measurement_validation_sanity_clog_*_gas.prm's own header for the Schalko, Follett &
+      // Nepf (2023) citation motivating this. Same doubled X as the gap probes above.
+      pillarUpstreamPos    < 280, 11, 40 >;
+      pillarDownstreamPos  < 500, 11, 40 >;
+   }
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       10000000000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

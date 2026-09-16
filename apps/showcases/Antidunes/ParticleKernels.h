@@ -895,20 +895,242 @@ public:
          return GeneralContactDetection::operator()(idx1, idx2, bx1, bx2, ac);
       }
 
+      // useSpheroBoxContact (this session): treats each box as a genuine "rounded box"/spherosimplex
+      // -- see ModelParameters.useSpheroBoxContact's own doc comment (SimulationParams.h) for the full
+      // derivation. Bypasses boxBoxSAT/boxBoxMultiPointContacts entirely (mutually exclusive with
+      // useRoundedBoxCorners/useMultiPointBoxContact/useBoxOverlapCap/useAxisHysteresis/
+      // useContactManifold, which only apply to that dispatch) and instead runs mesa_pd's own GJK/EPA
+      // -- the SAME general-purpose convex-convex algorithm this project already trusts as its
+      // fallback just above for useAnalyticalContactDetection=false -- called with a REAL physical
+      // margin (spheroBoxRadius) on each of the two SHARP boxes instead of
+      // GeneralContactDetection::collideGJKEPA's tiny numerical-tolerance margin. doGJKmargin/
+      // doEPAmargin already implement exactly the "core shape + margin" Minkowski-sum construction a
+      // spherosimplex is defined by; the combined dilation is 2*spheroBoxRadius (two equally-rounded
+      // bodies), continuous through EVERY feature-pair transition (vertex-vertex, vertex-edge,
+      // vertex-face, edge-edge, edge-face, face-face) since that is a structural property of GJK/EPA
+      // itself, not a per-case patch like useRoundedBoxCorners' edge-only fix.
+      // Shared GJK/EPA-with-margin resolver -- used both as the DEFAULT useSpheroBoxContact path
+      // and as useSpheroBoxAnalytical's fallback (see below) whenever Eberly's closed-form
+      // distance can't be trusted. Returns false (no contact) if genuinely no contact.
+      auto resolveSpheroBoxGJK = [&](const mesa_pd::data::Box& b1, const mesa_pd::data::Box& b2) -> bool {
+         mesa_pd::collision_detection::Support supportA(ac.getPosition(idx1), ac.getRotation(idx1), b1);
+         mesa_pd::collision_detection::Support supportB(ac.getPosition(idx2), ac.getRotation(idx2), b2);
+         mesa_pd::collision_detection::GJK gjk;
+         if (!gjk.doGJKmargin(supportA, supportB, spheroBoxRadius)) return false;
+
+         mesa_pd::collision_detection::EPA epa;
+         epa.useSphereOptimization(false);
+         mesa_pd::Vec3 normal, point;
+         real_t        penetrationDepth;
+         if (!epa.doEPAmargin(supportA, supportB, gjk, normal, point, penetrationDepth, spheroBoxRadius))
+            return false;
+
+         wasLastCallBoxBox_    = true;
+         getContactNormal()    = normal;
+         getContactPoint()     = point;
+         getPenetrationDepth() = penetrationDepth; // EPA's own convention already matches this class's
+                                                     // (negative = penetrating), see collideGJKEPA's own
+                                                     // unmodified pass-through of the same quantity.
+         return true;
+      };
+
+      if (useSpheroBoxContact && useSpheroBoxAnalytical)
+      {
+         // See ModelParameters::useSpheroBoxAnalytical's own doc comment (SimulationParams.h) --
+         // the closed-form (non-GJK) alternative, ported from David Eberly's GeometricTools.
+         //
+         // HYBRID FALLBACK (this session's own finding): Eberly's DistOrientedBox3OrientedBox3 is a
+         // pure SEPARATION-distance query -- it has no EPA-equivalent penetration-depth phase, so
+         // the instant the two SHARP cores actually interpenetrate (distance==0, not just "within
+         // the rounding margin"), it reports an arbitrary, unstable touching point with no
+         // meaningful direction (confirmed directly against the unmodified reference library: exact
+         // distance=0 at grazing-plank-stack's own starting pose, with the closest-point pair
+         // jumping to a different arbitrary location as the simulation evolves, even though the
+         // reported normal itself never moves -- see this session's own eberlyMaxPointJumpFrac/
+         // eberlyNormalFlipCount diagnostics in DEMValidationScenarios.h). GJK/EPA has no such gap
+         // (EPA exists specifically to resolve the already-penetrating case), so whenever Eberly's
+         // own distance comes back at/below a tiny epsilon, fall back to the GJK/EPA path instead of
+         // trusting the degenerate analytical answer. Eberly's closed-form result is used as-is only
+         // for the well-behaved regime it's actually valid for: two SEPARATED cores whose gap is
+         // still within the combined rounding margin.
+         getIdx1() = idx1;
+         getIdx2() = idx2;
+         const mesa_pd::Vec3 posA = ac.getPosition(idx1), posB = ac.getPosition(idx2);
+         const mesa_pd::Mat3 RA = ac.getRotation(idx1).getMatrix(), RB = ac.getRotation(idx2).getMatrix();
+         const mesa_pd::Vec3 halfA = bx1.getEdgeLength() * real_t(0.5), halfB = bx2.getEdgeLength() * real_t(0.5);
+         const auto coreDist = paper_analytical::eberly_box_distance::boxBoxDistance(posA, RA, halfA, posB, RB, halfB);
+
+         constexpr real_t kCoreOverlapEpsilon = real_t(1e-9);
+         if (coreDist.distance > kCoreOverlapEpsilon)
+         {
+            // Well-behaved regime: cores genuinely separated, Eberly's closest-point pair is unique
+            // and meaningful -- use it directly (cheap, exact, no iteration).
+            const real_t overlap = real_t(2) * spheroBoxRadius - coreDist.distance;
+            if (overlap <= real_t(0)) return false;
+            const mesa_pd::Vec3 diff = coreDist.closestA - coreDist.closestB;
+            const real_t        len  = diff.length();
+            if (len <= real_t(1e-10)) return resolveSpheroBoxGJK(bx1, bx2); // degenerate, be safe
+
+            recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "spherosimplex (Box-Box, Eberly analytical)");
+            wasLastCallBoxBox_    = true;
+            getContactNormal()    = diff / len;
+            getContactPoint()     = real_t(0.5) * (coreDist.closestA + coreDist.closestB);
+            getPenetrationDepth() = -overlap; // paper_analytical convention: overlap>0=penetrating;
+                                                // this class: penetrationDepth<0=penetrating.
+            return true;
+         }
+
+         // Cores already overlapping (or Eberly's own distance is otherwise untrustworthy at zero) --
+         // fall back to GJK/EPA, which has a real penetration-depth phase for exactly this regime.
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            "spherosimplex (Box-Box, Eberly->GJK/EPA fallback on core overlap)");
+         return resolveSpheroBoxGJK(bx1, bx2);
+      }
+
+      if (useSpheroBoxContact)
+      {
+         getIdx1() = idx1;
+         getIdx2() = idx2;
+         if (!resolveSpheroBoxGJK(bx1, bx2)) return false;
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "spherosimplex (Box-Box GJK/EPA+margin)");
+         return true;
+      }
+
+      // useTightLayer1 (this session): cheap single-candidate-axis pre-filter ahead of the full
+      // 15-axis boxBoxSAT test below -- see ModelParameters.useTightLayer1's own doc comment and
+      // paper_analytical::detail::boxesDefinitelySeparatedAlongCenterLine's comment for the full
+      // derivation (one legitimate separating axis -- the line between the two centres -- tested
+      // instead of all 15, so it can reject but never positively confirm contact). Unlike Cylinder x
+      // Cylinder's equivalent gate above, boxBoxSAT itself is already cheap and exact (no GJK/EPA
+      // fallback needed for boxes at all), so this saves the cost of a full SAT call, not a GJK/EPA
+      // one -- a smaller win than the cylinder case, but still a real one for obviously-separated pairs.
+      if (useTightLayer1 &&
+          paper_analytical::detail::boxesDefinitelySeparatedAlongCenterLine(
+             ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(), bx1.getEdgeLength() * real_t(0.5),
+             ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(), bx2.getEdgeLength() * real_t(0.5)))
+      {
+         ++contactStats.boxTightLayer1CheaplyProvedSeparated;
+         return false;
+      }
+
       getIdx1() = idx1;
       getIdx2() = idx2;
 
-      const auto result = paper_analytical::boxBoxSAT(
-         ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(), bx1.getEdgeLength() * real_t(0.5),
-         ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(), bx2.getEdgeLength() * real_t(0.5));
+      const mesa_pd::Vec3 halfA = bx1.getEdgeLength() * real_t(0.5), halfB = bx2.getEdgeLength() * real_t(0.5);
+      const mesa_pd::Vec3 posA = ac.getPosition(idx1), posB = ac.getPosition(idx2);
+      const mesa_pd::Mat3 RA = ac.getRotation(idx1).getMatrix(), RB = ac.getRotation(idx2).getMatrix();
 
-      if (!result.contact) return false;
-      ++contactStats.boxBoxSAT;
-      recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "closed-form analytical (Box-Box SAT)");
-      // paper_analytical convention: overlap > 0 = penetrating. This class: penetrationDepth < 0.
-      getPenetrationDepth() = -result.overlap;
-      getContactNormal()    = result.normal;
-      getContactPoint()     = result.point;
+      // See ModelParameters.useBoxOverlapCap/boxOverlapCapFraction's own doc comment (SimulationParams.h)
+      // -- computed per-pair since it scales with these two SPECIFIC bodies' own half-extents, not a
+      // single project-wide constant.
+      const real_t overlapCap = useBoxOverlapCap
+         ? boxOverlapCapFraction * std::min({ halfA[0], halfA[1], halfA[2], halfB[0], halfB[1], halfB[2] })
+         : std::numeric_limits< real_t >::max();
+
+      // See ModelParameters.useAxisHysteresis/axisHysteresisMargin's own doc comment (SimulationParams.h)
+      // and boxBoxHysteresisNormal_'s own comment above for why this state lives here, keyed by uid
+      // pair so it survives across sub-cycles for the SAME pair regardless of local index churn.
+      const auto  hysteresisKey = ac.getUid(idx1) < ac.getUid(idx2)
+                                     ? std::make_pair(ac.getUid(idx1), ac.getUid(idx2))
+                                     : std::make_pair(ac.getUid(idx2), ac.getUid(idx1));
+      const auto  hysteresisIt  = useAxisHysteresis ? boxBoxHysteresisNormal_.find(hysteresisKey)
+                                                     : boxBoxHysteresisNormal_.end();
+      const mesa_pd::Vec3* previousNormal = (hysteresisIt != boxBoxHysteresisNormal_.end()) ? &hysteresisIt->second : nullptr;
+
+      const auto result = paper_analytical::boxBoxSAT(posA, RA, halfA, posB, RB, halfB,
+                                                        useRoundedBoxCorners, boxRoundingRadius, overlapCap,
+                                                        previousNormal, axisHysteresisMargin);
+      if (useAxisHysteresis && result.contact) boxBoxHysteresisNormal_[hysteresisKey] = result.normal;
+
+      // useMultiPointBoxContact: see paper_analytical::boxBoxMultiPointContacts' and
+      // getMultiPointContacts()'s own doc comments. Computed independently of (and even when) the raw
+      // SAT result above reports no contact -- boxBoxSAT's single winning axis can occasionally miss
+      // a case a direct vertex-in-box test still catches near a degenerate configuration, and this list
+      // is exactly the OTHER, independent literature-documented remedy for that same class of defect.
+      if (useMultiPointBoxContact || useFraigeBoxContactModel)
+      {
+         // useFraigeBoxContactModel takes precedence when both are set -- see that flag's own doc
+         // comment (its whole point is to be a strict superset of what boxBoxMultiPointContacts covers).
+         multiPointContacts_ = useFraigeBoxContactModel
+                                   ? paper_analytical::boxBoxFraigeMultiPointContacts(posA, RA, halfA, posB,
+                                                                                        RB, halfB, overlapCap)
+                                   : paper_analytical::boxBoxMultiPointContacts(posA, RA, halfA, posB, RB, halfB,
+                                                                                  overlapCap);
+
+         // See boxBoxManifold_'s own doc comment for the full rationale. Replaces the fresh,
+         // potentially-discontinuous vertex set with a persistent, faded-in/out one keyed by uid pair
+         // + stable per-vertex identity.
+         if (useContactManifold)
+         {
+            const auto manifoldKey = ac.getUid(idx1) < ac.getUid(idx2)
+                                         ? std::make_pair(ac.getUid(idx1), ac.getUid(idx2))
+                                         : std::make_pair(ac.getUid(idx2), ac.getUid(idx1));
+            auto& manifold = boxBoxManifold_[manifoldKey]; // creates an empty one on first contact
+
+            std::unordered_map< int, bool > matched;
+            for (const auto& fresh : multiPointContacts_)
+            {
+               auto& entry     = manifold[fresh.identity]; // creates a fresh, fade=0 entry if new
+               entry.point     = fresh.point;
+               entry.normal    = fresh.normal;
+               entry.trueOverlap = fresh.overlap;
+               entry.fade      = std::min(real_t(1), entry.fade + manifoldFadeRate);
+               matched[fresh.identity] = true;
+            }
+            for (auto it = manifold.begin(); it != manifold.end();)
+            {
+               if (!matched[it->first]) // no fresh point this sub-cycle -- fade out, holding last pose
+               {
+                  it->second.fade -= manifoldFadeRate;
+                  if (it->second.fade <= real_t(0)) { it = manifold.erase(it); continue; }
+               }
+               ++it;
+            }
+
+            multiPointContacts_.clear();
+            for (const auto& kv : manifold)
+            {
+               paper_analytical::BoxVertexContact c;
+               c.point    = kv.second.point;
+               c.normal   = kv.second.normal;
+               c.overlap  = kv.second.trueOverlap * kv.second.fade; // fade scales overlap, see doc comment
+               c.identity = kv.first;
+               multiPointContacts_.push_back(c);
+            }
+            if (manifold.empty()) boxBoxManifold_.erase(manifoldKey); // don't leak empty entries forever
+         }
+      }
+
+      if (!result.contact && multiPointContacts_.empty()) return false;
+
+      // See wasLastCallBoxBox()'s own doc comment for why this must be set unconditionally here (not
+      // only when multiPointContacts_ is non-empty) -- ComputeContacts needs to know "this pair is
+      // Box-Box" independent of whether any vertex happens to be embedded THIS particular sub-cycle.
+      wasLastCallBoxBox_ = true;
+
+      if (result.contact)
+      {
+         ++contactStats.boxBoxSAT;
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "closed-form analytical (Box-Box SAT)");
+         // paper_analytical convention: overlap > 0 = penetrating. This class: penetrationDepth < 0.
+         getPenetrationDepth() = -result.overlap;
+         getContactNormal()    = result.normal;
+         getContactPoint()     = result.point;
+      }
+      else
+      {
+         // SAT itself found no contact, but useMultiPointBoxContact's independent vertex test did --
+         // report the DEEPEST vertex-overlap point as the primary contact (sorted below) so the normal
+         // ComputeContacts response path always has something to work with; the rest of the list
+         // (including this one) is what ComputeContacts::operator() applies additional force at.
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            "multi-point vertex overlap (Box-Box, SAT found no scenario)");
+         const auto deepest = std::max_element(multiPointContacts_.begin(), multiPointContacts_.end(),
+            [](const auto& a, const auto& b) { return a.overlap < b.overlap; });
+         getPenetrationDepth() = -deepest->overlap;
+         getContactNormal()    = deepest->normal;
+         getContactPoint()     = deepest->point;
+      }
       return true;
    }
 
@@ -958,6 +1180,29 @@ public:
       // particles directly via ParticleStorage -- would have zero here) means this bound can't be
       // trusted, so skip the cheap reject and fall through to the real solver instead of silently
       // rejecting every pair.
+      //
+      // useTightLayer1 (this session): replaces the sphere-sum bound above with
+      // paper_analytical::detail::closestDistanceSqBetweenSegments -- each cylinder's own axis
+      // SEGMENT (not a worst-case circumscribing sphere) vs. the sum of their radii. Same
+      // conservativeness guarantee (see that function's own comment), just orientation-aware instead
+      // of orientation-blind, so it resolves far more genuinely-separated pairs at this cheap stage,
+      // BEFORE they'd otherwise reach the (now more expensive to enter at all) analytical dispatch
+      // below -- not merely before GJK/EPA, as cylinderCylinderResultIsUncertain's useTightTier1 does
+      // one level deeper. CylinderState built here (moved up from below) so both branches can use it.
+      const paper_analytical::CylinderState ci{ ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(),
+                                                 cyl1.getRadius(), cyl1.getHeight() };
+      const paper_analytical::CylinderState cj{ ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(),
+                                                 cyl2.getRadius(), cyl2.getHeight() };
+      if (useTightLayer1)
+      {
+         mesa_pd::Vec3 p0i, p1i, p0j, p1j;
+         paper_analytical::detail::cylinderAxisEndpoints(ci, p0i, p1i);
+         paper_analytical::detail::cylinderAxisEndpoints(cj, p0j, p1j);
+         const real_t reach = ci.radius + cj.radius;
+         if (paper_analytical::detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) > reach * reach)
+            return false;
+      }
+      else
       {
          const real_t maxPossibleReach = ac.getInteractionRadius(idx1) + ac.getInteractionRadius(idx2);
          if (maxPossibleReach > real_t(0) &&
@@ -968,17 +1213,17 @@ public:
       if (!useAnalyticalContactDetection)
          return GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
 
-      const paper_analytical::CylinderState ci{ ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(),
-                                                 cyl1.getRadius(), cyl1.getHeight() };
-      const paper_analytical::CylinderState cj{ ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(),
-                                                 cyl2.getRadius(), cyl2.getHeight() };
-
       const auto result = paper_analytical::cylinderCylinderContact(ci, cj);
-      if (paper_analytical::cylinderCylinderResultIsUncertain(ci, cj, result))
+      if (paper_analytical::cylinderCylinderResultIsUncertain(ci, cj, result, useTightTier1, skipTier1))
       {
-         // Tier 2 (analytical DID find a contact, but the magnitude is flagged untrustworthy) vs
-         // Tier 1 (analytical found nothing at all) — see cylinderCylinderResultIsUncertain's own
-         // comment in PaperAnalyticalContacts.h for what each tier actually checks.
+         // Tier 1 (analytical found nothing at all) vs special-contact (analytical DID find a
+         // contact, but that ONE scenario is unconditionally distrusted) -- see
+         // cylinderCylinderResultIsUncertain's own comment in PaperAnalyticalContacts.h. NOTE: this
+         // used to also cover a broader magnitude-based "Tier 2" applied to every non-exempt scenario
+         // (face-edge/band-edge/edge-edge too) -- that was REMOVED (see PaperAnalyticalContacts.h's
+         // own history comment); what remains here is special-contact ONLY, renamed accordingly
+         // (was cylFallbackTier2/cylPureTier2Trusted) so the code's own names don't keep implying a
+         // broader check that no longer exists.
          if (usePureAnalyticalCylinder)
          {
             // "Pure Kodam+Guo" mode: no GJK/EPA safety net at all -- trust the closed-form dispatch's
@@ -993,8 +1238,8 @@ public:
                logCylComputation(ac.getUid(idx1), ac.getUid(idx2), path, ci, cj, result);
                return false;
             }
-            ++contactStats.cylPureTier2Trusted;
-            const std::string path = "pure analytical (Kodam+Guo): tier2 result trusted despite "
+            ++contactStats.cylPureSpecialContactTrusted;
+            const std::string path = "pure analytical (Kodam+Guo): special-contact result trusted despite "
                "uncertainty flag (usePureAnalyticalCylinder)";
             recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), path);
             logCylComputation(ac.getUid(idx1), ac.getUid(idx2), path, ci, cj, result);
@@ -1007,17 +1252,38 @@ public:
             return true;
          }
 
-         if (result.contact) ++contactStats.cylFallbackTier2;
+         if (result.contact) ++contactStats.cylFallbackSpecialContact;
          else ++contactStats.cylFallbackTier1;
          const std::string path =
-            result.contact ? "GJK/EPA fallback (tier2: analytical found a contact but flagged its magnitude uncertain)"
+            result.contact ? "GJK/EPA fallback (special-contact: unconditionally distrusted scenario)"
                             : "GJK/EPA fallback (tier1: analytical found no contact at all)";
          recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), path);
          logCylComputation(ac.getUid(idx1), ac.getUid(idx2), path, ci, cj, result);
-         return GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
+         const bool fallbackContact = GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
+         if (result.contact)
+         {
+            if (fallbackContact) ++contactStats.cylFallbackSpecialContactGjkFoundContact;
+            else ++contactStats.cylFallbackSpecialContactGjkFoundNoContact;
+         }
+         else
+         {
+            if (fallbackContact) ++contactStats.cylFallbackTier1GjkFoundContact;
+            else ++contactStats.cylFallbackTier1GjkFoundNoContact;
+         }
+         return fallbackContact;
       }
 
-      if (!result.contact) return false;
+      if (!result.contact)
+      {
+         // Reached only when cylinderCylinderResultIsUncertain() returned false (NOT uncertain) for a
+         // dispatch-gap pair -- i.e. some bound (the tight capsule one, when useTightTier1 is on; the
+         // original loose one essentially never triggers this in production, see that function's own
+         // comment) proved the two cylinders cannot possibly be touching, so "no contact" is trusted
+         // directly, with NO GJK/EPA call at all. Counted separately from cylFallbackTier1 (which is
+         // the OTHER, uncertain outcome of the same dispatch-gap case) specifically to measure this.
+         ++contactStats.cylTier1CheaplyProvedSeparated;
+         return false;
+      }
       contactStats.bumpCylScenario(result.scenario);
       const std::string path = std::string("closed-form analytical (scenario=") + result.scenario + ")";
       recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), path);
@@ -1102,13 +1368,38 @@ public:
       uint64_t cylBandEdge         = 0;
       uint64_t cylEdgeEdge         = 0;
       // Fired when cylinderCylinderResultIsUncertain() overruled the analytical result and this
-      // fell back to GJK/EPA instead — see the two counters' definitions at their increment sites.
-      uint64_t cylFallbackTier1 = 0;
-      uint64_t cylFallbackTier2 = 0;
+      // fell back to GJK/EPA instead. cylFallbackTier1: analytical found NO scenario at all.
+      // cylFallbackSpecialContact: analytical found a contact, but the "special-contact" scenario is
+      // unconditionally distrusted (was named cylFallbackTier2 -- renamed because a broader,
+      // magnitude-based Tier 2 covering EVERY non-exempt scenario used to exist here and was removed;
+      // see PaperAnalyticalContacts.h's own history comment on cylinderCylinderResultIsUncertain --
+      // what remains is special-contact only, so the name shouldn't keep implying a general tier).
+      uint64_t cylFallbackTier1          = 0;
+      uint64_t cylFallbackSpecialContact = 0;
+      // What GJK/EPA actually found for each of the two fallback paths above -- added to answer
+      // directly "are these Tier 1 fallbacks (analytical found no scenario at all) mostly genuine
+      // non-contacts, or is the analytical dispatch actually missing real contacts here": every Tier 1
+      // fallback that GJK/EPA also resolves to "no contact" is exactly the population Kodam's paper
+      // itself says a coarse/intermediate bounding check should be catching cheaply instead (see
+      // PaperAnalyticalContacts.h's own comment quoting Kodam et al. 2010 Section 4's conclusion) --
+      // this is NOT one of Kodam's own ten contact-detection equations, purely a diagnostic added here.
+      uint64_t cylFallbackTier1GjkFoundContact            = 0;
+      uint64_t cylFallbackTier1GjkFoundNoContact           = 0;
+      uint64_t cylFallbackSpecialContactGjkFoundContact   = 0;
+      uint64_t cylFallbackSpecialContactGjkFoundNoContact = 0;
       // Fired instead of the two counters above when usePureAnalyticalCylinder is true (no GJK/EPA
       // fallback attempted at all) -- see that flag's own doc comment (SimulationParams.h).
-      uint64_t cylPureTier1Rejected = 0; // analytical found no contact; accepted as "no contact" as-is
-      uint64_t cylPureTier2Trusted  = 0; // analytical found a contact flagged uncertain; trusted as-is
+      uint64_t cylPureTier1Rejected          = 0; // analytical found no contact; accepted as "no contact" as-is
+      uint64_t cylPureSpecialContactTrusted  = 0; // special-contact flagged uncertain; trusted as-is anyway
+      // Dispatch-gap pairs (analytical found no scenario) where cylinderCylinderResultIsUncertain()
+      // was NOT triggered -- some bound proved the pair definitely separated, so "no contact" is
+      // trusted directly with NO GJK/EPA call. Mutually exclusive with cylFallbackTier1 (the other,
+      // uncertain outcome of the same dispatch-gap case); added specifically to measure
+      // ModelParameters.useTightTier1's effect against GJK/EPA's own no-contact rate.
+      uint64_t cylTier1CheaplyProvedSeparated = 0;
+      // Box x Box pairs the useTightLayer1 single-axis pre-filter proved definitely separated before
+      // boxBoxSAT ever ran -- see ModelParameters.useTightLayer1's own doc comment.
+      uint64_t boxTightLayer1CheaplyProvedSeparated = 0;
 
       void bumpCylScenario(const char* scenario)
       {
@@ -1135,6 +1426,148 @@ public:
    // the closed-form Kodam et al. (2010) + Guo et al. (2012) dispatch as-is ("pure Kodam+Guo").
    bool usePureAnalyticalCylinder = false;
 
+   // Runtime switch (default false), only meaningful while useAnalyticalContactDetection is also
+   // true. See ModelParameters.useTightTier1's own doc comment (SimulationParams.h) -- swaps
+   // cylinderCylinderResultIsUncertain's Tier 1 check (fired when the dispatch found no scenario at
+   // all) from the original loose center-distance bound to the tight, capsule-based
+   // detail::closestDistanceSqBetweenSegments bound, resolving far more dispatch-gap pairs as
+   // "definitely separated" without needing a GJK/EPA call at all.
+   bool useTightTier1 = false;
+
+   // Runtime switch (default false). See ModelParameters.skipTier1's own doc comment
+   // (SimulationParams.h) -- skips cylinderCylinderResultIsUncertain's dispatch-gap check ENTIRELY (no
+   // distance computation at all, "no contact" trusted immediately) instead of merely swapping which
+   // bound it uses. Only correct when useTightLayer1 is ALSO on -- see
+   // cylinderCylinderResultIsUncertain's own comment in PaperAnalyticalContacts.h for the proof.
+   bool skipTier1 = false;
+
+   // Runtime switch (default false). See ModelParameters.useTightLayer1's own doc comment
+   // (SimulationParams.h) -- swaps the cheap "definitely too far apart to touch" pre-filter that runs
+   // BEFORE any real contact detection (Cylinder x Cylinder's own reject, and, newly, a Box x Box one
+   // that didn't exist before this flag) from a circumscribing-sphere-sum bound to each shape's own
+   // tight, orientation-aware bound (capsule/segment-distance for cylinders, single-axis projection
+   // for boxes). Meaningful for Cylinder x Cylinder regardless of useAnalyticalContactDetection (that
+   // reject runs either way); only has an effect for Box x Box when useAnalyticalContactDetection is
+   // also true (boxBoxSAT, the only thing this pre-filter guards for boxes, is only reached then).
+   bool useTightLayer1 = false;
+
+   // Runtime switches (both default false). See ModelParameters.useRoundedBoxCorners/
+   // useMultiPointBoxContact's own doc comments (SimulationParams.h) -- both are togglable mitigations
+   // for the corner/edge contact-normal discontinuity documented for polyhedral DEM and reproduced
+   // directly against this project's own boxBoxSAT by DEMValidationScenarios.h's
+   // runCornerNormalDiscontinuity. Threaded straight through to paper_analytical::boxBoxSAT
+   // (useRoundedBoxCorners/boxRoundingRadius) and paper_analytical::boxBoxMultiPointContacts
+   // (useMultiPointBoxContact) from the Box x Box operator() overload below.
+   bool   useRoundedBoxCorners = false;
+   real_t boxRoundingRadius    = real_t(0.05);
+   bool   useMultiPointBoxContact = false;
+   // A separate, independently-selectable alternative to useMultiPointBoxContact: when true, the Box x
+   // Box operator() below populates multiPointContacts_ via paper_analytical::boxBoxFraigeMultiPointContacts
+   // instead of boxBoxMultiPointContacts -- a fuller, more literal replica of Fraige, Langston & Chen
+   // (2008)'s own method (adds their edge-edge/edge-face contact modes and near-corner normal blend,
+   // see that function's own doc comment for the full derivation), rather than the vertex-only subset
+   // boxBoxMultiPointContacts implements. Mutually exclusive with useMultiPointBoxContact in practice
+   // (this one takes precedence if both are set) -- kept as a fully separate flag/function pair
+   // specifically so enabling it can never change useMultiPointBoxContact's own already-validated
+   // behaviour for any existing run/comparison.
+   bool   useFraigeBoxContactModel = false;
+   // See ModelParameters.useBoxOverlapCap/boxOverlapCapFraction's own doc comment (SimulationParams.h)
+   // and paper_analytical::boxBoxMultiPointContacts' own comment (PaperAnalyticalContacts.h) for why
+   // this exists: confirmed necessary by DEMValidationScenarios.h's multiPointDeepOverlapStability/
+   // Fuzz/EdgeCases scenarios (uncapped, useMultiPointBoxContact can inject MORE spurious energy than
+   // doing nothing under deep interpenetration). Threaded to BOTH boxBoxSAT and
+   // boxBoxMultiPointContacts as an absolute overlap value (boxOverlapCapFraction * min(halfExtents)),
+   // computed per-pair in the Box x Box operator() below since it depends on both bodies' own sizes.
+   bool   useBoxOverlapCap      = false;
+   real_t boxOverlapCapFraction = real_t(0.3);
+
+   // "Sticky" SAT axis selection -- the OTHER candidate fix for the axis-flip discontinuity
+   // useRoundedBoxCorners targets, see paper_analytical::boxBoxSAT's own doc comment
+   // (PaperAnalyticalContacts.h) for the full rationale and why it doesn't share useRoundedBoxCorners'
+   // deep-overlap side effect. boxBoxHysteresisNormal_ is the per-uid-pair persistent state
+   // paper_analytical::boxBoxSAT itself has no memory of (it's a pure function) -- keyed the same way
+   // as this class's other per-pair maps (see wasLastCallBoxBox_'s sibling members below), read/written
+   // ONLY from the Box x Box operator() overload, independent of useRoundedBoxCorners/
+   // useMultiPointBoxContact/useBoxOverlapCap (any combination is meaningful).
+   bool   useAxisHysteresis      = false;
+   real_t axisHysteresisMargin   = real_t(0.15);
+   std::map< std::pair< walberla::id_t, walberla::id_t >, mesa_pd::Vec3 > boxBoxHysteresisNormal_;
+
+   // Persistent contact manifold, only meaningful when useMultiPointBoxContact is ALSO true -- option
+   // 3 of the three candidate fixes for the axis/vertex-set discontinuity discussed this session
+   // (rounding, hysteresis, this). Unlike useAxisHysteresis (which stabilises WHICH single axis SAT
+   // reports) or useBoxOverlapCap (which bounds HOW DEEP one point's force can be), this targets a
+   // DIFFERENT, THIRD symptom: boxBoxMultiPointContacts' own vertex SET can change abruptly between
+   // sub-cycles (a vertex crosses from just-outside to just-inside the other box, or vice versa) --
+   // each such appearance/disappearance is itself a step discontinuity in the net force/torque, exactly
+   // the kind of asymmetric-point-set torque imbalance identified as the "grazing-plank-stack"
+   // regression (+618% even with useMultiPointBoxContact alone, DEMValidationScenarios.h). A real
+   // physics-engine-style manifold (Bullet/PhysX) never adds or drops a point in one step either --
+   // this is a simplified version of the same idea: each of BoxVertexContact's up to 16 possible
+   // identities (see that struct's own comment) is tracked persistently per uid pair; a NEWLY-embedded
+   // vertex fades its overlap IN linearly over several sub-cycles instead of applying full force
+   // immediately, and a vertex that just separated fades OUT the same way instead of vanishing --
+   // scaling each entry's EFFECTIVE overlap by its own fade fraction (0..1) reuses ComputeContacts'
+   // existing per-point force formula completely unchanged (see its own comment on why overlap, not
+   // force, is scaled).
+   struct ManifoldPoint
+   {
+      mesa_pd::Vec3 point;
+      mesa_pd::Vec3 normal;
+      real_t        trueOverlap = real_t(0); // last known REAL (uncapped-by-fade) overlap for this vertex
+      real_t        fade        = real_t(0); // 0 = contributes nothing, 1 = full strength
+   };
+   bool   useContactManifold  = false;
+   real_t manifoldFadeRate    = real_t(0.25); // fraction of full strength gained/lost per sub-cycle
+   std::map< std::pair< walberla::id_t, walberla::id_t >, std::unordered_map< int, ManifoldPoint > > boxBoxManifold_;
+
+   // See ModelParameters::useRotationalEffectiveMass's own doc comment (SimulationParams.h) for the full
+   // derivation. Unlike useAxisHysteresis/useContactManifold/useRoundedBoxCorners (which all change WHICH
+   // (point,normal,overlap) triplet is fed into the unmodified LinearSpringDashpot force law), this
+   // changes the force law's OWN calibration -- read by ComputeContacts (not this class directly) at the
+   // point it calls collisionResponse_.setStiffnessAndDamping(...), since that is where the generalized
+   // effective mass actually needs to replace the plain translational one.
+   bool useRotationalEffectiveMass = false;
+
+   // See ModelParameters::useSpheroBoxContact's own doc comment (SimulationParams.h) for the full
+   // derivation. When true, the Box x Box operator() overload below bypasses boxBoxSAT/
+   // boxBoxMultiPointContacts entirely and instead runs mesa_pd's own GJK/EPA with
+   // margin=spheroBoxRadius directly on the two SHARP boxes -- the same general-purpose algorithm
+   // this project already trusts for every other non-analytic shape pair, just given a real physical
+   // margin instead of the tiny numerical tolerance GeneralContactDetection::collideGJKEPA uses.
+   bool   useSpheroBoxContact = false;
+   real_t spheroBoxRadius     = real_t(0.05);
+   // See ModelParameters::useSpheroBoxAnalytical's own doc comment (SimulationParams.h). Only
+   // meaningful when useSpheroBoxContact is true -- selects the closed-form Eberly algorithm
+   // (paper_analytical::boxBoxSpheroAnalytical) instead of the default GJK/EPA-with-margin path.
+   bool   useSpheroBoxAnalytical = false;
+
+   // Populated by the Box x Box operator() overload below ONLY when useMultiPointBoxContact is true and
+   // at least one of either box's vertices was found embedded in the other -- see
+   // paper_analytical::boxBoxMultiPointContacts' own doc comment. ComputeContacts reads this (alongside
+   // the normal single point/normal/penetration this class already returns for the DEEPEST vertex) to
+   // apply a history-free spring-dashpot force at every OTHER point too, each scaled by 1/N -- see that
+   // call site's own comment.
+   const std::vector< paper_analytical::BoxVertexContact >& getMultiPointContacts() const
+   {
+      return multiPointContacts_;
+   }
+
+   // Set true by the Box x Box operator() overload below on EVERY call (whether or not any vertex was
+   // actually found embedded) -- lets ComputeContacts distinguish "this pair is Box-Box and
+   // useMultiPointBoxContact is on, so ALWAYS use the plain per-point formula" from "this pair isn't
+   // Box-Box at all" without needing getMultiPointContacts().empty() to double as both signals. Fixes a
+   // real defect found by DEMValidationScenarios.h's runMultiPointBoxContactFuzz: without this,
+   // ComputeContacts fell back to the full LinearSpringDashpot (WITH persistent tangential-spring
+   // history) on any sub-cycle where no vertex happened to be embedded (e.g. a pure edge-edge overlap
+   // between two elongated/tilted boxes with neither box's corner inside the other), then back to the
+   // plain multi-point formula (WITHOUT history) the next sub-cycle once a vertex re-entered -- for
+   // elongated/large-tilt configurations this geometry can flicker between the two every few sub-
+   // cycles, and the resulting mid-episode switch between two DIFFERENT force-response models was
+   // itself injecting massive spurious energy (up to ~6800% in the fuzz sweep), independent of and on
+   // top of the SAT-axis discontinuity useMultiPointBoxContact was built to fix.
+   bool wasLastCallBoxBox() const { return wasLastCallBoxBox_; }
+
    // Secondary contact point (arch/tunnel containment only, Box/Cylinder floaters): the containment
    // branches' farthest-point search can find TWO independent points simultaneously poking past the
    // tube radius at once -- e.g. an elongated floater wedged so both a leading and trailing corner
@@ -1152,11 +1585,23 @@ public:
    // pair visited in a sub-cycle (not reconstructed per-pair), so without an explicit reset a stale
    // hasSecondaryContact_=true from a PREVIOUS pair could leak into a pair whose own branch (or a
    // branch other than the two containment ones below) never touches these fields at all.
-   void resetSecondaryContact() { hasSecondaryContact_ = false; }
+   // ALSO clears multiPointContacts_ (getMultiPointContacts() above) -- same reused-across-every-pair
+   // rationale as hasSecondaryContact_ below: without this, a stale list from a PREVIOUS pair could
+   // leak into a pair whose own branch never repopulates it.
+   void resetSecondaryContact()
+   {
+      hasSecondaryContact_ = false;
+      multiPointContacts_.clear();
+      wasLastCallBoxBox_ = false;
+   }
 
 private:
    // Backing storage for recordDetectionPath()/lookupDetectionPath() above.
    std::map<std::pair<walberla::id_t, walberla::id_t>, std::string> pairDetectionPath;
+
+   // Backing storage for getMultiPointContacts()/wasLastCallBoxBox() above.
+   std::vector< paper_analytical::BoxVertexContact > multiPointContacts_;
+   bool wasLastCallBoxBox_ = false;
 
    // Backing storage for the secondary-contact getters above.
    bool          hasSecondaryContact_       = false;
@@ -1188,7 +1633,7 @@ public:
          << " in \"" << baseFolder << "\" -- does the directory exist?");
       file_ << "mainStep,subCycle,kind,computingRank,uidA,uidB,ownerRankA,ownerRankB,isGhostA,isGhostB,"
                "shapeTypeA,shapeTypeB,detectionPath,contactX,contactY,contactZ,normalX,normalY,normalZ,"
-               "penetrationDepth,forceOnA_x,forceOnA_y,forceOnA_z,forceOnB_x,forceOnB_y,forceOnB_z\n";
+               "penetrationDepth,overlapMagnitude,forceOnA_x,forceOnA_y,forceOnA_z,forceOnB_x,forceOnB_y,forceOnB_z\n";
       file_.flush();
 
       // Second file, same toggle: a per-floater WORLD-STATE snapshot (not per-contact) -- what THIS
@@ -1236,11 +1681,19 @@ public:
    // window that actually matters.
    void setMinStep(uint_t minStep) { minStep_ = minStep; }
 
+   // 0 (default, converted to the max uint_t sentinel) -> log through to the end of the run, as
+   // before. Nonzero -> the upper-bound counterpart to setMinStep above (see
+   // ModelParams::logFloaterHistoryEndStep's own comment in SimulationParams.h).
+   void setMaxStep(uint_t maxStep)
+   {
+      maxStep_ = (maxStep == uint_t(0)) ? std::numeric_limits< uint_t >::max() : maxStep;
+   }
+
    // kind: "contact" (ComputeContacts) or "lubrication" (ComputeLubrication). detectionPath describes
    // which algorithm actually produced this row: for Box-Box / Cylinder-Cylinder pairs (the only two
    // gated by ModelParameters.useAnalyticalContactDetection) this is the string recorded by
    // SolidCylinderContactDetection::recordDetectionPath -- "closed-form analytical (scenario=...)" or
-   // "GJK/EPA fallback (tier1/tier2: ...)"; for every other shape pair (no analytical/GJK choice
+   // "GJK/EPA fallback (tier1/special-contact: ...)"; for every other shape pair (no analytical/GJK choice
    // exists) or for lubrication rows, the caller passes a fixed descriptive label instead. forceOnA/
    // forceOnB are the FORCE DELTA this specific pair contributed this sub-cycle (caller captures
    // ac.getForceRef before/after applying the pair's force, since both LinearSpringDashpot and
@@ -1252,7 +1705,7 @@ public:
             real_t penetrationDepth, const mesa_pd::Vec3& forceOnA, const mesa_pd::Vec3& forceOnB,
             const std::string& detectionPath)
    {
-      if (!enabled_ || mainStep < minStep_) return;
+      if (!enabled_ || mainStep < minStep_ || mainStep > maxStep_) return;
       if (uidFilter_ && !uidFilter_->count(ac.getUid(idx1)) && !uidFilter_->count(ac.getUid(idx2))) return;
       using namespace mesa_pd::data::particle_flags;
       file_ << mainStep << ',' << subCycle << ',' << kind << ',' << mpi::MPIManager::instance()->rank() << ','
@@ -1264,6 +1717,7 @@ public:
             << '"' << detectionPath << '"' << ','
             << contactPoint[0] << ',' << contactPoint[1] << ',' << contactPoint[2] << ','
             << normal[0] << ',' << normal[1] << ',' << normal[2] << ',' << penetrationDepth << ','
+            << (-penetrationDepth) << ','
             << forceOnA[0] << ',' << forceOnA[1] << ',' << forceOnA[2] << ','
             << forceOnB[0] << ',' << forceOnB[1] << ',' << forceOnB[2] << '\n';
       // Flush every row, not just at shutdown: this run can WALBERLA_ABORT/MPI_ABORT at any point
@@ -1286,7 +1740,7 @@ public:
    template< typename ParticleAccessor_T >
    void logState(uint_t mainStep, uint_t subCycle, const ParticleAccessor_T& ac, size_t idx, real_t fluidDensity)
    {
-      if (!enabled_ || mainStep < minStep_) return;
+      if (!enabled_ || mainStep < minStep_ || mainStep > maxStep_) return;
       if (uidFilter_ && !uidFilter_->count(ac.getUid(idx))) return;
       using namespace mesa_pd::data::particle_flags;
       const auto& vel         = ac.getLinearVelocity(idx);
@@ -1331,7 +1785,7 @@ public:
       size_t tunnelIndex, const mesa_pd::Vec3& contactPoint, const mesa_pd::Vec3& normal,
       real_t penetrationDepth, const mesa_pd::Vec3& forceOnFloater)
    {
-      if (!enabled_ || mainStep < minStep_) return;
+      if (!enabled_ || mainStep < minStep_ || mainStep > maxStep_) return;
       if (uidFilter_ && !uidFilter_->count(ac.getUid(idx))) return;
       using namespace mesa_pd::data::particle_flags;
       file_ << mainStep << ',' << subCycle << ',' << "tunnel" << ',' << mpi::MPIManager::instance()->rank() << ','
@@ -1343,6 +1797,7 @@ public:
             << tunnelIndex << ")" << '"' << ','
             << contactPoint[0] << ',' << contactPoint[1] << ',' << contactPoint[2] << ','
             << normal[0] << ',' << normal[1] << ',' << normal[2] << ',' << penetrationDepth << ','
+            << (-penetrationDepth) << ','
             << forceOnFloater[0] << ',' << forceOnFloater[1] << ',' << forceOnFloater[2] << ','
             << -forceOnFloater[0] << ',' << -forceOnFloater[1] << ',' << -forceOnFloater[2] << '\n';
       // Same crash-survivability rationale as log()/logState() above.
@@ -1355,6 +1810,7 @@ private:
    std::ofstream stateFile_;
    const std::unordered_set< walberla::id_t >* uidFilter_ = nullptr;
    uint_t minStep_ = uint_t(0);
+   uint_t maxStep_ = std::numeric_limits< uint_t >::max();
 };
 
 
@@ -1415,6 +1871,51 @@ private:
    uint_t subCycle_ = uint_t(0);
 };
 
+// See ModelParameters::useRotationalEffectiveMass's own doc comment (SimulationParams.h) for the full
+// derivation and literature reference. Computes the generalized (translational + rotational) effective
+// mass for a contact at `contactPoint` with unit normal `contactNormal` between bodies idx1/idx2:
+//     1/meff = 1/mA + 1/mB + (rA x n)^T IA_world^-1 (rA x n) + (rB x n)^T IB_world^-1 (rB x n)
+// where rA/rB are the contact point's offset from each body's centre of mass. Each body's inverse
+// inertia tensor is stored in BODY frame (getInvInertiaBF) and must be rotated into world frame before
+// use here -- exactly the same math::transformMatrixRART(rotationMatrix, invInertiaBF) transform
+// mesa_pd::kernel::VelocityVerlet itself uses to turn torque into angular acceleration.
+//
+// For a FIXED/infinite-mass body (walls, pillars) both getInvMass and getInvInertiaBF are zero by
+// construction (see ComputeContacts' own comment on why meff = 1/(invMass_floater + 0) already holds for
+// the plain translational formula), so that body's rotational term is automatically zero here too.
+//
+// For sphere-sphere contact, rA and rB are always parallel to contactNormal (the line of centres), so
+// rA x n = rB x n = 0 identically and this reduces EXACTLY to the plain translational formula --
+// consistent with sphere-sphere floaters never showing the energy-injection defect this option targets.
+template < typename Accessor >
+inline real_t computeRotationalEffectiveMass(Accessor& ac, size_t idx1, size_t idx2,
+                                              const mesa_pd::Vec3& contactPoint,
+                                              const mesa_pd::Vec3& contactNormal)
+{
+   const mesa_pd::Vec3 rA = contactPoint - ac.getPosition(idx1);
+   const mesa_pd::Vec3 rB = contactPoint - ac.getPosition(idx2);
+
+   const mesa_pd::Vec3 crossA = rA % contactNormal;
+   const mesa_pd::Vec3 crossB = rB % contactNormal;
+
+   real_t rotationalTerm = real_t(0);
+   if (crossA.sqrLength() > real_t(0))
+   {
+      const mesa_pd::Mat3 invInertiaWF_A =
+         math::transformMatrixRART(ac.getRotation(idx1).getMatrix(), ac.getInvInertiaBF(idx1));
+      rotationalTerm += crossA * (invInertiaWF_A * crossA);
+   }
+   if (crossB.sqrLength() > real_t(0))
+   {
+      const mesa_pd::Mat3 invInertiaWF_B =
+         math::transformMatrixRART(ac.getRotation(idx2).getMatrix(), ac.getInvInertiaBF(idx2));
+      rotationalTerm += crossB * (invInertiaWF_B * crossB);
+   }
+
+   const real_t invMeff = ac.getInvMass(idx1) + ac.getInvMass(idx2) + rotationalTerm;
+   WALBERLA_ASSERT_GREATER(invMeff, real_t(0));
+   return real_t(1) / invMeff;
+}
 
 class ComputeContacts {
 public:
@@ -1422,7 +1923,15 @@ public:
       real_t restitutionCoefficient, real_t kappa,
       real_t collisionTime, real_t particleTimestepSize, real_t frictionCoefficient,
       uint_t numParticleTypes = uint_t(2), bool useAnalyticalContactDetection = false,
-      bool usePureAnalyticalCylinder = false, bool useContactFilterOwnerTiebreak = false)
+      bool usePureAnalyticalCylinder = false, bool useContactFilterOwnerTiebreak = false,
+      bool useTightTier1 = false, bool useTightLayer1 = false, bool skipTier1 = false,
+      bool useRoundedBoxCorners = false, real_t boxRoundingRadius = real_t(0.05),
+      bool useMultiPointBoxContact = false, bool useBoxOverlapCap = false,
+      real_t boxOverlapCapFraction = real_t(0.3), bool useAxisHysteresis = false,
+      real_t axisHysteresisMargin = real_t(0.15), bool useContactManifold = false,
+      real_t manifoldFadeRate = real_t(0.25), bool useRotationalEffectiveMass = false,
+      bool useSpheroBoxContact = false, real_t spheroBoxRadius = real_t(0.05),
+      bool useSpheroBoxAnalytical = false, bool useFraigeBoxContactModel = false)
       : domain_(domain)
       , collisionResponse_(numParticleTypes)
       , restitutionCoefficient_(restitutionCoefficient)
@@ -1435,6 +1944,23 @@ public:
             collisionResponse_.setFrictionCoefficientDynamic(t, u, frictionCoefficient);
       acd_.useAnalyticalContactDetection = useAnalyticalContactDetection;
       acd_.usePureAnalyticalCylinder     = usePureAnalyticalCylinder;
+      acd_.useTightTier1                 = useTightTier1;
+      acd_.skipTier1                     = skipTier1;
+      acd_.useRoundedBoxCorners          = useRoundedBoxCorners;
+      acd_.boxRoundingRadius             = boxRoundingRadius;
+      acd_.useMultiPointBoxContact       = useMultiPointBoxContact;
+      acd_.useBoxOverlapCap              = useBoxOverlapCap;
+      acd_.boxOverlapCapFraction         = boxOverlapCapFraction;
+      acd_.useAxisHysteresis             = useAxisHysteresis;
+      acd_.axisHysteresisMargin          = axisHysteresisMargin;
+      acd_.useContactManifold            = useContactManifold;
+      acd_.manifoldFadeRate              = manifoldFadeRate;
+      acd_.useRotationalEffectiveMass    = useRotationalEffectiveMass;
+      acd_.useSpheroBoxContact           = useSpheroBoxContact;
+      acd_.spheroBoxRadius               = spheroBoxRadius;
+      acd_.useSpheroBoxAnalytical        = useSpheroBoxAnalytical;
+      acd_.useFraigeBoxContactModel      = useFraigeBoxContactModel;
+      acd_.useTightLayer1                = useTightLayer1;
       contact_filter_.useOwnerRankTiebreak = useContactFilterOwnerTiebreak;
 
       // Wire the optional ContactHistoryNotification diagnostic hook (see that file's own comment)
@@ -1460,6 +1986,12 @@ public:
    // ParticleKernels::logContactDetectionStatistics() to MPI-sum and log at end-of-run.
    const SolidCylinderContactDetection::ContactDetectionStats& contactStats() const { return acd_.contactStats; }
 
+   // Zeroes acd_'s per-rank tallies in place, for ParticleKernels::resetContactDetectionStatistics()
+   // -- lets a periodic (not just end-of-run) log report PER-INTERVAL counts instead of a running
+   // cumulative total, e.g. to see whether a scenario's mix of cylinder-cylinder sub-cases shifts as
+   // a jam builds up over the run.
+   void resetContactStats() { acd_.contactStats = SolidCylinderContactDetection::ContactDetectionStats{}; }
+
    // Wires ModelParameters.logFloaterHistory's CSV writer in (nullptr/disabled by default -- see
    // FloaterHistoryLogger's own class comment). Both this and setStepInfo are called once per
    // sub-cycle from doDEMSubCycles, mirroring the existing addExternalForces.setStepInfo/setSubCycle
@@ -1476,6 +2008,48 @@ public:
    void setFreshlyActivatedUIDs(std::shared_ptr< std::unordered_set< walberla::id_t > > uids)
    {
       freshlyActivatedUIDs_ = std::move(uids);
+   }
+
+   // See ModelParams::logContactAnomalies' own doc comment in SimulationParams.h for what the three
+   // watchers this enables ([NORMAL-FLIP]/[PROLONGED-CONTACT]/[SIMULTANEOUS-CONTACTS]) do and why.
+   // endStep == 0 means unbounded (through end of run), same convention as FloaterHistoryLogger's own
+   // setMaxStep.
+   void setLogContactAnomalies(bool enabled, uint_t startStep, uint_t endStep)
+   {
+      logContactAnomalies_     = enabled;
+      contactAnomalyStartStep_ = startStep;
+      contactAnomalyEndStep_   = (endStep == uint_t(0)) ? std::numeric_limits< uint_t >::max() : endStep;
+   }
+
+   // Called once per sub-cycle by doDEMSubCycles, right after forEachParticlePairHalf(...,
+   // computeContacts, ...) finishes for that sub-cycle -- reports any floater that was resolved
+   // against kSimultaneousContactsThreshold or more OTHER bodies within this SAME sub-cycle
+   // ([SIMULTANEOUS-CONTACTS]: each contact's spring-dashpot force is computed independently and
+   // summed onto that body, so the effective combined stiffness may exceed what the explicit
+   // integrator's timestep was tuned to handle for a single dominant contact -- the "many floaters
+   // piled on top of each other" packing case), then clears the per-sub-cycle tally regardless of
+   // whether logging is even on (cheap; keeps the map from growing across sub-cycles it's disabled).
+   void reportAndResetSimultaneousContacts()
+   {
+      if (logContactAnomalies_ && mainStep_ >= contactAnomalyStartStep_ && mainStep_ <= contactAnomalyEndStep_)
+      {
+         constexpr uint_t kSimultaneousContactsThreshold = uint_t(3);
+         static uint_t simultaneousContactsLogCount = uint_t(0);
+         for (const auto& entry : contactCountThisSubCycle_)
+         {
+            if (entry.second >= kSimultaneousContactsThreshold && simultaneousContactsLogCount < uint_t(200))
+            {
+               WALBERLA_LOG_WARNING("[SIMULTANEOUS-CONTACTS] step=" << mainStep_ << " subCycle=" << subCycle_
+                  << " uid=" << entry.first << " activeContactsThisSubCycle=" << entry.second
+                  << " -- this floater was resolved against " << entry.second << " other bodies within "
+                     "the SAME sub-cycle; each contact's spring-dashpot force is computed independently "
+                     "and summed, so the EFFECTIVE combined stiffness on this body may exceed what the "
+                     "explicit integrator's timestep was tuned to handle for a single dominant contact.");
+               ++simultaneousContactsLogCount;
+            }
+         }
+      }
+      contactCountThisSubCycle_.clear();
    }
 
    template< typename ParticleAccessor_T >
@@ -1629,7 +2203,122 @@ public:
                }
             }
 
+            // [NORMAL-FLIP] / [PROLONGED-CONTACT] / [SIMULTANEOUS-CONTACTS]: forensic instrumentation
+            // for the "logs/boxes silently build up 50%+ overlap over many sub-cycles, then explode
+            // once contact is finally resolved -- Sphere floaters in the identical jam never do this"
+            // investigation. All three are OFF by default (logContactAnomalies_) and, even when on,
+            // only active inside [contactAnomalyStartStep_, contactAnomalyEndStep_] -- see
+            // ModelParams::logContactAnomalies' own doc comment in SimulationParams.h.
+            if (logContactAnomalies_ && mainStep_ >= contactAnomalyStartStep_ && mainStep_ <= contactAnomalyEndStep_)
+            {
+               const walberla::id_t uidA = ac.getUid(acd_.getIdx1());
+               const walberla::id_t uidB = ac.getUid(acd_.getIdx2());
+               const auto pairKey = uidA < uidB ? std::make_pair(uidA, uidB) : std::make_pair(uidB, uidA);
+
+               // [NORMAL-FLIP]: a large, sudden change in the reported contact normal for the SAME uid
+               // pair between the last sub-cycle they were seen in contact and this one -- the discrete
+               // mode-switch symptom of SAT (Box-Box) / the Kodam-scenario dispatch (Cylinder-Cylinder):
+               // a tiny positional change near a near-symmetric/degenerate configuration (two nearly-
+               // parallel logs, two nearly face-aligned boxes -- exactly what a tight jam produces) can
+               // flip which face/edge/rim is reported as the contact feature, snapping the normal to a
+               // very different direction. To the (continuous-normal-assuming) spring-dashpot integrator
+               // that looks like an impulsive kick, not a continuous restoring force. Sphere-sphere
+               // contact has exactly one possible feature (the center-to-center line) and can never do
+               // this -- a candidate explanation for why only Box/Cylinder floaters "explode" this way.
+               {
+                  const auto it = lastContactNormal_.find(pairKey);
+                  if (it != lastContactNormal_.end())
+                  {
+                     const real_t cosAngle = std::max(real_t(-1), std::min(real_t(1), n * it->second));
+                     constexpr real_t kNormalFlipCosThreshold = real_t(0.7); // ~45 degrees
+                     if (cosAngle < kNormalFlipCosThreshold)
+                     {
+                        static uint_t normalFlipLogCount = uint_t(0);
+                        if (normalFlipLogCount < uint_t(200))
+                        {
+                           const auto fs1 = ac.getBaseShape(acd_.getIdx1())
+                                              ? ac.getBaseShape(acd_.getIdx1())->getShapeType() : uint_t(999);
+                           const auto fs2 = ac.getBaseShape(acd_.getIdx2())
+                                              ? ac.getBaseShape(acd_.getIdx2())->getShapeType() : uint_t(999);
+                           WALBERLA_LOG_WARNING("[NORMAL-FLIP] step=" << mainStep_ << " subCycle=" << subCycle_
+                              << " uidA=" << uidA << " uidB=" << uidB
+                              << " shapeTypeA=" << fs1 << " shapeTypeB=" << fs2
+                              << " prevNormal=" << it->second << " newNormal=" << n
+                              << " angleChangeDeg=" << (std::acos(cosAngle) * real_t(180) / math::pi)
+                              << " overlap=" << overlapMag << " (" << (overlapMag / smallerRad * real_t(100))
+                              << "% of smallerInteractionRadius=" << smallerRad << ")"
+                              << " posA=" << ac.getPosition(acd_.getIdx1()) << " posB=" << ac.getPosition(acd_.getIdx2())
+                              << " velA=" << ac.getLinearVelocity(acd_.getIdx1())
+                              << " velB=" << ac.getLinearVelocity(acd_.getIdx2()));
+                           ++normalFlipLogCount;
+                        }
+                     }
+                  }
+                  lastContactNormal_[pairKey] = n;
+               }
+
+               // [PROLONGED-CONTACT]: tracks how many consecutive sub-cycles (allowing up to a 1-main-
+               // step gap, since a pair need not be re-detected on EVERY sub-cycle of the same step to
+               // still be the "same" ongoing contact) this exact pair has been resolved, plus the peak
+               // overlap seen during that stretch -- direct evidence for whether overlap crept up
+               // gradually over many steps (a slow build-up the contact force never fully arrested) or
+               // appeared suddenly within one step (more consistent with a detection/sync gap upstream).
+               {
+                  auto& episode = contactEpisodes_[pairKey];
+                  if (mainStep_ > episode.lastSeenMainStep + uint_t(1))
+                  {
+                     episode.episodeLength    = uint_t(0);
+                     episode.episodeStartStep = mainStep_;
+                     episode.peakOverlap      = real_t(0);
+                  }
+                  episode.lastSeenMainStep = mainStep_;
+                  ++episode.episodeLength;
+                  episode.peakOverlap = std::max(episode.peakOverlap, overlapMag);
+
+                  constexpr uint_t kProlongedContactFirstReport = uint_t(30);
+                  constexpr uint_t kProlongedContactReportEvery = uint_t(50);
+                  if (episode.episodeLength == kProlongedContactFirstReport ||
+                      (episode.episodeLength > kProlongedContactFirstReport &&
+                       episode.episodeLength % kProlongedContactReportEvery == uint_t(0)))
+                  {
+                     static uint_t prolongedContactLogCount = uint_t(0);
+                     if (prolongedContactLogCount < uint_t(200))
+                     {
+                        WALBERLA_LOG_WARNING("[PROLONGED-CONTACT] step=" << mainStep_ << " subCycle=" << subCycle_
+                           << " uidA=" << uidA << " uidB=" << uidB
+                           << " episodeLength=" << episode.episodeLength << " subCycles (started step "
+                           << episode.episodeStartStep << ")"
+                           << " currentOverlap=" << overlapMag << " (" << (overlapMag / smallerRad * real_t(100))
+                           << "% of smallerInteractionRadius=" << smallerRad << ")"
+                           << " peakOverlapThisEpisode=" << episode.peakOverlap
+                           << " (" << (episode.peakOverlap / smallerRad * real_t(100)) << "%)"
+                           << " posA=" << ac.getPosition(acd_.getIdx1()) << " posB=" << ac.getPosition(acd_.getIdx2()));
+                        ++prolongedContactLogCount;
+                     }
+                  }
+               }
+
+               // [SIMULTANEOUS-CONTACTS]: per-sub-cycle active-contact count per body, reported (and
+               // reset) once the whole sub-cycle's pairwise sweep finishes by
+               // reportAndResetSimultaneousContacts() (called from doDEMSubCycles right after this
+               // sub-cycle's forEachParticlePairHalf(computeContacts, ...) sweep) -- see that method's
+               // own comment for why this specifically targets the "many floaters piled on top of each
+               // other" packing case.
+               ++contactCountThisSubCycle_[uidA];
+               ++contactCountThisSubCycle_[uidB];
+            }
+
             auto meff = real_c(1) / (ac.getInvMass(idx1) + ac.getInvMass(idx2));
+            // useRotationalEffectiveMass (any shape pair, see ModelParameters' own doc comment in
+            // SimulationParams.h): replace the plain translational reduced mass with the generalized
+            // effective mass AT THE ACTUAL CONTACT POINT just reported by acd_ -- the single change
+            // needed to make LinearSpringDashpot's stiffness/damping calibration correct for contacts
+            // whose point is off the line of centres (identical to the plain formula for sphere-sphere,
+            // where it never is).
+            if (acd_.useRotationalEffectiveMass)
+            {
+               meff = computeRotationalEffectiveMass(ac, idx1, idx2, acd_.getContactPoint(), acd_.getContactNormal());
+            }
             // Set stiffness for the actual type pair involved in this contact
             const uint_t t1 = std::min(ac.getType(acd_.getIdx1()), ac.getType(acd_.getIdx2()));
             const uint_t t2 = std::max(ac.getType(acd_.getIdx1()), ac.getType(acd_.getIdx2()));
@@ -1642,8 +2331,103 @@ public:
             const mesa_pd::Vec3 torqueBeforeA = ac.getTorqueRef(acd_.getIdx1());
             const mesa_pd::Vec3 torqueBeforeB = ac.getTorqueRef(acd_.getIdx2());
 
-            collisionResponse_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), acd_.getContactNormal(),
-                              acd_.getPenetrationDepth(), particleTimestepSize_);
+            // useMultiPointBoxContact (Box-Box only, see ModelParameters/SolidCylinderContactDetection's
+            // own doc comments): resolve EVERY vertex-overlap point independently instead of routing
+            // only the single deepest one through collisionResponse_ (LinearSpringDashpot) -- exactly
+            // the "multi-point contact concept" Fraige et al. 2008a/2008b describe as the fix for the
+            // sudden-normal-shift defect (see paper_analytical::boxBoxMultiPointContacts' own comment).
+            //
+            // Gated on acd_.wasLastCallBoxBox(), NOT on getMultiPointContacts() being non-empty: a
+            // pair-by-pair mix of "some sub-cycles have an embedded vertex, some don't" (routine for
+            // elongated/tilted boxes, where the contact can be pure edge-edge with neither box's corner
+            // inside the other) must NOT flip which force-response MODEL is used mid-episode. An
+            // earlier version of this gate (checking getMultiPointContacts().empty() instead) did
+            // exactly that -- fell back to the full LinearSpringDashpot (WITH persistent tangential-
+            // spring history) whenever no vertex happened to be embedded that sub-cycle, then back to
+            // this plain formula (WITHOUT history) once one re-entered -- and DEMValidationScenarios.h's
+            // runMultiPointBoxContactFuzz caught the consequence directly: that mid-episode model switch
+            // was itself injecting massive spurious energy (up to ~6800% relative KE gain across a
+            // randomized sweep), independent of and on top of the SAT-axis discontinuity this mode
+            // exists to fix. Fixed by ALWAYS using this same plain velocity-based normal+tangential
+            // spring-dashpot formula for Box-Box once useMultiPointBoxContact is on -- with N=1 (the
+            // single SAT point, synthesized into a one-element list below) on sub-cycles with no
+            // embedded vertex, or N>1 (the real vertex list) when there are -- never collisionResponse_.
+            // Same rationale as the arch/tunnel secondary-contact block below for not using
+            // collisionResponse_ here at all: its persistent tangential-spring history is keyed only by
+            // the uid pair, not by "which of N points", so reusing it per-point (or intermittently
+            // switching to it) would conflate/discontinue N physically distinct sliding histories.
+            // Each point's force is scaled by 1/N so simultaneous points don't multiply the total force
+            // applied this sub-cycle (Höhner et al. 2011's own "corrections" for exactly this, cited in
+            // Lu et al. 2015 Section 2.2.4: "the incremental elastic and dissipative forces were divided
+            // by the number of contact points involved").
+            if (acd_.useMultiPointBoxContact && acd_.wasLastCallBoxBox())
+            {
+               const real_t stiffnessN = collisionResponse_.getStiffnessN(t1, t2);
+               const real_t dampingN   = collisionResponse_.getDampingN(t1, t2);
+               const real_t dampingT   = collisionResponse_.getDampingT(t1, t2);
+               const real_t muDynamic  = collisionResponse_.getFrictionCoefficientDynamic(t1, t2);
+
+               const auto& mpList = acd_.getMultiPointContacts();
+               const paper_analytical::BoxVertexContact fallbackSingle{ acd_.getContactPoint(),
+                                                                          acd_.getContactNormal(),
+                                                                          -acd_.getPenetrationDepth() };
+               const auto& points = mpList.empty()
+                  ? std::vector< paper_analytical::BoxVertexContact >{ fallbackSingle }
+                  : mpList;
+               const real_t invN = real_t(1) / real_t(points.size());
+
+               for (const auto& mp : points)
+               {
+                  // [LARGE-OVERLAP] above only ever inspects acd_.getPenetrationDepth() -- the ONE
+                  // "primary" overlap (boxBoxSAT's own, or the single deepest vertex chosen as a
+                  // fallback when SAT itself found nothing) -- never each individual point actually
+                  // used for force application here. With N>1 points that gap is real: a SECONDARY
+                  // vertex can carry a much deeper overlap than the primary one (each vertex is
+                  // tested independently against the other box, with no shared cap), and its force
+                  // is applied at that point's own (potentially far-from-centroid) world position --
+                  // exactly the ingredient for a large, unwarned spurious torque. Mirrors
+                  // [LARGE-OVERLAP]'s own threshold (half the smaller body's interaction radius) so
+                  // the two are directly comparable.
+                  if (mp.overlap > real_t(0.5) * smallerRad)
+                  {
+                     static uint_t largeOverlapMultiPointLogCount = uint_t(0);
+                     if (largeOverlapMultiPointLogCount < uint_t(20))
+                     {
+                        WALBERLA_LOG_WARNING_ON_ROOT(
+                           "[LARGE-OVERLAP-MULTIPOINT] step=" << mainStep_ << " subCycle=" << subCycle_
+                           << " uid=" << ac.getUid(acd_.getIdx1()) << " <-> uid=" << ac.getUid(acd_.getIdx2())
+                           << " point=" << mp.point << " normal=" << mp.normal << " overlap=" << mp.overlap
+                           << " (smallerInteractionRadius=" << smallerRad << ", pointIndex of "
+                           << points.size() << " total) -- this SECONDARY multi-point vertex carries an "
+                              "anomalously deep overlap that [LARGE-OVERLAP] (primary-contact-only) would "
+                              "never see.");
+                        ++largeOverlapMultiPointLogCount;
+                     }
+                  }
+
+                  const mesa_pd::Vec3 relVel = mesa_pd::getVelocityAtWFPoint(acd_.getIdx2(), ac, mp.point)
+                                              - mesa_pd::getVelocityAtWFPoint(acd_.getIdx1(), ac, mp.point);
+                  const real_t        velN = relVel * mp.normal;
+                  const mesa_pd::Vec3 velT = relVel - velN * mp.normal;
+
+                  real_t fN = stiffnessN * mp.overlap + dampingN * velN;
+                  if (fN < real_t(0)) fN = real_t(0); // a spring-dashpot must never pull the bodies together
+
+                  mesa_pd::Vec3 fT = dampingT * velT;
+                  const real_t  fTmag = fT.length();
+                  const real_t  fTmax = muDynamic * fN;
+                  if (fTmag > fTmax && fTmag > real_t(1e-12)) fT *= (fTmax / fTmag);
+
+                  const mesa_pd::Vec3 force = invN * (fN * mp.normal + fT);
+                  mesa_pd::addForceAtWFPosAtomic(acd_.getIdx1(), ac,  force, mp.point);
+                  mesa_pd::addForceAtWFPosAtomic(acd_.getIdx2(), ac, -force, mp.point);
+               }
+            }
+            else
+            {
+               collisionResponse_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), acd_.getContactNormal(),
+                                 acd_.getPenetrationDepth(), particleTimestepSize_);
+            }
 
             // TEMP DIAGNOSTIC (remove after investigation): [STRONG-CONTACT-FORCE] -- the collapsed-
             // plane density05 scenarios (jobs 4124358, 4125031) showed floaters launched far above
@@ -1810,6 +2594,29 @@ private:
    }
 
    std::map< std::pair< walberla::id_t, walberla::id_t >, std::string > pairContactInputState_;
+
+   // See setLogContactAnomalies()'s own doc comment above for what these three gate/feed.
+   bool   logContactAnomalies_     = false;
+   uint_t contactAnomalyStartStep_ = uint_t(0);
+   uint_t contactAnomalyEndStep_   = std::numeric_limits< uint_t >::max();
+
+   // [NORMAL-FLIP]'s per-pair "last seen contact normal" (local to this rank, not synced -- same
+   // spirit as pairContactInputState_ above).
+   std::map< std::pair< walberla::id_t, walberla::id_t >, mesa_pd::Vec3 > lastContactNormal_;
+
+   // [PROLONGED-CONTACT]'s per-pair episode state.
+   struct ContactEpisodeState
+   {
+      uint_t lastSeenMainStep = uint_t(0);
+      uint_t episodeStartStep = uint_t(0);
+      uint_t episodeLength    = uint_t(0);
+      real_t peakOverlap      = real_t(0);
+   };
+   std::map< std::pair< walberla::id_t, walberla::id_t >, ContactEpisodeState > contactEpisodes_;
+
+   // [SIMULTANEOUS-CONTACTS]' per-sub-cycle tally -- populated in operator(), consumed and cleared by
+   // reportAndResetSimultaneousContacts() once per sub-cycle.
+   std::unordered_map< walberla::id_t, uint_t > contactCountThisSubCycle_;
 };
 
 
@@ -2820,7 +3627,24 @@ public:
          uint_t(5), // 5 types: 0=bed/wall, 1=sphere floater, 2=pillar, 3=box floater, 4=cylinder floater
          simParams->model.useAnalyticalContactDetection,
          simParams->model.usePureAnalyticalCylinder,
-         simParams->model.useContactFilterOwnerTiebreak)
+         simParams->model.useContactFilterOwnerTiebreak,
+         simParams->model.useTightTier1,
+         simParams->model.useTightLayer1,
+         simParams->model.skipTier1,
+         simParams->model.useRoundedBoxCorners,
+         simParams->model.boxRoundingRadius,
+         simParams->model.useMultiPointBoxContact,
+         simParams->model.useBoxOverlapCap,
+         simParams->model.boxOverlapCapFraction,
+         simParams->model.useAxisHysteresis,
+         simParams->model.axisHysteresisMargin,
+         simParams->model.useContactManifold,
+         simParams->model.manifoldFadeRate,
+         simParams->model.useRotationalEffectiveMass,
+         simParams->model.useSpheroBoxContact,
+         simParams->model.spheroBoxRadius,
+         simParams->model.useSpheroBoxAnalytical,
+         simParams->model.useFraigeBoxContactModel)
       , dormantFloaterUIDs_(simObjs->dormantFloaterUIDs)
       , freshlyActivatedFloaterUIDs_(simObjs->freshlyActivatedFloaterUIDs)
       , addExternalForces(
@@ -2868,8 +3692,11 @@ public:
       // before this constructor runs.
       floaterHistoryLogger_.init(simParams->model.floaterHistoryBaseFolder, simParams->model.logFloaterHistory);
       floaterHistoryLogger_.setMinStep(simParams->model.logFloaterHistoryStartStep);
+      floaterHistoryLogger_.setMaxStep(simParams->model.logFloaterHistoryEndStep);
       computeContacts.setHistoryLogger(&floaterHistoryLogger_);
       computeContacts.setFreshlyActivatedUIDs(freshlyActivatedFloaterUIDs_);
+      computeContacts.setLogContactAnomalies(simParams->model.logContactAnomalies,
+         simParams->model.contactAnomalyStartStep, simParams->model.contactAnomalyEndStep);
       computeLubrication.setHistoryLogger(&floaterHistoryLogger_);
       if (computeTunnelContacts_) computeTunnelContacts_->setHistoryLogger(&floaterHistoryLogger_);
       if (simParams->model.logFloaterHistory)
@@ -2877,6 +3704,18 @@ public:
             << simParams->model.floaterHistoryBaseFolder << "/\""
             << (simParams->model.logFloaterHistoryStartStep != uint_t(0)
                    ? (" starting at step " + std::to_string(simParams->model.logFloaterHistoryStartStep))
+                   : std::string())
+            << (simParams->model.logFloaterHistoryEndStep != uint_t(0)
+                   ? (" ending at step " + std::to_string(simParams->model.logFloaterHistoryEndStep))
+                   : std::string()));
+      if (simParams->model.logContactAnomalies)
+         WALBERLA_LOG_INFO_ON_ROOT("[ComputeContacts] logContactAnomalies enabled -- "
+            "[NORMAL-FLIP]/[PROLONGED-CONTACT]/[SIMULTANEOUS-CONTACTS] watchers active"
+            << (simParams->model.contactAnomalyStartStep != uint_t(0)
+                   ? (" from step " + std::to_string(simParams->model.contactAnomalyStartStep))
+                   : std::string())
+            << (simParams->model.contactAnomalyEndStep != uint_t(0)
+                   ? (" to step " + std::to_string(simParams->model.contactAnomalyEndStep))
                    : std::string()));
 
       // ModelParams::logFloaterHistoryReleaseStepFilter (0 = disabled = log everyone, unchanged):
@@ -2924,6 +3763,7 @@ public:
       useAnalyticBoxBuoyancy_    = simParams->model.useAnalyticBoxBuoyancy;
       usePhantomForceCorrection_ = simParams->model.usePhantomForceCorrection;
       useMemOnlyBuoyancy_        = simParams->model.useMemOnlyBuoyancy;
+      useFullVolumeAnalyticBuoyancy_ = simParams->model.useFullVolumeAnalyticBuoyancy;
       WALBERLA_LOG_INFO_ON_ROOT("[FloaterForces] phantom-force correction (Option A): "
          << (usePhantomForceCorrection_ ? "ON (F_hydro_z −= tapered F_pred_z)" : "OFF"));
       WALBERLA_LOG_INFO_ON_ROOT("[FloaterForces] buoyancy model: "
@@ -2981,10 +3821,15 @@ public:
                                         : "STATIC (flat H=" + std::to_string(surfaceHeight_) + ")"));
    }
 
-   // End-of-run diagnostic: MPI-sums computeContacts' per-rank PaperAnalyticalContacts.h scenario /
-   // GJK-EPA-fallback tallies (all zero unless ModelParameters.useAnalyticalContactDetection is on)
-   // and logs one line on root. Call once after the main timeloop finishes -- see Antidunes.cpp.
-   void logContactDetectionStatistics() const
+   // MPI-sums computeContacts' per-rank PaperAnalyticalContacts.h scenario / GJK-EPA-fallback
+   // tallies (all zero unless ModelParameters.useAnalyticalContactDetection is on) and logs one line
+   // on root. Called once after the main timeloop finishes (stepLabel="") -- see Antidunes.cpp -- or,
+   // when EvaluationParameters.logContactDetectionStatsPeriodically is set, also periodically at
+   // performanceLogFrequency (stepLabel=the current step number) paired with
+   // resetContactDetectionStatistics() so each printed line reports PER-INTERVAL counts instead of a
+   // cumulative running total -- lets the sub-case mix be tracked as a jam develops over a run,
+   // instead of only seeing one aggregate total at the end.
+   void logContactDetectionStatistics(const std::string& stepLabel = "") const
    {
       const auto& s = computeContacts.contactStats();
       uint64_t boxBoxSAT = s.boxBoxSAT, cylFaceFace = s.cylFaceFace,
@@ -2992,8 +3837,15 @@ public:
                cylBandBandSkewed = s.cylBandBandSkewed, cylFaceEdge = s.cylFaceEdge,
                cylSpecialContact = s.cylSpecialContact, cylBandEdge = s.cylBandEdge,
                cylEdgeEdge = s.cylEdgeEdge, cylFallbackTier1 = s.cylFallbackTier1,
-               cylFallbackTier2 = s.cylFallbackTier2, cylPureTier1Rejected = s.cylPureTier1Rejected,
-               cylPureTier2Trusted = s.cylPureTier2Trusted;
+               cylFallbackSpecialContact = s.cylFallbackSpecialContact,
+               cylPureTier1Rejected = s.cylPureTier1Rejected,
+               cylPureSpecialContactTrusted = s.cylPureSpecialContactTrusted,
+               cylFallbackTier1GjkFoundContact            = s.cylFallbackTier1GjkFoundContact,
+               cylFallbackTier1GjkFoundNoContact           = s.cylFallbackTier1GjkFoundNoContact,
+               cylFallbackSpecialContactGjkFoundContact   = s.cylFallbackSpecialContactGjkFoundContact,
+               cylFallbackSpecialContactGjkFoundNoContact = s.cylFallbackSpecialContactGjkFoundNoContact,
+               cylTier1CheaplyProvedSeparated = s.cylTier1CheaplyProvedSeparated,
+               boxTightLayer1CheaplyProvedSeparated = s.boxTightLayer1CheaplyProvedSeparated;
 
       mpi::allReduceInplace(boxBoxSAT,           mpi::SUM);
       mpi::allReduceInplace(cylFaceFace,         mpi::SUM);
@@ -3005,24 +3857,33 @@ public:
       mpi::allReduceInplace(cylBandEdge,         mpi::SUM);
       mpi::allReduceInplace(cylEdgeEdge,         mpi::SUM);
       mpi::allReduceInplace(cylFallbackTier1,    mpi::SUM);
-      mpi::allReduceInplace(cylFallbackTier2,    mpi::SUM);
+      mpi::allReduceInplace(cylFallbackSpecialContact, mpi::SUM);
       mpi::allReduceInplace(cylPureTier1Rejected, mpi::SUM);
-      mpi::allReduceInplace(cylPureTier2Trusted,  mpi::SUM);
+      mpi::allReduceInplace(cylPureSpecialContactTrusted, mpi::SUM);
+      mpi::allReduceInplace(cylFallbackTier1GjkFoundContact,   mpi::SUM);
+      mpi::allReduceInplace(cylFallbackTier1GjkFoundNoContact, mpi::SUM);
+      mpi::allReduceInplace(cylFallbackSpecialContactGjkFoundContact,   mpi::SUM);
+      mpi::allReduceInplace(cylFallbackSpecialContactGjkFoundNoContact, mpi::SUM);
+      mpi::allReduceInplace(cylTier1CheaplyProvedSeparated, mpi::SUM);
+      mpi::allReduceInplace(boxTightLayer1CheaplyProvedSeparated, mpi::SUM);
 
-      // cylPureTier2Trusted is a SUB-metric of cylAnalyticalTrusted below (that path also calls
-      // bumpCylScenario, so it's already folded into face-face/band-band-skewed/etc.) -- reported
-      // separately, not added again, to avoid double-counting. cylPureTier1Rejected is NOT folded
-      // into anything else (a pure-mode-rejected pair isn't a "trusted" scenario), so it's added to
-      // the grand total the same way a fallback attempt would be.
+      // cylPureSpecialContactTrusted is a SUB-metric of cylAnalyticalTrusted below (that path also
+      // calls bumpCylScenario, so it's already folded into face-face/band-band-skewed/etc.) --
+      // reported separately, not added again, to avoid double-counting. cylPureTier1Rejected is NOT
+      // folded into anything else (a pure-mode-rejected pair isn't a "trusted" scenario), so it's
+      // added to the grand total the same way a fallback attempt would be.
       const uint64_t cylAnalyticalTrusted = cylFaceFace + cylBandBandParallel + cylFaceBand +
          cylBandBandSkewed + cylFaceEdge + cylSpecialContact + cylBandEdge + cylEdgeEdge;
-      const uint64_t cylFallbackTotal = cylFallbackTier1 + cylFallbackTier2;
-      const uint64_t cylTotal = cylAnalyticalTrusted + cylFallbackTotal + cylPureTier1Rejected;
+      const uint64_t cylFallbackTotal = cylFallbackTier1 + cylFallbackSpecialContact;
+      const uint64_t cylTotal = cylAnalyticalTrusted + cylFallbackTotal + cylPureTier1Rejected +
+         cylTier1CheaplyProvedSeparated;
       const real_t fallbackRatePercent =
          (cylTotal > uint64_t(0)) ? real_t(100) * real_t(cylFallbackTotal) / real_t(cylTotal) : real_t(0);
 
       WALBERLA_LOG_INFO_ON_ROOT(
-         "[ContactDetectionStats] Box x Box: SAT=" << boxBoxSAT
+         "[ContactDetectionStats]" << (stepLabel.empty() ? "" : " step=" + stepLabel)
+         << " Box x Box: SAT=" << boxBoxSAT
+         << " (Layer1-cheaply-proved-separated=" << boxTightLayer1CheaplyProvedSeparated << ")"
          << " | Cylinder x Cylinder analytical (trusted): face-face=" << cylFaceFace
          << " band-band-parallel=" << cylBandBandParallel
          << " face-band=" << cylFaceBand
@@ -3032,15 +3893,27 @@ public:
          << " band-edge=" << cylBandEdge
          << " edge-edge=" << cylEdgeEdge
          << " (trusted total=" << cylAnalyticalTrusted
-         << ", of which pure-mode-tier2-trusted-anyway=" << cylPureTier2Trusted << ")"
+         << ", of which pure-mode-special-contact-trusted-anyway=" << cylPureSpecialContactTrusted << ")"
          << " | GJK/EPA fallback: tier1(analytical-found-nothing)=" << cylFallbackTier1
-         << " tier2(analytical-magnitude-flagged-uncertain)=" << cylFallbackTier2
+         << " [of which GJK says: contact=" << cylFallbackTier1GjkFoundContact
+         << " no-contact=" << cylFallbackTier1GjkFoundNoContact << "]"
+         << " special-contact(unconditionally-distrusted)=" << cylFallbackSpecialContact
+         << " [of which GJK says: contact=" << cylFallbackSpecialContactGjkFoundContact
+         << " no-contact=" << cylFallbackSpecialContactGjkFoundNoContact << "]"
          << " (fallback total=" << cylFallbackTotal << ")"
+         << " | Tier 1 CHEAPLY PROVED SEPARATED (no GJK/EPA call needed at all)="
+         << cylTier1CheaplyProvedSeparated
          << " | usePureAnalyticalCylinder rejections (no fallback attempted): tier1="
          << cylPureTier1Rejected
          << " | cylinder-cylinder grand total=" << cylTotal
          << " fallback-rate=" << fallbackRatePercent << "%");
    }
+
+   // Zeroes computeContacts' per-rank ContactDetectionStats tallies in place -- call right after
+   // logContactDetectionStatistics() in a periodic (not end-of-run) reporting loop so the NEXT
+   // printed line reports only what happened since this reset, not a cumulative running total. A
+   // no-op with respect to physics/contact resolution itself -- purely a diagnostic counter reset.
+   void resetContactDetectionStatistics() { computeContacts.resetContactStats(); }
 
    template< typename TP >
    void resetHydroForces(timing::TimingPool<TP> & tp){
@@ -3480,6 +4353,9 @@ public:
          particleStorage->forEachParticlePairHalf(useOpenMP,
             pairSelector, *particleAccessor,
             computeContacts, *particleAccessor);
+         // [SIMULTANEOUS-CONTACTS]: report+reset this sub-cycle's per-body active-contact tally, now
+         // that the whole pairwise sweep above has finished -- see that method's own comment.
+         computeContacts.reportAndResetSimultaneousContacts();
          tp["MESAPD: ComputeContacts"].end();
 
          // compute arch-tunnel contacts (floaters vs. the inside of a hollow tunnel -- see
@@ -3696,6 +4572,20 @@ public:
    {
       const size_t nF = floaterUIDs_.size();
       if (nF == 0) { submergedVolumes_.clear(); return; }
+
+      // useFullVolumeAnalyticBuoyancy_: skip the plane-fit/surface-sampling entirely -- vSub=vFull
+      // unconditionally for every floater (see SimulationParams.h's own doc comment on this flag).
+      if (useFullVolumeAnalyticBuoyancy_)
+      {
+         submergedVolumes_.clear();
+         for (size_t fi = 0; fi < nF; ++fi)
+         {
+            const real_t r     = floaterRadii_[fi];
+            const real_t vFull = (real_t(4) / real_t(3)) * math::pi * r * r * r;
+            submergedVolumes_[floaterUIDs_[fi]] = vFull;
+         }
+         return;
+      }
 
       // Gather sphere centres from owner ranks; allReduce(SUM) broadcasts to all.
       std::vector< real_t > cenX(nF, real_t(0));
@@ -4062,6 +4952,25 @@ public:
       buoyancyCenterOffset_.clear(); // box/cylinder-only; recomputed every step
       const size_t nB = clipFloaters_.size(); // boxes (type 3) + cylinders (type 4)
       if (nB == 0) return;
+
+      // useFullVolumeAnalyticBuoyancy_: skip the plane-fit/surface-sampling entirely -- vSub=vFull,
+      // no righting lever, for every floater unconditionally (see SimulationParams.h's own doc
+      // comment on this flag).
+      if (useFullVolumeAnalyticBuoyancy_)
+      {
+         for (size_t bi = 0; bi < nB; ++bi)
+         {
+            const real_t hx    = clipFloaters_[bi].halfExtents[0];
+            const real_t hy    = clipFloaters_[bi].halfExtents[1];
+            const real_t hz    = clipFloaters_[bi].halfExtents[2];
+            const bool   isCyl = clipFloaters_[bi].isCylinder;
+            const real_t vFull = isCyl ? math::pi * hx * hx * real_t(2) * hz
+                                       : real_t(8) * hx * hy * hz;
+            submergedVolumes_[clipFloaters_[bi].uid] = vFull;
+            // buoyancyCenterOffset_ left empty (cleared above) -- symmetric, no righting lever.
+         }
+         return;
+      }
 
       // Gather centre positions and rotation matrices from owner ranks.
       // Non-owner ranks contribute 0; allReduce(SUM) distributes the owner's values.
@@ -4533,6 +5442,11 @@ private:
    // support and righting moment both come solely from the raw MEM force/torque). false → run them as
    // before (Antidunes' extended, opt-in split; the pre-existing behaviour before the default flip).
    bool                                               useMemOnlyBuoyancy_{ true };
+   // Only consulted when useMemOnlyBuoyancy_==false. true -> computeSubmergedVolumes()/
+   // computeSubmergedVolumesBox() force vSub=vFull (buoyancyCenterOffset_=0) for every floater
+   // unconditionally, skipping the plane-fit/clip/sampling machinery entirely -- see
+   // SimulationParams.h::ModelParams::useFullVolumeAnalyticBuoyancy's own doc comment.
+   bool                                               useFullVolumeAnalyticBuoyancy_{ false };
    std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxPositions_;  // boxes whose TRANSLATION is held (rotation free); UID → pinned world position
    std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxAxes_;       // UID → per-axis pin mask (nonzero = pin that axis, 0 = free)
    std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedRotationAxes_; // UID → per-axis rotation pin mask (nonzero = zero that axis's angular velocity every sub-cycle, 0 = free)

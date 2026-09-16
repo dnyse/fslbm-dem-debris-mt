@@ -80,6 +80,12 @@ struct PIDParams {
    real_t minActuatingVariable;
    real_t maxActuatingVariable;
 
+   // false disables the PID controller's own forcing update entirely (Forcing.h's ForcingAdjuster
+   // then leaves `acceleration[0]` pinned at its setupSimState-computed initial value for the whole
+   // run -- a "fixed hydraulic gradient" rather than a controlled flume; see THESIS_PLAN.md item 3).
+   // Default true reproduces every existing prm's exact prior behavior (unconditional PID control).
+   bool   enabled;
+
    PIDParams(const config::Config::BlockHandle& b)
       : targetMeanVelocityMagnitude { b.getParameter< real_t >("targetMeanVelocityMagnitude") }
       , proportionalGain            { b.getParameter< real_t >("proportionalGain") }
@@ -88,6 +94,7 @@ struct PIDParams {
       , maxRamp                     { b.getParameter< real_t >("maxRamp") }
       , minActuatingVariable        { b.getParameter< real_t >("minActuatingVariable") }
       , maxActuatingVariable        { b.getParameter< real_t >("maxActuatingVariable") }
+      , enabled                     { b.getParameter< bool >  ("enabled", true) }
    {}
 };
 
@@ -125,6 +132,25 @@ struct PhysicsParams {
    uint_t denseNanScanFromStep;
    uint_t denseNanScanToStep;
 
+   // 0 (DEFAULT, off) -> checkPdfNaN behaves exactly as before (isfinite only). > 0 -> checkPdfNaN
+   // (SetupStages.h) ALSO logs a throttled (first 20 per rank) [LOW-RHO-PRECURSOR] warning for any
+   // liquid/interface cell whose aggregate density is still finite but has drained below this value --
+   // catching the step(s) BEFORE a cell goes fully non-finite, which the plain isfinite scan can never
+   // see by construction. Same intended usage as denseNanScanEnabled above (a targeted, windowed
+   // rerun from a checkpoint near an already-known crash, not routine production use) -- gated on the
+   // SAME nanScanNow cadence in Antidunes.cpp, no separate window needed. Pick a threshold well below
+   // the fluid's nominal rho (~1 in lattice units); e.g. 0.1.
+   real_t lowRhoPrecursorThreshold;
+
+   // 0 (DEFAULT, off) -> no effect. > 0 -> checkPdfNaN ALSO logs a throttled (first 20 per rank)
+   // [HIGH-VELOCITY-PRECURSOR] warning for any liquid/interface cell whose velocity magnitude is
+   // still finite but exceeds this value -- the symmetric counterpart to lowRhoPrecursorThreshold
+   // above: a blowup does not always drain toward rho=0 first, it can equally show up as an
+   // unrealistically large (but not yet Inf/NaN) velocity for a step or two beforehand. Same intended
+   // usage (targeted windowed rerun, not routine production use). Pick a value well above the flow's
+   // own target velocity (e.g. 10x targetMeanVelocityMagnitude).
+   real_t highVelocityPrecursorThreshold;
+
    PhysicsParams(const config::Config::BlockHandle& b)
       : enableWetting          { b.getParameter< bool >  ("enableWetting") }
       , timesteps              { b.getParameter< uint_t >("timesteps") }
@@ -137,6 +163,8 @@ struct PhysicsParams {
       , denseNanScanEnabled    { b.getParameter< bool >  ("denseNanScanEnabled", false) }
       , denseNanScanFromStep   { b.getParameter< uint_t >("denseNanScanFromStep", uint_t(0)) }
       , denseNanScanToStep     { b.getParameter< uint_t >("denseNanScanToStep", timesteps) }
+      , lowRhoPrecursorThreshold { b.getParameter< real_t >("lowRhoPrecursorThreshold", real_c(0)) }
+      , highVelocityPrecursorThreshold { b.getParameter< real_t >("highVelocityPrecursorThreshold", real_c(0)) }
    {}
 };
 
@@ -614,6 +642,19 @@ struct ModelParams {
    //         non-thesis split; the pre-existing behaviour before this flag defaulted to true).
    bool        useMemOnlyBuoyancy;
 
+   // Only consulted when useMemOnlyBuoyancy=false (computeSubmergedVolumes()/computeSubmergedVolumesBox()
+   // are only ever called from that branch, doDEMSubCycles) -- meaningless and never read otherwise.
+   // true  → force vSub = vFull (and buoyancyCenterOffset_ = 0, no righting lever) for every floater
+   //         unconditionally, skipping the entire local-free-surface plane-fit/clip/sampling machinery
+   //         in computeSubmergedVolumes()/computeSubmergedVolumesBox() entirely. This is "the original,
+   //         simple" full-volume-submerged buoyancy computation (correct as long as the floater never
+   //         approaches the free surface) -- added for thesis item 1b's MEM-vs-analytical comparison,
+   //         which is scoped to the fully-submerged case only and must never depend on incidental
+   //         floater-to-surface proximity engaging the (separately validated, partial-submersion-only)
+   //         plane-fit machinery mid-run.
+   // false → (DEFAULT) unchanged existing behaviour: plane-fit/clip/sampling as before.
+   bool        useFullVolumeAnalyticBuoyancy;
+
    // true  → re-seed each FormerMO cell to the depth-consistent hydrostatic density
    //         ρ_hyd(z) = 1 + 3·a_z·(z − H) instead of the EquilibriumReconstructor's fill-blind
    //         unweighted mean (interface cells report ρ≈1 however empty they are). Kills the ρ≈1
@@ -712,6 +753,227 @@ struct ModelParams {
    //         cylinderCylinderResultIsUncertain() flags the analytical result.
    bool        usePureAnalyticalCylinder;
 
+   // true  → (only meaningful together with useAnalyticalContactDetection=true) cylinderCylinderResultIsUncertain's
+   //         Tier 1 check (fired when the analytical dispatch found no scenario at all) uses the tight,
+   //         capsule-based bound (detail::closestDistanceSqBetweenSegments: the two cylinders' own axis
+   //         SEGMENTS vs. the sum of their radii) instead of the original loose center-distance bound
+   //         (radius+halfLength sum per side). Both are fully conservative -- neither can ever wrongly
+   //         declare "definitely separated" for a pair that's actually touching (validated directly
+   //         against GJK/EPA in PaperAnalyticalContactTest.cpp's testTightTier1Accuracy10k, 0 unsafe
+   //         cases across 10000 trials) -- but the tight bound is strictly tighter for any cylinder
+   //         with length > 0, so it resolves far more dispatch-gap pairs as "definitely separated,
+   //         skip GJK/EPA entirely" instead of falling back on every one of them. See
+   //         PaperAnalyticalContacts.h's own comment on cylinderCylinderResultIsUncertain's
+   //         useTightTier1 parameter for the full derivation.
+   // false → (DEFAULT) the original loose center-distance Tier 1 bound, unchanged behaviour.
+   bool        useTightTier1;
+
+   // true  → the "cheap raw-center-distance reject" that runs BEFORE any real contact detection at
+   //         all (both Cylinder x Cylinder and, newly, Box x Box) uses a tight, ORIENTATION-AWARE bound
+   //         instead of collapsing each body to its circumscribing sphere. Cylinder x Cylinder: the
+   //         same capsule/segment-distance bound as useTightTier1 above, applied one level earlier (so
+   //         a pair it resolves never even reaches the analytical dispatch, not just skips GJK/EPA).
+   //         Box x Box: a NEW cheap single-candidate-axis test (detail::boxesDefinitelySeparatedAlongCenterLine
+   //         -- projects each box onto the line between the two centres and compares to the sum of
+   //         radii, i.e. one axis of full SAT instead of all 15) run ahead of boxBoxSAT, which
+   //         previously had no pre-filter at all. Both remain fully conservative (validated directly
+   //         against GJK/EPA: 0 unsafe cases across 10000 trials each, see
+   //         PaperAnalyticalContactTest.cpp's testTightTier1Accuracy10k and testTightLayer1BoxAccuracy10k)
+   //         -- see PaperAnalyticalContacts.h's own comments on closestDistanceSqBetweenSegments and
+   //         boxesDefinitelySeparatedAlongCenterLine for the full derivation of each.
+   // false → (DEFAULT) the original circumscribing-sphere-sum reject for Cylinder x Cylinder,
+   //         unchanged; NO pre-filter at all for Box x Box (boxBoxSAT runs directly), unchanged.
+   bool        useTightLayer1;
+
+   // true  → (only correct together with useTightLayer1=true -- see below) skips
+   //         cylinderCylinderResultIsUncertain's Tier 1 check ENTIRELY for dispatch-gap pairs (no
+   //         distance computation of any kind; "no contact" is trusted immediately) instead of merely
+   //         swapping which bound it uses. Justified by a proof, not just a benchmark: any pair that
+   //         survives the tight Layer 1 pre-filter is GUARANTEED (via the triangle inequality) to also
+   //         survive Tier 1's own bound, tight or original -- so once Layer 1 is tight, Tier 1's
+   //         dispatch-gap check can provably never reject anything, and running it is pure wasted
+   //         work. Confirmed empirically too (job 4194491: cylTier1CheaplyProvedSeparated=0 at every
+   //         interval with both useTightLayer1 and useTightTier1 on together). See
+   //         PaperAnalyticalContacts.h's own comment on cylinderCylinderResultIsUncertain's skipTier1
+   //         parameter for the full derivation.
+   // false → (DEFAULT) Tier 1 always runs (using whichever bound useTightTier1 selects).
+   // WARNING: skipTier1=true with useTightLayer1=false is NOT just a missed optimization -- it is
+   //          incorrect, and will silently trust "no contact" for real dispatch-gap contacts the loose
+   //          Layer 1 reject lets through. A startup warning fires if this combination is detected.
+   bool        skipTier1;
+
+   // true  → Box x Box's boxBoxSAT (only meaningful together with useAnalyticalContactDetection=true)
+   //         replaces its normal with a closest-point-between-edge-segments vector whenever the
+   //         winning SAT axis is edge-vs-edge, and inflates the reported overlap by
+   //         2*boxRoundingRadius -- see PaperAnalyticalContacts.h's own comment on boxBoxSAT's
+   //         useRoundedCorners parameter for the full derivation and the corner/edge contact-normal
+   //         DISCONTINUITY this fixes (Lu, Third & Müller 2015, Chem. Eng. Sci. 127, Section 2.1.3,
+   //         citing Fraige et al. 2008a) -- proven present in this project's own production Box x Box
+   //         dispatch by DEMValidationScenarios.h's runCornerNormalDiscontinuity (47.7% spurious
+   //         kinetic-energy gain with this OFF, using this project's own real FloatingBox parameters).
+   // false → (DEFAULT) exact pre-existing boxBoxSAT behaviour, unchanged.
+   bool        useRoundedBoxCorners;
+   // Rounding radius used only when useRoundedBoxCorners is true. 0.05 (DEFAULT) is small relative to
+   // a typical FloatingBox's own half-extents (this scenario family's own logs use halfExtents as
+   // small as <6,1,1.5>) -- enough to smooth the corner/edge transition without materially changing
+   // the box's effective size.
+   real_t      boxRoundingRadius;
+
+   // true  → Box x Box additionally resolves via paper_analytical::boxBoxMultiPointContacts (the
+   //         OTHER literature-documented remedy for the same defect useRoundedBoxCorners targets --
+   //         Fraige et al. 2008a/2008b's "multi-point contact concept", see that function's own doc
+   //         comment in PaperAnalyticalContacts.h): every one of both boxes' 8 vertices found embedded
+   //         in the other box gets its own local normal/overlap and its own (history-free, same
+   //         formula as the existing arch/tunnel secondary-contact code) spring-dashpot force, each
+   //         scaled by 1/N (N = total active contact points this sub-cycle) so multiple simultaneous
+   //         points don't multiply the total force -- rather than one single SAT-chosen deepest
+   //         point/axis whose identity can flip discontinuously between sub-cycles. Independent of
+   //         useRoundedBoxCorners -- either, both, or neither can be enabled.
+   // false → (DEFAULT) exact pre-existing single-point behaviour, unchanged.
+   bool        useMultiPointBoxContact;
+
+   // true  → both paper_analytical::boxBoxSAT's single overlap AND every individual vertex overlap
+   //         paper_analytical::boxBoxMultiPointContacts reports are clamped to at most
+   //         boxOverlapCapFraction * min(halfExtents over BOTH boxes' 3 components) before being used
+   //         for force computation -- see boxBoxMultiPointContacts' own doc comment (PaperAnalyticalContacts.h)
+   //         for the full rationale. Confirmed necessary by DEMValidationScenarios.h's
+   //         multiPointDeepOverlapStability/Fuzz/EdgeCases scenarios: UNCAPPED, useMultiPointBoxContact
+   //         can inject dramatically MORE spurious energy than doing nothing at all under deep
+   //         interpenetration (e.g. +618% vs baseline's -0.9% on the "grazing-plank-stack" edge case,
+   //         the everyday two-slightly-askew-planks geometry a real jam actually produces) -- exactly
+   //         the opposite of what the mitigation is for. Independent of useRoundedBoxCorners/
+   //         useMultiPointBoxContact -- meaningful with either, both, or (via boxBoxSAT's own cap)
+   //         even neither enabled.
+   // false → (DEFAULT) exact pre-existing unbounded overlap behaviour, unchanged.
+   bool        useBoxOverlapCap;
+   // Fraction of min(halfExtents) used as the cap when useBoxOverlapCap is true. 0.3 (DEFAULT) sits
+   // comfortably above the shallow, near-degenerate overlaps this contact model was actually tuned
+   // against (typically a few percent of the smaller half-extent, per this project's own
+   // STRONG-CONTACT-FORCE/DEM-WATCH log evidence) while still well below the geometric maximum
+   // (1.0 = a vertex sitting exactly at the other box's centre).
+   real_t      boxOverlapCapFraction;
+
+   // true  → Box x Box's boxBoxSAT axis selection becomes "sticky": among all candidate axes within
+   //         axisHysteresisMargin (relative) of the true minimum-gap axis, the one whose normal aligns
+   //         best with the PREVIOUS sub-cycle's reported normal for this exact uid pair is used, even
+   //         when it is not the strict minimum -- see paper_analytical::boxBoxSAT's own doc comment
+   //         (PaperAnalyticalContacts.h) for the full derivation. The OTHER candidate fix for the same
+   //         axis-flip discontinuity useRoundedBoxCorners targets, without useRoundedBoxCorners' own
+   //         deep-overlap side effect (confirmed by this project's own multiPointDeepOverlapStability/
+   //         EdgeCases scenarios: useRoundedBoxCorners is +884% on "plank-vs-near-cube-deep" despite
+   //         fixing the axis-tie case cleanly). Independent of useRoundedBoxCorners/
+   //         useMultiPointBoxContact/useBoxOverlapCap -- any combination is meaningful.
+   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
+   bool        useAxisHysteresis;
+   // Relative margin (DEFAULT 0.15 = 15%) within which a competing axis is considered "as good as" the
+   // true minimum for hysteresis purposes -- see useAxisHysteresis's own comment.
+   real_t      axisHysteresisMargin;
+
+   // true  → boxBoxMultiPointContacts' own vertex SET is smoothed across sub-cycles into a persistent
+   //         manifold (one entry per possible vertex identity, up to 16, per uid pair) instead of being
+   //         used fresh every sub-cycle -- a newly-embedded vertex fades its overlap contribution IN
+   //         over several sub-cycles, and one that just separated fades OUT the same way, rather than
+   //         appearing/vanishing in one discontinuous step. See ParticleKernels.h's
+   //         ComputeContacts::boxBoxManifold_ own doc comment for the full rationale -- a simplified,
+   //         same-spirit version of the persistent contact manifold + warm-starting real physics
+   //         engines (Bullet/PhysX) use, targeting a THIRD distinct symptom from useAxisHysteresis
+   //         (which axis wins) and useBoxOverlapCap (how deep one point's force can be): the vertex SET
+   //         itself changing abruptly. Only meaningful together with useMultiPointBoxContact=true.
+   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
+   bool        useContactManifold;
+   // Fraction of full strength gained/lost per sub-cycle a manifold entry fades by (DEFAULT 0.25 = a
+   // vertex reaches full/zero strength over 4 sub-cycles).
+   real_t      manifoldFadeRate;
+
+   // true  → the normal-direction stiffness/damping fed into LinearSpringDashpot::setStiffnessAndDamping
+   //         is computed from a GENERALIZED effective mass that includes each body's rotational inertia
+   //         at the actual contact point, not just 1/(1/mA+1/mB) (pure translational reduced mass):
+   //             1/meff = 1/mA + 1/mB + (rA×n)ᵀ IA_world⁻¹ (rA×n) + (rB×n)ᵀ IB_world⁻¹ (rB×n)
+   //         where rA/rB are the contact point's offset from each body's centre of mass and IA_world⁻¹/
+   //         IB_world⁻¹ are each body's inverse inertia tensor rotated into the WORLD frame (see
+   //         ParticleKernels.h's computeRotationalEffectiveMass, and mesa_pd::kernel::VelocityVerlet's own
+   //         use of math::transformMatrixRART for the same body→world inertia transform). This is the
+   //         standard generalized/rigid-body-collision effective mass (Baraff, "Physically Based
+   //         Modeling: Rigid Body Simulation"), and is EXACT for sphere-sphere contact (there rA/rB are
+   //         always parallel to n, so the rotational terms are identically zero and meff reduces to the
+   //         plain translational formula) -- consistent with sphere-sphere floaters never showing the
+   //         energy-injection defect this whole family of options targets.
+   //
+   //         Root-cause rationale: LinearSpringDashpot's stiffness/damping are calibrated ONCE per
+   //         particle-type pair from the plain translational effectiveMass, so the requested coefficient
+   //         of restitution is only actually delivered to the linear closing-velocity DOF. Any contact
+   //         whose point has a nonzero moment arm off the line of centres (any Box/Cylinder corner or
+   //         edge contact) bleeds kinetic energy into rotation that this damping was never sized to
+   //         control -- under-damping that combination and injecting energy on its own, BEFORE and
+   //         INDEPENDENT of any SAT axis-flip discontinuity. useAxisHysteresis/useContactManifold/
+   //         useRoundedBoxCorners all instead fix WHICH (point,normal,overlap) triplet feeds the force
+   //         law; this option is the only one of the five that changes the force law's own calibration,
+   //         so it is meaningful together with any/all of the others, or entirely on its own.
+   // false → (DEFAULT) exact pre-existing behaviour: plain translational effectiveMass, unchanged.
+   bool        useRotationalEffectiveMass;
+
+   // true  → Box x Box contact is resolved as a genuine "rounded box" (spherosimplex): the Minkowski
+   //         sum of the SHARP box (its true faces/edges/vertices) with a sphere of radius
+   //         spheroBoxRadius. Unlike useRoundedBoxCorners (which patches boxBoxSAT's discrete 15-axis
+   //         dispatch, only fixing the normal for the ONE case where the winning axis is edge x edge)
+   //         or useMultiPointBoxContact (which resolves the SHARP corner discontinuity via multiple
+   //         simultaneous points), this replaces the whole detection path with mesa_pd's own GJK/EPA
+   //         (the SAME general-purpose convex-convex algorithm this project already trusts as its
+   //         fallback for every other shape pair), called with margin=spheroBoxRadius on each of the
+   //         two SHARP boxes (mesa_pd::collision_detection::GJK::doGJKmargin/EPA::doEPAmargin already
+   //         implement exactly this "core shape + margin" construction -- the identical mechanism real
+   //         physics engines use for collision margins). Because GJK/EPA computes the TRUE closest
+   //         points (or true penetration via EPA) between the two sharp skeletons across EVERY feature
+   //         pair (vertex-vertex, vertex-edge, vertex-face, edge-edge, edge-face, face-face) through
+   //         ONE unified algorithm, the reported normal is continuous through every possible feature
+   //         transition, not just the edge-edge one useRoundedBoxCorners special-cases -- the literature
+   //         analogue is Galindo-Torres & Pedroso (2010, Phys. Rev. E 81, 061303)'s Voronoi-based
+   //         spheropolyhedra, cited in Lu, Third & Müller (2015) Section 2.2.5 as the general-polyhedron
+   //         version of this same "minimum distance between skeletons, dilated by spheroradius" idea --
+   //         our case is the box-specialised instance, using mesa_pd's own already-tested GJK/EPA
+   //         instead of re-deriving a closed-form OBB-OBB distance routine from scratch.
+   //         MUTUALLY EXCLUSIVE with useRoundedBoxCorners/useMultiPointBoxContact/useBoxOverlapCap/
+   //         useAxisHysteresis/useContactManifold -- when true, this option's detection path is used
+   //         INSTEAD of all of those (they only apply to the boxBoxSAT dispatch this bypasses
+   //         entirely). Still composable with useRotationalEffectiveMass, which only changes the force
+   //         law's calibration, independent of how the (point,normal,overlap) triplet was obtained.
+   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
+   bool        useSpheroBoxContact;
+   // Rounding radius for useSpheroBoxContact, applied identically to both boxes in a pair (combined
+   // Minkowski dilation = 2*spheroBoxRadius, matching two equally-rounded bodies). DEFAULT 0.05 matches
+   // boxRoundingRadius's own default for the SAT-patch approach, for a like-for-like comparison.
+   real_t      spheroBoxRadius;
+
+   // Only meaningful when useSpheroBoxContact is true -- selects WHICH algorithm computes the
+   // spherosimplex (point,normal,overlap) triplet:
+   // false → (DEFAULT) mesa_pd's own GJK/EPA run with margin=spheroBoxRadius on the two sharp
+   //         boxes (paper_analytical::boxBoxSAT's sibling comment describes the mechanism).
+   // true  → a closed-form, non-iterative analytical distance between the two sharp boxes
+   //         instead (paper_analytical::boxBoxSpheroAnalytical / eberly_box_distance namespace,
+   //         PaperAnalyticalContacts.h) -- ported from David Eberly's GeometricTools library
+   //         (github.com/davideberly/GeometricTools), whose line-vs-box case dispatch is
+   //         documented there as Section 10.9.4 "Linear Component to Oriented Bounding Box" of
+   //         Schneider, P.J. & Eberly, D.H. (2002) "Geometric Tools for Computer Graphics",
+   //         Morgan Kaufmann. Unlike GJK/EPA (an iterative simplex refinement with its own
+   //         convergence tolerance), this is a deterministic finite case dispatch -- added
+   //         specifically to A/B-test against the GJK/EPA path on the exact same test batteries.
+   bool        useSpheroBoxAnalytical;
+
+   // true  → Box x Box's multi-point contact list (see useMultiPointBoxContact above) is computed by
+   //         paper_analytical::boxBoxFraigeMultiPointContacts INSTEAD OF boxBoxMultiPointContacts --
+   //         a fuller, more literal replica of Fraige, Langston & Chen (2008, Powder Technology
+   //         186(3):224-240, Section 3.3)'s own method, adding the two contact modes
+   //         boxBoxMultiPointContacts omits (their Fig. 5 edge-edge and edge-face cases -- two boxes
+   //         overlapping with NEITHER having a vertex embedded in the other, e.g. crossing like an
+   //         "X") plus their own near-corner normal blend (Fig. 4b). Takes precedence over
+   //         useMultiPointBoxContact if both are set (see ComputeContacts' own Box x Box operator()
+   //         for the exact dispatch) -- kept as a fully separate flag/function pair specifically so
+   //         enabling it can never change useMultiPointBoxContact's own already-validated behaviour.
+   //         Composable with useContactManifold/useBoxOverlapCap/useRotationalEffectiveMass exactly
+   //         like useMultiPointBoxContact is.
+   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
+   bool        useFraigeBoxContactModel;
+
    // true  → every rank writes its own CSV file under floaterHistoryBaseFolder/ (rank_<N>.csv,
    //         truncated at simulation start), one row per contact/lubrication pair it actually computed
    //         and accepted (i.e. that passed mesa_pd::mpi::ContactFilter), for EVERY DEM sub-cycle of
@@ -759,6 +1021,41 @@ struct ModelParams {
    // lets logFloaterHistory run at full (unfiltered-by-UID) resolution for just the steps that matter
    // instead of paying its per-subcycle cost for the entire run up to that point.
    uint_t      logFloaterHistoryStartStep;
+
+   // 0 (DEFAULT) -> logFloaterHistory writes through to the end of the run, as before. Nonzero -> both
+   // log() and logState() skip every row once mainStep exceeds this value -- the upper-bound
+   // counterpart to logFloaterHistoryStartStep above, so a targeted rerun can scope full-resolution
+   // logging to a closed [start, end] window (e.g. "90000 to 100000") instead of paying the per-
+   // subcycle cost from the start step through to whenever the run happens to end/crash.
+   uint_t      logFloaterHistoryEndStep;
+
+   // true  → enables three lightweight WALBERLA_LOG_WARNING-based watchers inside ComputeContacts,
+   //         active only within [contactAnomalyStartStep, contactAnomalyEndStep] below (same windowed-
+   //         diagnostic spirit as logFloaterHistoryStartStep/EndStep, but independent of whether the
+   //         heavier per-contact CSV logger is also on). Added investigating why Box/Cylinder floaters
+   //         ("logs") occasionally build up 50%+ geometric overlap over many sub-cycles before any
+   //         corrective force engages, then "explode" apart once contact is finally resolved -- a
+   //         failure mode Sphere floaters in the identical jam never show:
+   //           [NORMAL-FLIP]          -- the SAME uid pair's contact normal swings by more than ~45
+   //                                     degrees between the sub-cycles it's seen in contact (the
+   //                                     discrete-mode-switch symptom of SAT/Kodam-scenario dispatch
+   //                                     near a near-symmetric configuration -- impossible for
+   //                                     sphere-sphere, which has only one possible contact feature).
+   //           [PROLONGED-CONTACT]    -- the SAME uid pair stays in contact for many consecutive
+   //                                     sub-cycles; reports episode length and peak overlap seen so
+   //                                     far, to distinguish a slow overlap build-up from a sudden one.
+   //           [SIMULTANEOUS-CONTACTS] -- a single floater is resolved against 3+ other bodies within
+   //                                     the SAME sub-cycle (the "many floaters piled on top of each
+   //                                     other" packing case) -- each contact's spring-dashpot force is
+   //                                     computed independently and summed, so the effective combined
+   //                                     stiffness on that body may exceed what the explicit
+   //                                     integrator's timestep was tuned to handle for one contact.
+   // false → (DEFAULT) none of the three run; zero added cost.
+   bool        logContactAnomalies;
+   // 0 (DEFAULT) -> from step 0, if logContactAnomalies is on.
+   uint_t      contactAnomalyStartStep;
+   // 0 (DEFAULT) -> unbounded (through end of run), if logContactAnomalies is on.
+   uint_t      contactAnomalyEndStep;
 
    // Diagnostic for the "how did water get up there" question: a job 4132582 [LOW-RHO] crash was
    // traced (VTK velocity field, decoded directly) to a region that was completely dry gas 592 steps
@@ -825,6 +1122,7 @@ struct ModelParams {
       , useFillWeighting            { b.getParameter< bool >       ("useFillWeighting", true) }
       , useBognerThreePhaseMEM      { b.getParameter< bool >       ("useBognerThreePhaseMEM", true) }
       , useMemOnlyBuoyancy          { b.getParameter< bool >       ("useMemOnlyBuoyancy", true) }
+      , useFullVolumeAnalyticBuoyancy { b.getParameter< bool >     ("useFullVolumeAnalyticBuoyancy", false) }
       , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
       , usePass3Reresolution        { b.getParameter< bool >       ("usePass3Reresolution", false) }
       , useAnalyticBoxBuoyancy      { b.getParameter< bool >       ("useAnalyticBoxBuoyancy", false) }
@@ -835,10 +1133,31 @@ struct ModelParams {
       , boxPlaneFitBandFactor        { b.getParameter< real_t >    ("boxPlaneFitBandFactor", real_t(0.8)) }
       , useAnalyticalContactDetection{ b.getParameter< bool >      ("useAnalyticalContactDetection", false) }
       , usePureAnalyticalCylinder   { b.getParameter< bool >       ("usePureAnalyticalCylinder", false) }
+      , useTightTier1               { b.getParameter< bool >       ("useTightTier1", false) }
+      , useTightLayer1              { b.getParameter< bool >       ("useTightLayer1", false) }
+      , skipTier1                   { b.getParameter< bool >       ("skipTier1", false) }
+      , useRoundedBoxCorners        { b.getParameter< bool >       ("useRoundedBoxCorners", false) }
+      , boxRoundingRadius           { b.getParameter< real_t >     ("boxRoundingRadius", real_t(0.05)) }
+      , useMultiPointBoxContact     { b.getParameter< bool >       ("useMultiPointBoxContact", false) }
+      , useBoxOverlapCap            { b.getParameter< bool >       ("useBoxOverlapCap", false) }
+      , boxOverlapCapFraction       { b.getParameter< real_t >     ("boxOverlapCapFraction", real_t(0.3)) }
+      , useAxisHysteresis           { b.getParameter< bool >       ("useAxisHysteresis", false) }
+      , axisHysteresisMargin        { b.getParameter< real_t >     ("axisHysteresisMargin", real_t(0.15)) }
+      , useContactManifold          { b.getParameter< bool >       ("useContactManifold", false) }
+      , manifoldFadeRate            { b.getParameter< real_t >     ("manifoldFadeRate", real_t(0.25)) }
+      , useRotationalEffectiveMass  { b.getParameter< bool >       ("useRotationalEffectiveMass", false) }
+      , useSpheroBoxContact         { b.getParameter< bool >       ("useSpheroBoxContact", false) }
+      , spheroBoxRadius             { b.getParameter< real_t >     ("spheroBoxRadius", real_t(0.05)) }
+      , useSpheroBoxAnalytical      { b.getParameter< bool >       ("useSpheroBoxAnalytical", false) }
+      , useFraigeBoxContactModel    { b.getParameter< bool >       ("useFraigeBoxContactModel", false) }
       , logFloaterHistory           { b.getParameter< bool >       ("logFloaterHistory", false) }
       , floaterHistoryBaseFolder    { b.getParameter< std::string >("floaterHistoryBaseFolder", "floater-history") }
       , logFloaterHistoryReleaseStepFilter{ b.getParameter< uint_t >("logFloaterHistoryReleaseStepFilter", uint_t(0)) }
       , logFloaterHistoryStartStep   { b.getParameter< uint_t >     ("logFloaterHistoryStartStep", uint_t(0)) }
+      , logFloaterHistoryEndStep     { b.getParameter< uint_t >     ("logFloaterHistoryEndStep", uint_t(0)) }
+      , logContactAnomalies          { b.getParameter< bool >       ("logContactAnomalies", false) }
+      , contactAnomalyStartStep      { b.getParameter< uint_t >     ("contactAnomalyStartStep", uint_t(0)) }
+      , contactAnomalyEndStep        { b.getParameter< uint_t >     ("contactAnomalyEndStep", uint_t(0)) }
       , highAltitudeWaterScanEnabled { b.getParameter< bool >       ("highAltitudeWaterScanEnabled", false) }
       , highAltitudeWaterThresholdZ  { b.getParameter< real_t >     ("highAltitudeWaterThresholdZ", real_t(0)) }
       , useArchTunnelAsMesaPDObject  { b.getParameter< bool >       ("useArchTunnelAsMesaPDObject", false) }
@@ -849,6 +1168,32 @@ struct ModelParams {
          WALBERLA_LOG_WARNING("usePureAnalyticalCylinder=true but useAnalyticalContactDetection=false -- "
             "this flag only has an effect inside the Cylinder x Cylinder analytical dispatch, which is "
             "off, so it does nothing here.");
+      if (useTightTier1 && !useAnalyticalContactDetection)
+         WALBERLA_LOG_WARNING("useTightTier1=true but useAnalyticalContactDetection=false -- "
+            "this flag only has an effect inside the Cylinder x Cylinder analytical dispatch's Tier 1 "
+            "check, which is off, so it does nothing here.");
+      if (skipTier1 && !useAnalyticalContactDetection)
+         WALBERLA_LOG_WARNING("skipTier1=true but useAnalyticalContactDetection=false -- "
+            "this flag only has an effect inside the Cylinder x Cylinder analytical dispatch's Tier 1 "
+            "check, which is off, so it does nothing here.");
+      if (useRoundedBoxCorners && !useAnalyticalContactDetection)
+         WALBERLA_LOG_WARNING("useRoundedBoxCorners=true but useAnalyticalContactDetection=false -- "
+            "this flag only has an effect inside boxBoxSAT, which is off (Box x Box uses GJK/EPA), so "
+            "it does nothing here.");
+      if (skipTier1 && !useTightLayer1)
+         WALBERLA_LOG_WARNING("skipTier1=true but useTightLayer1=false -- this is NOT just a missed "
+            "optimization, it is INCORRECT: without a sufficiently tight Layer 1 pre-filter upstream, "
+            "skipping Tier 1 entirely will silently trust \"no contact\" for real dispatch-gap "
+            "contacts the loose Layer 1 reject lets through. Set useTightLayer1=true as well, or turn "
+            "skipTier1 back off.");
+      if (logFloaterHistoryEndStep != uint_t(0) && logFloaterHistoryEndStep <= logFloaterHistoryStartStep)
+         WALBERLA_LOG_WARNING("logFloaterHistoryEndStep=" << logFloaterHistoryEndStep << " <= "
+            "logFloaterHistoryStartStep=" << logFloaterHistoryStartStep << " -- this window is empty, "
+            "logFloaterHistory will never write a row regardless of its own enable flag.");
+      if (logContactAnomalies && contactAnomalyEndStep != uint_t(0) && contactAnomalyEndStep <= contactAnomalyStartStep)
+         WALBERLA_LOG_WARNING("contactAnomalyEndStep=" << contactAnomalyEndStep << " <= "
+            "contactAnomalyStartStep=" << contactAnomalyStartStep << " -- this window is empty, "
+            "logContactAnomalies' watchers will never fire.");
    }
 };
 
@@ -856,11 +1201,51 @@ struct EvaluationParams {
    uint_t      performanceLogFrequency;
    uint_t      evaluationFrequency;
    std::string baseFolderName;
+   // false (DEFAULT) -> ParticleKernels::logContactDetectionStatistics() is called exactly once, at
+   // end-of-run, as before (no behaviour change for any existing scenario). true -> ALSO called
+   // (paired with resetContactDetectionStatistics()) every performanceLogFrequency steps, so each
+   // printed [ContactDetectionStats] line reports counts for just that interval instead of a
+   // cumulative running total -- lets the cylinder-cylinder sub-case mix (and GJK fallback rate) be
+   // tracked as a jam develops over a run, not just seen as one aggregate total at the end.
+   bool        logContactDetectionStatsPeriodically;
+
+   // Optional block (THESIS_PLAN.md item 3): probe positions for ClogMeasurementEvaluator, tracking
+   // local water elevation and pressure at an "upstream" and a "downstream"/reference point, e.g.
+   // either side of a pier/obstruction, to measure a developing clog's backwater effect directly
+   // rather than only observing it visually. Parsed from an OPTIONAL "ClogMeasurement" block (same
+   // pattern as VTKParams::denseEnabled's "fluid_field_dense" block below) -- absent block means
+   // clogMeasurementEnabled is false and every existing prm is completely unaffected.
+   bool               clogMeasurementEnabled;
+   Vector3< real_t >  clogUpstreamPos;
+   Vector3< real_t >  clogDownstreamPos;
+   real_t             clogProbeHalfWidthXY;
+
+   // Second, optional probe pair placed at the pillar's own Y (rather than the gap centerline) --
+   // added 2026-09-14 per Schalko, Follett & Nepf (2023), Water Resources Research, "Impact of Lateral
+   // Gap on Flow Distribution, Backwater Rise, and Turbulence Generated by a Logjam": that study found
+   // real lateral variation in water depth (~7.5%+-1.8%) between a partial-width obstruction's own
+   // blocked-flow region and the open gap beside it, and took SEPARATE longitudinal profiles at the
+   // jam centre and the gap centre rather than assuming one location represents both -- the pillar-face
+   // location is where the strongest backwater pile-up is actually expected, not the gap centreline
+   // (which still has open flow through it). Optional sibling params `pillarUpstreamPos`/
+   // `pillarDownstreamPos` inside the SAME "ClogMeasurement" block; absent means disabled (existing
+   // prms using only upstreamPos/downstreamPos are completely unaffected).
+   bool               clogPillarMeasurementEnabled;
+   Vector3< real_t >  clogPillarUpstreamPos;
+   Vector3< real_t >  clogPillarDownstreamPos;
 
    EvaluationParams(const config::Config::BlockHandle& b)
       : performanceLogFrequency { b.getParameter< uint_t >     ("performanceLogFrequency") }
       , evaluationFrequency     { b.getParameter< uint_t >     ("evaluationFrequency") }
       , baseFolderName          { b.getParameter< std::string >("baseFolderName") }
+      , logContactDetectionStatsPeriodically{ b.getParameter< bool >("logContactDetectionStatsPeriodically", false) }
+      , clogMeasurementEnabled  { static_cast< bool >(b.getBlock("ClogMeasurement")) }
+      , clogUpstreamPos         { clogMeasurementEnabled ? b.getOneBlock("ClogMeasurement").getParameter< Vector3< real_t > >("upstreamPos")   : Vector3< real_t >(real_t(0)) }
+      , clogDownstreamPos       { clogMeasurementEnabled ? b.getOneBlock("ClogMeasurement").getParameter< Vector3< real_t > >("downstreamPos") : Vector3< real_t >(real_t(0)) }
+      , clogProbeHalfWidthXY    { clogMeasurementEnabled ? b.getOneBlock("ClogMeasurement").getParameter< real_t >("probeHalfWidthXY", real_t(2)) : real_t(0) }
+      , clogPillarMeasurementEnabled { clogMeasurementEnabled && b.getOneBlock("ClogMeasurement").isDefined("pillarUpstreamPos") }
+      , clogPillarUpstreamPos   { clogPillarMeasurementEnabled ? b.getOneBlock("ClogMeasurement").getParameter< Vector3< real_t > >("pillarUpstreamPos")   : Vector3< real_t >(real_t(0)) }
+      , clogPillarDownstreamPos { clogPillarMeasurementEnabled ? b.getOneBlock("ClogMeasurement").getParameter< Vector3< real_t > >("pillarDownstreamPos") : Vector3< real_t >(real_t(0)) }
    {}
 };
 

@@ -48,4 +48,45 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
          AntidunesLatticeModelGeneration )
    waLBerla_execute_test( NAME ANTIDUNES_PaperAnalyticalContacts )
 
+   # Microbenchmark (not a correctness test -- see PaperAnalyticalContactTest.cpp for that): times
+   # each PaperAnalyticalContacts.h cylinder-cylinder analytical sub-case, the GJK/EPA fallback path,
+   # and box-box SAT/GJK for comparison, to find which part of the cylinder-cylinder contact pipeline
+   # actually dominates a run's cost -- see CylinderCylinderContactBenchmark.cpp's own file header for
+   # the widerstacks-shape-ablation finding (cylinder+hybrid ran slower than box+forced-GJK) that
+   # motivated writing this.
+   waLBerla_add_test_executable ( ANTIDUNES_CylinderCylinderContactBenchmark CylinderCylinderContactBenchmark.cpp )
+   target_include_directories ( ANTIDUNES_CylinderCylinderContactBenchmark PRIVATE ${ANTIDUNES_SRC_DIR} )
+   target_link_libraries ( ANTIDUNES_CylinderCylinderContactBenchmark
+         walberla::blockforest walberla::boundary walberla::core walberla::domain_decomposition
+         walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
+         walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk
+         AntidunesLatticeModelGeneration )
+   waLBerla_execute_test( NAME ANTIDUNES_CylinderCylinderContactBenchmark )
+
+   # Standalone time/accuracy comparison of the three quartic-root solvers available in
+   # PaperAnalyticalContacts.h::detail (Durand-Kerner, Ferrari closed-form, Aberth-Ehrlich) against
+   # KNOWN synthetic roots -- not a correctness test of any production path (this header is unused by
+   # the simulation), purely informs whether solveQuarticDurandKerner should ever be replaced.
+   waLBerla_add_test_executable ( ANTIDUNES_QuarticSolverComparison QuarticSolverComparisonTest.cpp )
+   target_include_directories ( ANTIDUNES_QuarticSolverComparison PRIVATE ${ANTIDUNES_SRC_DIR} )
+   target_link_libraries ( ANTIDUNES_QuarticSolverComparison
+         walberla::blockforest walberla::boundary walberla::core walberla::domain_decomposition
+         walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
+         walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk
+         AntidunesLatticeModelGeneration )
+   waLBerla_execute_test( NAME ANTIDUNES_QuarticSolverComparison )
+
+   # Pure analytic box-overlap fill-level math for the tsunami executable's dry-domain dam-break
+   # initial condition (TsunamiDataInitialization.h) -- see that file's own header. Requires codegen
+   # (transitively pulls in the generated LBM lattice model via SimulationParams.h/SimulationObjects.h),
+   # same reason as the other tests in this file despite not touching LBM directly.
+   waLBerla_add_test_executable ( ANTIDUNES_TsunamiDamBreak TsunamiDamBreakTest.cpp )
+   target_include_directories ( ANTIDUNES_TsunamiDamBreak PRIVATE ${ANTIDUNES_SRC_DIR} )
+   target_link_libraries ( ANTIDUNES_TsunamiDamBreak
+         walberla::blockforest walberla::boundary walberla::core walberla::domain_decomposition
+         walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
+         walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk
+         AntidunesLatticeModelGeneration )
+   waLBerla_execute_test( NAME ANTIDUNES_TsunamiDamBreak )
+
 endif ()

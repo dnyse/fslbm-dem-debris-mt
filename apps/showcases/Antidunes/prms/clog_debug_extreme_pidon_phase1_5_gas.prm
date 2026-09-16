@@ -1,0 +1,228 @@
+// clog_debug_extreme_pidon_phase1_5_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-15] PHASE 1.5: a plain checkpoint-resume smoke test, not a diagnostic run.
+// Phase 1 (clog_debug_extreme_pidon_phase1_gas.prm, job 4235135) ran all 50000 of its own steps
+// WITHOUT crashing -- unexpected, since job 4234953 crashed with `reynoldsNumber is nan!` at step
+// 48819 under the seemingly identical setup. With no crash to dense-scan, PHASE 2's original design
+// (resume + full diagnostics + tight VTK over a short known-bad window) has nothing to target yet.
+// This phase instead answers a narrower, still-useful question first: does loadSnapshot correctly
+// resume THIS run's own checkpoint and continue physically sensibly, with none of phase 2's
+// diagnostic overhead (no denseNanScanEnabled, no precursor thresholds, no tight VTK)? It simply
+// loads phase 1's final checkpoint (step 50000) and runs for the same DURATION as phase 1 did
+// (another 50000 steps -> timesteps=100000, since `timesteps` is the absolute target step, not a
+// relative count -- confirmed by Antidunes.cpp's own `for (t = beginTimeStep; t != timesteps; ++t)`
+// loop). storeSnapshot is left on (checkpointing again every 500 steps from the new starting point)
+// so a second checkpoint exists if this run crashes somewhere in the new 50000-100000 window --
+// itself a second, independent data point on whether the original crash is a rare/non-deterministic
+// event or reproducible given enough additional runtime.
+// Otherwise byte-for-byte identical to clog_debug_extreme_pidon_phase1_gas.prm (same physics/
+// geometry/debris schedule; all FloatingSphere entries already finished releasing by t=27000, long
+// before the loaded step 50000, so no release-schedule interaction with the resume is possible).
+// ─────────────────────────────────────────────────────────────────────────────
+// Thesis item 3 (THESIS_PLAN.md): a deliberately bigger/more-extreme sibling of
+// clog_measurement_validation_sanity_clog_pidon_gas.prm -- same physics/geometry family (same
+// pillars/gap ratio, same target velocity, PID gains, particle physics), scaled up in domain size and
+// debris count to produce a bigger, more visually/numerically obvious clog for clearer contrast
+// against the (also-scaled) no-clog reference. NOT a replacement for the small sanity-clog pair above
+// -- both are kept; this is the "make it more extreme" follow-up requested once the small pair's tool
+// validation and flow-spinup timing were confirmed correct.
+//
+// EXTREME, PID ENABLED: 36 spheres (3x the small scenario's 12, radius 4, diameter 8 LU -- still
+// LARGER than the unchanged 6 LU pier gap) fed in from X=40-100 at the channel centerline (Y=20),
+// staggered releases (startInactive+settlingSteps ladder, 200-step gap, first release at t=20000 --
+// same post-spinup timing fix as the small sanity-clog pair, not the original t=5000 the small pair
+// itself used before that fix) across the same 3 density tiers (0.25/0.5/0.75) and Z variation
+// (44/45/46) as the small scenario, simply repeated 3x on the same 12-entry cycle (X-phase period 4 x
+// density/Z-phase period 3 = 12, so 3 repeats give 3 fresh copies of every combination, not new manual
+// positions -- reduces risk of a transcription error vs. hand-designing 36 new spots).
+//
+// Domain <768, 40, 90>, cellsPerBlock <64,20,15> -> numBlocks (12, 2, 6) = 144 ranks, 2 nodes.
+// Physics (targetMeanVelocityMagnitude, PID gains, Re/Fr/We, avgParticleDiameterOverride/dxSIOverride,
+// densityRatio, liquidHeightFactor, floorHeightFactor) are IDENTICAL to the small scenario -- this is a
+// pure geometry/debris-count scale-up of the same physical setup, not a different flow regime.
+//
+// ClogMeasurement probes: upstream X=280, downstream X=500. Pillar-face probe pair at the same
+// doubled X, Y=11 (unchanged, matching the left CylinderPillar's own unchanged Y center).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 20, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  true;
+   storeSnapshot                 true;
+   snapshotFrequency             500;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <768, 40, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.04;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+   enabled                     true;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         100000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+   // no gravityOverride -- dynamically computed, see file header
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;   // never opened -- see avgParticleDiameterOverride below
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8.001943372119138;
+   dxSIOverride                0.000362694127490625;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar { center < 384, 11, 45 >; radius 6; }
+   CylinderPillar { center < 384, 29, 45 >; radius 6; }
+}
+FloatingSpheres
+{
+   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 20200; startInactive true; }
+   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 20400; startInactive true; }
+   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 20600; startInactive true; }
+   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 20800; startInactive true; }
+   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 21000; startInactive true; }
+   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 21200; startInactive true; }
+   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 21400; startInactive true; }
+   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 21600; startInactive true; }
+   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 21800; startInactive true; }
+   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 22000; startInactive true; }
+   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 22200; startInactive true; }
+   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 22400; startInactive true; }
+   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 22600; startInactive true; }
+   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 22800; startInactive true; }
+   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 23000; startInactive true; }
+   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 23200; startInactive true; }
+   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 23400; startInactive true; }
+   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 23600; startInactive true; }
+   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 23800; startInactive true; }
+   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 24200; startInactive true; }
+   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 24400; startInactive true; }
+   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 24600; startInactive true; }
+   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 24800; startInactive true; }
+   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 25000; startInactive true; }
+   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 25200; startInactive true; }
+   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 25400; startInactive true; }
+   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 25600; startInactive true; }
+   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 25800; startInactive true; }
+   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 26000; startInactive true; }
+   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 26200; startInactive true; }
+   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 26400; startInactive true; }
+   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 26600; startInactive true; }
+   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 26800; startInactive true; }
+   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 27000; startInactive true; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+
+   ClogMeasurement
+   {
+      upstreamPos       < 280, 20, 40 >;
+      downstreamPos      < 500, 20, 40 >;
+      probeHalfWidthXY   2;
+
+      // Second probe pair at the pillar's own Y (=11) instead of the gap centreline (Y=20) -- see the
+      // small clog_measurement_validation_sanity_clog_*_gas.prm's own header for the Schalko, Follett &
+      // Nepf (2023) citation motivating this. Same doubled X as the gap probes above.
+      pillarUpstreamPos    < 280, 11, 40 >;
+      pillarDownstreamPos  < 500, 11, 40 >;
+   }
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       10000000000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

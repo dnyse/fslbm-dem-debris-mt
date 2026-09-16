@@ -104,10 +104,16 @@ void ObstacleNormalSweep< Stencil_T, FlagField_T, VectorField_T >::operator()(IB
          // Zero normal after averaging: obstacle cell has fluid neighbours in exactly symmetric
          // opposing directions (e.g. liquid below and gas above the sphere equator). The fill
          // level for this cell will be assigned by ObstacleFillLevelSweep's equal-weight fallback.
-         WALBERLA_LOG_DEVEL_ON_ROOT("ObstacleNormalSweep: zero obstacle normal at cell ("
-                                    << x << "," << y << "," << z
-                                    << "). Fluid-neighbour directions cancelled. Using equal-weight "
-                                    << "fallback in ObstacleFillLevelSweep.");
+         // Logging disabled (this session): fires for dozens of cells every timestep and, combined
+         // with WALBERLA_LOG_DEVEL's uncached ignore-regex check (never gated by WALBERLA_LOGLEVEL,
+         // see Logging::isInIgnoreCallerPaths), was both flooding sbatch-output past the shared
+         // /home quota AND measurably slowing every run down even when suppressed via regex (a
+         // regex_search scan still runs per call whether or not the message is printed) -- see
+         // THESIS_PLAN.md's phase1 (43m32s, unfiltered) vs phase1.5 (92m27s, regex-filtered) timing.
+         // WALBERLA_LOG_DEVEL_ON_ROOT("ObstacleNormalSweep: zero obstacle normal at cell ("
+         //                            << x << "," << y << "," << z
+         //                            << "). Fluid-neighbour directions cancelled. Using equal-weight "
+         //                            << "fallback in ObstacleFillLevelSweep.");
       }
    }); // WALBERLA_FOR_ALL_CELLS_INCLUDING_GHOST_LAYER_XYZ
 }

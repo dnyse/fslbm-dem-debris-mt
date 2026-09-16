@@ -1,0 +1,19 @@
+// Diagnostic (not a literature benchmark): does mesa_pd's generic iterative GJK/EPA solver agree with
+// the exact closed-form Cylinder x HalfSpace contact geometry (SolidCylinderContactDetection's
+// cyl.support()-based formula, ParticleKernels.h -- algebraically identical to
+// paper_analytical::rimPointTowardPlane, the formula AnalyticalSolutions.h::cylinderWallImpact uses as
+// wallImpactCylinder's own analytical reference)? A true HalfSpace has no support() function at all,
+// so GJK/EPA cannot run on this shape pair in production at all -- this test approximates the wall as
+// a large, thin box (which IS GJK-compatible) purely to get an independent third answer for the same
+// cylinder geometry dem_validation_wall_cylinder_kodam_test1.prm sweeps.
+DEMValidation{
+    testCase gjkVsAnalyticalCylinderWall;
+
+    cylinderRadius 4.0;
+    cylinderLength 5.3;
+    overlapDepth 0.05;
+    tiltStartDeg 0.0;
+    tiltEndDeg 90.0;
+    tiltStepDeg 10.0;
+    toleranceRelError 0.02;
+}

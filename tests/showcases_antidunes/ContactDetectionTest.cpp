@@ -605,7 +605,12 @@ void testBoxHalfSpaceContactAxisAligned()
    WALBERLA_CHECK(scd(0, 1, boxShape, wallShape, ac));
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), real_t(-0.2));
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(1)));
-   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(0.5), real_t(0.5), real_t(0)));
+   // Flush face-on (query direction exactly axis-aligned, both lateral components exactly zero): the
+   // TRUE contact region is the whole bottom face, not one arbitrary corner -- (0,0,0), the face
+   // centre, is the physically-symmetric representative point (Box::support()'s own fix, see its
+   // header comment). Was (0.5,0.5,0) before that fix (an arbitrary corner among 4 equally valid
+   // ones) -- confirmed via mesa_pd::data::Cylinder/Box::support()'s degenerate-direction guard.
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(0), real_t(0), real_t(0)));
 
    // Swapped-argument overload must give the identical result.
    SolidCylinderContactDetection scd2;
@@ -617,16 +622,23 @@ void testBoxHalfSpaceContactAxisAligned()
 
 void testBoxHalfSpaceContactRotated()
 {
-   // Same z-offset as the axis-aligned case (so the penetration depth matches), but an ASYMMETRIC
-   // box (edge lengths differ in x/y) rotated 90 deg about z -- a cube would look identical after
-   // this rotation, so this specifically exercises that R is applied to find the correct deepest
-   // corner in the rotated body frame, not just passed through as a no-op.
+   // NOTE (updated alongside Box::support()'s degenerate-direction fix): a rotation purely about Z --
+   // the SAME axis as the wall normal -- never changes the wall-normal direction expressed in the
+   // box's own body frame (Z stays Z under any Z-rotation), so it stays exactly as degenerate/flush
+   // as the unrotated axis-aligned case above, regardless of angle. That no longer exercises rotated
+   // corner-finding at all post-fix (both now correctly return the SAME face-centre point) -- so this
+   // test instead rotates about X (an axis that genuinely changes the wall-facing direction in body
+   // frame), which puts the box corner-first against the wall, a well-defined, non-degenerate single
+   // contact point, and DOES exercise that R is applied to find the correct deepest corner in the
+   // rotated body frame rather than passed through as a no-op.
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
    mesa_pd::data::ParticleAccessor ac(ps);
 
+   const real_t tilt = math::pi / real_t(6); // 30 deg about X -- clearly non-degenerate, not a special angle
+
    auto box = ps->create();
    box->setPosition(Vec3(real_t(0), real_t(0), real_t(0.3)));
-   box->setRotation(mesa_pd::Rot3(Vec3(real_t(0), real_t(0), real_t(1)), math::pi * real_t(0.5)));
+   box->setRotation(mesa_pd::Rot3(Vec3(real_t(1), real_t(0), real_t(0)), tilt));
    auto wall = ps->create();
    wall->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
 
@@ -635,11 +647,22 @@ void testBoxHalfSpaceContactRotated()
 
    SolidCylinderContactDetection scd;
    WALBERLA_CHECK(scd(0, 1, boxShape, wallShape, ac));
-   WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), real_t(-0.2)); // same as axis-aligned: only z matters here
+
+   // Body-frame direction toward the wall: R^T*(0,0,-1) = (0, -sin(tilt), -cos(tilt)) for a rotation
+   // about X -- X stays exactly 0 (rotating about X can never introduce an X-component), so that axis
+   // is still degenerate here (the deepest CORNER is really a deepest EDGE spanning the box's full
+   // X-extent) and the fixed support() correctly keeps the X-offset at 0 (the edge's own midpoint) --
+   // but Y and Z are both clearly, unambiguously nonzero, so the deepest point is otherwise a genuine,
+   // well-defined corner in the Y-Z cross-section: body-frame support point (0, -0.5, -0.5).
+   const real_t s = std::sin(tilt), c = std::cos(tilt);
+   const Vec3   worldOffset(real_t(0), real_t(0.5) * (s - c), real_t(-0.5) * (s + c)); // R * (0,-0.5,-0.5)
+   const Vec3   deepest            = box->getPosition() + worldOffset;
+   const real_t expectedPenetration = deepest[2]; // wall plane through the origin, normal (0,0,1)
+   const Vec3   expectedContactPoint(deepest[0], deepest[1], real_t(0));
+
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), expectedPenetration, real_t(1e-6));
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(1)));
-   // Different from the axis-aligned case's (0.5,0.5,0) -- confirms the rotation genuinely changes
-   // which corner is deepest, not just passing the unrotated corner through.
-   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(-0.5), real_t(0.3), real_t(0)));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactPoint(), expectedContactPoint, real_t(1e-6));
 }
 
 void testBoxHalfSpaceNoContact()

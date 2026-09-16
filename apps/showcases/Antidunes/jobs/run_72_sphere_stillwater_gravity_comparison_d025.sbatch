@@ -48,7 +48,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 # single-run job scripts: ${SLURM_JOB_NAME}_$STAMP); otherwise fall back to the local build
 # dir, which is scratch/work storage and not guaranteed to persist.
 if [[ -n "$HPCVAULT" ]]; then
-    ARCHIVE_ROOT="$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_$STAMP"
+    ARCHIVE_ROOT="$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_$STAMP"
 else
     ARCHIVE_ROOT="$BIN_DIR/archive/$STAMP"
 fi
@@ -57,7 +57,7 @@ fi
 
 archive_outputs() {  # $1 = label
     for d in vtk-out eval snapshots; do
-        [[ -d "$BIN_DIR/$d" ]] && mkdir -p "$ARCHIVE_ROOT" && mv "$BIN_DIR/$d" "$ARCHIVE_ROOT/${1}_$d"
+        [[ -d "$BIN_DIR/$d" ]] && mkdir -p "$ARCHIVE_ROOT/$1" && mv "$BIN_DIR/$d" "$ARCHIVE_ROOT/$1/$d"
     done
 }
 

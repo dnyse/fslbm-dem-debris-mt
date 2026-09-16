@@ -1,0 +1,334 @@
+// tsunami_pole_forest_driftwood_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// FIRST ATTEMPT at the real dry-domain dam-break tsunami test case (tsunami executable, tsunami.cpp),
+// closing the gap the wet-channel toy scenario (prms/toy_pole_forest_driftwood_gas.prm) explicitly
+// flagged in its own header: that file modeled the pole forest / driftwood sitting in an already-
+// flowing, already-wet steady channel (Antidunes' native PID-driven periodic flow) instead of a genuine
+// impulsive tsunami surge into a dry domain. This file uses the SAME geometry (8-pole staggered forest,
+// domain footprint, box floater size) so the two scenarios are directly comparable, but replaces the
+// initial/forcing setup entirely:
+//   - periodicity <0,0,0> -- a closed tank (Watanabe's own water tank), not a periodic channel.
+//   - DamBreakParameters: a reservoir occupying x in [0,40) at full water depth (54 LU), everything
+//     else in the domain starts completely DRY. There is no explicit gate body -- the fill-level step
+//     function itself collapses under gravity from step 0, exactly like Watanabe et al. 2023 Section 3/
+//     4's own gate-release setup (see tsunami.cpp / TsunamiDataInitialization.h for the mechanism).
+//   - No PID / flow-rate controller at all (targetMeanVelocityMagnitude=0, and tsunami.cpp never adds
+//     the ForcingAdjuster sweep) -- gravity alone drives the whole event, matching "the gate opens and
+//     the reservoir simply falls" rather than a steady maintained current.
+//   - Driftwood logs (FloatingBoxes) start RESTING ON THE DRY FLOOR between the gate and the pole
+//     forest (x=45/50/55, matching Watanabe Section 4.2's own placement "between the gate and the
+//     poles"), not mid-air on staggered release timers -- there is no steady pre-existing flow for them
+//     to be dropped into; the incoming wave itself lifts and carries them, exactly like the real
+//     experiment's floating logs.
+//
+// GEOMETRY: domain <128,60,90>, reservoir x in [0,40) (full 60-wide, 54 LU deep), dry run-out x in
+// [40,60) before the forest, 8 poles (2 staggered rows) at x=60/70 (identical layout to
+// toy_pole_forest_driftwood_gas.prm), then 58 LU of run-out/observation space to the domain's far wall.
+//
+// WHY periodicity IS <0,0,0> (X included) -- Antidunes' own channel scenarios always use periodicity
+// <1,0,0>, so this is the one setting that genuinely has to differ, not just carry over: Watanabe's own
+// experiment is a bounded, walled water tank (Figure 6/11 -- a reservoir + gate + finite run-out floor,
+// not an infinite channel), and this is a single transient release, not a maintained current. Periodic
+// X would let outflow at the domain's far end wrap back around and re-enter through the reservoir/gate
+// region every period -- there is no physical mechanism in the real experiment (or in this codebase's
+// own reused setupBoundaryHandling, which auto-adds a NoSlip wall on any non-periodic X/Y face) that
+// corresponds to that, so X must be a real wall, exactly like Y already is in every prior scenario.
+//
+// CONSEQUENCE of a walled (not periodic) far end: the wave reflects off it instead of leaving the
+// domain, and CAN return to contaminate the forest/driftwood interaction with tank-sloshing that has no
+// counterpart in an idealized "wave passes through and is gone" picture.
+//
+// REVISED after run 4180567 (15000 steps, thoroughly checked against both the log and VTK output -- see
+// wave_front_check.py / find_degenerate_cells.py): the original 1D shallow-water estimate below this
+// comment (c = sqrt(g_LU*waterDepth) ~= 0.0195 LU/step, predicting far-wall arrival at ~4520 steps) turned
+// out to be roughly 2x too fast -- the real, observed front (cross-validated from both eval/avgDataSlices
+// and raw fluid_field VTK cells) reaches the far wall (x=127.5) at ~step 9500, an effective average speed
+// of ~0.0092 LU/step, presumably because the 1D estimate ignores the poles' drag and real 3D spreading.
+// Using the OBSERVED speed instead: reflected wave back from the far wall to the forest (58 LU return
+// trip) ~= 9500 + 58/0.0092 ~= 15800 steps; a second full round trip (2*88 LU) ~= 9500 + 2*88/0.0092
+// ~= 28600 steps. timesteps is set to 100000 below to watch the tank actually settle across several
+// reflections (multiple round trips plus viscous/wave-breaking decay) rather than stopping right after
+// the first one, now that the true propagation speed is known from this project's own established
+// pattern: submit, inspect, adjust.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 15 >;
+   periodicity                   < 0, 0, 0 >;   // closed tank -- no periodic direction at all
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;   // 10 checkpoints over the 100000-step run
+   snapshotBaseFolder            snapshots;
+}
+
+// wavePeriods/initialAmplitude are INERT placeholders here (only consumed by Antidunes' own
+// sinusoidal-bed init, which tsunami.cpp never calls) -- required fields, kept at harmless defaults.
+// floorHeightFactor CANNOT be 0 despite also being otherwise inert here: ComputedParams
+// (SimulationParams.h) computes floorHeight = avgParticleDiameter * floorHeightFactor and then hard-
+// aborts via WALBERLA_CHECK_FLOAT_UNEQUAL(floorHeight, 0.0) -- a pre-existing invariant of that shared,
+// untouched file (presumably meant to catch a forgotten prm field in the antidune-bed context it was
+// written for), not something this scenario can opt out of. liquidHeightFactor+floorHeightFactor
+// together DO still matter: combined with ParticleParameters.avgParticleDiameterOverride=2 below, they
+// set computed.absoluteLiquidHeight = avgParticleDiameterOverride * (liquidHeightFactor+floorHeightFactor)
+// = 2 * (26+1) = 54 -- kept equal to DamBreakParameters.waterDepth below so the MEM's static
+// hydrostatic reference height matches the reservoir's own initial calm water level.
+DomainParameters
+{
+   domainSize         <128, 60, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 26;
+   floorHeightFactor  1;
+   initialAmplitude   0;
+}
+
+// The reservoir: x in [0, gateX) is initially liquid up to z=waterDepth; everywhere else starts dry.
+// yMin/yMax default to the full domain width (0..60), i.e. the reservoir spans the whole tank, matching
+// Watanabe's own experiment (no side channel).
+DamBreakParameters
+{
+   gateX      40;
+   waterDepth 54;
+}
+
+// unused: targetMeanVelocityMagnitude=0 means setupSimState's accelerationX is exactly 0, and
+// tsunami.cpp never adds the ForcingAdjuster sweep that would otherwise read the other gains -- gravity
+// alone drives this scenario. PIDController is still constructed (setupSimState, shared code path) but
+// never stepped.
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;
+   proportionalGain            0;
+   derivativeGain              0;
+   integralGain                0;
+   maxRamp                     0;
+   minActuatingVariable        0;
+   maxActuatingVariable        0;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   // 100000: covers the observed wave transit (~9500 steps to the far wall), the return trip to the
+   // forest (~15800 steps) and several further reflections/decay -- see this file's own header "REVISED
+   // after run 4180567" section for the observed-speed derivation (the original shallow-water estimate
+   // this scenario first shipped with was ~2x too fast).
+   timesteps         100000;
+   // Re/Fr/We are mandatory fields but IGNORED under useHardcodedUnits=true (kept at the same values as
+   // every other validated scenario in this project for consistency, not because they are meaningful
+   // here).
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;   // reuse this project's own proven viscosity/gravity/surfaceTension constants
+}
+
+// avgParticleDiameterOverride/dxSIOverride (both > 0) bypass reading a bed-generation file's header
+// entirely -- there is no sediment bed at all in this scenario (useParticleBed=false), just poles and
+// floating logs, so there is nothing for inFileName to meaningfully point at.
+// dxSIOverride=0.01 ties 1 LU = 1 cm, matching Watanabe et al. 2023's own tsunami-flow grid spacing.
+ParticleParameters
+{
+   inFileName unused.dat;   // never opened -- see avgParticleDiameterOverride/dxSIOverride above
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;       // unused (no sediment bed); kept for consistency with other scenarios
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.3;   // wet/waterlogged wood-wood, same as every other floater scenario
+   numSubCycles 20;               // see this project's own DEM spring-stability-bound analysis: clears
+                                   // with ~1200x margin at 20, no need for the antidune family's 40
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+   avgParticleDiameterOverride 2;
+   dxSIOverride 0.01;
+}
+
+// 8 freestanding "forest" poles, 2 staggered rows -- IDENTICAL layout to
+// toy_pole_forest_driftwood_gas.prm, 20 LU downstream of the gate (x=40) so the wave has room to
+// develop before reaching the forest. center Z is cosmetic (CylindricalBoundary is infinite along its
+// axis).
+CylinderPillars
+{
+   CylinderPillar { center < 60, 12, 30 >; radius 3; }
+   CylinderPillar { center < 60, 24, 30 >; radius 3; }
+   CylinderPillar { center < 60, 36, 30 >; radius 3; }
+   CylinderPillar { center < 60, 48, 30 >; radius 3; }
+   CylinderPillar { center < 70, 18, 30 >; radius 3; }
+   CylinderPillar { center < 70, 30, 30 >; radius 3; }
+   CylinderPillar { center < 70, 42, 30 >; radius 3; }
+   CylinderPillar { center < 70, 54, 30 >; radius 3; }
+}
+
+// Driftwood logs, resting on the DRY floor between the gate (x=40) and the forest (x=60) -- matching
+// Watanabe Section 4.2's own placement. z = halfExtents[2] = 1.5 so each box starts exactly resting on
+// the floor plane (z=0) before the wave arrives and lifts it. settlingSteps/startInactive are left at
+// their defaults (0 / false) -- these are not staggered releases, just objects sitting still until the
+// incoming water reaches and floats them, same as the real experiment.
+//
+// FIXED (post-run-4180567 review): the last two entries were originally <50,30,1.5> and <55,30,1.5>,
+// both halfExtents<6,1,1.5> -- identical Y and a 7 LU X-overlap, so those two boxes genuinely overlapped
+// at t=0. DEM contact resolution didn't crash on it, but it produced a violent, unintended initial
+// separation kick (visible as VELOCITY-JUMP log entries at steps 2-3 and a large spurious net Y-drift for
+// both boxes by the run's end) that has no counterpart in the real experiment. The last box is moved to
+// Y=56 -- clear of every other box (nearest neighbour is the Y=52 box, 4 LU gap vs 2 LU combined
+// half-extent) and clear of the nearest pole disk (row-A pole at <60,48>, radius 3; this box's X-range
+// only reaches 61, and Y=56 is 8 LU from the pole's Y=48, well outside its footprint) -- everything else
+// unchanged.
+FloatingBoxes
+{
+   FloatingBox { position < 45,  8, 1.5 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; }
+   FloatingBox { position < 45, 22, 1.5 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; }
+   FloatingBox { position < 45, 38, 1.5 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; }
+   FloatingBox { position < 45, 52, 1.5 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; }
+   FloatingBox { position < 50, 15, 1.5 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; }
+   FloatingBox { position < 50, 30, 1.5 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; }
+   FloatingBox { position < 50, 45, 1.5 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; }
+   FloatingBox { position < 55, 56, 1.5 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;  // Box x Box -> boxBoxSAT; Box x CylindricalBoundary is
+                                        // analytic regardless (SolidCylinderContactDetection
+                                        // override) -- no GJK anywhere in this scenario.
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePass3Reresolution          true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   logFloaterHistory             false;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     500;   // finer than the steady-state scenarios -- this is a short transient event
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   // E/W (x) walls: periodicity<0,..> already makes SetupStages.h add these automatically; listed here
+   // too for documentation/consistency (idempotent).
+   Border { direction E;  walldistance -1; NoSlip{} }
+   Border { direction W;  walldistance -1; NoSlip{} }
+
+   // pole 1 (row A, Y=12)
+   BodyBC
+   {
+      shape Cylinder; min < 60, 12, 0 >; max < 60, 12, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 2 (row A, Y=24)
+   BodyBC
+   {
+      shape Cylinder; min < 60, 24, 0 >; max < 60, 24, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 3 (row A, Y=36)
+   BodyBC
+   {
+      shape Cylinder; min < 60, 36, 0 >; max < 60, 36, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 4 (row A, Y=48)
+   BodyBC
+   {
+      shape Cylinder; min < 60, 48, 0 >; max < 60, 48, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 5 (row B, Y=18)
+   BodyBC
+   {
+      shape Cylinder; min < 70, 18, 0 >; max < 70, 18, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 6 (row B, Y=30)
+   BodyBC
+   {
+      shape Cylinder; min < 70, 30, 0 >; max < 70, 30, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 7 (row B, Y=42)
+   BodyBC
+   {
+      shape Cylinder; min < 70, 42, 0 >; max < 70, 42, 60 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 8 (row B, Y=54)
+   BodyBC
+   {
+      shape Cylinder; min < 70, 54, 0 >; max < 70, 54, 60 >; radius 3;
+      NoSlip{}
+   }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      // 1500: run 4180567 (15000 steps @ 250) produced ~141MB/frame, 61 frames, 8.6GB total. Scaling
+      // writeFrequency by the same ~6.7x as timesteps (15000->100000) keeps frame count (~67) and total
+      // VTK volume (~9.5GB) roughly unchanged instead of ballooning to ~56GB.
+      writeFrequency       1500;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 0, 0, 0 >; max < 128, 60, 90 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

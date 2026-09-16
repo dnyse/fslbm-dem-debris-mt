@@ -1,0 +1,328 @@
+// tsunami_pole_forest_driftwood_proportional_elongated_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// Built on top of tsunami_pole_forest_driftwood_proportional_gas.prm (see that file's own header for the
+// full Watanabe-proportionality derivation, unchanged here) with three deliberate changes, all requested
+// after reviewing the completed non-proportional 100k run (job 4181190) and the still-unrun proportional
+// scenario:
+//
+// 1. DOMAIN ELONGATED 2x in X (1872 -> 3744, all reservoir/gate/forest positions UNCHANGED): the
+//    proportional scenario's far wall (x=1872) sits only 548 LU past the forest (x=1312-1324), so the wave
+//    reflects almost immediately after crossing the forest and the run spends nearly all its time (job
+//    4181190's own 100k-step non-proportional analog: wall hit by step 9000, 91000 steps of sloshing after)
+//    on reflection/sloshing rather than genuine downstream travel. Doubling domainX to 3744 gives 2420 LU
+//    of run-out PAST the forest (vs. 548 before) -- room for debris that clears the forest to keep moving
+//    and scatter before any wall reflection can reach back. cellsPerBlock/rank count updated accordingly
+//    (see BlockForestParameters below); timesteps (120000, unchanged) still reaches the forest at the same
+//    ~95,600-step estimate as before (that part of the geometry didn't move) but now has room to show
+//    post-forest travel instead of an early wall-bounce artifact.
+//
+// 2. HALF THE DRIFTWOOD LOGS ROTATED 90 DEGREES (yaw, i.e. long axis along Y instead of X): logs 2, 4, 6,
+//    8 (of 8) have halfExtents' X/Y components swapped (<1.2,9,1.2> instead of <9,1.2,1.2>) -- geometrically
+//    identical to an actual 90-degree rotation about Z for an axis-aligned box, without needing this
+//    codebase's initialTiltAngleDeg (which rotates about Y -- tips a log up on end, not what's wanted here;
+//    there is no yaw/Z-rotation parameter on FloatingBoxParams, so the swapped-halfExtents equivalent is
+//    used instead). Purpose: logs lying broadside-to-flow should snag/jam against poles and each other
+//    more readily than logs all aligned lengthwise with the flow, for a more chaotic pile-up. Y positions
+//    for logs 4 and 8 were adjusted from the "logical" symmetric spot (62->58, 67->60) so the much wider
+//    (18 LU) rotated Y-footprint still clears both the domain's Y walls and its neighbours -- verified by
+//    script (see this session's own overlap check), not just by eye.
+//
+// 3. logFloaterHistory ENABLED (SimulationParams.h ModelParameters -- OFF by default project-wide because
+//    it blew a 126GB quota on a 1000-floater scenario; see that field's own comment). With only 8 floaters
+//    here, the per-subcycle per-floater world-state CSV cost is ~125x smaller than the incident that
+//    caused that blowup, so it's left unfiltered (logFloaterHistoryReleaseStepFilter/StartStep both left at
+//    their 0 defaults -- log every floater from step 0). Reason: this session's own analysis of job
+//    4181190 (the completed non-proportional 100k run) found the driftwood boxes are NOT actually
+//    floating -- direct VTK inspection showed them sitting flush on the floor under ~14-15 LU of standing
+//    water, and the per-floater force breakdown showed F_hydro_z is NEGATIVE (pulling down, not
+//    up) for every box still touching the floor, while the one box that got knocked clear of the floor
+//    (onto/against a pole) showed a small POSITIVE F_hydro_z. useMemOnlyBuoyancy=true (unchanged, still
+//    the project default) is supposed to supply ALL buoyant support via this same MEM force -- so a box
+//    that starts resting on the dry floor and gets engulfed in place, never having an initial impact/
+//    detachment event (unlike every other validated floater scenario in this project, which drops boxes
+//    from the air into already-established water), appears never to receive it. logFloaterHistory's full
+//    per-subcycle position/velocity/force trail is turned on here specifically to get a much finer-grained
+//    diagnostic record of this behaviour than the once-per-500-step BoxForces/BoxTorque log used so far --
+//    NOT because the underlying issue has been fixed. Expect this run to reproduce the same floor-sticking
+//    behaviour; it is a diagnostic run, not a corrected one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   // 144x2x2 = 576 blocks (8 nodes x 72 ranks) -- cellsPerBlockX unchanged at 26 (3744/26=144, vs the
+   // non-elongated scenario's 1872/26=72); Y/Z unchanged (72/36=2 each). See
+   // jobs/run_576_tsunami_pole_forest_driftwood_proportional_elongated.sbatch.
+   cellsPerBlock                 < 26, 36, 36 >;
+   periodicity                   < 0, 0, 0 >;   // closed tank -- no periodic direction at all
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             40000;   // 3 checkpoints over the 120000-step run
+   snapshotBaseFolder            snapshots;
+}
+
+// wavePeriods/initialAmplitude are INERT placeholders here (only consumed by Antidunes' own
+// sinusoidal-bed init, which tsunami.cpp never calls) -- required fields, kept at harmless defaults.
+// floorHeightFactor CANNOT be 0 (see the non-proportional scenario's own header for why -- a pre-existing
+// invariant of SimulationParams.h::ComputedParams, unrelated to this scenario). liquidHeightFactor+
+// floorHeightFactor together DO still matter: combined with ParticleParameters.avgParticleDiameterOverride
+// =2 below, they set computed.absoluteLiquidHeight = 2 * (liquidHeightFactor+floorHeightFactor) =
+// 2 * (14+1) = 30 -- kept equal to DamBreakParameters.waterDepth below.
+DomainParameters
+{
+   domainSize         <3744, 72, 72>;
+   wavePeriods        1;
+   liquidHeightFactor 14;
+   floorHeightFactor  1;
+   initialAmplitude   0;
+}
+
+// Reservoir: x in [0, gateX) initially liquid up to z=waterDepth; everywhere else starts dry. UNCHANGED
+// from the non-elongated proportional scenario -- only the downstream run-out past the forest grew.
+DamBreakParameters
+{
+   gateX      660;
+   waterDepth 30;
+}
+
+// unused: targetMeanVelocityMagnitude=0 means setupSimState's accelerationX is exactly 0, and
+// tsunami.cpp never adds the ForcingAdjuster sweep that would otherwise read the other gains -- gravity
+// alone drives this scenario. PIDController is still constructed (setupSimState, shared code path) but
+// never stepped.
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;
+   proportionalGain            0;
+   derivativeGain              0;
+   integralGain                0;
+   maxRamp                     0;
+   minActuatingVariable        0;
+   maxActuatingVariable        0;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   // 120000, UNCHANGED: the forest is still ~95,600 steps out (same gate-to-forest gap as before); the
+   // extra domain length only adds run-out PAST the forest, which this timestep budget does not need to
+   // fully traverse to see the intended effect (debris scattering past the forest instead of an immediate
+   // wall-bounce). Revisit upward if the actual run shows debris still developing at step 120000.
+   timesteps         120000;
+   // Re/Fr/We are mandatory fields but IGNORED under useHardcodedUnits=true (kept at the same values as
+   // every other validated scenario in this project for consistency, not because they are meaningful
+   // here).
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;   // reuse this project's own proven viscosity/gravity/surfaceTension constants
+}
+
+// avgParticleDiameterOverride/dxSIOverride (both > 0) bypass reading a bed-generation file's header
+// entirely -- there is no sediment bed at all in this scenario (useParticleBed=false), just poles and
+// floating logs, so there is nothing for inFileName to meaningfully point at.
+// dxSIOverride=0.01 ties 1 LU = 1 cm -- UNCHANGED; this scenario's scale-up is entirely in domain/geometry
+// size (more LU cells), not grid spacing.
+ParticleParameters
+{
+   inFileName unused.dat;   // never opened -- see avgParticleDiameterOverride/dxSIOverride above
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;       // unused (no sediment bed); kept for consistency with other scenarios
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.3;   // wet/waterlogged wood-wood, same as every other floater scenario
+   numSubCycles 20;               // see this project's own DEM spring-stability-bound analysis: clears
+                                   // with ~1200x margin at 20, no need for the antidune family's 40
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+   avgParticleDiameterOverride 2;
+   dxSIOverride 0.01;
+}
+
+// 8 freestanding "forest" poles, 2 staggered rows of 4 -- positions UNCHANGED from the non-elongated
+// proportional scenario (only the domain past them grew). radius=3 (6 cm diameter = Watanabe's
+// 0.05m*1.2). center Z is cosmetic (CylindricalBoundary is infinite along its axis).
+CylinderPillars
+{
+   CylinderPillar { center < 1312, 15, 36 >; radius 3; }
+   CylinderPillar { center < 1312, 29, 36 >; radius 3; }
+   CylinderPillar { center < 1312, 43, 36 >; radius 3; }
+   CylinderPillar { center < 1312, 57, 36 >; radius 3; }
+   CylinderPillar { center < 1324, 22, 36 >; radius 3; }
+   CylinderPillar { center < 1324, 36, 36 >; radius 3; }
+   CylinderPillar { center < 1324, 50, 36 >; radius 3; }
+   CylinderPillar { center < 1324, 64, 36 >; radius 3; }
+}
+
+// Driftwood logs, resting on the DRY floor between the gate (x=660) and the forest (x=1312). Logs 2, 4, 6,
+// 8 are rotated 90 degrees (halfExtents X/Y swapped -- see this file's own header for why that's the
+// equivalent of a real yaw rotation for an axis-aligned box, and why initialTiltAngleDeg isn't used
+// instead). Y positions for logs 4 and 8 shifted (62->58, 67->60) so their much wider (18 LU) rotated
+// footprint clears the domain's Y walls and neighbouring logs -- verified overlap-free by script.
+// settlingSteps/startInactive left at defaults (0/false) -- these sit still until the incoming water
+// reaches them (see this file's own header point 3 for why they are NOT expected to actually float yet).
+FloatingBoxes
+{
+   FloatingBox { position < 823,  10, 1.2 >; halfExtents < 9,   1.2, 1.2 >; densityRatio 0.6; }   // unrotated
+   FloatingBox { position < 823,  26, 1.2 >; halfExtents < 1.2, 9,   1.2 >; densityRatio 0.6; }   // rotated 90
+   FloatingBox { position < 823,  46, 1.2 >; halfExtents < 9,   1.2, 1.2 >; densityRatio 0.6; }   // unrotated
+   FloatingBox { position < 823,  58, 1.2 >; halfExtents < 1.2, 9,   1.2 >; densityRatio 0.6; }   // rotated 90
+   FloatingBox { position < 986,  18, 1.2 >; halfExtents < 9,   1.2, 1.2 >; densityRatio 0.6; }   // unrotated
+   FloatingBox { position < 986,  36, 1.2 >; halfExtents < 1.2, 9,   1.2 >; densityRatio 0.6; }   // rotated 90
+   FloatingBox { position < 986,  54, 1.2 >; halfExtents < 9,   1.2, 1.2 >; densityRatio 0.6; }   // unrotated
+   FloatingBox { position < 1149, 60, 1.2 >; halfExtents < 1.2, 9,   1.2 >; densityRatio 0.6; }   // rotated 90
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;  // Box x Box -> boxBoxSAT; Box x CylindricalBoundary is
+                                        // analytic regardless (SolidCylinderContactDetection
+                                        // override) -- no GJK anywhere in this scenario.
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePass3Reresolution          true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   // ON (unlike every other tsunami prm so far) -- see this file's own header point 3. Only 8 floaters,
+   // so left unfiltered (no logFloaterHistoryReleaseStepFilter/StartStep) -- ~125x cheaper than the
+   // 1000-floater scenario that blew a 126GB quota under the same unfiltered setting.
+   logFloaterHistory             true;
+}
+
+// evaluationFrequency/performanceLogFrequency doubled again from the non-elongated proportional scenario
+// (4000->8000, 40000 unchanged) to hold total eval/ output roughly constant: each slice is now
+// domainX*domainZ=3744*72=269,568 cells (2x the non-elongated scenario's 134,784), so halving the write
+// COUNT keeps total volume in the same few-hundred-MB ballpark instead of doubling it.
+EvaluationParameters
+{
+   performanceLogFrequency 40000;
+   evaluationFrequency     8000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   // E/W (x) walls: periodicity<0,..> already makes SetupStages.h add these automatically; listed here
+   // too for documentation/consistency (idempotent).
+   Border { direction E;  walldistance -1; NoSlip{} }
+   Border { direction W;  walldistance -1; NoSlip{} }
+
+   // pole 1 (row A, Y=15)
+   BodyBC
+   {
+      shape Cylinder; min < 1312, 15, 0 >; max < 1312, 15, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 2 (row A, Y=29)
+   BodyBC
+   {
+      shape Cylinder; min < 1312, 29, 0 >; max < 1312, 29, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 3 (row A, Y=43)
+   BodyBC
+   {
+      shape Cylinder; min < 1312, 43, 0 >; max < 1312, 43, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 4 (row A, Y=57)
+   BodyBC
+   {
+      shape Cylinder; min < 1312, 57, 0 >; max < 1312, 57, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 5 (row B, Y=22)
+   BodyBC
+   {
+      shape Cylinder; min < 1324, 22, 0 >; max < 1324, 22, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 6 (row B, Y=36)
+   BodyBC
+   {
+      shape Cylinder; min < 1324, 36, 0 >; max < 1324, 36, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 7 (row B, Y=50)
+   BodyBC
+   {
+      shape Cylinder; min < 1324, 50, 0 >; max < 1324, 50, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 8 (row B, Y=64)
+   BodyBC
+   {
+      shape Cylinder; min < 1324, 64, 0 >; max < 1324, 64, 72 >; radius 3;
+      NoSlip{}
+   }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      // 12000: at ~19.4M LU cells (3744x72x72, 2x the non-elongated proportional scenario's 9.7M), each
+      // VTK frame is roughly 2x that scenario's ~2GB/frame, i.e. ~4GB/frame. writeFrequency=12000 over
+      // 120000 steps gives 10 frames (~40GB total) -- half the frame count of the non-elongated scenario's
+      // 20, keeping total volume roughly unchanged instead of doubling it. Revisit once an actual run shows
+      // the true per-frame size.
+      writeFrequency       12000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 0, 0, 0 >; max < 3744, 72, 72 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

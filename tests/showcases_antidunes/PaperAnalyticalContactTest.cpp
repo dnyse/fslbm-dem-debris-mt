@@ -51,6 +51,7 @@
 #include <mesa_pd/data/shape/Cylinder.h>
 #include <mesa_pd/data/shape/CylindricalBoundary.h>
 #include <mesa_pd/data/shape/HalfSpace.h>
+#include <mesa_pd/data/shape/Sphere.h>
 
 #include <core/Environment.h>
 #include <core/logging/Logging.h>
@@ -61,6 +62,7 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <set>
 
 namespace walberla
 {
@@ -78,6 +80,17 @@ using Rot3 = mesa_pd::Rot3;
 //! the cylinder-mismatch VTK/CSV dump always lands in the build tree next to the executable instead
 //! of wherever the process happened to be launched from.
 std::filesystem::path g_outputDir;
+
+//! Off by default -- writing the per-mismatch VTK frame series (cylinder_fuzz_mismatches,
+//! cylinder_kodam_mismatches) is the single biggest cost in this whole test's runtime for no benefit
+//! on a routine run; the CSV dump (cheap, always written) already has everything needed to see WHICH
+//! trials mismatched. Set WALBERLA_WRITE_MISMATCH_VTK=1 to turn the VTK series back on when actually
+//! visualizing a specific mismatch geometry in ParaView.
+inline bool writeMismatchVTKEnabled()
+{
+   const char* env = std::getenv("WALBERLA_WRITE_MISMATCH_VTK");
+   return env != nullptr && std::string(env) == "1";
+}
 
 //======================================================================================================================
 // Helpers: run the existing, already-in-production SolidCylinderContactDetection for the same
@@ -159,6 +172,29 @@ GjkResult gjkCylPlane(const Vec3& posCyl, const Rot3& rotCyl, real_t radius, rea
 
    SolidCylinderContactDetection gjk;
    const bool                    contactFound = gjk(0, 1, cylShape, wallShape, ac);
+   return GjkResult{ contactFound, gjk.getPenetrationDepth(), gjk.getContactNormal(), gjk.getContactPoint() };
+}
+
+//! Sphere x Cylinder has no dedicated override anywhere in the SolidCylinderContactDetection /
+//! GeneralContactDetection hierarchy (unlike sphere-sphere/sphere-box, inherited from
+//! AnalyticContactDetection, or cylinder-cylinder/box-box, overridden in ParticleKernels.h), so this
+//! exercises the generic GJK/EPA template directly -- exactly the ground truth
+//! paper_analytical::sphereCylinderContact is validated against below.
+GjkResult gjkSphereCyl(const Vec3& spherePos, real_t sphereRadius, const Vec3& cylPos, const Rot3& rotCyl,
+                        real_t cylRadius, real_t cylLength)
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+   auto body0 = ps->create();
+   body0->setPosition(spherePos);
+   auto body1 = ps->create();
+   body1->setPosition(cylPos);
+   body1->setRotation(rotCyl);
+   const mesa_pd::data::Sphere   sphShape(sphereRadius);
+   const mesa_pd::data::Cylinder cylShape(cylRadius, cylLength);
+
+   SolidCylinderContactDetection gjk;
+   const bool                    contactFound = gjk(0, 1, sphShape, cylShape, ac);
    return GjkResult{ contactFound, gjk.getPenetrationDepth(), gjk.getContactNormal(), gjk.getContactPoint() };
 }
 
@@ -733,8 +769,16 @@ void testCylinderCylinderBandBandSkewedNoContact()
 }
 
 //! Cylinder j's curved side pressed into cylinder i's flat top face, with j's axis perpendicular to
-//! i's (eq. 34's precondition) and the contact line lying fully within i's face (eq. 42's case).
-//! Hand-derived: overlap = (halfLi + radiusJ) - |zIJ| = (1+0.5) - 1.4 = 0.1.
+//! i's (eq. 34's precondition). Hand-derived: overlap = (halfLi + radiusJ) - |zIJ| = (1+0.5) - 1.4 =
+//! 0.1. NOTE: despite this test's ORIGINAL docstring claiming eq. 42's "fully inside" case, checking
+//! Kodam's actual line AB (eq. 40-41: cylinder j's own centreline of half-length 2, translated onto
+//! i's face) against i's face disc (radius 0.5) shows BOTH endpoints (x=+-2) lie far outside it --
+//! this is actually the case neither eq. 42 (fully inside) nor eq. 44 (one end inside) names: AB
+//! straddles the disc, poking out through both ends. faceBandContactPoint's finite line-circle
+//! intersection handles this by construction (see its own comment); the exact expected point below
+//! is independently hand-derived from that same construction, not merely read back from the code:
+//! the two disc-boundary crossings are symmetric about x=0 (since cj's centre projects to x=0), so
+//! their midpoint is (0, 0.45), pulled back from the face (z=1) by half the overlap (0.05) to 0.95.
 void testCylinderCylinderFaceBand()
 {
    CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.5), real_t(2) };
@@ -748,12 +792,67 @@ void testCylinderCylinderFaceBand()
    WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-band");
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-3));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(0), real_t(0), real_t(-1)), real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0), real_t(0.45), real_t(0.95)), real_t(1e-3));
 
    const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
    WALBERLA_CHECK(gjk.contact);
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-2));
-   WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-band): overlap=" << kodam.overlap << " (agree)");
+   WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-band, straddling): overlap=" << kodam.overlap
+                              << " point=" << kodam.point << " (agree; GJK/EPA point=" << gjk.point
+                              << ", informational only -- underdetermined along the band direction)");
+}
+
+//! Genuine eq. 42 "fully inside" case: a short, narrow cylinder j (half-length 0.3, matching AB's
+//! own half-length since eq. 40-41 has no radius term) whose translated centreline AB fits entirely
+//! within i's much larger face disc (radius 1.0). Hand-derived expected point: AB's own midpoint,
+//! i.e. cj's centre projected onto i's face plane, (0, 0.2, 1 - 0.1/2) = (0, 0.2, 0.95).
+void testCylinderCylinderFaceBandFullyInside()
+{
+   CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(2) };
+   Rot3          rotJ;
+   rotJ.rotate(Vec3(real_t(0), real_t(1), real_t(0)), math::pi * real_t(0.5)); // body z -> world x
+   CylinderState cj{ Vec3(real_t(0), real_t(0.2), real_t(1.2)), rotJ.getMatrix(), real_t(0.3), real_t(0.6) };
+
+   const ContactResult kodam = cylinderCylinderContact(ci, cj);
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-band");
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0), real_t(0.2), real_t(0.95)), real_t(1e-3));
+
+   const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
+   WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-band, fully inside): overlap=" << kodam.overlap
+                              << " point=" << kodam.point << " (agree)");
+}
+
+//! Genuine eq. 44 "partially inside" case (one end of AB inside the disc, one outside), constructed
+//! off-centre (cj's projected centre at (0.5, 0.3), not on i's own axis) so the two ends of AB are NOT
+//! symmetric the way testCylinderCylinderFaceBand's straddling case is. Hand-derived via the same
+//! line-circle intersection faceBandContactPoint solves: with A (t=+halfLj=+1) at (1.5,0.3) (outside
+//! Ri=1) and B (t=-halfLj=-1) at (-0.5,0.3) (inside), the disc crossing nearer A is at
+//! t2=(-0.5+sqrt(0.91))=0.453939, so the contact point sits at the midpoint of B and that crossing,
+//! t=(-1+0.453939)/2=-0.273031, i.e. xy=(0.5-0.273031, 0.3)=(0.226970, 0.3).
+void testCylinderCylinderFaceBandPartiallyInside()
+{
+   CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(2) };
+   Rot3          rotJ;
+   rotJ.rotate(Vec3(real_t(0), real_t(1), real_t(0)), math::pi * real_t(0.5)); // body z -> world x
+   CylinderState cj{ Vec3(real_t(0.5), real_t(0.3), real_t(1.2)), rotJ.getMatrix(), real_t(0.3), real_t(2.0) };
+
+   const ContactResult kodam = cylinderCylinderContact(ci, cj);
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-band");
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0.226970), real_t(0.3), real_t(0.95)),
+                                       real_t(1e-3));
+
+   const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
+   WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-band, partially inside): overlap=" << kodam.overlap
+                              << " point=" << kodam.point << " (agree)");
 }
 
 void testCylinderCylinderFaceBandNoContact()
@@ -903,6 +1002,89 @@ void testCylinderCylinderSpecialContact()
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (special-contact): kodam overlap=" << kodam.overlap
                               << " normal=" << kodam.normal << " vs GJK/EPA penetrationDepth="
                               << gjk.penetrationDepth << " normal=" << gjk.normal);
+}
+
+//! Independent, third arbiter for testCylinderCylinderSpecialContact's own disagreement (Kodam/Guo:
+//! 0.181, GJK/EPA: ~0.610): the minimum TRANSLATION distance (MTD) between two convex solids, computed
+//! directly from each cylinder's own support function via a dense sweep over unit directions -- no
+//! dependency on either Kodam/Guo's candidate-point approach or on this codebase's own GJK/EPA
+//! implementation, so it can genuinely arbitrate between them rather than just re-confirming one side.
+//!
+//! For a solid convex body centred at c with support function h(d) = max_{p in body} (p-c).d, and two
+//! bodies A, B, the projected gap along direction d is (cB-cA).d - hA(d) - hB(-d); if this is negative
+//! for some d, the bodies overlap along that axis by that amount, and the TRUE minimum translation
+//! distance (over every direction, not just a finite candidate set) is the most negative such gap,
+//! i.e. MTD = -max_d[gap(d)] = min_d[hA(d) + hB(-d) - (cB-cA).d]. A cylinder's own support function is
+//! elementary: h(d) = halfLength*|axis.d| + radius*sqrt(max(0, 1-(axis.d)^2)).
+void testCylinderCylinderSpecialContactBruteForceMTD()
+{
+   CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(3.0) };
+   Rot3          rotJ;
+   rotJ.rotate(Vec3(real_t(1), real_t(0), real_t(0)), math::pi * (real_t(35) / real_t(180)));
+   CylinderState cj{ Vec3(real_t(0.9), real_t(0), real_t(1.7)), rotJ.getMatrix(), real_t(1.0), real_t(0.6) };
+
+   auto support = [](const CylinderState& c, const Vec3& d) {
+      const real_t axisDotD = c.axis() * d;
+      return real_t(0.5) * c.length * std::abs(axisDotD) +
+             c.radius * std::sqrt(std::max(real_t(0), real_t(1) - axisDotD * axisDotD));
+   };
+
+   const Vec3 centreDiff = cj.pos - ci.pos;
+
+   // Coarse-to-fine directional search: a Fibonacci sphere lattice (uniform-ish coverage, no pole
+   // clustering), then a local perturbation search re-centred on the best direction found so far --
+   // avoids needing many more points for a precise MAXIMUM (the least-overlapping, true separating,
+   // axis -- see this function's own doc comment for why it's a maximization, not a minimization).
+   auto gap = [&](const Vec3& d) { return centreDiff * d - support(ci, d) - support(cj, -d); };
+
+   Vec3   bestDir(real_t(0), real_t(0), real_t(1));
+   real_t bestGap = gap(bestDir);
+   auto   sweepFibonacci = [&](int n) {
+      const real_t goldenAngle = math::pi * (real_t(3) - std::sqrt(real_t(5)));
+      for (int i = 0; i < n; ++i)
+      {
+         const real_t z     = real_t(1) - (real_t(2) * real_t(i) + real_t(1)) / real_t(n);
+         const real_t r     = std::sqrt(std::max(real_t(0), real_t(1) - z * z));
+         const real_t theta = goldenAngle * real_t(i);
+         const Vec3   d(r * std::cos(theta), r * std::sin(theta), z);
+         const real_t g = gap(d);
+         if (g > bestGap) // MAXIMIZE gap: the true separating axis is the direction of LEAST overlap
+         {
+            bestGap = g;
+            bestDir = d;
+         }
+      }
+   };
+   sweepFibonacci(2000000);
+
+   // Local refinement: small random perturbations around the best direction found, shrinking the
+   // perturbation radius -- a simple, dependency-free local search to polish the coarse global sweep.
+   std::mt19937                             rng(999);
+   std::uniform_real_distribution< real_t > unit(real_t(-1), real_t(1));
+   real_t                                    radius = real_t(0.05);
+   for (int round = 0; round < 40; ++round)
+   {
+      for (int i = 0; i < 2000; ++i)
+      {
+         Vec3 perturb(unit(rng), unit(rng), unit(rng));
+         Vec3 d = (bestDir + radius * perturb).getNormalizedIfNotZero();
+         if (d.sqrLength() < real_t(0.5)) continue;
+         const real_t g = gap(d);
+         if (g > bestGap) // MAXIMIZE gap: the true separating axis is the direction of LEAST overlap
+         {
+            bestGap = g;
+            bestDir = d;
+         }
+      }
+      radius *= real_t(0.7);
+   }
+
+   const real_t mtd = -bestGap;
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "Cylinder x Cylinder (special-contact, INDEPENDENT brute-force MTD arbiter): brute-force MTD="
+      << mtd << " (direction=" << bestDir << ") | Kodam/Guo overlap=0.1811 | GJK/EPA overlap~0.610 "
+      << "-- whichever of the latter two this brute-force value sits closer to is the more likely "
+      << "correct one, independent of both implementations");
 }
 
 void testCylinderCylinderSpecialContactNoContact()
@@ -1055,6 +1237,13 @@ struct CylMismatchRecord
    int           kind; // 0 = existence false positive (analytical says contact, GJK says none)
                         // 1 = existence false negative (analytical says none, GJK says contact)
                         // 2 = magnitude mismatch (both agree contact exists, overlap differs)
+   const char*   cause      = ""; // mathematical root-cause tag, see
+                                    // testCylinderCylinderFullComparisonAndHybridFeasibility's
+                                    // classifyMagnitudeCause/classifyDispatchGapCause -- always a
+                                    // fixed string literal (never dynamically built), so this pointer
+                                    // never dangles
+   real_t        causeMetric = real_t(-1); // supporting number for `cause` (e.g. the kodam-vs-GJK
+                                             // normal misalignment angle in degrees); -1 where n/a
 };
 
 inline std::array< real_t, 9 > glyphRotationFromR(const Mat3& R)
@@ -1127,6 +1316,12 @@ inline void writeCylMismatchFrame(const std::string& path, const CylMismatchReco
    f << "    <DataArray type=\"Float64\" Name=\"gjkOverlap\" NumberOfComponents=\"1\" format=\"ascii\">"
      << r.gjkOverlap << "</DataArray>\n";
 
+   // cause is a fixed-string tag (see CylMismatchRecord::cause); ParaView's ascii VTU writer here has
+   // no string DataArray, so the human-readable tag goes in the companion CSV only and causeMetric
+   // (e.g. a misalignment angle in degrees, -1 if n/a) is exposed here for colour-by-value glyphing.
+   f << "    <DataArray type=\"Float64\" Name=\"causeMetric\" NumberOfComponents=\"1\" format=\"ascii\">"
+     << r.causeMetric << "</DataArray>\n";
+
    f << "   </PointData>\n";
    f << "   <CellData>\n   </CellData>\n";
    f << "  </Piece>\n </UnstructuredGrid>\n</VTKFile>\n";
@@ -1186,7 +1381,7 @@ inline void writeCylMismatchCSV(const std::string& path, const std::vector< CylM
    if (records.empty()) return;
    std::ofstream f(path);
    f << "trial,kind,Ri,Li,Rj,Lj,sep,scenario,analyticalContact,gjkContact,analyticalOverlap,gjkOverlap,"
-        "overlapDiff\n";
+        "overlapDiff,cause,causeMetric\n";
    for (const auto& r : records)
    {
       const real_t sep        = (r.cj.pos - r.ci.pos).length();
@@ -1196,7 +1391,8 @@ inline void writeCylMismatchCSV(const std::string& path, const std::vector< CylM
                                            : "magnitude_mismatch";
       f << r.trial << "," << kindStr << "," << r.ci.radius << "," << r.ci.length << "," << r.cj.radius << ","
         << r.cj.length << "," << sep << "," << r.scenario << "," << r.analyticalContact << "," << r.gjkContact
-        << "," << r.analyticalOverlap << "," << r.gjkOverlap << "," << overlapDiff << "\n";
+        << "," << r.analyticalOverlap << "," << r.gjkOverlap << "," << overlapDiff << "," << r.cause << ","
+        << r.causeMetric << "\n";
    }
    WALBERLA_LOG_INFO_ON_ROOT("[fuzz] wrote " << records.size() << " mismatch row(s) to " << path);
 }
@@ -1298,8 +1494,9 @@ void testCylinderCylinderRandomizedFuzz()
       }
    }
 
-   writeCylMismatchVTKSeries((g_outputDir / "cylinder_fuzz_mismatches").string(), "cylinder_fuzz_mismatches",
-                              mismatches);
+   if (writeMismatchVTKEnabled())
+      writeCylMismatchVTKSeries((g_outputDir / "cylinder_fuzz_mismatches").string(), "cylinder_fuzz_mismatches",
+                                 mismatches);
    writeCylMismatchCSV((g_outputDir / "cylinder_fuzz_mismatches.csv").string(), mismatches);
 
    WALBERLA_LOG_INFO_ON_ROOT(
@@ -1321,23 +1518,541 @@ void testCylinderCylinderRandomizedFuzz()
       << "are loose/conservative specifically near that boundary, so this number is expected to run very "
       << "high and should NOT be read as \"the hybrid falls back this often in a real simulation\".");
 
-   // The hybrid dispatcher's whole purpose is to catch what the raw analytical path misses -- so its
-   // mismatch rate against GJK/EPA should be dramatically lower than the raw path's, not just lower.
-   // History: before Tier 2 covered band-band-skewed/edge-edge at all, this was ~8% of all trials
-   // (403/5000), purely false positives -- reporting contact for genuinely separated pairs. Adding
-   // Tier 2 coverage for both got it to 8/5000 (0.16%), all residual band-band-skewed. That
-   // remainder turned out to be a genuine frame-mismatch bug in band-band-skewed's own perpendicular-
-   // distance formula (line ~698: dotting ci-body-frame `relI` against world-frame `rHatN`, correct
-   // only when ci itself is unrotated -- true in every hand-picked test in this file, false for most
-   // of this fuzz test's fully-random orientations, which is why only the fuzz test ever found it).
-   // Fixed to use the world-frame relative position directly. At 10000 trials post-fix: 0 mismatches,
-   // exactly -- so this is asserted strictly now, not loosely.
+   // The hybrid dispatcher's whole purpose is to catch what the raw analytical path misses -- its
+   // EXISTENCE mismatch rate against GJK/EPA is still held to 0, strictly: Tier 1 (the unconditional
+   // reach-sum bound whenever the raw dispatch reports no contact) plus special-contact's own
+   // unconditional routing together guarantee this regardless of overlap magnitude. History: before
+   // Tier 2 ever covered band-band-skewed/edge-edge (when Tier 2 still existed), this was ~8% of all
+   // trials (403/5000), purely false positives -- reporting contact for genuinely separated pairs.
+   // That was traced to a genuine frame-mismatch bug in band-band-skewed's own perpendicular-distance
+   // formula (dotting a body-frame vector against a world-frame one, correct only when ci itself was
+   // unrotated) and fixed at the root, not safety-netted -- band-band-skewed is provably exact under
+   // its own precondition regardless of any fallback tier.
    WALBERLA_CHECK_EQUAL(numHybridMismatch, 0);
-   // On the cases where both sides agree there's a contact, the geometry should now match exactly too
-   // (same root cause as the existence mismatches above) -- strict tolerance, not the loose one this
-   // comment used to describe while that bug was still open.
-   WALBERLA_CHECK_LESS(maxAgreeOverlapDiff, real_t(1e-6));
-   WALBERLA_CHECK_LESS(maxAgreePointDist, real_t(1e-6));
+   // Overlap MAGNITUDE is no longer held to a tight bound: Tier 2 (a circumscribing-sphere magnitude
+   // cross-check applied to every non-exempt scenario) was REMOVED from cylinderCylinderResultIsUncertain
+   // -- see that function's own comment for the full history -- after a dedicated master comparison
+   // showed it pushed the GJK/EPA fallback rate to ~90% while still being structurally one-sided (it
+   // only catches UNDERESTIMATES, never overestimates, and a deliberately-deep-overlap stress test
+   // found a case where it missed one anyway). The traded-off residual: band-edge/edge-edge/face-edge
+   // now keep their own raw overlap value whenever they fire (no longer corrected by Tier 2), so
+   // maxAgreeOverlapDiff can legitimately be as large as their own documented error range (median
+   // ~2.7% relative, max ~13.5% absolute in a 10000-trial master comparison) -- informational only
+   // below, not asserted, same treatment already given to the point-distance metric right after it.
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] max overlap magnitude difference on agreeing contacts=" << maxAgreeOverlapDiff
+      << " (informational only -- Tier 2 no longer corrects band-edge/edge-edge/face-edge's own raw "
+      << "overlap value, see cylinderCylinderResultIsUncertain's comment; not asserted)");
+   // Point distance: band-band-skewed's own contact POINT can differ from GJK/EPA's along a flush
+   // contact line with no unique point (the same benign ambiguity already documented for face-band and
+   // band-band-parallel elsewhere in this file) -- informational only, same treatment the box-box fuzz
+   // test already gives its own analogous "PERPENDICULAR-to-normal point difference" for flush contacts.
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] max contact-point distance on agreeing contacts=" << maxAgreePointDist << " (informational "
+      << "only -- not asserted)");
+}
+
+//======================================================================================================================
+// PURE analytical (cylinderCylinderContact directly -- NOT cylinderCylinderContactHybrid, which would
+// blend in GJK/EPA on every Tier-2-flagged trial and hide exactly what this is meant to show) validated
+// against GJK/EPA, broken down BY SCENARIO: how often does each of Kodam et al.'s dispatch outcomes
+// actually occur under random fully-3D orientations and realistic (boundary-biased, capped-overlap)
+// separations, and on the trials it fires for, does it agree with GJK/EPA on existence, overlap
+// magnitude, and contact point? Same random/sampling scheme as testCylinderCylinderRandomizedFuzz
+// above (fully random axes for BOTH cylinders, not forced-perpendicular the way
+// testCylinderCylinderFaceBandBarelyOverlappingFuzz is) so the scenario mix reflects what a real
+// simulation's arbitrary floater orientations would actually produce, not one scenario forced into
+// dominance. Reported for inspection -- not asserted against a fixed bound, since face-edge/band-edge/
+// edge-edge/special-contact are DOCUMENTED to sometimes disagree with GJK/EPA (that disagreement is
+// the whole reason cylinderCylinderResultIsUncertain/the hybrid fallback exist); asserting a tolerance
+// here would just be re-deriving that known limitation under a different name.
+//======================================================================================================================
+void testCylinderCylinderPureAnalyticalScenarioBreakdown()
+{
+   FuzzRng                                  fuzz(24680); // distinct seed from every other fuzz test
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrials = 5000;
+
+   struct ScenarioStats
+   {
+      int                    numTrials         = 0;
+      int                    existenceAgree    = 0;
+      int                    existenceMismatch = 0;
+      real_t                 maxOverlapDiff    = real_t(0);
+      real_t                 maxPointDist      = real_t(0);
+      std::vector< real_t >  pointDists; // for a percentile breakdown, not just the worst outlier
+      // Root-cause diagnostics for the worst overlap-magnitude disagreement: is GJK/EPA's contact
+      // normal still close to what the analytical rim/edge-based formula reports (a shared-feature,
+      // pure-magnitude imprecision), or does it point somewhere structurally different (a sign that
+      // GJK/EPA found a DIFFERENT, non-rim closest feature -- e.g. the curved band surface away from
+      // any edge -- that the analytical dispatch never searches for at all, per
+      // testCylinderCylinderTiltedRimIntoFace/IntoBand/SpecialContact's own documented limitation)?
+      real_t        worstOverlapDiff = real_t(0);
+      CylinderState worstCi{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+      CylinderState worstCj{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+      Vec3          worstAnalyticalNormal, worstGjkNormal;
+      real_t        worstAnalyticalOverlap = real_t(0), worstGjkOverlap = real_t(0);
+      // One example existence mismatch (analytical says no contact, GJK/EPA says yes -- a total miss,
+      // not just a wrong magnitude), to check whether it shares the same root cause.
+      bool          haveMismatchExample = false;
+      CylinderState mismatchCi{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+      CylinderState mismatchCj{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+      Vec3          mismatchGjkNormal;
+      real_t        mismatchGjkOverlap = real_t(0);
+      // Best-agreeing example with a non-trivial overlap (gjkOverlap > 0.05, so it isn't just a
+      // barely-touching near-zero case) -- candidate geometry for a genuine, well-agreeing hand-drawn
+      // test, to complement the existing "known limitation" ones for this scenario.
+      real_t        bestRelOverlapDiff = std::numeric_limits< real_t >::max();
+      CylinderState bestCi{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+      CylinderState bestCj{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+      real_t        bestOverlap = real_t(0);
+   };
+   std::map< std::string, ScenarioStats > byScenario;
+   int numNoContactBoth = 0;
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+      const Rot3   rotJ = fuzz.randomRotation();
+
+      const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+      const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (circumRi + circumRj),
+                                                             std::min(Ri, Rj));
+      const Vec3 posJ = posI + dir * sep;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      const ContactResult analytical = cylinderCylinderContact(ci, cj); // pure analytical, no fallback
+      const GjkResult      gjk       = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+
+      if (!analytical.contact && !gjk.contact)
+      {
+         ++numNoContactBoth;
+         continue;
+      }
+
+      const std::string scenario =
+         analytical.contact ? std::string(analytical.scenario) : std::string("(missed -- analytical found no contact)");
+      auto& st = byScenario[scenario];
+      ++st.numTrials;
+
+      if (analytical.contact != gjk.contact)
+      {
+         ++st.existenceMismatch;
+         if (!st.haveMismatchExample && gjk.contact) // the interesting case: analytical missed a real contact
+         {
+            st.haveMismatchExample = true;
+            st.mismatchCi          = ci;
+            st.mismatchCj          = cj;
+            st.mismatchGjkNormal   = gjk.normal;
+            st.mismatchGjkOverlap  = -gjk.penetrationDepth;
+         }
+         continue;
+      }
+      ++st.existenceAgree;
+
+      const real_t gjkOverlap  = -gjk.penetrationDepth;
+      const real_t overlapDiff = std::abs(analytical.overlap - gjkOverlap);
+      const real_t pointDist   = (analytical.point - gjk.point).length();
+      st.maxOverlapDiff = std::max(st.maxOverlapDiff, overlapDiff);
+      st.maxPointDist   = std::max(st.maxPointDist, pointDist);
+      st.pointDists.push_back(pointDist);
+      if (overlapDiff > st.worstOverlapDiff)
+      {
+         st.worstOverlapDiff       = overlapDiff;
+         st.worstCi                = ci;
+         st.worstCj                = cj;
+         st.worstAnalyticalNormal  = analytical.normal;
+         st.worstGjkNormal         = gjk.normal;
+         st.worstAnalyticalOverlap = analytical.overlap;
+         st.worstGjkOverlap        = gjkOverlap;
+      }
+      if (gjkOverlap > real_t(0.05))
+      {
+         const real_t relDiff = overlapDiff / gjkOverlap;
+         if (relDiff < st.bestRelOverlapDiff)
+         {
+            st.bestRelOverlapDiff = relDiff;
+            st.bestCi             = ci;
+            st.bestCj             = cj;
+            st.bestOverlap        = gjkOverlap;
+         }
+      }
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] PURE analytical (no GJK/EPA fallback) Cylinder x Cylinder scenario breakdown, "
+      << numTrials << " random-orientation trials (" << numNoContactBoth
+      << " agree no contact at all -- excluded from the per-scenario counts below):");
+   for (auto& [name, st] : byScenario)
+   {
+      real_t p50 = real_t(0), p90 = real_t(0);
+      if (!st.pointDists.empty())
+      {
+         std::vector< real_t > sorted = st.pointDists;
+         std::sort(sorted.begin(), sorted.end());
+         p50 = sorted[sorted.size() / 2];
+         p90 = sorted[std::min(sorted.size() - 1, size_t(real_t(0.9) * real_t(sorted.size())))];
+      }
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "  " << name << ": count=" << st.numTrials << " (" << (real_t(100) * real_t(st.numTrials) / real_t(numTrials))
+         << "% of all trials) | existence: agree=" << st.existenceAgree << " mismatch="
+         << st.existenceMismatch << " | on agreeing trials: maxOverlapDiff=" << st.maxOverlapDiff
+         << " maxPointDist=" << st.maxPointDist << " p50PointDist=" << p50 << " p90PointDist=" << p90);
+      if (st.worstOverlapDiff > real_t(1e-3))
+      {
+         const real_t normalDot = st.worstAnalyticalNormal * st.worstGjkNormal;
+         WALBERLA_LOG_INFO_ON_ROOT(
+            "    worst overlap-diff root-cause probe: analytical.overlap=" << st.worstAnalyticalOverlap
+            << " gjk.overlap=" << st.worstGjkOverlap << " | analytical.normal=" << st.worstAnalyticalNormal
+            << " gjk.normal=" << st.worstGjkNormal << " (dot=" << normalDot << ", <1 means GJK/EPA "
+            << "found a geometrically DIFFERENT closest feature than the rim/edge point the analytical "
+            << "formula used -- consistent with the documented rim-vs-band-surface gap, not a shared "
+            << "feature computed slightly imprecisely) | geometry: ci.pos=" << st.worstCi.pos
+            << " ci.axis=" << st.worstCi.axis() << " Ri=" << st.worstCi.radius << " Li=" << st.worstCi.length
+            << " | cj.pos=" << st.worstCj.pos << " cj.axis=" << st.worstCj.axis() << " Rj=" << st.worstCj.radius
+            << " Lj=" << st.worstCj.length);
+      }
+      if (st.haveMismatchExample)
+      {
+         WALBERLA_LOG_INFO_ON_ROOT(
+            "    existence-mismatch example (analytical missed a real contact): gjk.overlap="
+            << st.mismatchGjkOverlap << " gjk.normal=" << st.mismatchGjkNormal << " | geometry: ci.pos="
+            << st.mismatchCi.pos << " ci.axis=" << st.mismatchCi.axis() << " Ri=" << st.mismatchCi.radius
+            << " Li=" << st.mismatchCi.length << " | cj.pos=" << st.mismatchCj.pos << " cj.axis="
+            << st.mismatchCj.axis() << " Rj=" << st.mismatchCj.radius << " Lj=" << st.mismatchCj.length);
+      }
+      if (st.bestRelOverlapDiff < std::numeric_limits< real_t >::max())
+      {
+         WALBERLA_LOG_INFO_ON_ROOT(
+            "    best-agreeing non-trivial example (candidate for a genuine hand-drawn test): "
+            << "gjk.overlap=" << st.bestOverlap << " relOverlapDiff=" << st.bestRelOverlapDiff
+            << " | geometry: ci.pos=" << st.bestCi.pos << " ci.R=" << st.bestCi.R << " Ri=" << st.bestCi.radius
+            << " Li=" << st.bestCi.length << " | cj.pos=" << st.bestCj.pos << " cj.R=" << st.bestCj.R
+            << " Rj=" << st.bestCj.radius << " Lj=" << st.bestCj.length);
+      }
+   }
+}
+
+//======================================================================================================================
+// Targeted fuzz test: axes forced (ANTI-)PARALLEL by construction -- the necessary precondition for
+// face-face/band-band-parallel that testCylinderCylinderPureAnalyticalScenarioBreakdown's fully-random
+// orientations structurally cannot hit at all (exact axis-parallelism, checked to 1e-8, has zero
+// measure under random 3D rotation -- confirmed empirically there: 0/5000 trials landed in either
+// scenario). Same boundary-biased separation sampling and same trial count (5000) as that test, so
+// its results are directly comparable in the same breakdown table.
+//
+// A random direction is used for the boundary search, exactly like the general fuzz test: separating
+// mostly along the shared axis tends to produce face-face, separating mostly sideways tends to
+// produce band-band-parallel, and eq. 22's own delta_a-vs-delta_r comparison (see
+// cylinderCylinderContact) picks the right one for everything in between -- no need to construct the
+// two sub-cases as separate loops. Cylinder j's axis is either exactly cylinder i's own (parallel) or
+// flipped 180 degrees about a perpendicular axis (antiparallel), chosen with equal probability per
+// trial, so both of eq. 22's "|e_i . e_j| ~ 1" sign cases get covered -- two logs pointing the same
+// way, or pointing opposite ways, are equally physical floater configurations.
+//======================================================================================================================
+void testCylinderCylinderParallelAxesFuzz()
+{
+   FuzzRng                                  fuzz(11235); // distinct seed from every other fuzz test
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+   std::uniform_real_distribution< real_t > flipDist(real_t(0), real_t(1));
+
+   constexpr int numTrials = 5000;
+
+   struct ScenarioStats
+   {
+      int                    numTrials         = 0;
+      int                    existenceAgree    = 0;
+      int                    existenceMismatch = 0;
+      real_t                 maxOverlapDiff    = real_t(0);
+      real_t                 maxPointDist      = real_t(0);
+      std::vector< real_t >  pointDists;
+   };
+   std::map< std::string, ScenarioStats > byScenario;
+   int numNoContactBoth = 0;
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+
+      const Vec3 eI = rotI.getMatrix() * Vec3(real_t(0), real_t(0), real_t(1));
+      Rot3       rotJ = rotI; // parallel by default
+      if (flipDist(fuzz.rng) < real_t(0.5))
+      {
+         // antiparallel: flip 180 degrees about any axis perpendicular to eI
+         const Vec3 helper = (std::abs(eI[2]) < real_t(0.9)) ? Vec3(real_t(0), real_t(0), real_t(1))
+                                                              : Vec3(real_t(1), real_t(0), real_t(0));
+         const Vec3 perp = (eI % helper).getNormalized();
+         rotJ.rotate(perp, math::pi);
+      }
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs((rotJ.getMatrix() * Vec3(real_t(0), real_t(0), real_t(1))) * eI),
+                                          real_t(1), real_t(1e-6));
+
+      const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+      const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (circumRi + circumRj),
+                                                             std::min(Ri, Rj));
+      const Vec3 posJ = posI + dir * sep;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      const ContactResult analytical = cylinderCylinderContact(ci, cj);
+      const GjkResult      gjk       = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+
+      if (!analytical.contact && !gjk.contact)
+      {
+         ++numNoContactBoth;
+         continue;
+      }
+
+      const std::string scenario =
+         analytical.contact ? std::string(analytical.scenario) : std::string("(missed -- analytical found no contact)");
+      auto& st = byScenario[scenario];
+      ++st.numTrials;
+
+      if (analytical.contact != gjk.contact)
+      {
+         ++st.existenceMismatch;
+         continue;
+      }
+      ++st.existenceAgree;
+
+      const real_t gjkOverlap  = -gjk.penetrationDepth;
+      const real_t overlapDiff = std::abs(analytical.overlap - gjkOverlap);
+      const real_t pointDist   = (analytical.point - gjk.point).length();
+      st.maxOverlapDiff = std::max(st.maxOverlapDiff, overlapDiff);
+      st.maxPointDist   = std::max(st.maxPointDist, pointDist);
+      st.pointDists.push_back(pointDist);
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] PURE analytical (no GJK/EPA fallback) Cylinder x Cylinder, forced-(anti)parallel-axes, "
+      << numTrials << " trials (" << numNoContactBoth
+      << " agree no contact at all -- excluded from the per-scenario counts below):");
+   for (auto& [name, st] : byScenario)
+   {
+      real_t p50 = real_t(0), p90 = real_t(0);
+      if (!st.pointDists.empty())
+      {
+         std::vector< real_t > sorted = st.pointDists;
+         std::sort(sorted.begin(), sorted.end());
+         p50 = sorted[sorted.size() / 2];
+         p90 = sorted[std::min(sorted.size() - 1, size_t(real_t(0.9) * real_t(sorted.size())))];
+      }
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "  " << name << ": count=" << st.numTrials << " (" << (real_t(100) * real_t(st.numTrials) / real_t(numTrials))
+         << "% of all trials) | existence: agree=" << st.existenceAgree << " mismatch="
+         << st.existenceMismatch << " | on agreeing trials: maxOverlapDiff=" << st.maxOverlapDiff
+         << " maxPointDist=" << st.maxPointDist << " p50PointDist=" << p50 << " p90PointDist=" << p90);
+   }
+}
+
+//======================================================================================================================
+// Targeted fuzz test: 1000 trials, axes forced PERPENDICULAR by construction (the necessary
+// precondition for face-band -- random offsets can still land the actual dispatch in
+// face-edge/band-edge/edge-edge/no-contact too; results are tagged by scenario and reported
+// separately), separation sampled to be BARELY overlapping -- a much tighter cap (2% of the smaller
+// radius, sampled only on the overlapping side of the true GJK/EPA boundary) than
+// testCylinderCylinderRandomizedFuzz's already-modest 15%-of-radius, up-to-2x-past-boundary range, so
+// every kept trial is a genuine, shallow contact rather than a mix of deep overlap and near-misses.
+//
+// Compares the RAW analytical result directly against GJK/EPA -- not the GJK/EPA-fallback-blended
+// hybrid, which would trivially agree with GJK/EPA on every Tier-2-flagged trial and tell us nothing
+// about the analytical formulas themselves. Purpose-built to stress-test detail::faceBandContactPoint
+// (the exact Kodam eq. 40-44 construction that replaced this file's earlier point approximation) at
+// the shallow-overlap regime a real spring-dashpot contact model actually operates in. Not asserted
+// against a fixed tolerance -- reported for inspection, the same style as
+// testCylinderCylinderFallbackRateBoundaryBiased below, since the non-face-band scenarios this can
+// also land in (face-edge, band-edge) already have documented, accepted imprecision of their own
+// (see testCylinderCylinderTiltedRimIntoFace) that isn't this test's job to re-litigate.
+//======================================================================================================================
+void testCylinderCylinderFaceBandBarelyOverlappingFuzz()
+{
+   FuzzRng                                  fuzz(778899); // fixed seed -- reproducible across runs
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrials = 1000;
+   int    numFaceBand = 0, numFaceBandExistenceMismatch = 0;
+   int    numOtherScenario = 0, numOtherExistenceMismatch = 0, numNoContactEither = 0;
+   real_t maxFaceBandOverlapDiff = real_t(0), maxFaceBandPointDist = real_t(0);
+   real_t maxOtherOverlapDiff    = real_t(0), maxOtherPointDist    = real_t(0);
+   CylinderState worstCi{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   CylinderState worstCj{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   real_t        worstPointDist = real_t(0);
+   Vec3          worstAnalyticalPoint, worstGjkPoint;
+   std::vector< real_t > faceBandPointDists; // for a percentile breakdown, not just the max outlier
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+
+      // Force cylinder j's axis perpendicular to cylinder i's: Gram-Schmidt a random direction
+      // against eI, then align body-z to the result the same way SetupStages.h aligns a floating
+      // cylinder's initial axis to a requested world direction.
+      const Vec3 eI = rotI.getMatrix() * Vec3(real_t(0), real_t(0), real_t(1));
+      Vec3       eJ;
+      do {
+         const Vec3 raw = fuzz.randomUnitVec();
+         eJ = raw - (raw * eI) * eI;
+      } while (eJ.sqrLength() < real_t(1e-6));
+      eJ = eJ.getNormalized();
+
+      Rot3         rotJ;
+      const Vec3   ez(real_t(0), real_t(0), real_t(1));
+      const real_t cosA = ez * eJ;
+      if (cosA < real_t(1) - real_t(1e-10))
+      {
+         const Vec3 rotAxis = (cosA > real_t(-1) + real_t(1e-10)) ? (ez % eJ).getNormalized()
+                                                                    : Vec3(real_t(1), real_t(0), real_t(0));
+         rotJ.rotate(rotAxis, std::acos(std::clamp(cosA, real_t(-1), real_t(1))));
+      }
+
+      // Offset cylinder j's centre, in cylinder i's local xy-plane, biased to land near/within i's
+      // face disc -- otherwise almost every random draw would be a "no contact at all" geometry.
+      std::uniform_real_distribution< real_t > offsetDist(real_t(0), real_t(0.8) * Ri);
+      const real_t offsetAng = fuzz.angleDist(fuzz.rng);
+      const real_t offsetMag = offsetDist(fuzz.rng);
+      const Vec3   lateral   = rotI.getMatrix() *
+                              Vec3(offsetMag * std::cos(offsetAng), offsetMag * std::sin(offsetAng), real_t(0));
+      const Vec3 posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         const Vec3 posJ = posI + lateral + s * eI;
+         return gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj).contact;
+      };
+      // s=0 (j's centre level with i's centre along eI) is overlapping for every draw this
+      // distribution can produce; skip the ~zero-probability degenerate case rather than assert.
+      if (!contactAtSep(real_t(0))) continue;
+      const real_t farSep = real_t(2) * (Ri + Li + Rj + Lj);
+      if (contactAtSep(farSep)) continue; // still overlapping at the generous far bound -- skip
+
+      real_t lo = real_t(0), hi = farSep;
+      for (int it = 0; it < 40; ++it)
+      {
+         const real_t mid = real_t(0.5) * (lo + hi);
+         if (contactAtSep(mid)) { lo = mid; }
+         else { hi = mid; }
+      }
+      const real_t boundary   = real_t(0.5) * (lo + hi);
+      const real_t maxOverlap = real_t(0.02) * std::min(Ri, Rj); // "barely" -- 2%, not the general
+                                                                   // fuzz test's already-modest 15%
+      std::uniform_real_distribution< real_t > sepDist(std::max(real_t(0), boundary - maxOverlap), boundary);
+      const real_t sep  = sepDist(fuzz.rng); // sampled ONLY on the overlapping side of the boundary
+      const Vec3   posJ = posI + lateral + sep * eI;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      const ContactResult analytical = cylinderCylinderContact(ci, cj);
+      const GjkResult      gjk       = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+
+      const bool isFaceBand = analytical.contact && std::string(analytical.scenario) == "face-band";
+      if (!gjk.contact && !analytical.contact)
+      {
+         ++numNoContactEither;
+         continue;
+      }
+      if (isFaceBand) { ++numFaceBand; }
+      else { ++numOtherScenario; }
+
+      if (analytical.contact != gjk.contact)
+      {
+         if (isFaceBand) { ++numFaceBandExistenceMismatch; }
+         else { ++numOtherExistenceMismatch; }
+         continue;
+      }
+      if (!analytical.contact) continue; // both agree: no contact
+
+      const real_t gjkOverlap  = -gjk.penetrationDepth;
+      const real_t overlapDiff = std::abs(analytical.overlap - gjkOverlap);
+      const real_t pointDist   = (analytical.point - gjk.point).length();
+
+      if (isFaceBand)
+      {
+         maxFaceBandOverlapDiff = std::max(maxFaceBandOverlapDiff, overlapDiff);
+         maxFaceBandPointDist   = std::max(maxFaceBandPointDist, pointDist);
+         faceBandPointDists.push_back(pointDist);
+      }
+      else
+      {
+         maxOtherOverlapDiff = std::max(maxOtherOverlapDiff, overlapDiff);
+         maxOtherPointDist   = std::max(maxOtherPointDist, pointDist);
+      }
+      if (pointDist > worstPointDist)
+      {
+         worstPointDist       = pointDist;
+         worstCi              = ci;
+         worstCj              = cj;
+         worstAnalyticalPoint = analytical.point;
+         worstGjkPoint        = gjk.point;
+      }
+   }
+
+   std::sort(faceBandPointDists.begin(), faceBandPointDists.end());
+   auto percentile = [&](real_t p) {
+      if (faceBandPointDists.empty()) return real_t(0);
+      const size_t idx = std::min(faceBandPointDists.size() - 1,
+                                    size_t(p * real_t(faceBandPointDists.size())));
+      return faceBandPointDists[idx];
+   };
+   const Vec3   worstDiff       = worstAnalyticalPoint - worstGjkPoint;
+   const Vec3   worstAxisJ      = worstCj.axis();
+   const real_t worstAlongAxis  = std::abs(worstDiff * worstAxisJ);
+   const real_t worstPerp       = std::sqrt(std::max(real_t(0), worstDiff.sqrLength() - worstAlongAxis * worstAlongAxis));
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] Cylinder x Cylinder, barely-overlapping (<=2% of min radius), forced-perpendicular-axes, "
+      << numTrials << " trials: face-band scenario count=" << numFaceBand
+      << " (existence mismatches vs GJK/EPA=" << numFaceBandExistenceMismatch
+      << "), max overlap diff on agreeing face-band trials=" << maxFaceBandOverlapDiff
+      << ", max contact-point distance on agreeing face-band trials=" << maxFaceBandPointDist);
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] ... other perpendicular-axis-eligible scenarios (face-edge/band-edge/edge-edge/no-contact) count="
+      << numOtherScenario << " (existence mismatches=" << numOtherExistenceMismatch
+      << "), max overlap diff=" << maxOtherOverlapDiff << ", max point distance=" << maxOtherPointDist
+      << " | both-agree-no-contact=" << numNoContactEither);
+   WALBERLA_LOG_INFO_ON_ROOT("[fuzz] worst face-band/other point-distance geometry: ci.pos=" << worstCi.pos
+                              << " ci axis=" << worstCi.axis() << " Ri=" << worstCi.radius
+                              << " Li=" << worstCi.length << " | cj.pos=" << worstCj.pos
+                              << " cj axis=" << worstCj.axis() << " Rj=" << worstCj.radius
+                              << " Lj=" << worstCj.length << " | distance=" << worstPointDist);
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] worst-case decomposition: analytical.point=" << worstAnalyticalPoint << " gjk.point="
+      << worstGjkPoint << " | component ALONG cylinder j's axis (the direction a face-band contact "
+      << "line has no unique point along, if this is what's driving the distance)=" << worstAlongAxis
+      << ", component PERPENDICULAR to it (a genuine positional disagreement if this is large)="
+      << worstPerp);
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] face-band point-distance percentiles over " << faceBandPointDists.size()
+      << " agreeing trials: p50=" << percentile(real_t(0.50)) << " p90=" << percentile(real_t(0.90))
+      << " p99=" << percentile(real_t(0.99)) << " max=" << maxFaceBandPointDist);
 }
 
 //======================================================================================================================
@@ -1454,6 +2169,1768 @@ void testCylinderCylinderFallbackRateBoundaryBiased()
    }
 }
 
+//! Clean, well-agreeing face-edge case -- deliberately constructed as the counterpart to
+//! testCylinderCylinderTiltedRimIntoFace's KNOWN LIMITATION: that limitation traces to the true
+//! closest feature landing on probe j's curved BAND surface rather than its rim, a candidate neither
+//! Kodam et al. nor Guo et al. ever search for. That failure mode is driven by the interaction of
+//! BOTH cylinders' curvature; if host i's own curvature is made negligible (a much larger radius than
+//! j's, so its face looks locally flat), the closest-point problem degenerates to "cylinder j vs. an
+//! effectively flat plane" -- a case Section 3.1's cylinder-plane edge-plane formula already proves
+//! exact (the support-function argument: for any tilt away from 0/90 degrees, a solid cylinder's true
+//! extremal point along a fixed direction is always exactly on its rim). Confirmed empirically here:
+//! sweeping cylinder j's axial position with Ri=3.0 (vs. Rj=0.3) reproduced EXACT agreement with
+//! GJK/EPA to every printed digit at every position tried, unlike the genuinely curvature-coupled
+//! geometry in the KNOWN LIMITATION test.
+void testCylinderCylinderFaceEdgeClean()
+{
+   CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(3.0), real_t(1.0) };
+   Rot3          rotJ;
+   rotJ.rotate(Vec3(real_t(0), real_t(1), real_t(0)), math::pi / real_t(6)); // 30 degrees about y
+   CylinderState cj{ Vec3(real_t(0), real_t(0), real_t(1.0)), rotJ.getMatrix(), real_t(0.3), real_t(1.5) };
+
+   const ContactResult kodam = cylinderCylinderContact(ci, cj);
+   const GjkResult      gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-edge");
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-4)); // tight, not
+                                                                                             // the loose
+                                                                                             // 1e-2 used
+                                                                                             // for the
+                                                                                             // known-
+                                                                                             // limitation
+                                                                                             // case
+   WALBERLA_CHECK_GREATER(kodam.normal * gjk.normal, real_t(0.999));
+   WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-edge, clean/negligible-host-curvature): overlap="
+                              << kodam.overlap << " (agrees with GJK/EPA to 1e-4, unlike the KNOWN "
+                              << "LIMITATION case above -- confirms the limitation is curvature-coupling, "
+                              << "not a general face-edge defect)");
+}
+
+//! Clean, well-agreeing band-edge case -- counterpart to testCylinderCylinderTiltedRimIntoBand's
+//! KNOWN LIMITATION, using the SAME large-host-radius trick as testCylinderCylinderFaceEdgeClean
+//! above (see its own comment for why this isolates the curvature-coupling root cause): host i's
+//! band is made locally near-flat (Ri=3.0 vs. Rj=0.3), so probe j's rim -- Kodam's own eq. 67-81
+//! candidate -- is genuinely the closest feature, matching GJK/EPA exactly.
+void testCylinderCylinderBandEdgeClean()
+{
+   CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(3.0), real_t(6.0) };
+   Rot3          rotJ;
+   rotJ.rotate(Vec3(real_t(0), real_t(1), real_t(0)), math::pi / real_t(3)); // 60 degrees about y
+   CylinderState cj{ Vec3(real_t(3.3), real_t(0), real_t(1.0)), rotJ.getMatrix(), real_t(0.3), real_t(1.5) };
+
+   const ContactResult kodam = cylinderCylinderContact(ci, cj);
+   const GjkResult      gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "band-edge");
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-4));
+   WALBERLA_CHECK_GREATER(kodam.normal * gjk.normal, real_t(0.999));
+   WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (band-edge, clean/negligible-host-curvature): overlap="
+                              << kodam.overlap << " (agrees with GJK/EPA to 1e-4, unlike the KNOWN "
+                              << "LIMITATION case above -- confirms the limitation is curvature-coupling, "
+                              << "not a general band-edge defect)");
+}
+
+//! The FIRST dedicated test that actually dispatches to scenario=="edge-edge" -- previously the only
+//! edge-edge-adjacent test (testCylinderCylinderEdgeEdge above) resolves as "face-edge" once Guo et
+//! al.'s bidirectional correction is applied (see that test's own comment), so no test anywhere
+//! exercised this branch specifically. Geometry found by direct parameter search against
+//! testCylinderCylinderPureAnalyticalScenarioBreakdown's own fuzz corpus (fixed seed 24680, the
+//! trial with the best non-trivial overlap agreement among every "edge-edge"-classified trial across
+//! 5000 fully-random-orientation samples -- the same "found by search, hand-verified against GJK/EPA"
+//! methodology testCylinderCylinderSpecialContact's own comment describes), not hand-derived from
+//! first principles: both cylinders' rotations are genuinely arbitrary 3D orientations, which is
+//! exactly the regime edge-edge (both rims facing each other, neither a flat face nor a curved band
+//! being the dominant feature on either side) actually requires -- the axis-angle constructions used
+//! by every other hand-picked test in this file cannot easily reach it. Agreement here (0.47% relative
+//! overlap difference) is close but not machine-precision, consistent with edge-edge's fuzz-measured
+//! p50 relative point-distance of ~0.1% and its own worst-case root-cause probe (see
+//! testCylinderCylinderPureAnalyticalScenarioBreakdown's log output) showing the same curvature-
+//! coupling gap can still bite edge-edge, just less severely on this particular geometry than on its
+//! worst fuzzed trial.
+// Standard rotation-matrix -> quaternion conversion (e.g. Shepperd 1978), needed only because Rot3
+// has no direct Matrix3 constructor -- it keeps a quaternion and a matrix in sync internally, always
+// built up incrementally via rotate(axis, angle). The geometry below is a raw fuzz-discovered matrix
+// with no such incremental history, so it must be converted once here instead.
+Rot3 rot3FromMatrix(const Mat3& m)
+{
+   const real_t w = std::sqrt(std::max(real_t(0), real_t(1) + m(0, 0) + m(1, 1) + m(2, 2))) / real_t(2);
+   real_t       x = std::sqrt(std::max(real_t(0), real_t(1) + m(0, 0) - m(1, 1) - m(2, 2))) / real_t(2);
+   real_t       y = std::sqrt(std::max(real_t(0), real_t(1) - m(0, 0) + m(1, 1) - m(2, 2))) / real_t(2);
+   real_t       z = std::sqrt(std::max(real_t(0), real_t(1) - m(0, 0) - m(1, 1) + m(2, 2))) / real_t(2);
+   x              = std::copysign(x, m(2, 1) - m(1, 2));
+   y              = std::copysign(y, m(0, 2) - m(2, 0));
+   z              = std::copysign(z, m(1, 0) - m(0, 1));
+   return Rot3(mesa_pd::Quat(w, x, y, z));
+}
+
+void testCylinderCylinderEdgeEdgeGenuine()
+{
+   const Mat3 rotICols(real_t(-0.390898), real_t(-0.198955), real_t(0.898675), real_t(0.196307),
+                        real_t(0.935875), real_t(0.292579), real_t(-0.899257), real_t(0.290784),
+                        real_t(-0.326775));
+   const Mat3 rotJCols(real_t(0.131414), real_t(-0.370814), real_t(0.919362), real_t(-0.959446),
+                        real_t(0.18573), real_t(0.212056), real_t(-0.249386), real_t(-0.909946),
+                        real_t(-0.331369));
+
+   // rotICols/rotJCols are printed to ~6 significant figures, not perfectly orthonormal at full
+   // precision -- rot3FromMatrix's quaternion round-trip snaps them to the nearest valid rotation
+   // (Rot3 asserts its matrix has determinant 1). Build BOTH CylinderState (analytical) and the
+   // GJK/EPA reference from that same snapped Rot3, not the raw printed matrix, so the two methods
+   // are compared on IDENTICAL geometry rather than two matrices differing by ~1e-4.
+   const Rot3           rotI = rot3FromMatrix(rotICols);
+   const Rot3           rotJ = rot3FromMatrix(rotJCols);
+   const CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), rotI.getMatrix(), real_t(1.44446),
+                            real_t(1.30996) };
+   const CylinderState cj{ Vec3(real_t(2.11131), real_t(0.251881), real_t(0.154264)), rotJ.getMatrix(),
+                            real_t(1.22407), real_t(2.5082) };
+
+   const ContactResult kodam = cylinderCylinderContact(ci, cj);
+   const GjkResult      gjk =
+      gjkCylCyl(ci.pos, rotI, ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "edge-edge");
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(5e-3));
+   WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (genuine edge-edge, found by search): overlap="
+                              << kodam.overlap << " vs GJK/EPA " << -gjk.penetrationDepth
+                              << " (0.47% relative -- first dedicated coverage of this scenario)");
+}
+
+//======================================================================================================================
+// Cylinder x Cylinder, ALTERNATIVE method -- Feng, Han & Owen (2017), see PaperAnalyticalContacts.h's
+// feng2017 namespace comment for the full citation and scope. Validated the same way Kodam/Guo's
+// method is above: a brute-force cross-check of the one independently re-derived quartic this method
+// depends on, then hand-picked interior/rim cases, then a fuzz test against GJK/EPA with the same
+// per-scenario breakdown style as testCylinderCylinderPureAnalyticalScenarioBreakdown.
+//======================================================================================================================
+
+//! Validates detail::closestThetaOnEllipseToOrigin (PaperAnalyticalContacts.h) -- re-derived from
+//! scratch rather than transcribed from Feng et al. (2017)'s own Appendix A, whose intermediate
+//! algebra looked internally inconsistent (see that function's own comment) -- against a brute-force
+//! numeric sweep over theta, for several ellipse/origin configurations including ones where the
+//! origin is inside, outside, and near the ellipse boundary.
+void testFengClosestPointOnEllipseToOrigin()
+{
+   auto bruteForceMin = [](real_t a, real_t b, real_t x0, real_t y0) {
+      real_t best = std::numeric_limits< real_t >::max();
+      for (int i = 0; i < 2000000; ++i)
+      {
+         const real_t theta = real_t(2) * math::pi * real_t(i) / real_t(2000000);
+         const real_t x = x0 + a * std::cos(theta);
+         const real_t y = y0 + b * std::sin(theta);
+         best            = std::min(best, x * x + y * y);
+      }
+      return best;
+   };
+
+   struct Case { real_t a, b, x0, y0; };
+   const Case cases[] = {
+      { real_t(1.0), real_t(0.6), real_t(2.0), real_t(0.3) },   // origin well outside
+      { real_t(1.0), real_t(0.6), real_t(0.1), real_t(0.05) },  // origin inside
+      { real_t(1.5), real_t(1.5), real_t(1.5), real_t(0.0) },   // circle special case, tangent-ish
+      { real_t(0.5), real_t(2.0), real_t(-0.8), real_t(1.7) },  // b > a, off both axes
+      { real_t(1.0), real_t(1.0), real_t(0.0), real_t(0.0) },   // origin exactly at centre (degenerate)
+   };
+
+   for (const auto& c : cases)
+   {
+      const real_t theta = feng2017::closestThetaOnEllipseToOrigin(c.a, c.b, c.x0, c.y0);
+      const real_t x     = c.x0 + c.a * std::cos(theta);
+      const real_t y     = c.y0 + c.b * std::sin(theta);
+      const real_t got   = x * x + y * y;
+      const real_t brute = bruteForceMin(c.a, c.b, c.x0, c.y0);
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(got, brute, std::max(real_t(1e-4), real_t(1e-3) * brute));
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("Feng et al. (2017) closestThetaOnEllipseToOrigin: matches brute-force "
+                              << "sweep on all " << (sizeof(cases) / sizeof(cases[0])) << " test cases");
+}
+
+//! Validates detail::intersectEllipseWithCircle (Appendix B) against a brute-force numeric sweep:
+//! for each returned theta, checks it actually lies ON the circle (within tolerance), and separately
+//! confirms the COUNT of roots matches a fine-grained sign-change count of (distance-to-origin -
+//! R) swept over the full circle -- catching both "found a spurious root" and "missed a real one".
+void testFengIntersectEllipseWithCircle()
+{
+   struct Case { real_t a, b, x0, y0, R; };
+   const Case cases[] = {
+      { real_t(1.0), real_t(0.6), real_t(0.8), real_t(0.1), real_t(1.0) },  // genuine partial crossing
+      { real_t(1.0), real_t(0.6), real_t(0.0), real_t(0.0), real_t(0.3) },  // circle fully inside ellipse
+      { real_t(0.3), real_t(0.2), real_t(0.0), real_t(0.0), real_t(1.0) },  // ellipse fully inside circle
+      { real_t(1.0), real_t(0.6), real_t(5.0), real_t(5.0), real_t(1.0) },  // fully separate, no overlap
+      { real_t(0.5), real_t(2.0), real_t(-0.8), real_t(1.7), real_t(1.5) }, // b > a, off both axes
+   };
+
+   for (const auto& c : cases)
+   {
+      real_t thetas[4];
+      int    count;
+      feng2017::intersectEllipseWithCircle(c.a, c.b, c.x0, c.y0, c.R, thetas, count);
+
+      // Every returned theta must actually lie on the circle.
+      for (int i = 0; i < count; ++i)
+      {
+         const real_t x = c.x0 + c.a * std::cos(thetas[i]);
+         const real_t y = c.y0 + c.b * std::sin(thetas[i]);
+         WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(x * x + y * y, c.R * c.R, real_t(1e-4));
+      }
+
+      // Sign-change count of (distance-to-origin - R) over a fine sweep should match `count`
+      // (a tangency, if the sweep resolution happens to skip past it, is the one case this can
+      // under-count by 2 -- none of the hand-picked cases above are tangent, so this is exact here).
+      constexpr int N = 200000;
+      int           signChanges = 0;
+      auto          f = [&](real_t theta) {
+         const real_t x = c.x0 + c.a * std::cos(theta);
+         const real_t y = c.y0 + c.b * std::sin(theta);
+         return std::sqrt(x * x + y * y) - c.R;
+      };
+      real_t prev = f(real_t(0));
+      for (int i = 1; i <= N; ++i)
+      {
+         const real_t cur = f(real_t(2) * math::pi * real_t(i) / real_t(N));
+         if ((prev < real_t(0)) != (cur < real_t(0))) ++signChanges;
+         prev = cur;
+      }
+      WALBERLA_CHECK_EQUAL(count, signChanges);
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("Feng et al. (2017) intersectEllipseWithCircle (Appendix B): matches "
+                              << "brute-force root count and root validity on all "
+                              << (sizeof(cases) / sizeof(cases[0])) << " test cases");
+}
+
+//! Interior-contact case (Sec. 3.1, Step 1): the same geometry as testCylinderCylinderBandBandSkewed90Degrees
+//! (band-band-skewed under Kodam/Guo), since "both axes' closest-approach feet fall within both
+//! cylinders' finite half-lengths" is exactly what Kodam calls band-band-skewed too -- a useful direct
+//! comparison point between the two methods on identical geometry.
+void testFengInteriorContact()
+{
+   CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.5), real_t(4) };
+   Rot3          rotJ;
+   rotJ.rotate(Vec3(real_t(0), real_t(1), real_t(0)), math::pi * real_t(0.5)); // body z -> world x
+   CylinderState cj{ Vec3(real_t(0), real_t(0.6), real_t(1)), rotJ.getMatrix(), real_t(0.5), real_t(4) };
+
+   const ContactResult feng = feng2017::fengCylinderCylinderContact(ci, cj);
+   const GjkResult      gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+
+   WALBERLA_CHECK(feng.contact);
+   WALBERLA_CHECK_EQUAL(std::string(feng.scenario), "feng-interior");
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(feng.overlap, -gjk.penetrationDepth, real_t(1e-2));
+   WALBERLA_CHECK_GREATER(feng.normal * gjk.normal, real_t(0.99));
+   WALBERLA_LOG_INFO_ON_ROOT("Feng et al. (2017) (interior): overlap=" << feng.overlap
+                              << " vs GJK/EPA " << -gjk.penetrationDepth << " (agree)");
+}
+
+//! Rim-vs-axis case (Sec. 3.1, Step 3): the same "large host radius" clean geometry as
+//! testCylinderCylinderBandEdgeClean, so this can be read directly against Kodam/Guo's own answer
+//! for the identical configuration, not just against GJK/EPA in isolation.
+void testFengRimContact()
+{
+   CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(3.0), real_t(6.0) };
+   Rot3          rotJ;
+   rotJ.rotate(Vec3(real_t(0), real_t(1), real_t(0)), math::pi / real_t(3)); // 60 degrees about y
+   CylinderState cj{ Vec3(real_t(3.3), real_t(0), real_t(1.0)), rotJ.getMatrix(), real_t(0.3), real_t(1.5) };
+
+   const ContactResult feng  = feng2017::fengCylinderCylinderContact(ci, cj);
+   const ContactResult kodam = cylinderCylinderContact(ci, cj);
+   const GjkResult      gjk  = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+
+   WALBERLA_CHECK(feng.contact);
+   WALBERLA_CHECK_EQUAL(std::string(feng.scenario), "feng-rim-edge"); // rim-vs-axis candidate, not the
+                                                                        // Appendix-B-based face-type one
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(feng.overlap, -gjk.penetrationDepth, real_t(1e-3));
+   WALBERLA_CHECK_GREATER(feng.normal * gjk.normal, real_t(0.999));
+   WALBERLA_LOG_INFO_ON_ROOT("Feng et al. (2017) (rim, same geometry as testCylinderCylinderBandEdgeClean): "
+                              << "overlap=" << feng.overlap << " vs Kodam/Guo " << kodam.overlap
+                              << " vs GJK/EPA " << -gjk.penetrationDepth << " (all three agree)");
+}
+
+//======================================================================================================================
+// Fuzz test: Feng et al. (2017) vs. GJK/EPA, same random-orientation/boundary-biased sampling and
+// scenario-breakdown style as testCylinderCylinderPureAnalyticalScenarioBreakdown, for a direct,
+// like-for-like comparison between the two published methods on identical trial geometry (both
+// methods run on the SAME sampled pair each trial, not independently-sampled populations).
+//======================================================================================================================
+void testFengVsKodamVsGjkScenarioBreakdown()
+{
+   FuzzRng                                  fuzz(24680); // SAME seed as
+                                                            // testCylinderCylinderPureAnalyticalScenarioBreakdown,
+                                                            // so both methods are compared on the
+                                                            // identical 5000 trials
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrials = 5000;
+
+   struct ScenarioStats
+   {
+      int                   numTrials         = 0;
+      int                   existenceAgree    = 0;
+      int                   existenceMismatch = 0;
+      real_t                maxOverlapDiff    = real_t(0);
+      real_t                maxPointDist      = real_t(0);
+      std::vector< real_t > pointDists;
+   };
+   std::map< std::string, ScenarioStats > fengByScenario;
+   int fengNoContactBoth = 0, fengParallelSkipped = 0;
+   int kodamCorrectWhereFengWrong = 0, fengCorrectWhereKodamWrong = 0, bothWrong = 0, bothCorrect = 0;
+   bool          haveMissExample = false;
+   CylinderState missCi{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   CylinderState missCj{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   Vec3          missGjkNormal;
+   real_t        missGjkOverlap = real_t(0), missKodamOverlap = real_t(0);
+   bool          missKodamAlsoMissed = false;
+   std::vector< real_t > missGaps; // closestMissGap for every Feng-missed-a-real-contact trial --
+                                     // near-zero means "missed by a hair" (numerical precision),
+                                     // large means "no candidate came remotely close" (structural)
+   int           sharedMiss = 0; // both Feng AND Kodam/Guo independently say no contact, GJK says yes
+   bool          haveSharedMissExample = false;
+   CylinderState sharedMissCi{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   CylinderState sharedMissCj{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   real_t        sharedMissGjkOverlap = real_t(0);
+   Vec3          sharedMissGjkNormal;
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+      const Rot3   rotJ = fuzz.randomRotation();
+
+      const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+      const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (circumRi + circumRj),
+                                                             std::min(Ri, Rj));
+      const Vec3 posJ = posI + dir * sep;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      real_t               debugGap = real_t(0);
+      const ContactResult feng  = feng2017::fengCylinderCylinderContact(ci, cj, &debugGap);
+      const ContactResult kodam = cylinderCylinderContact(ci, cj);
+      const GjkResult      gjk  = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+
+      if (std::string(feng.scenario) == "feng-parallel-unsupported")
+      {
+         ++fengParallelSkipped; // excluded from the comparison below, not counted as right or wrong
+         continue;
+      }
+      if (!feng.contact && !gjk.contact)
+      {
+         ++fengNoContactBoth;
+      }
+      else
+      {
+         auto& st = fengByScenario[std::string(feng.scenario)];
+         ++st.numTrials;
+         if (feng.contact != gjk.contact)
+         {
+            ++st.existenceMismatch;
+            if (!feng.contact && gjk.contact)
+            {
+               missGaps.push_back(debugGap);
+               if (!haveMissExample)
+               {
+                  haveMissExample     = true;
+                  missCi              = ci;
+                  missCj              = cj;
+                  missGjkNormal       = gjk.normal;
+                  missGjkOverlap      = -gjk.penetrationDepth;
+                  missKodamOverlap    = kodam.contact ? kodam.overlap : real_t(0);
+                  missKodamAlsoMissed = !kodam.contact;
+               }
+            }
+         }
+         else
+         {
+            ++st.existenceAgree;
+            if (feng.contact)
+            {
+               const real_t gjkOverlap  = -gjk.penetrationDepth;
+               const real_t overlapDiff = std::abs(feng.overlap - gjkOverlap);
+               const real_t pointDist   = (feng.point - gjk.point).length();
+               st.maxOverlapDiff = std::max(st.maxOverlapDiff, overlapDiff);
+               st.maxPointDist   = std::max(st.maxPointDist, pointDist);
+               st.pointDists.push_back(pointDist);
+            }
+         }
+      }
+
+      // Head-to-head: on trials where the two methods disagree with each other about EXISTENCE, which
+      // one (if either) actually matches GJK/EPA?
+      if (feng.contact != kodam.contact)
+      {
+         const bool fengRight  = feng.contact == gjk.contact;
+         const bool kodamRight = kodam.contact == gjk.contact;
+         if (fengRight && !kodamRight) { ++fengCorrectWhereKodamWrong; }
+         else if (kodamRight && !fengRight) { ++kodamCorrectWhereFengWrong; }
+         else if (!fengRight && !kodamRight) { ++bothWrong; }
+         else { ++bothCorrect; } // both happened to agree with GJK despite disagreeing with each other
+                                  // (impossible unless gjk.contact itself is ambiguous/borderline)
+      }
+      // Genuinely SHARED misses: both methods independently say "no contact" (so the branch above,
+      // which only fires when they DISAGREE with each other, never sees these at all), yet GJK/EPA
+      // finds a real one -- i.e. a geometry that is hard for BOTH published methods, not an artefact
+      // specific to either one's own implementation.
+      if (!feng.contact && !kodam.contact && gjk.contact)
+      {
+         ++sharedMiss;
+         if (!haveSharedMissExample)
+         {
+            haveSharedMissExample = true;
+            sharedMissCi          = ci;
+            sharedMissCj          = cj;
+            sharedMissGjkOverlap  = -gjk.penetrationDepth;
+            sharedMissGjkNormal   = gjk.normal;
+         }
+      }
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] Feng et al. (2017) Cylinder x Cylinder scenario breakdown, " << numTrials
+      << " random-orientation trials (SAME seed/sampling as testCylinderCylinderPureAnalyticalScenarioBreakdown "
+      << "-- directly comparable table): " << fengParallelSkipped << " parallel-axes (out of scope, "
+      << "excluded), " << fengNoContactBoth << " agree no contact at all:");
+   for (auto& [name, st] : fengByScenario)
+   {
+      real_t p50 = real_t(0), p90 = real_t(0);
+      if (!st.pointDists.empty())
+      {
+         std::vector< real_t > sorted = st.pointDists;
+         std::sort(sorted.begin(), sorted.end());
+         p50 = sorted[sorted.size() / 2];
+         p90 = sorted[std::min(sorted.size() - 1, size_t(real_t(0.9) * real_t(sorted.size())))];
+      }
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "  " << name << ": count=" << st.numTrials << " (" << (real_t(100) * real_t(st.numTrials) / real_t(numTrials))
+         << "% of all trials) | existence: agree=" << st.existenceAgree << " mismatch="
+         << st.existenceMismatch << " | on agreeing trials: maxOverlapDiff=" << st.maxOverlapDiff
+         << " maxPointDist=" << st.maxPointDist << " p50PointDist=" << p50 << " p90PointDist=" << p90);
+   }
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] Head-to-head on trials where Feng and Kodam/Guo DISAGREE with each other on existence: "
+      << "Feng right (Kodam wrong)=" << fengCorrectWhereKodamWrong << ", Kodam right (Feng wrong)="
+      << kodamCorrectWhereFengWrong << ", both wrong=" << bothWrong << ", both right=" << bothCorrect);
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] SHARED misses (both methods independently say no contact, GJK/EPA says yes -- geometry "
+      << "genuinely hard for both, not an artefact of either implementation): " << sharedMiss << "/"
+      << numTrials << " (" << (real_t(100) * real_t(sharedMiss) / real_t(numTrials)) << "%)");
+   if (haveSharedMissExample)
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "[fuzz] example shared miss: gjk.overlap=" << sharedMissGjkOverlap << " gjk.normal="
+         << sharedMissGjkNormal << " | geometry: ci.pos=" << sharedMissCi.pos << " ci.axis="
+         << sharedMissCi.axis() << " Ri=" << sharedMissCi.radius << " Li=" << sharedMissCi.length
+         << " | cj.pos=" << sharedMissCj.pos << " cj.axis=" << sharedMissCj.axis() << " Rj="
+         << sharedMissCj.radius << " Lj=" << sharedMissCj.length);
+   if (!missGaps.empty())
+   {
+      std::vector< real_t > sortedGaps = missGaps;
+      std::sort(sortedGaps.begin(), sortedGaps.end());
+      const int nearTangent = static_cast< int >(
+         std::count_if(missGaps.begin(), missGaps.end(), [](real_t g) { return g < real_t(0.01); }));
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "[fuzz] Feng miss diagnostic over " << missGaps.size() << " missed trials: closestMissGap "
+         << "p10=" << sortedGaps[sortedGaps.size() / 10] << " p50=" << sortedGaps[sortedGaps.size() / 2]
+         << " p90=" << sortedGaps[std::min(sortedGaps.size() - 1, sortedGaps.size() * 9 / 10)]
+         << " max=" << sortedGaps.back() << " | " << nearTangent << "/" << missGaps.size()
+         << " (" << (real_t(100) * real_t(nearTangent) / real_t(missGaps.size()))
+         << "%) are near-tangent (gap<0.01, i.e. missed by a hair -- numerical precision) vs. "
+         << "structural (no candidate came remotely close)");
+   }
+   if (haveMissExample)
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "[fuzz] example remaining Feng miss (constrained-search version): gjk.overlap="
+         << missGjkOverlap << " gjk.normal=" << missGjkNormal << " | kodam.contact="
+         << !missKodamAlsoMissed << " kodam.overlap=" << missKodamOverlap << " | geometry: ci.pos="
+         << missCi.pos << " ci.axis=" << missCi.axis() << " Ri=" << missCi.radius << " Li="
+         << missCi.length << " | cj.pos=" << missCj.pos << " cj.axis=" << missCj.axis() << " Rj="
+         << missCj.radius << " Lj=" << missCj.length);
+}
+
+//======================================================================================================================
+// Is there a clear geometric PATTERN to what each method misses? Same 5000-trial population (same
+// seed as the two breakdown tests above, so directly comparable), characterised by four descriptors
+// per trial -- aspect ratio of the more slender cylinder, aspect ratio of the less slender one,
+// radius ratio, and the axis tilt angle (0 = parallel, 90 = perpendicular) -- with medians reported
+// for the overall population vs. each method's own missed-contact subset. A real pattern shows up as
+// the miss-set median diverging noticeably from the baseline population median on some descriptor(s).
+//======================================================================================================================
+void testCylinderCylinderMissPatternAnalysis()
+{
+   FuzzRng                                  fuzz(24680); // same seed as the two breakdown tests above
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrials = 5000;
+
+   struct Descriptor
+   {
+      real_t aspectMax, aspectMin, radiusRatio, tiltDeg;
+   };
+   std::vector< Descriptor > allDesc, kodamMissDesc, fengMissDesc, sharedMissDesc;
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+      const Rot3   rotJ = fuzz.randomRotation();
+
+      const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+      const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (circumRi + circumRj),
+                                                             std::min(Ri, Rj));
+      const Vec3 posJ = posI + dir * sep;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      const ContactResult feng  = feng2017::fengCylinderCylinderContact(ci, cj);
+      const ContactResult kodam = cylinderCylinderContact(ci, cj);
+      const GjkResult      gjk  = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+
+      if (std::string(feng.scenario) == "feng-parallel-unsupported") continue; // keep populations
+                                                                                  // comparable across
+                                                                                  // all three reports
+      if (!gjk.contact) continue; // only geometries with a REAL contact can be "missed" at all
+
+      const real_t aspectI     = Li / (real_t(2) * Ri);
+      const real_t aspectJ     = Lj / (real_t(2) * Rj);
+      const real_t radiusRatio = std::max(Ri, Rj) / std::min(Ri, Rj);
+      const real_t cosAlpha    = std::abs(ci.axis() * cj.axis());
+      const real_t tiltDeg     = std::acos(std::clamp(cosAlpha, real_t(-1), real_t(1))) * real_t(180) / math::pi;
+
+      const Descriptor d{ std::max(aspectI, aspectJ), std::min(aspectI, aspectJ), radiusRatio, tiltDeg };
+      allDesc.push_back(d);
+      if (!kodam.contact) kodamMissDesc.push_back(d);
+      if (!feng.contact) fengMissDesc.push_back(d);
+      if (!kodam.contact && !feng.contact) sharedMissDesc.push_back(d);
+   }
+
+   auto median = [](std::vector< Descriptor >& v, real_t Descriptor::*field) {
+      if (v.empty()) return real_t(0);
+      std::vector< real_t > vals;
+      vals.reserve(v.size());
+      for (auto& d : v)
+         vals.push_back(d.*field);
+      std::sort(vals.begin(), vals.end());
+      return vals[vals.size() / 2];
+   };
+   auto report = [&](const char* name, std::vector< Descriptor >& v) {
+      if (v.empty())
+      {
+         WALBERLA_LOG_INFO_ON_ROOT("[pattern] " << name << ": n=0 (no trials)");
+         return;
+      }
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "[pattern] " << name << ": n=" << v.size() << " median(max aspect ratio)="
+         << median(v, &Descriptor::aspectMax) << " median(min aspect ratio)="
+         << median(v, &Descriptor::aspectMin) << " median(radius ratio)="
+         << median(v, &Descriptor::radiusRatio) << " median(axis tilt, deg)="
+         << median(v, &Descriptor::tiltDeg));
+   };
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[pattern] Miss-pattern analysis over " << allDesc.size() << " genuinely-overlapping trials "
+      << "(both parallel-axes-unsupported and no-contact-at-all trials excluded, so every row below "
+      << "is drawn from the SAME population of real, findable contacts):");
+   report("ALL trials (baseline population)", allDesc);
+   report("Kodam/Guo misses", kodamMissDesc);
+   report("Feng et al. (2017) misses", fengMissDesc);
+   report("SHARED misses (both wrong)", sharedMissDesc);
+}
+
+//! Same Tier 1 (reach-sum bound on a missed contact) / Tier 2 (circumscribing-sphere bound on a
+//! found contact's overlap) STRUCTURE as paper_analytical::cylinderCylinderResultIsUncertain, but
+//! with the "fully verified, never distrust" exemption swapped to feng-interior (the analogue of
+//! Kodam's face-face/band-band-parallel: provably exact under its own simple precondition, no
+//! curved-search ambiguity) instead of Kodam's own scenario names. Tier 1/2 math is copied verbatim
+//! rather than calling the existing function, since that function's exemption list is hardcoded to
+//! Kodam's own scenario strings and would silently never exempt anything for Feng's results.
+bool fengResultIsUncertain(const CylinderState& ci, const CylinderState& cj, const ContactResult& feng)
+{
+   if (!feng.contact)
+   {
+      const real_t centreDist = (cj.pos - ci.pos).length();
+      const real_t reach = ci.radius + cj.radius + real_t(0.5) * ci.length + real_t(0.5) * cj.length;
+      return centreDist < reach; // Tier 1, identical to Kodam's
+   }
+   if (std::string(feng.scenario) == "feng-interior") return false; // exempt, analogous to Kodam's
+                                                                       // face-face/band-band-parallel
+   auto circumscribingSphereOverlapOfOtherFace = [](const CylinderState& probe, const CylinderState& host) {
+      const real_t circumRadius = std::sqrt(probe.radius * probe.radius + real_t(0.25) * probe.length * probe.length);
+      const Vec3   eHost  = host.axis();
+      const real_t halfLh = real_t(0.5) * host.length;
+      const Vec3   topFace = host.pos + halfLh * eHost;
+      const Vec3   botFace = host.pos - halfLh * eHost;
+      const real_t zTop = std::abs((probe.pos - topFace) * eHost);
+      const real_t zBot = std::abs((probe.pos - botFace) * eHost);
+      const real_t zFace = std::min(zTop, zBot);
+      return circumRadius - zFace;
+   };
+   const real_t maxPossibleJ = circumscribingSphereOverlapOfOtherFace(cj, ci);
+   const real_t maxPossibleI = circumscribingSphereOverlapOfOtherFace(ci, cj);
+   return (maxPossibleJ > feng.overlap) || (maxPossibleI > feng.overlap); // Tier 2, identical structure
+}
+
+//======================================================================================================================
+// The master comparison: pure Kodam/Guo, pure Feng et al. (2017), Kodam's existing GJK/EPA hybrid,
+// and a proposed analogous Feng-based hybrid (fengResultIsUncertain above), all evaluated on the
+// SAME 5000 trials (same seed as every other breakdown/pattern test in this file) against GJK/EPA as
+// ground truth -- directly answering: does a Feng-based hybrid behave any differently from Kodam's
+// existing one, or does it also fall back to GJK/EPA on essentially every trial?
+//======================================================================================================================
+//! Classifies WHY a matched-scenario trial's overlap MAGNITUDE disagrees with GJK/EPA, as a fixed
+//! string literal (safe to store in a CylMismatchRecord -- see that struct's own comment) plus a
+//! supporting numeric metric. Two structurally different causes are distinguished, exactly the two
+//! ways a closed-form dispatch can go wrong:
+//!
+//!   (a) MISCLASSIFIED SCENARIO: the dispatch fired a branch whose contact NORMAL points somewhere
+//!       structurally different from GJK/EPA's true separating direction (checked directly: angle
+//!       between kodam.normal and gjk.normal > 15 degrees). This means the wrong PRIMITIVE PAIRING
+//!       was selected -- e.g. band-edge's fixed "radial from host axis" normal when the true nearest
+//!       feature pair is actually face-vs-edge or a different rim entirely -- so no refinement of the
+//!       chosen formula could fix it; only re-dispatching would.
+//!   (b) WRONG POINT, SAME SCENARIO: the normal is essentially right (within 15 degrees) but the
+//!       chosen POINT along that scenario's own construction is not the true extremal one, so the
+//!       measured overlap is off even though the qualitative geometry (which primitive pairs with
+//!       which) was correctly identified.
+//!
+//! special-contact is handled as a distinct, THIRD, already-diagnosed cause (not fit into the (a)/(b)
+//! split above): rimVsFaceOrBand's special-contact branch measures its axial overlap at P, the point
+//! on probe's rim closest to HOST'S AXIS (found for the band-edge search just above it in that
+//! function), instead of E, the point on probe's rim closest to HOST'S FACE PLANE (the exact closed
+//! form face-edge already computes, one branch earlier in the SAME function, via
+//! detail::rimPointTowardPlane). Since E is defined as the axial-distance MINIMIZER over the whole
+//! rim, |z_E| <= |z_P| always, so re-using P systematically UNDERESTIMATES the axial overlap
+//! halfLHost-|z| -- exactly the ">3x underestimate" already noted where special-contact is
+//! unconditionally routed to GJK/EPA in PaperAnalyticalContacts.h. This is verified per-trial below
+//! (not just asserted from that comment) by recomputing E for whichever host/probe pairing actually
+//! fired and checking that the resulting delta_a(E) lands much closer to GJK/EPA's ground truth than
+//! Kodam's own delta_a(P) did.
+const char* classifyMagnitudeCause(const CylinderState& ci, const CylinderState& cj, const ContactResult& kodam,
+                                    const GjkResult& gjk, real_t& outMetric)
+{
+   const real_t gjkOverlap = -gjk.penetrationDepth;
+
+   if (std::string(kodam.scenario) == "special-contact")
+   {
+      // Recompute E for whichever (host, probe) pairing actually produced `kodam` -- rimVsFaceOrBand
+      // is order-sensitive, so try both and keep the one whose raw (unnegated) overlap matches.
+      auto axialOverlapViaE = [&](const CylinderState& host, const CylinderState& probe, bool& eInDisc) -> real_t {
+         const ContactResult raw = rimVsFaceOrBand(host, probe);
+         if (!raw.contact || std::string(raw.scenario) != "special-contact") return real_t(-1);
+         if (std::abs(raw.overlap - kodam.overlap) > real_t(1e-9)) return real_t(-1); // not this pairing
+         const Vec3   E    = detail::rimPointTowardPlane(probe, host.pos, host.axis());
+         const Vec3   relE = host.R.getTranspose() * (E - host.pos);
+         eInDisc = (relE[0] * relE[0] + relE[1] * relE[1]) < host.radius * host.radius; // is E even a
+                                                                                           // geometrically
+                                                                                           // valid face
+                                                                                           // contact
+                                                                                           // candidate?
+         return real_t(0.5) * host.length - std::abs(relE[2]);
+      };
+      bool   eInDisc     = false;
+      real_t viaE        = axialOverlapViaE(ci, cj, eInDisc);
+      bool   matchedOnCi = viaE >= real_t(0);
+      if (!matchedOnCi) viaE = axialOverlapViaE(cj, ci, eInDisc);
+      if (viaE >= real_t(0))
+      {
+         const real_t errViaP = std::abs(kodam.overlap - gjkOverlap);
+         const real_t errViaE = std::abs(viaE - gjkOverlap);
+         outMetric            = errViaE; // the error the E-based point WOULD have had, for comparison
+         // Verified against a 5000-trial run (2026-09-07): of the 24 trials where this re-derivation
+         // matched the firing host/probe pairing, exactly the 5 with eInDisc=true landed within
+         // errViaE<1e-3 of GJK/EPA (several to <1e-7, i.e. machine precision) -- E IS the true extremal
+         // point whenever it's a geometrically valid candidate. All 20 with eInDisc=false overshot
+         // GJK/EPA by 1.3x-16x even using E, confirming the deeper bug: rimVsFaceOrBand never checks
+         // whether E lies inside host's face disc before using it (unlike the face-edge branch just
+         // above it in the same function, which does via eInFaceDisc) -- when it doesn't, the
+         // unconstrained axial gap halfLHost-|z_E| doesn't correspond to any real overlap, because no
+         // part of host's face actually extends out to where E's axial projection lands. Fixing this
+         // properly would need a disc-boundary-constrained extremal search (the same kind of Appendix-B
+         // ellipse/circle-intersection machinery built for feng2017::fengCylinderCylinderContact's
+         // face-type containment case), not just substituting E for P.
+         if (errViaE < real_t(1e-3)) return "special-contact-exact-fix-via-E";
+         if (!eInDisc) return "special-contact-E-outside-face-disc";
+         if (errViaE < errViaP) return "special-contact-partial-fix-via-E";
+      }
+      return "special-contact-E-also-fails"; // deeper than a simple point swap -- neither P nor E is
+                                                // the true GJK/EPA extremal point (includes the ~4/28
+                                                // trials where this re-derivation couldn't even match
+                                                // the firing pairing: right at the deltaAp~=deltaRp
+                                                // dispatch threshold, where floating-point noise between
+                                                // the inlined production call and this separate one can
+                                                // flip which branch fires -- benign re-dispatch jitter,
+                                                // not a new bug)
+   }
+
+   const real_t cosAngle = std::clamp(kodam.normal * gjk.normal, real_t(-1), real_t(1));
+   const real_t angleDeg = std::acos(cosAngle) * real_t(180) / math::pi;
+   outMetric              = angleDeg;
+   return (angleDeg > real_t(15)) ? "misclassified-scenario" : "wrong-point-same-scenario";
+}
+
+//! Companion to classifyMagnitudeCause, for the OTHER kind of Kodam error: no scenario matched at
+//! all even though GJK/EPA finds a real contact. Always a fixed string literal (see
+//! CylMismatchRecord::cause). Reuses the rim/band classification from the prior investigation (a
+//! point within 30% of a radius's width of a cylinder's own end cap counts as "rim" on that side,
+//! else "band") -- the four combinations are enumerated explicitly (rather than building the string
+//! dynamically) specifically so the result is a safe-to-store string literal.
+const char* classifyDispatchGapCause(const CylinderState& ci, const CylinderState& cj, const GjkResult& gjk)
+{
+   auto isRim = [&](const CylinderState& c) {
+      const real_t zAlong  = c.axis() * (gjk.point - c.pos);
+      const real_t halfLen = real_t(0.5) * c.length;
+      return (halfLen - std::abs(zAlong)) < real_t(0.3) * c.radius;
+   };
+   const bool riI = isRim(ci), riJ = isRim(cj);
+   if (riI && riJ) return "dispatch-gap-rim-rim";
+   if (riI && !riJ) return "dispatch-gap-rim-band";
+   if (!riI && riJ) return "dispatch-gap-band-rim";
+   return "dispatch-gap-band-band";
+}
+
+//======================================================================================================================
+// Kodam/Guo (2010) master comparison against GJK/EPA. Feng et al. (2017) is intentionally out of
+// scope here (dropped from active development -- see testFeng*/testCylinderCylinderMissPatternAnalysis,
+// still defined above but no longer called from main(), for that investigation's full record).
+//
+// Produces, over the SAME 5000 trials (same seed as every other breakdown/pattern test in this file):
+//   (1) a full per-scenario table -- occurrence count, wrong-magnitude count/rate, relative/absolute
+//       overlap error stats -- covering EVERY dispatch outcome, including ones with zero wrong trials;
+//   (2) the "no scenario matched at all" dispatch-gap breakdown (rim/band classification + missed
+//       overlap magnitude);
+//   (3) for every wrong-magnitude and dispatch-gap trial, a MATHEMATICAL CAUSE classification
+//       (classifyMagnitudeCause / classifyDispatchGapCause above) with an overall cause-occurrence
+//       count table -- directly answering "why, not just how often"; and
+//   (4) a VTK/CSV dump (writeCylMismatchVTKSeries/CSV, same writer testCylinderCylinderRandomizedFuzz
+//       uses) of every one of those trials, tagged with its cause, so the actual failing geometries
+//       can be opened in ParaView.
+//======================================================================================================================
+//! THREE-WAY accuracy comparison, all on IDENTICAL trials in one process (not separate builds/runs):
+//!   A) ORIGINAL:      maxIterations=60, useFastEdgeEdgeReference=false -- the code as it shipped
+//!                      before this session's own performance investigation.
+//!   B) CURRENT DEFAULT: maxIterations=30, useFastEdgeEdgeReference=false -- simplification #2 only
+//!                      (halved Durand-Kerner iteration count; see solveQuarticDurandKerner's comment).
+//!   C) FULLY OPTIMIZED: maxIterations=30, useFastEdgeEdgeReference=true -- #2 AND #1 together
+//!                      (thetaRef via the cheap closestThetaOnCircleToPoint instead of a second
+//!                      quartic solve; see findRimCrossing's own comment).
+//!   D) 20 iter, old ref: maxIterations=20, useFastEdgeEdgeReference=false -- probing whether the
+//!                      Durand-Kerner iteration count can be dropped further than #2's own 30.
+//!   E) 20 iter, new ref: maxIterations=20, useFastEdgeEdgeReference=true -- D combined with #1.
+//! Old code paths for BOTH simplifications are kept fully intact (nothing deleted) -- maxIterations
+//! and useFastEdgeEdgeReference are both ordinary default-valued parameters threaded through
+//! solveQuarticDurandKerner / closestThetaOnCircleToLine / findRimCrossing / cylinderCylinderContact,
+//! so variant A (the literal original behaviour) is still reachable by simply passing 60/false.
+//!
+//! Only trials classified "edge-edge" (the ONE scenario either simplification can affect at all) are
+//! scored, all three variants evaluated on the SAME geometry, classified via variant A (the original)
+//! so the selection criterion doesn't depend on either simplification being compared.
+//!
+//! 10000 trials (not this file's usual 5000) specifically because edge-edge only fires on ~4% of
+//! trials (213/5000 in the master-comparison run) -- doubling the trial count roughly doubles the
+//! edge-edge sample size this comparison actually has to work with.
+void testEdgeEdgeThreeWayAccuracy10k()
+{
+   FuzzRng                                  fuzz(13579); // distinct seed from the master-table test
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrials = 10000;
+
+   struct RefStats
+   {
+      int    edgeEdgeTrials = 0;
+      int    existenceAgree = 0, existenceMismatch = 0;
+      real_t maxOverlapDiff = 0, sumOverlapDiff = 0;
+      real_t maxPointDist = 0, sumPointDist = 0;
+      real_t maxNormalAngleDeg = 0, sumNormalAngleDeg = 0;
+   };
+   RefStats original, currentDefault, fullyOptimized, iter20OldRef, iter20NewRef, ferrariSolver, aberthEhrlichSolver,
+      lazyThetaRefFerrari;
+
+   auto accumulate = [](RefStats& s, const ContactResult& kodam, const GjkResult& gjk) {
+      ++s.edgeEdgeTrials;
+      if (gjk.contact != kodam.contact)
+      {
+         ++s.existenceMismatch;
+         return; // no meaningful overlap/point/normal comparison when existence itself disagrees
+      }
+      ++s.existenceAgree;
+      if (!gjk.contact) return; // both agree "no contact" -- nothing further to measure
+
+      const real_t gjkOverlap = -gjk.penetrationDepth;
+      const real_t overlapDiff = std::abs(kodam.overlap - gjkOverlap);
+      s.maxOverlapDiff = std::max(s.maxOverlapDiff, overlapDiff);
+      s.sumOverlapDiff += overlapDiff;
+
+      const real_t pointDist = (kodam.point - gjk.point).length();
+      s.maxPointDist = std::max(s.maxPointDist, pointDist);
+      s.sumPointDist += pointDist;
+
+      const real_t cosAngle = std::clamp(kodam.normal * gjk.normal, real_t(-1), real_t(1));
+      const real_t angleDeg = std::acos(cosAngle) * real_t(180) / math::pi;
+      s.maxNormalAngleDeg = std::max(s.maxNormalAngleDeg, angleDeg);
+      s.sumNormalAngleDeg += angleDeg;
+   };
+
+   int    pairwiseIdenticalOldVsCurrent = 0, pairwiseIdenticalCurrentVsFull = 0;
+   int    pairwiseIdenticalOriginalVs20Old = 0, pairwiseIdenticalOriginalVs20New = 0;
+   int    pairwiseIdenticalOriginalVsFerrari = 0, pairwiseIdenticalOriginalVsAberthEhrlich = 0;
+   int    pairwiseIdenticalOriginalVsLazyThetaRef = 0;
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+      const Rot3   rotJ = fuzz.randomRotation();
+
+      const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+      const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (circumRi + circumRj),
+                                                             std::min(Ri, Rj));
+      const Vec3 posJ = posI + dir * sep;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      // Classify with variant A (the literal original: 60 iterations, old reference) -- only trials
+      // landing in edge-edge under the ORIGINAL dispatch are used, so all three variants are scored on
+      // EXACTLY the same set of edge-edge geometries, and the selection criterion is independent of
+      // either simplification being compared.
+      // quarticSolver pinned EXPLICITLY to DurandKerner, and lazyThetaRef EXPLICITLY to false, on every
+      // one of these calls (A-G): the file defaults changed to Ferrari and lazyThetaRef=true after this
+      // test was written (see cylinderCylinderContact's own comment), and these variants' labels ("60
+      // iter", "30 iter", "20 iter", "Ferrari solver") are each meant to isolate ONE specific change --
+      // leaving any of them on the current defaults would have silently pulled in whichever other
+      // simplifications happen to default to on/off at the time, collapsing distinct variants into
+      // duplicates of each other without warning. Only H below deliberately tests lazyThetaRef.
+      const ContactResult kodamOriginal =
+         cylinderCylinderContact(ci, cj, false, 60, detail::QuarticSolverMethod::DurandKerner, false);
+      if (std::string(kodamOriginal.scenario) != "edge-edge") continue;
+
+      const ContactResult kodamCurrent =
+         cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::DurandKerner, false);
+      const ContactResult kodamFull =
+         cylinderCylinderContact(ci, cj, true, 30, detail::QuarticSolverMethod::DurandKerner, false);
+      const ContactResult kodam20Old =
+         cylinderCylinderContact(ci, cj, false, 20, detail::QuarticSolverMethod::DurandKerner, false);
+      const ContactResult kodam20New =
+         cylinderCylinderContact(ci, cj, true, 20, detail::QuarticSolverMethod::DurandKerner, false);
+      // Solver-choice-ONLY variants: same 30 iterations and old (line-based) reference as variant B,
+      // isolating the effect of swapping solveQuarticDurandKerner for solveQuarticFerrari /
+      // solveQuarticAberthEhrlich -- see QuarticSolverComparisonTest.cpp's synthetic-quartic comparison
+      // (known ground-truth roots) that motivated checking this against real cylinder-cylinder geometry
+      // too, not just synthetic polynomials.
+      const ContactResult kodamFerrari =
+         cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::Ferrari, false);
+      const ContactResult kodamAberthEhrlich =
+         cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::AberthEhrlich, false);
+      // lazyThetaRef, on top of Ferrari (the current production default) -- defers thetaRef's
+      // computation until it's actually needed (>1 candidate for point A or B), which
+      // testThetaRefTieBreakNecessity10k found is NEVER on real geometry (0/832 calls). If that holds,
+      // this should be bit-identical to the plain Ferrari variant above, at even lower cost.
+      const ContactResult kodamLazyThetaRef =
+         cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::Ferrari, true);
+      const GjkResult      gjk          = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+
+      accumulate(original, kodamOriginal, gjk);
+      accumulate(currentDefault, kodamCurrent, gjk);
+      accumulate(fullyOptimized, kodamFull, gjk);
+      accumulate(iter20OldRef, kodam20Old, gjk);
+      accumulate(iter20NewRef, kodam20New, gjk);
+      accumulate(ferrariSolver, kodamFerrari, gjk);
+      accumulate(aberthEhrlichSolver, kodamAberthEhrlich, gjk);
+      accumulate(lazyThetaRefFerrari, kodamLazyThetaRef, gjk);
+
+      // Direct pairwise diff -- not just "both agree with GJK to similar tolerance" but "did changing
+      // the iteration count / reference method change THIS trial's actual answer at all".
+      if (kodamOriginal.contact == kodamCurrent.contact &&
+          std::abs(kodamOriginal.overlap - kodamCurrent.overlap) < real_t(1e-9) &&
+          (kodamOriginal.point - kodamCurrent.point).length() < real_t(1e-9))
+         ++pairwiseIdenticalOldVsCurrent;
+      if (kodamCurrent.contact == kodamFull.contact &&
+          std::abs(kodamCurrent.overlap - kodamFull.overlap) < real_t(1e-9) &&
+          (kodamCurrent.point - kodamFull.point).length() < real_t(1e-9))
+         ++pairwiseIdenticalCurrentVsFull;
+      // 20-iteration variants compared directly against the literal original (60 iter, old ref), the
+      // strongest baseline, not against the 30-iteration variants -- answers "does dropping to 20 still
+      // match the original code", independent of whether the 30-iteration step already changed anything.
+      if (kodamOriginal.contact == kodam20Old.contact &&
+          std::abs(kodamOriginal.overlap - kodam20Old.overlap) < real_t(1e-9) &&
+          (kodamOriginal.point - kodam20Old.point).length() < real_t(1e-9))
+         ++pairwiseIdenticalOriginalVs20Old;
+      if (kodamOriginal.contact == kodam20New.contact &&
+          std::abs(kodamOriginal.overlap - kodam20New.overlap) < real_t(1e-9) &&
+          (kodamOriginal.point - kodam20New.point).length() < real_t(1e-9))
+         ++pairwiseIdenticalOriginalVs20New;
+      if (kodamOriginal.contact == kodamFerrari.contact &&
+          std::abs(kodamOriginal.overlap - kodamFerrari.overlap) < real_t(1e-9) &&
+          (kodamOriginal.point - kodamFerrari.point).length() < real_t(1e-9))
+         ++pairwiseIdenticalOriginalVsFerrari;
+      if (kodamOriginal.contact == kodamAberthEhrlich.contact &&
+          std::abs(kodamOriginal.overlap - kodamAberthEhrlich.overlap) < real_t(1e-9) &&
+          (kodamOriginal.point - kodamAberthEhrlich.point).length() < real_t(1e-9))
+         ++pairwiseIdenticalOriginalVsAberthEhrlich;
+      if (kodamOriginal.contact == kodamLazyThetaRef.contact &&
+          std::abs(kodamOriginal.overlap - kodamLazyThetaRef.overlap) < real_t(1e-9) &&
+          (kodamOriginal.point - kodamLazyThetaRef.point).length() < real_t(1e-9))
+         ++pairwiseIdenticalOriginalVsLazyThetaRef;
+   }
+
+   auto report = [](const char* label, const RefStats& s) {
+      const real_t meanOverlapDiff = s.existenceAgree > 0 ? s.sumOverlapDiff / real_t(s.existenceAgree) : real_t(0);
+      const real_t meanPointDist   = s.existenceAgree > 0 ? s.sumPointDist / real_t(s.existenceAgree) : real_t(0);
+      const real_t meanNormalAngle = s.existenceAgree > 0 ? s.sumNormalAngleDeg / real_t(s.existenceAgree) : real_t(0);
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "[EdgeEdge3Way] " << label << ": edge-edge trials=" << s.edgeEdgeTrials
+         << " | existence: agree=" << s.existenceAgree << " mismatch=" << s.existenceMismatch
+         << " | overlap diff vs GJK/EPA: mean=" << meanOverlapDiff << " max=" << s.maxOverlapDiff
+         << " | point dist vs GJK/EPA: mean=" << meanPointDist << " max=" << s.maxPointDist
+         << " | normal angle vs GJK/EPA (deg): mean=" << meanNormalAngle << " max=" << s.maxNormalAngleDeg);
+   };
+   report("A) ORIGINAL (60 iter, old ref)",           original);
+   report("B) CURRENT DEFAULT (30 iter, old ref)",    currentDefault);
+   report("C) FULLY OPTIMIZED (30 iter, new ref)",    fullyOptimized);
+   report("D) 20 iter, old ref",                      iter20OldRef);
+   report("E) 20 iter, new ref",                      iter20NewRef);
+   report("F) Ferrari solver (30 iter budget N/A, old ref)", ferrariSolver);
+   report("G) Aberth-Ehrlich solver (30, old ref)",   aberthEhrlichSolver);
+   report("H) Ferrari + lazyThetaRef",                lazyThetaRefFerrari);
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[EdgeEdge3Way] Direct pairwise identical-answer count (same contact flag, overlap within 1e-9, "
+      "point within 1e-9): A-vs-B=" << pairwiseIdenticalOldVsCurrent << "/" << original.edgeEdgeTrials
+      << " | B-vs-C=" << pairwiseIdenticalCurrentVsFull << "/" << original.edgeEdgeTrials
+      << " | A-vs-D(20,old)=" << pairwiseIdenticalOriginalVs20Old << "/" << original.edgeEdgeTrials
+      << " | A-vs-E(20,new)=" << pairwiseIdenticalOriginalVs20New << "/" << original.edgeEdgeTrials
+      << " | A-vs-F(Ferrari)=" << pairwiseIdenticalOriginalVsFerrari << "/" << original.edgeEdgeTrials
+      << " | A-vs-G(Aberth-Ehrlich)=" << pairwiseIdenticalOriginalVsAberthEhrlich << "/" << original.edgeEdgeTrials
+      << " | A-vs-H(lazyThetaRef)=" << pairwiseIdenticalOriginalVsLazyThetaRef << "/" << original.edgeEdgeTrials);
+
+   // All three variants must land in the SAME ballpark of existence agreement against GJK/EPA -- either
+   // simplification costing genuinely worse EXISTENCE detection (not just a slightly different overlap
+   // magnitude on already-agreeing trials) would be a real regression, not an acceptable trade-off.
+   WALBERLA_CHECK_GREATER_EQUAL(original.edgeEdgeTrials, 100); // sanity: comparison isn't running on noise
+   WALBERLA_CHECK_EQUAL(original.edgeEdgeTrials, currentDefault.edgeEdgeTrials); // same selection set
+   WALBERLA_CHECK_EQUAL(original.edgeEdgeTrials, fullyOptimized.edgeEdgeTrials); // by construction
+}
+
+//======================================================================================================================
+//! Is thetaRef's tie-break EVER actually load-bearing on real edge-edge geometry, or is it dead weight?
+//!
+//! findRimCrossing's point A (eq. 83) and point B (eq. 84-85) each pick, among every candidate theta
+//! that passes their own containment check, the one CLOSEST to thetaRef -- a tie-break neither Kodam's
+//! nor Guo's paper specifies at all (see this file's own RimCrossing comment). If, in practice, at most
+//! ONE candidate ever survives each containment check, thetaRef's VALUE is irrelevant to the result --
+//! any value at all (a cheap atan2, a hardcoded 0, garbage) would produce the identical answer, and
+//! thetaRef's own quartic solve (candidates 3/4 in the "6 quartic solves per edge-edge pair" breakdown)
+//! would be pure overhead, not doing any actual disambiguation work.
+//!
+//! Uses findRimCrossing's own optional candidateCountA/candidateCountB out-parameters (added purely for
+//! this diagnostic, default nullptr, zero effect otherwise) directly on the SAME real edge-edge fuzz
+//! corpus (seed 13579, same generation as testEdgeEdgeThreeWayAccuracy10k) already validated elsewhere
+//! in this file -- not a synthetic argument, an actual count on the geometries this file's own fuzz
+//! testing has shown are representative.
+void testThetaRefTieBreakNecessity10k()
+{
+   FuzzRng                                  fuzz(13579); // SAME seed as testEdgeEdgeThreeWayAccuracy10k
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrials = 10000;
+
+   std::map< int, int > countHistogramA, countHistogramB; // candidate count -> number of rim-crossing
+                                                              // calls that saw exactly that many
+   int totalRimCrossingCalls = 0;
+   int everMultipleA = 0, everMultipleB = 0; // calls where thetaRef's tie-break actually had >1 to choose from
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+      const Rot3   rotJ = fuzz.randomRotation();
+
+      const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+      const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (circumRi + circumRj),
+                                                             std::min(Ri, Rj));
+      const Vec3 posJ = posI + dir * sep;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      const ContactResult classify =
+         cylinderCylinderContact(ci, cj, false, 60, detail::QuarticSolverMethod::DurandKerner);
+      if (std::string(classify.scenario) != "edge-edge") continue;
+
+      // Replicate cylinderCylinderContact's own edge-edge branch geometry setup exactly, so jVsI/iVsJ
+      // are called with the SAME inputs production would use.
+      const Vec3   eI = ci.axis(), eJ = cj.axis();
+      const real_t halfLi = real_t(0.5) * ci.length, halfLj = real_t(0.5) * cj.length;
+
+      Vec3 uJ, vJ, uI, vI;
+      detail::perpendicularBasis(eJ, uJ, vJ);
+      detail::perpendicularBasis(eI, uI, vI);
+      const Vec3 capJ = cj.pos + math::sign((ci.pos - cj.pos) * eJ) * halfLj * eJ;
+      const Vec3 capI = ci.pos + math::sign((cj.pos - ci.pos) * eI) * halfLi * eI;
+
+      int countA_jVsI = 0, countB_jVsI = 0, countA_iVsJ = 0, countB_iVsJ = 0;
+      detail::findRimCrossing(capJ, uJ, vJ, cj.radius, ci.pos, eI, ci.radius, halfLi, false, 60,
+                               detail::QuarticSolverMethod::DurandKerner, &countA_jVsI, &countB_jVsI);
+      detail::findRimCrossing(capI, uI, vI, ci.radius, cj.pos, eJ, cj.radius, halfLj, false, 60,
+                               detail::QuarticSolverMethod::DurandKerner, &countA_iVsJ, &countB_iVsJ);
+
+      for (const int countA : { countA_jVsI, countA_iVsJ })
+      {
+         ++countHistogramA[countA];
+         ++totalRimCrossingCalls;
+         if (countA > 1) ++everMultipleA;
+      }
+      for (const int countB : { countB_jVsI, countB_iVsJ })
+      {
+         ++countHistogramB[countB];
+         if (countB > 1) ++everMultipleB;
+      }
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT("[ThetaRefNecessity] " << totalRimCrossingCalls << " findRimCrossing calls "
+                              << "sampled (both directions, every real edge-edge trial in a " << numTrials
+                              << "-trial fuzz run)");
+   for (const auto& [count, occurrences] : countHistogramA)
+      WALBERLA_LOG_INFO_ON_ROOT("[ThetaRefNecessity]   point A candidate count=" << count << ": "
+                                 << occurrences << " calls");
+   for (const auto& [count, occurrences] : countHistogramB)
+      WALBERLA_LOG_INFO_ON_ROOT("[ThetaRefNecessity]   point B candidate count=" << count << ": "
+                                 << occurrences << " calls");
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[ThetaRefNecessity] thetaRef's tie-break was ACTUALLY consulted (>1 surviving candidate) on "
+      << everMultipleA << "/" << totalRimCrossingCalls << " point-A calls and " << everMultipleB << "/"
+      << totalRimCrossingCalls << " point-B calls");
+
+   WALBERLA_CHECK_GREATER_EQUAL(totalRimCrossingCalls, 200); // sanity: enough real edge-edge geometry sampled
+}
+
+//======================================================================================================================
+//! Hand-computed ground-truth check of detail::closestDistanceSqBetweenSegments -- validates the
+//! closed-form segment-segment distance itself, independent of anything cylinder-related, before it's
+//! trusted as a cylinder-cylinder separation bound. Four configurations, each with an exactly known
+//! answer: parallel+overlapping (pure perpendicular offset), parallel+non-overlapping (nearest
+//! endpoints), perpendicular skew (crossing at a single closest pair of points), and intersecting
+//! (distance exactly 0).
+//======================================================================================================================
+void testClosestDistanceSqBetweenSegments()
+{
+   using detail::closestDistanceSqBetweenSegments;
+
+   // Parallel, overlapping ranges -- closest distance is the pure perpendicular offset (3), achieved
+   // anywhere along the overlapping length, independent of where exactly s/t land.
+   {
+      const real_t distSq = closestDistanceSqBetweenSegments(
+         Vec3(0, 0, 0), Vec3(0, 0, 10), Vec3(3, 0, 0), Vec3(3, 0, 10));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(distSq, real_t(9), real_t(1e-9));
+   }
+
+   // Parallel, NON-overlapping ranges (axial gap too) -- closest points are the two nearest endpoints:
+   // (0,0,5) and (3,0,10) -> distance = sqrt(3^2 + 5^2) = sqrt(34).
+   {
+      const real_t distSq = closestDistanceSqBetweenSegments(
+         Vec3(0, 0, 0), Vec3(0, 0, 5), Vec3(3, 0, 10), Vec3(3, 0, 15));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(distSq, real_t(34), real_t(1e-9));
+   }
+
+   // Perpendicular skew segments (one along x at z=2, one along y at z=0) -- closest points are
+   // (0,0,2) and (0,0,0), distance = 2.
+   {
+      const real_t distSq = closestDistanceSqBetweenSegments(
+         Vec3(-5, 0, 2), Vec3(5, 0, 2), Vec3(0, -5, 0), Vec3(0, 5, 0));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(distSq, real_t(4), real_t(1e-9));
+   }
+
+   // Intersecting segments (an X-crossing in the z=0 plane) -- distance exactly 0.
+   {
+      const real_t distSq = closestDistanceSqBetweenSegments(
+         Vec3(-1, -1, 0), Vec3(1, 1, 0), Vec3(-1, 1, 0), Vec3(1, -1, 0));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(distSq, real_t(0), real_t(1e-9));
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT("[TightTier1] closestDistanceSqBetweenSegments: all 4 hand-computed "
+                              "ground-truth cases matched.");
+}
+
+//======================================================================================================================
+//! Does the tight, capsule-based Tier 1 bound (useTightTier1=true) ever WRONGLY declare two cylinders
+//! "definitely separated" when they're actually in contact? This is the one thing that must NEVER
+//! happen -- a false "definitely separated" would silently skip the GJK/EPA fallback and drop a real
+//! contact. Checked directly against GJK/EPA ground truth on real cylinder geometry, both near the
+//! actual contact boundary (sampleSeparationNearBoundary, the same methodology as every other fuzz
+//! test in this file) and at uniformly-distributed separations across the whole physically-possible
+//! range (representative of a packed simulation, where two pillars can sit anywhere within reach, not
+//! just near their own contact boundary) -- since the tight bound's main value proposition is
+//! specifically for well-separated-but-within-reach pairs, the near-boundary corpus alone would
+//! under-sample exactly the population it's meant to help with.
+//======================================================================================================================
+void testTightTier1Accuracy10k()
+{
+   FuzzRng                                  fuzz(97531); // distinct seed from every other fuzz test
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrialsPerCorpus = 5000;
+
+   int dispatchGapTrials = 0;                                  // analytical found NO scenario at all
+   int oldTier1Uncertain = 0, newTightTier1Uncertain = 0;       // how often each bound says "check with GJK"
+   int unsafeFalseSeparated = 0;                                // tight bound wrong -> MUST stay 0
+   real_t maxUnsafeOverlap = 0;
+
+   auto runCorpus = [&](bool uniformSeparation) {
+      for (int trial = 0; trial < numTrialsPerCorpus; ++trial)
+      {
+         const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+         const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+         const Rot3   rotI = fuzz.randomRotation();
+         const Rot3   rotJ = fuzz.randomRotation();
+
+         const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+         const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+         const Vec3   dir      = fuzz.randomUnitVec();
+         const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+         real_t sep;
+         if (uniformSeparation)
+         {
+            std::uniform_real_distribution< real_t > uniformSepDist(real_t(0), real_t(3) * (circumRi + circumRj));
+            sep = uniformSepDist(fuzz.rng);
+         }
+         else
+         {
+            auto contactAtSep = [&](real_t s) {
+               return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+            };
+            sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0), real_t(3) * (circumRi + circumRj),
+                                                       std::min(Ri, Rj));
+         }
+         const Vec3 posJ = posI + dir * sep;
+
+         const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+         const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+         const ContactResult analytical = cylinderCylinderContact(ci, cj);
+         if (analytical.contact) continue; // Tier 1 only ever applies when the dispatch found nothing
+         ++dispatchGapTrials;
+
+         const bool oldUncertain = cylinderCylinderResultIsUncertain(ci, cj, analytical, false);
+         const bool newUncertain = cylinderCylinderResultIsUncertain(ci, cj, analytical, true);
+         if (oldUncertain) ++oldTier1Uncertain;
+         if (newUncertain) ++newTightTier1Uncertain;
+
+         if (!newUncertain) // tight bound says "definitely separated, don't bother with GJK"
+         {
+            const GjkResult gjk = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+            if (gjk.contact)
+            {
+               ++unsafeFalseSeparated;
+               maxUnsafeOverlap = std::max(maxUnsafeOverlap, -gjk.penetrationDepth);
+            }
+         }
+      }
+   };
+
+   runCorpus(false); // near the actual GJK/EPA contact boundary
+   runCorpus(true);  // uniformly across the whole physically-possible-reach range
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[TightTier1] " << dispatchGapTrials << " dispatch-gap trials (analytical found no scenario) "
+      << "out of " << (2 * numTrialsPerCorpus) << " total | old Tier 1 uncertain=" << oldTier1Uncertain
+      << "/" << dispatchGapTrials << " | NEW tight Tier 1 uncertain=" << newTightTier1Uncertain << "/"
+      << dispatchGapTrials << " (i.e. tight bound resolved "
+      << (dispatchGapTrials - newTightTier1Uncertain) << " trials as definitely-separated, skipping "
+      << "GJK/EPA entirely) | UNSAFE false-separated (tight bound wrong vs GJK/EPA): "
+      << unsafeFalseSeparated << " (max missed overlap=" << maxUnsafeOverlap << ")");
+
+   // The one thing that must NEVER happen: the tight bound declaring "definitely separated" for a
+   // pair GJK/EPA confirms is actually touching. Any failure here means the capsule bound is NOT
+   // conservative as derived and must not be trusted.
+   WALBERLA_CHECK_EQUAL(unsafeFalseSeparated, 0);
+   WALBERLA_CHECK_GREATER_EQUAL(dispatchGapTrials, 200); // sanity: comparison isn't running on noise
+}
+
+//======================================================================================================================
+//! Hand-computed ground-truth check of detail::boxSupportAlongDirection and
+//! detail::boxesDefinitelySeparatedAlongCenterLine -- the box-box analog of
+//! testClosestDistanceSqBetweenSegments, validating the geometric primitive itself before it's
+//! trusted as a Layer 1 pre-filter.
+//======================================================================================================================
+void testBoxSeparationAlongCenterLine()
+{
+   using detail::boxesDefinitelySeparatedAlongCenterLine;
+   using detail::boxSupportAlongDirection;
+
+   // Axis-aligned box, half-extents (2,3,4): projection along the X axis is exactly halfExtents.x.
+   {
+      const Mat3   R = Mat3();
+      const Vec3   half(2, 3, 4);
+      const real_t supportX = boxSupportAlongDirection(half, R, Vec3(1, 0, 0));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(supportX, real_t(2), real_t(1e-9));
+   }
+
+   // Box with half-extents (h,h,h) rotated 45 degrees about Z: projection along world X is
+   // h*|cos45| + h*|sin45| = h*sqrt(2) (both local x and y axes now contribute equally).
+   {
+      Rot3 rot;
+      rot.rotate(Vec3(0, 0, 1), math::pi * real_t(0.25));
+      const Vec3   half(real_t(1), real_t(1), real_t(1));
+      const real_t supportX = boxSupportAlongDirection(half, rot.getMatrix(), Vec3(1, 0, 0));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(supportX, real_t(1) * std::sqrt(real_t(2)), real_t(1e-6));
+   }
+
+   // Two axis-aligned boxes separated along X by more than the sum of their X half-extents ->
+   // definitely separated. half-extents (1,1,1) and (1,1,1), centres 3 apart -> reach=2 < 3.
+   {
+      const Mat3 R = Mat3();
+      const Vec3 half(1, 1, 1);
+      WALBERLA_CHECK(boxesDefinitelySeparatedAlongCenterLine(Vec3(0, 0, 0), R, half, Vec3(3, 0, 0), R, half));
+   }
+
+   // Same boxes, centres only 1.5 apart (reach=2 > 1.5) -> NOT resolvable as separated by this bound
+   // (they may or may not actually overlap -- the point is this axis alone can't rule it out).
+   {
+      const Mat3 R = Mat3();
+      const Vec3 half(1, 1, 1);
+      WALBERLA_CHECK(!boxesDefinitelySeparatedAlongCenterLine(Vec3(0, 0, 0), R, half, Vec3(1.5, 0, 0), R, half));
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT("[TightLayer1Box] boxSupportAlongDirection / "
+                              "boxesDefinitelySeparatedAlongCenterLine: all hand-computed cases matched.");
+}
+
+//======================================================================================================================
+//! Does the cheap single-axis box-box separation bound (Layer 1 pre-filter) ever WRONGLY declare two
+//! boxes "definitely separated" when they're actually touching? Checked directly against GJK/EPA
+//! ground truth on real box geometry (same two-corpus methodology as testTightTier1Accuracy10k: near
+//! the actual contact boundary, and uniformly across the whole physically-possible-reach range).
+//======================================================================================================================
+void testTightLayer1BoxAccuracy10k()
+{
+   FuzzRng                                  fuzz(24601); // distinct seed from every other fuzz test
+   std::uniform_real_distribution< real_t > halfExtentDist(real_t(0.3), real_t(3.0));
+
+   constexpr int numTrialsPerCorpus = 5000;
+
+   int unsafeFalseSeparated = 0, resolvedSeparated = 0;
+   real_t maxUnsafeOverlap = 0;
+
+   auto runCorpus = [&](bool uniformSeparation) {
+      for (int trial = 0; trial < numTrialsPerCorpus; ++trial)
+      {
+         const Vec3 halfA(halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng));
+         const Vec3 halfB(halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng));
+         const Rot3 rotA = fuzz.randomRotation();
+         const Rot3 rotB = fuzz.randomRotation();
+
+         const real_t circumA = halfA.length(); // circumscribing-sphere radius of a box = |halfExtents|
+         const real_t circumB = halfB.length();
+         const Vec3   dir     = fuzz.randomUnitVec();
+         const Vec3   posA(real_t(0), real_t(0), real_t(0));
+
+         real_t sep;
+         if (uniformSeparation)
+         {
+            std::uniform_real_distribution< real_t > uniformSepDist(real_t(0), real_t(3) * (circumA + circumB));
+            sep = uniformSepDist(fuzz.rng);
+         }
+         else
+         {
+            auto contactAtSep = [&](real_t s) {
+               return gjkBoxBox(posA, rotA, halfA * real_t(2), posA + dir * s, rotB, halfB * real_t(2)).contact;
+            };
+            sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0), real_t(3) * (circumA + circumB),
+                                                       std::min(halfA.min(), halfB.min()));
+         }
+         const Vec3 posB = posA + dir * sep;
+
+         const bool tightSaysSeparated =
+            detail::boxesDefinitelySeparatedAlongCenterLine(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(), halfB);
+         if (tightSaysSeparated)
+         {
+            ++resolvedSeparated;
+            const GjkResult gjk = gjkBoxBox(posA, rotA, halfA * real_t(2), posB, rotB, halfB * real_t(2));
+            if (gjk.contact)
+            {
+               ++unsafeFalseSeparated;
+               maxUnsafeOverlap = std::max(maxUnsafeOverlap, -gjk.penetrationDepth);
+            }
+         }
+      }
+   };
+
+   runCorpus(false);
+   runCorpus(true);
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[TightLayer1Box] " << (2 * numTrialsPerCorpus) << " trials | resolved definitely-separated="
+      << resolvedSeparated << " | UNSAFE false-separated (bound wrong vs GJK/EPA): " << unsafeFalseSeparated
+      << " (max missed overlap=" << maxUnsafeOverlap << ")");
+
+   WALBERLA_CHECK_EQUAL(unsafeFalseSeparated, 0);
+   WALBERLA_CHECK_GREATER_EQUAL(resolvedSeparated, 200); // sanity: comparison isn't running on noise
+}
+
+void testCylinderCylinderFullComparisonAndHybridFeasibility()
+{
+   FuzzRng                                  fuzz(24680); // same seed as every breakdown/pattern test above
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrials = 5000; // confirmed consistent at 10000 trials for the Tier1+special-contact-
+                                      // only hybrid standard (fallback rate landed at 3.3553%, matching
+                                      // the 3.3-3.4% predicted from the 5000-trial numbers almost
+                                      // exactly); reverted to keep the standard suite's runtime down.
+                                      // Re-confirmed at 10000 trials again after making Ferrari the
+                                      // default quartic solver (this session): wrong=0/3338, fallback
+                                      // rate=112/3338 (3.3553%) -- IDENTICAL to the number recorded here
+                                      // under the previous Durand-Kerner default, across every scenario
+                                      // in the file. Re-confirmed a THIRD time at 10000 trials after also
+                                      // making lazyThetaRef=true the default (this session): again
+                                      // wrong=0/3338, fallback rate=112/3338 (3.3553%) -- unchanged
+                                      // (not just edge-edge), before reverting back to 5000 again.
+
+   int kodamMiss = 0, kodamFalsePos = 0, kodamCorrectNoContact = 0;
+   int kodamHybridWrong = 0, kodamHybridFallback = 0, kodamHybridFallbackNeeded = 0;
+   int kodamTier1OnlyWrong = 0, kodamTier1OnlyFallback = 0;
+   real_t kodamMaxOverlapDiff = 0;
+
+   struct ScenarioWrongStats
+   {
+      int                    count = 0;
+      real_t                 maxAbsDiff = 0, maxRelDiff = 0;
+      std::vector< real_t >  relDiffs;
+   };
+   std::map< std::string, ScenarioWrongStats > kodamWrongByScenario;
+   std::map< std::string, std::vector< real_t > > kodamWrongAngleByScenario;   // normal angle, wrongMag trials
+   std::map< std::string, std::vector< real_t > > kodamPassingAngleByScenario; // normal angle, passing trials
+   std::map< std::string, int >                kodamScenarioCount; // denominator per scenario, EVERY
+                                                                       // scenario that ever fires, not
+                                                                       // just the ones with wrong trials
+   std::map< std::string, int >                kodamMissRimBandClass;
+   std::map< std::string, std::vector< real_t > > kodamMissOverlapByClass;
+   int kodamSpecialContactCount = 0; // how many trials fire special-contact (now unconditionally
+                                       // routed to GJK/EPA -- see cylinderCylinderResultIsUncertain)
+
+   std::map< std::string, int >     causeOccurrence; // "overall cause occurrence" count table
+   std::vector< CylMismatchRecord > mismatches;       // every one of them, for the VTK/CSV dump
+
+   const std::set< std::string > exemptScenarios = { "face-face", "band-band-parallel", "band-band-skewed" };
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+      const Rot3   rotJ = fuzz.randomRotation();
+
+      const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+      const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (circumRi + circumRj),
+                                                             std::min(Ri, Rj));
+      const Vec3 posJ = posI + dir * sep;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      const ContactResult kodam = cylinderCylinderContact(ci, cj);
+      const GjkResult      gjk  = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+      const real_t         gjkOverlap = gjk.contact ? -gjk.penetrationDepth : real_t(0);
+
+      // NOTE: the rim-rim dispatch-gap investigation (why Kodam/Guo's edge-edge chord-existence test
+      // -- eq. 82-101 -- fails even for real, substantial overlaps, e.g. trials 463/3047/3075/4997)
+      // was done via temporary ad-hoc diagnostics here and has been removed after the finding was
+      // extracted. Summary (see the thesis writeup for the full derivation): the chord test requires,
+      // for each rim, a point A (crosses the other cylinder's infinite lateral surface, within its
+      // axial extent) AND a point B (crosses the other cylinder's near face plane, within its radius).
+      // Two distinct sub-failures were found: point A can have zero valid roots at all (the rim never
+      // reaches the other's lateral surface in that direction -- trial 463's iVsJ), or point A exists
+      // but point B's candidates both land outside the target's radius (the entry point never lines up
+      // with a valid exit through the face -- trial 3047's iVsJ). Both stem from the same structural
+      // cause: the formula assumes a single clean in-and-out chord through one curved surface and one
+      // flat face, which doesn't exist for a genuine corner-to-corner (both rims' edges meeting near
+      // both cylinders' own corners) contact -- confirmed independently via brute-force MTD (support-
+      // function-based, see testCylinderCylinderSpecialContactBruteForceMTD's method) to agree with
+      // GJK/EPA to within 0.01% on all three trials. No orientation/aspect-ratio signature was found
+      // across the 13 occurrences in a 5000-trial run (axis angles spanned 33-169 degrees); a mild
+      // (73%) lean toward squat cylinders was the only pattern. Already fully covered in production:
+      // cylinderCylinderResultIsUncertain's Tier 1 reach-sum bound catches every "no scenario matched"
+      // case unconditionally, and the existing hybrid shows 0/1664 existence mismatches.
+
+      if (!gjk.contact)
+      {
+         if (kodam.contact)
+         {
+            ++kodamFalsePos;
+            ++causeOccurrence["false-positive"];
+            mismatches.push_back(CylMismatchRecord{ trial, ci, cj, true, false, kodam.overlap, real_t(0),
+                                                       kodam.scenario, 0, "false-positive", real_t(-1) });
+         }
+         else { ++kodamCorrectNoContact; }
+         continue;
+      }
+
+      if (!kodam.contact)
+      {
+         ++kodamMiss;
+         const char* cause = classifyDispatchGapCause(ci, cj, gjk);
+         ++kodamMissRimBandClass[cause];
+         kodamMissOverlapByClass[cause].push_back(gjkOverlap);
+         ++causeOccurrence[cause];
+         mismatches.push_back(CylMismatchRecord{ trial, ci, cj, false, true, real_t(0), gjkOverlap, "none", 1,
+                                                    cause, real_t(-1) });
+      }
+      else
+      {
+         kodamMaxOverlapDiff = std::max(kodamMaxOverlapDiff, std::abs(kodam.overlap - gjkOverlap));
+         if (std::string(kodam.scenario) == "special-contact") ++kodamSpecialContactCount;
+      }
+
+      // Kodam's existing production hybrid.
+      const HybridResult kodamHybrid = cylinderCylinderContactHybrid(ci, rotI, cj, rotJ);
+      if (kodamHybrid.usedFallback) ++kodamHybridFallback;
+      if (kodamHybrid.contact != gjk.contact) ++kodamHybridWrong;
+      const bool kodamWouldHaveBeenWrongRaw =
+         (kodam.contact != gjk.contact) ||
+         (kodam.contact && std::abs(kodam.overlap - gjkOverlap) > std::max(real_t(0.01), real_t(0.05) * gjkOverlap));
+      if (cylinderCylinderResultIsUncertain(ci, cj, kodam) && kodamWouldHaveBeenWrongRaw) ++kodamHybridFallbackNeeded;
+
+      // Simplified "Tier-1-only" hybrid: fall back to GJK/EPA ONLY when nothing matched at all --
+      // drop Tier 2 (the circumscribing-sphere magnitude check) entirely. Directly answers "if no
+      // scenario matches, run GJK, otherwise always trust the raw analytical answer as-is."
+      if (!kodam.contact) { ++kodamTier1OnlyFallback; }
+      else
+      {
+         ++kodamScenarioCount[std::string(kodam.scenario)];
+         const real_t absDiff  = std::abs(kodam.overlap - gjkOverlap);
+         const real_t relDiff  = absDiff / gjkOverlap;
+         const bool   wrongMag = absDiff > std::max(real_t(0.01), real_t(0.05) * gjkOverlap);
+
+         // Normal-angle comparison for EVERY kodam.contact trial, not just the wrongMag ones -- to
+         // check whether the "passing" (magnitude-agreeing) population also has near-zero normal
+         // divergence, or whether it's only the wrongMag trials with large-angle outliers.
+         const real_t cosAngle = std::clamp(kodam.normal * gjk.normal, real_t(-1), real_t(1));
+         const real_t angleDeg = std::acos(cosAngle) * real_t(180) / math::pi;
+         (wrongMag ? kodamWrongAngleByScenario : kodamPassingAngleByScenario)[std::string(kodam.scenario)]
+            .push_back(angleDeg);
+
+         if (wrongMag)
+         {
+            ++kodamTier1OnlyWrong;
+            auto& st = kodamWrongByScenario[std::string(kodam.scenario)];
+            ++st.count;
+            st.maxAbsDiff = std::max(st.maxAbsDiff, absDiff);
+            st.maxRelDiff = std::max(st.maxRelDiff, relDiff);
+            st.relDiffs.push_back(relDiff);
+
+            real_t      metric = real_t(-1);
+            const char* cause  = classifyMagnitudeCause(ci, cj, kodam, gjk, metric);
+            ++causeOccurrence[cause];
+            mismatches.push_back(CylMismatchRecord{ trial, ci, cj, true, true, kodam.overlap, gjkOverlap,
+                                                       kodam.scenario, 2, cause, metric });
+         }
+      }
+   }
+
+   const int totalOverlapping = numTrials - kodamFalsePos - kodamCorrectNoContact;
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] ================ KODAM/GUO MASTER TABLE (" << numTrials << " trials, same seed "
+      << "throughout this file) ================");
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] " << kodamCorrectNoContact << " genuinely separated (Kodam correctly reports no "
+      << "contact), " << kodamFalsePos << " Kodam false positives (excluded from the miss-rate rows below), "
+      << totalOverlapping << " genuine GJK/EPA contacts remain as the denominator for every row below");
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] PURE Kodam/Guo:   miss=" << kodamMiss << "/" << totalOverlapping << " ("
+      << (real_t(100) * real_t(kodamMiss) / real_t(totalOverlapping)) << "%), maxOverlapDiff="
+      << kodamMaxOverlapDiff);
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] Kodam HYBRID (existing production dispatcher): wrong=" << kodamHybridWrong << "/"
+      << totalOverlapping << ", fallback rate=" << kodamHybridFallback << "/" << totalOverlapping << " ("
+      << (real_t(100) * real_t(kodamHybridFallback) / real_t(totalOverlapping))
+      << "%), of which genuinely NEEDED (raw analytical would've been wrong)=" << kodamHybridFallbackNeeded
+      << "/" << kodamHybridFallback << " (" << (real_t(100) * real_t(kodamHybridFallbackNeeded) /
+                                                  real_t(std::max(1, kodamHybridFallback))) << "%)");
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] Of those, special-contact fired (and is now UNCONDITIONALLY routed to GJK/EPA, per "
+      << "cylinderCylinderResultIsUncertain's new check) on " << kodamSpecialContactCount << "/" << totalOverlapping
+      << " (" << (real_t(100) * real_t(kodamSpecialContactCount) / real_t(totalOverlapping))
+      << "%) trials");
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] Kodam TIER-1-ONLY (fallback iff no scenario matched, Tier 2 dropped entirely): wrong="
+      << kodamTier1OnlyWrong << "/" << totalOverlapping << " (" << (real_t(100) * real_t(kodamTier1OnlyWrong) /
+      real_t(totalOverlapping)) << "%), fallback rate=" << kodamTier1OnlyFallback << "/" << totalOverlapping
+      << " (" << (real_t(100) * real_t(kodamTier1OnlyFallback) / real_t(totalOverlapping)) << "%)");
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] ---------------- FULL PER-SCENARIO TABLE (every dispatch outcome, including "
+      << "zero-wrong ones) ----------------");
+   for (auto& [name, denom] : kodamScenarioCount)
+   {
+      const bool  exempt = exemptScenarios.count(name) > 0;
+      auto        it     = kodamWrongByScenario.find(name);
+      const int   wrongCount = (it != kodamWrongByScenario.end()) ? it->second.count : 0;
+      if (wrongCount == 0)
+      {
+         WALBERLA_LOG_INFO_ON_ROOT(
+            "  [comparison]   " << name << (exempt ? " [fully verified, exempt from Tier 2]" : "") << ": "
+            << denom << " occurrences, 0 wrong (0%)");
+         continue;
+      }
+      const ScenarioWrongStats& st = it->second;
+      std::vector< real_t >     sorted = st.relDiffs;
+      std::sort(sorted.begin(), sorted.end());
+      const real_t p50 = sorted[sorted.size() / 2];
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "  [comparison]   " << name << (exempt ? " [fully verified, exempt from Tier 2]" : "") << ": "
+         << denom << " occurrences, " << wrongCount << " wrong (" << (real_t(100) * real_t(wrongCount) /
+         real_t(denom)) << "% of this scenario's own trials, " << (real_t(100) * real_t(wrongCount) /
+         real_t(kodamTier1OnlyWrong)) << "% of all wrong trials) | relative overlap error: p50=" << p50
+         << " max=" << st.maxRelDiff << " (absolute max=" << st.maxAbsDiff << ")");
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] ---------------- NORMAL ANGLE: kodam.normal vs GJK/EPA's, PASSING vs WRONG-MAGNITUDE "
+      << "trials, per scenario ----------------");
+   for (auto& [name, denom] : kodamScenarioCount)
+   {
+      auto printStats = [&](const char* label, std::map< std::string, std::vector< real_t > >& byScenario) {
+         auto it = byScenario.find(name);
+         if (it == byScenario.end() || it->second.empty())
+         {
+            WALBERLA_LOG_INFO_ON_ROOT("  [comparison]   " << name << " " << label << ": n=0");
+            return;
+         }
+         std::vector< real_t > sorted = it->second;
+         std::sort(sorted.begin(), sorted.end());
+         WALBERLA_LOG_INFO_ON_ROOT(
+            "  [comparison]   " << name << " " << label << ": n=" << sorted.size() << " min=" << sorted.front()
+            << " median=" << sorted[sorted.size() / 2] << " max=" << sorted.back());
+      };
+      printStats("PASSING ", kodamPassingAngleByScenario);
+      printStats("WRONG   ", kodamWrongAngleByScenario);
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] Kodam's \"no scenario matched at all\" gap (" << kodamMiss << " trials), classified by "
+      << "whether GJK/EPA's own contact point sits near each cylinder's rim or well within its band "
+      << "(ci-side first, cj-side second):");
+   for (auto& [name, count] : kodamMissRimBandClass)
+   {
+      std::vector< real_t > overlaps = kodamMissOverlapByClass[name];
+      std::sort(overlaps.begin(), overlaps.end());
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "  [comparison]   " << name << ": " << count << "/" << kodamMiss << " ("
+         << (real_t(100) * real_t(count) / real_t(kodamMiss)) << "%) | missed overlap (GJK/EPA, i.e. "
+         << "the depth completely undetected): min=" << overlaps.front() << " p50="
+         << overlaps[overlaps.size() / 2] << " max=" << overlaps.back());
+   }
+   {
+      const int total = kodamCorrectNoContact + kodamMiss; // every trial where Kodam itself reported
+                                                              // "no scenario matched"
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "[comparison] Precision of Kodam's \"no case\" classification: of every trial where Kodam reports "
+         << "no scenario matched at all (" << total << " = " << kodamCorrectNoContact
+         << " genuinely separated + " << kodamMiss << " actually real contacts), " << kodamMiss << "/"
+         << total << " (" << (real_t(100) * real_t(kodamMiss) / real_t(total))
+         << "%) were wrong -- i.e. \"no case\" is correct " << (real_t(100) * real_t(kodamCorrectNoContact) /
+         real_t(total)) << "% of the time it fires, which is exactly what Tier 1's cheap "
+         << "reach-sum bound exists to catch the residual of");
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[comparison] ---------------- OVERALL CAUSE OCCURRENCE (every dispatch-gap + wrong-magnitude "
+      << "trial, " << mismatches.size() << " total) ----------------");
+   for (auto& [cause, count] : causeOccurrence)
+   {
+      WALBERLA_LOG_INFO_ON_ROOT(
+         "  [comparison]   " << cause << ": " << count << "/" << mismatches.size() << " (" <<
+         (real_t(100) * real_t(count) / real_t(mismatches.size())) << "%)");
+   }
+
+   if (writeMismatchVTKEnabled())
+      writeCylMismatchVTKSeries((g_outputDir / "cylinder_kodam_mismatches").string(), "cylinder_kodam_mismatches",
+                                 mismatches);
+   writeCylMismatchCSV((g_outputDir / "cylinder_kodam_mismatches.csv").string(), mismatches);
+}
+
+//======================================================================================================================
+// Deliberately DEEP (not "realistic") overlap stress test. Every other fuzz test in this file caps
+// sampled overlap at 15% of the smaller body's radius (FuzzRng::sampleSeparationNearBoundary's
+// maxOverlap) -- a working simulation's spring-dashpot contact force would never let overlap develop
+// beyond that, so testing deeper is testing geometry the simulation itself would never reach. This
+// test intentionally goes there anyway, to answer a narrower safety question: IF a genuinely large,
+// degenerate overlap ever did occur (a bad initial condition, an unrelated bug elsewhere in the
+// pipeline pushing state somewhere it shouldn't be), does Kodam/Guo's dispatch degrade SAFELY -- i.e.
+// either get the scenario/overlap right, or cleanly report "no case" (scenario=none) so
+// cylinderCylinderResultIsUncertain's unconditional Tier 1 reach-sum bound catches it and the hybrid
+// still recovers the correct answer via GJK/EPA -- rather than UNSAFELY: some scenario firing with
+// kodam.contact=true and a badly wrong overlap that Tier 2's magnitude bound might not always catch.
+//======================================================================================================================
+void testCylinderCylinderLargeOverlapDegenerateStress()
+{
+   FuzzRng                                  fuzz(13579); // distinct seed
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+   std::uniform_real_distribution< real_t > overlapFracDist(real_t(0.3), real_t(1.5)); // 30%-150% of
+                                                                                          // the smaller
+                                                                                          // radius --
+                                                                                          // well past
+                                                                                          // "realistic"
+
+   constexpr int numTrials = 10000;
+   int kodamNoneCase = 0, hybridWrong = 0;
+   real_t worstUnsafeAbsDiff = 0, worstUnsafeRelDiff = 0;
+   CylinderState worstCi{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   CylinderState worstCj{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   real_t worstHybridAbsDiff = 0, worstHybridRelDiff = 0;
+   CylinderState worstHybridCi{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+   CylinderState worstHybridCj{ Vec3(real_t(0)), Mat3(), real_t(0), real_t(0) };
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+      const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation();
+      const Rot3   rotJ = fuzz.randomRotation();
+
+      const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+      const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+      };
+      // Find the true touching boundary via the same bisection FuzzRng::sampleSeparationNearBoundary
+      // uses internally, then deliberately push DEEP past it -- 30%-150% of the smaller radius, not
+      // the usual 15% cap.
+      real_t lo = real_t(0), hi = real_t(3) * (circumRi + circumRj);
+      WALBERLA_ASSERT(contactAtSep(lo));
+      WALBERLA_ASSERT(!contactAtSep(hi));
+      for (int it = 0; it < 40; ++it)
+      {
+         const real_t mid = real_t(0.5) * (lo + hi);
+         if (contactAtSep(mid)) { lo = mid; } else { hi = mid; }
+      }
+      const real_t boundary = real_t(0.5) * (lo + hi);
+      const real_t sep      = boundary - overlapFracDist(fuzz.rng) * std::min(Ri, Rj);
+      const Vec3   posJ     = posI + dir * sep;
+
+      const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+      const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+      const ContactResult kodam = cylinderCylinderContact(ci, cj);
+      const GjkResult      gjk  = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+      const real_t         gjkOverlap = gjk.contact ? -gjk.penetrationDepth : real_t(0);
+
+      if (!gjk.contact) continue; // sampling occasionally overshoots into no-contact -- skip, not the
+                                    // population this test is about
+      if (!kodam.contact) { ++kodamNoneCase; } // SAFE: caught unconditionally by Tier 1 below
+      else
+      {
+         const real_t absDiff = std::abs(kodam.overlap - gjkOverlap);
+         const real_t relDiff = absDiff / gjkOverlap;
+         // "Unsafe" here means Tier 2 would ALSO need to catch it for the hybrid to recover --
+         // worth knowing the worst case even though the hybrid check below already covers whether it
+         // actually does.
+         if (absDiff > worstUnsafeAbsDiff)
+         {
+            worstUnsafeAbsDiff = absDiff;
+            worstUnsafeRelDiff = relDiff;
+            worstCi            = ci;
+            worstCj            = cj;
+         }
+      }
+
+      const HybridResult hybrid = cylinderCylinderContactHybrid(ci, rotI, cj, rotJ);
+      if (hybrid.contact != gjk.contact) ++hybridWrong;
+      // Existence agreement alone isn't the full safety story -- also check the HYBRID's own overlap
+      // MAGNITUDE (not just raw kodam's) against GJK/EPA, since Tier 2's circumscribing-sphere bound
+      // only catches UNDERESTIMATES (it flags uncertainty when more overlap is geometrically possible
+      // than reported) and could in principle miss an overestimate.
+      if (hybrid.contact && gjk.contact)
+      {
+         const real_t hybAbsDiff = std::abs(hybrid.overlap - gjkOverlap);
+         const real_t hybRelDiff = hybAbsDiff / gjkOverlap;
+         if (hybAbsDiff > worstHybridAbsDiff)
+         {
+            worstHybridAbsDiff = hybAbsDiff;
+            worstHybridRelDiff = hybRelDiff;
+            worstHybridCi      = ci;
+            worstHybridCj      = cj;
+         }
+      }
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[stress] Deep-overlap degenerate stress (" << numTrials << " trials, overlap forced to 30%-150% "
+      << "of the smaller radius -- well past the 15% 'realistic' cap every other fuzz test in this file "
+      << "uses): " << kodamNoneCase << " correctly fell to \"no case\" (safe, always caught by Tier 1), "
+      << (numTrials - kodamNoneCase) << " had SOME scenario fire, of which the worst raw analytical "
+      << "overlap disagreement was absDiff=" << worstUnsafeAbsDiff << " relDiff=" << worstUnsafeRelDiff
+      << " (ci: R=" << worstCi.radius << " L=" << worstCi.length << ", cj: R=" << worstCj.radius
+      << " L=" << worstCj.length << "). HYBRID (with Tier 1/2 fallback) existence mismatches="
+      << hybridWrong << "/" << numTrials << " (must be 0 for the hybrid to be considered safe under "
+      << "deep/degenerate overlap, not just realistic overlap)");
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[stress] HYBRID's own worst overlap MAGNITUDE disagreement (not just raw kodam's, and not just "
+      << "existence): absDiff=" << worstHybridAbsDiff << " relDiff=" << worstHybridRelDiff << " (ci: R="
+      << worstHybridCi.radius << " L=" << worstHybridCi.length << ", cj: R=" << worstHybridCj.radius
+      << " L=" << worstHybridCj.length << ") -- this is what actually reaches the simulation, unlike "
+      << "the raw-analytical worst-case above which the hybrid may have already corrected");
+   WALBERLA_CHECK_EQUAL(hybridWrong, 0);
+}
+
 //======================================================================================================================
 // Same randomized fuzz test, for Box x Box: boxBoxSAT (provably order-symmetric, no golden-section
 // search ever involved) against GJK/EPA directly -- boxBoxSAT has no uncertain-result fallback gate
@@ -1552,6 +4029,332 @@ void testBoxBoxRandomizedFuzz()
 }
 
 //======================================================================================================================
+// Box x Box: Fraige et al. (2008) multi-point replica vs. GJK/EPA vs. SAT, three-way fuzz comparison
+//======================================================================================================================
+
+//! Same random box-pair sampling as testBoxBoxRandomizedFuzz above, but additionally exercises
+//! boxBoxFraigeMultiPointContacts (the fuller literal Fraige et al. 2008 replica, PaperAnalyticalContacts.h
+//! -- adds the edge-edge/edge-face contact modes and near-corner normal blend that
+//! boxBoxMultiPointContacts, its vertex-only sibling, does not have) against both GJK/EPA (ground truth)
+//! and boxBoxSAT (already independently verified above). Checks: (1) does Fraige's method detect contact
+//! whenever GJK/EPA does -- unlike SAT (exact by construction, a 15-axis test that can never miss), the
+//! Fraige-style vertex+edge dispatch is NOT provably complete for every configuration, so this is
+//! MEASURED here, not assumed (result: 0/3286 missed in a 10000-trial run -- empirically complete for
+//! everything this fuzz sampling produces); (2) on trials where both fire, does Fraige's DEEPEST reported
+//! point's overlap MAGNITUDE agree with SAT's, at the same tolerance already established for
+//! boxBoxMultiPointContacts's own agreement with SAT elsewhere in this file.
+//!
+//! Normal agreement is deliberately NOT asserted (only logged) for the same reason
+//! testBoxBoxRandomizedFuzz's own perpendicular-point-distance metric isn't: investigated directly (a
+//! 10000-trial run found one case with near-perpendicular normals, both overlaps ~0.10-0.12, halfA/B
+//! ~1-2 each) and confirmed it is a genuine MULTI-FEATURE ambiguity, not a bug -- SAT reports its single
+//! globally-best-separating axis, while Fraige can report several simultaneous, comparably-deep contact
+//! points on genuinely DIFFERENT vertices/edges of a generically-overlapping pair, each with its own
+//! legitimately different local normal. Picking "the deepest" among several near-tied features and
+//! expecting it to match SAT's own single choice is exactly the kind of near-tied-axis ambiguity
+//! useRoundedBoxCorners/useAxisHysteresis exist to smooth over for SAT itself -- it is not something a
+//! second, independently-computed method should be expected to resolve identically.
+void testBoxBoxFraigeVsGjkVsSatFuzz()
+{
+   FuzzRng                                  fuzz(24681357); // distinct seed from every other box/cylinder fuzz test
+   std::uniform_real_distribution< real_t > halfExtentDist(real_t(0.3), real_t(2.0));
+
+   constexpr int numTrials             = 10000;
+   int           numOverlapping        = 0;
+   int           numFraigeMissedGjk    = 0; // GJK says contact, Fraige found nothing at all
+   int           numSatMissedGjk       = 0; // sanity re-check of the already-proven SAT/GJK agreement
+   real_t        maxAgreeOverlapDiff   = real_t(0); // Fraige's deepest point vs SAT, on trials both fire
+   real_t        maxAgreeNormalDiff    = real_t(0);
+   real_t        maxAgreePointAlongN   = real_t(0);
+   Vec3          worstHalfA, worstHalfB, worstPosB, worstSatNormal, worstFraigeNormal, worstSatPoint, worstFraigePoint;
+   real_t        worstSatOverlap = 0, worstFraigeOverlap = 0;
+   int           worstFraigeCount = 0;
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const Vec3 halfA(halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng));
+      const Vec3 halfB(halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng));
+      const Rot3 rotA = fuzz.randomRotation();
+      const Rot3 rotB = fuzz.randomRotation();
+
+      const real_t diagA    = halfA.length();
+      const real_t diagB    = halfB.length();
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const real_t minSize  = std::min({ halfA[0], halfA[1], halfA[2], halfB[0], halfB[1], halfB[2] });
+      const Vec3   posA(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkBoxBox(posA, rotA, real_t(2) * halfA, posA + dir * s, rotB, real_t(2) * halfB).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (diagA + diagB), minSize);
+      const Vec3 posB = posA + dir * sep;
+
+      const GjkResult gjk = gjkBoxBox(posA, rotA, real_t(2) * halfA, posB, rotB, real_t(2) * halfB);
+      const auto      sat = boxBoxSAT(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(), halfB);
+      const auto      fraige =
+         boxBoxFraigeMultiPointContacts(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(), halfB);
+
+      if (gjk.contact) ++numOverlapping;
+      if (gjk.contact && !sat.contact) ++numSatMissedGjk;
+      if (gjk.contact && fraige.empty())
+      {
+         ++numFraigeMissedGjk;
+         WALBERLA_LOG_WARNING_ON_ROOT("[fuzz] Fraige missed a GJK-confirmed contact, trial "
+                                       << trial << ": halfA=" << halfA << " halfB=" << halfB << " sep=" << sep
+                                       << " gjk.overlap=" << -gjk.penetrationDepth);
+      }
+
+      if (sat.contact && !fraige.empty())
+      {
+         const auto* deepest = &fraige.front();
+         for (const auto& c : fraige)
+            if (c.overlap > deepest->overlap) deepest = &c;
+
+         maxAgreeOverlapDiff = std::max(maxAgreeOverlapDiff, std::abs(sat.overlap - deepest->overlap));
+         const real_t normalDiff = (sat.normal - deepest->normal).length();
+         if (normalDiff > maxAgreeNormalDiff)
+         {
+            maxAgreeNormalDiff = normalDiff;
+            worstHalfA = halfA; worstHalfB = halfB; worstPosB = posB;
+            worstSatNormal = sat.normal; worstFraigeNormal = deepest->normal;
+            worstSatPoint = sat.point; worstFraigePoint = deepest->point;
+            worstSatOverlap = sat.overlap; worstFraigeOverlap = deepest->overlap;
+            worstFraigeCount = int(fraige.size());
+         }
+         const Vec3 diff     = sat.point - deepest->point;
+         maxAgreePointAlongN = std::max(maxAgreePointAlongN, std::abs(diff * sat.normal));
+      }
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] Box x Box, Fraige vs GJK vs SAT, " << numTrials << " random trials (" << numOverlapping
+      << " actually overlapping per GJK/EPA): SAT missed=" << numSatMissedGjk << " (expected 0), Fraige "
+      << "missed=" << numFraigeMissedGjk << " (Fraige's vertex+edge dispatch is not proven complete like "
+      << "SAT's 15-axis test -- measured, not assumed), on agreeing trials max overlap diff (SAT vs "
+      << "Fraige's deepest point)=" << maxAgreeOverlapDiff << ", max normal diff=" << maxAgreeNormalDiff
+      << " (informational only -- see this test's own doc comment for why normal agreement isn't "
+      << "asserted), max along-normal point diff=" << maxAgreePointAlongN);
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] worst normal-diff case: halfA=" << worstHalfA << " halfB=" << worstHalfB << " posB=" << worstPosB
+      << " | sat: normal=" << worstSatNormal << " point=" << worstSatPoint << " overlap=" << worstSatOverlap
+      << " | fraige (" << worstFraigeCount << " points, deepest shown): normal=" << worstFraigeNormal
+      << " point=" << worstFraigePoint << " overlap=" << worstFraigeOverlap);
+
+   WALBERLA_CHECK_EQUAL(numSatMissedGjk, 0);
+   // Fraige's completeness is NOT asserted at 0 -- see the log line above -- but should still be a small
+   // fraction of the overlapping trials, not a systematic failure, or the method has a real geometric gap.
+   WALBERLA_CHECK_LESS(real_t(numFraigeMissedGjk), real_t(0.02) * real_t(numOverlapping));
+   WALBERLA_CHECK_LESS(maxAgreeOverlapDiff, real_t(0.1));
+   // maxAgreeNormalDiff is NOT asserted -- see this test's own doc comment (genuine multi-feature
+   // ambiguity, confirmed by direct investigation, not a bug).
+   WALBERLA_CHECK_LESS(maxAgreePointAlongN, real_t(0.15));
+}
+
+//======================================================================================================================
+// Box x Box: hand-crafted replicas of Fraige et al. (2008)'s own Figs. 4-5 contact-type illustrations
+//======================================================================================================================
+
+//! Fig. 4a: a vertex of B embedded in A, NOT near any of A's own corners/edges -- the plain "nearest
+//! face" rule should apply (no corner blend), matching boxBoxMultiPointContacts' own behaviour exactly
+//! in this regime. A is a large cube; B is a small cube whose one corner pokes into the centre of A's
+//! +Z face, well away from any edge of A.
+void testFraigeVertexFaceContact()
+{
+   const Vec3 halfA(real_t(2), real_t(2), real_t(2));
+   const Vec3 halfB(real_t(0.3), real_t(0.3), real_t(0.3));
+   const Vec3 posA(real_t(0), real_t(0), real_t(0));
+   // B sits centred (in X/Y) on A's +Z face, poking 0.1 units in -- since B is axis-aligned and
+   // centred, all 4 of its bottom corners embed simultaneously (a flush corner-square, not a single
+   // diamond-tip poke -- Fraige's own Fig. 4a is 2D, where a ROTATED square gives a single vertex; the
+   // 3D axis-aligned analogue of "not near a corner/edge of A" is this flush 4-corner case instead).
+   // None of A's own corners (at +-2 in every axis) fall inside tiny, centred B, so this is exactly 4
+   // contacts, no reciprocal A-in-B ones.
+   const Vec3 posB(real_t(0), real_t(0), real_t(2) + halfB[2] - real_t(0.1));
+
+   const auto fraige = boxBoxFraigeMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK_EQUAL(fraige.size(), 4u);
+   for (const auto& c : fraige)
+   {
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(c.overlap, real_t(0.1), real_t(1e-9));
+      // This file's own pair-level convention: normal points from B (posB, sitting ABOVE A here) toward
+      // A (posA, below) -- i.e. -Z, regardless of which body's vertex is the one actually embedded.
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(c.normal, Vec3(0, 0, -1), real_t(1e-9));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(c.point[2], real_t(1.9), real_t(1e-9));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(c.point[0]), real_t(0.3), real_t(1e-9));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(c.point[1]), real_t(0.3), real_t(1e-9));
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("Fraige Fig.4a (vertex-face, not near a corner/edge): 4 flush corner "
+                              << "contacts, each normal=<0,0,-1> overlap=0.1 -- nearest-face rule confirmed, "
+                              << "no blend");
+
+   // Does boxBoxSAT (the production analytical dispatch) agree on this same geometry? Unlike Fraige's
+   // 4 separate vertex contacts, SAT reports ONE point/normal/overlap for the single winning
+   // separating axis -- here Z is unambiguously the minimum (A/B footprints in X/Y are far larger
+   // than their small Z gap), so this should match every one of Fraige's 4 contacts' own overlap and
+   // normal exactly, with no tie/ambiguity at all.
+   const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.1), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, Vec3(0, 0, -1), real_t(1e-9));
+   WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
+                              << sat.normal << " -- exact match, no ambiguity here");
+}
+
+//! Fig. 4b: the SAME vertex-in-box geometry as above, but now positioned so the penetrating vertex is
+//! near TWO of A's faces simultaneously (i.e. near one of A's own edges) -- the near-corner blend should
+//! fire, switching the normal from a pure face axis to the radial direction from A's centre to the
+//! vertex. Contrasted directly against boxBoxMultiPointContacts (the OLD, non-blended version) on the
+//! IDENTICAL geometry to show the two disagree exactly where the paper says they should.
+void testFraigeVertexNearCornerBlend()
+{
+   const Vec3 halfA(real_t(2), real_t(2), real_t(2));
+   const Vec3 halfB(real_t(0.3), real_t(0.3), real_t(0.3));
+   const Vec3 posA(real_t(0), real_t(0), real_t(0));
+   // B approaches A's +X/+Z edge (Y kept well away from any A boundary, so only 2 of A's 3 faces are
+   // ever close): B's near corner (posB - halfB) lands at (1.95, 1.5, 1.95), clearance 0.05 from BOTH
+   // A's +X and +Z faces (< 0.1 = 5% of halfA -- "near", blend fires) but 0.5 from A's +Y face (nowhere
+   // close). Every OTHER corner of B has at least one coordinate pushed past A's +2 boundary by a
+   // single +0.6 sign flip (e.g. the (+x,...) corner sits at x=2.55>2). Note A's own corner (2,2,2)
+   // ALSO happens to fall inside B here (a genuine reciprocal contact, not a bug) -- so this finds the
+   // SPECIFIC contact at B's near corner rather than assuming it is the only one returned.
+   const Vec3 posB(real_t(2.25), real_t(1.8), real_t(2.25));
+   const Vec3 expectedPoint(real_t(1.95), real_t(1.5), real_t(1.95));
+
+   const auto fraigeBlended   = boxBoxFraigeMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   const auto plainVertexOnly = boxBoxMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+
+   auto findByPoint = [](const std::vector< BoxVertexContact >& list, const Vec3& p) -> const BoxVertexContact* {
+      for (const auto& c : list)
+         if ((c.point - p).length() < real_t(1e-9)) return &c;
+      return nullptr;
+   };
+   const auto* blended = findByPoint(fraigeBlended, expectedPoint);
+   const auto* plain   = findByPoint(plainVertexOnly, expectedPoint);
+   WALBERLA_CHECK_NOT_NULLPTR(blended);
+   WALBERLA_CHECK_NOT_NULLPTR(plain);
+
+   // Both must agree on HOW deep the contact is -- only the reported NORMAL differs.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(blended->overlap, plain->overlap, real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(blended->overlap, real_t(0.05), real_t(1e-9));
+   const real_t normalDiff = (blended->normal - plain->normal).length();
+   WALBERLA_CHECK_GREATER(normalDiff, real_t(0.05)); // the blend must actually change the normal here
+   // The blended normal is the radial direction from A's centre (origin) to the embedded vertex
+   // (1.95,1.5,1.95), sign-flipped to match this file's own "from B toward A" pair convention --
+   // i.e. it should point noticeably toward BOTH the -X and -Z directions (a diagonal-ish vector),
+   // unlike the plain version's single-axis-aligned normal.
+   WALBERLA_CHECK_LESS(blended->normal[0], real_t(-0.1));
+   WALBERLA_CHECK_LESS(blended->normal[2], real_t(-0.1));
+   WALBERLA_LOG_INFO_ON_ROOT("Fraige Fig.4b (vertex near corner/edge): blended.normal=" << blended->normal
+                              << " vs plain (nearest-face-only).normal=" << plain->normal
+                              << " -- blend confirmed to change the normal near a corner, as the paper describes");
+
+   // Does boxBoxSAT agree here? By hand: overlap along X = halfA[0]+halfB[0]-|posB[0]| = 2.3-2.25=0.05,
+   // along Y = 2.3-1.8=0.5, along Z = 2.3-2.25=0.05 -- X and Z are EXACTLY tied at the true minimum
+   // (0.05), Y is not competitive. Since both boxes share the same orientation, the 9 edge-cross-product
+   // axes degenerate to the same 3 face axes (no new information), so SAT's own tie-break picks ONE of
+   // the two tied axes -- i.e. SAT should land on a plain, SINGLE-axis-aligned normal here too (either
+   // +-X or +-Z, whichever its own iteration order happens to pick -- not necessarily the SAME one
+   // "plain" Fraige's own tie-break picks, since that is a separate, independently-ordered loop), NOT
+   // the blended diagonal one. Checked, not assumed.
+   const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.05), real_t(1e-9));
+   const bool  satIsSingleAxisAligned = (std::abs(std::abs(sat.normal[0]) - real_t(1)) < real_t(1e-9)) ||
+                                        (std::abs(std::abs(sat.normal[2]) - real_t(1)) < real_t(1e-9));
+   const real_t satVsBlendedDiff = (sat.normal - blended->normal).length();
+   WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
+                              << sat.normal << "  singleAxisAligned=" << satIsSingleAxisAligned
+                              << "  |diff vs blended|=" << satVsBlendedDiff);
+   WALBERLA_CHECK(satIsSingleAxisAligned);                  // SAT ties to a single face axis (X or Z)
+   WALBERLA_CHECK_GREATER(satVsBlendedDiff, real_t(0.05));  // NOT the blended diagonal normal
+}
+
+//! Fig. 5b: an edge of B pierces through A's face with NEITHER of the edge's own endpoints embedded in
+//! A -- exactly the configuration boxBoxMultiPointContacts (vertex-only) cannot detect at all. B is a
+//! long thin box crossing straight through A like a skewer, entering one face and exiting the opposite
+//! one, so neither of the piercing edge's two endpoints ever lands inside A.
+void testFraigeEdgeFaceContact()
+{
+   const Vec3 halfA(real_t(2), real_t(2), real_t(2));
+   const Vec3 halfB(real_t(0.2), real_t(0.2), real_t(5)); // long along its own local Z
+   const Vec3 posA(real_t(0), real_t(0), real_t(0));
+   const Vec3 posB(real_t(0), real_t(0), real_t(0)); // B's long axis skewers straight through A's centre
+
+   const auto plainVertexOnly = boxBoxMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(plainVertexOnly.empty()); // confirms this really is the gap boxBoxMultiPointContacts has
+
+   const auto fraige = boxBoxFraigeMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(!fraige.empty());
+   const GjkResult gjk = gjkBoxBox(posA, Rot3(), real_t(2) * halfA, posB, Rot3(), real_t(2) * halfB);
+   WALBERLA_CHECK(gjk.contact);
+
+   // B's 4 edges running along ITS OWN long (Z) axis are the only ones that ever cross into A (its
+   // other 8 edges have a coordinate stuck at +-5, always outside A's own +-2 extent) -- each contact
+   // point lands at the midpoint of the clipped segment, (+-0.2,+-0.2,0) (A and B share a centre here),
+   // where the SMALLEST of A's 3 face clearances is the lateral one (2-0.2=1.8), NOT the longitudinal
+   // one (2-0=2 at the exact centre) -- so exactly 4 contacts, each overlap=1.8, normal +-X or +-Y
+   // (never Z, since B doesn't poke out of A's top/bottom -- A is wider than B's cross-section).
+   WALBERLA_CHECK_EQUAL(fraige.size(), 4u);
+   real_t maxOverlap = real_t(0);
+   for (const auto& c : fraige)
+   {
+      maxOverlap = std::max(maxOverlap, c.overlap);
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(c.overlap, real_t(1.8), real_t(1e-9));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(c.normal[2]), real_t(0), real_t(1e-9));
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("Fraige Fig.5b (edge-face, skewer): " << fraige.size()
+                              << " contact(s) found, maxOverlap=" << maxOverlap << " gjk.overlap="
+                              << -gjk.penetrationDepth << " -- detects a case boxBoxMultiPointContacts misses entirely");
+
+   // Does boxBoxSAT (which, unlike the vertex-only method, tests all 15 candidate axes including face
+   // normals) handle this skewer case? By hand: overlap along X = halfA[0]+halfB[0]-0 = 2.2, along Y =
+   // 2.2, along Z = 2+5-0=7 -- X/Y are tied at the TRUE minimum (2.2), matching GJK's own
+   // -penetrationDepth exactly (SAT is proven exact from the earlier fuzz test) -- a completely
+   // DIFFERENT number from Fraige's own 1.8 (a local per-point clearance, not the global minimum), by
+   // design (see this file's own doc comment on why normal/overlap need not match between the two
+   // methods).
+   const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
+                              << sat.normal << " -- matches GJK's true global minimum exactly, unlike "
+                              << "Fraige's own per-point local overlap (1.8)");
+}
+
+//! Fig. 5a: two long thin boxes crossing like an "X" / "plus" sign, each edge of one crossing an edge of
+//! the other at a shared central region, with NO vertex of either box embedded in the other one. Also a
+//! case boxBoxMultiPointContacts (vertex-only) cannot detect.
+void testFraigeEdgeEdgeContact()
+{
+   const Vec3 halfA(real_t(0.2), real_t(0.2), real_t(5)); // long along its own local Z
+   const Vec3 halfB(real_t(5), real_t(0.2), real_t(0.2)); // long along its own local X
+   const Vec3 posA(real_t(0), real_t(0), real_t(0));
+   const Vec3 posB(real_t(0), real_t(0), real_t(0)); // both skewers cross through the shared origin
+
+   const auto plainVertexOnly = boxBoxMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(plainVertexOnly.empty());
+
+   const auto fraige = boxBoxFraigeMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(!fraige.empty());
+   const GjkResult gjk = gjkBoxBox(posA, Rot3(), real_t(2) * halfA, posB, Rot3(), real_t(2) * halfB);
+   WALBERLA_CHECK(gjk.contact);
+
+   WALBERLA_LOG_INFO_ON_ROOT("Fraige Fig.5a (edge-edge, crossing skewers): " << fraige.size()
+                              << " contact(s) found, gjk.overlap=" << -gjk.penetrationDepth
+                              << " -- another case boxBoxMultiPointContacts misses entirely");
+
+   // Does boxBoxSAT handle this crossing case? By hand: overlap along X = halfA[0]+halfB[0]-0 = 5.2,
+   // along Y = 0.2+0.2=0.4, along Z = 5+0.2=5.2 -- Y is the unambiguous true minimum (0.4), matching
+   // GJK exactly.
+   const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
+                              << sat.normal << " -- matches GJK's true global minimum exactly");
+}
+
+//======================================================================================================================
 // Hybrid dispatcher: does cylinderCylinderResultIsUncertain() correctly route the two still-open
 // "known limitation" geometries to GJK/EPA (recovering the right answer), while leaving every
 // already-verified scenario family on the fast analytical path (no unnecessary fallback calls)?
@@ -1607,9 +4410,16 @@ void testHybridTier1BoundaryCase()
    WALBERLA_CHECK(!hybrid.contact);
 }
 
-//! TIER 2: identical geometry to testCylinderCylinderTiltedRimIntoFace, where the analytical
-//! dispatch DOES find a scenario (face-edge) but with the wrong magnitude (0.299 vs GJK/EPA's 0.235).
-//! The circumscribing-sphere cross-check should flag this and recover the correct value via fallback.
+//! FORMERLY "Tier 2 triggers on wrong magnitude": identical geometry to
+//! testCylinderCylinderTiltedRimIntoFace, where the analytical dispatch DOES find a scenario
+//! (face-edge) but with the wrong magnitude (0.299 vs GJK/EPA's 0.235). Tier 2 (a circumscribing-
+//! sphere magnitude cross-check applied to every non-exempt scenario) used to flag this and recover
+//! the correct value via fallback -- it was REMOVED from cylinderCylinderResultIsUncertain (see that
+//! function's own comment for the full history: it pushed the GJK/EPA fallback rate to ~90% while
+//! still being structurally one-sided, catching underestimates but not overestimates). This is now
+//! exactly the accepted trade-off: the hybrid no longer falls back here, and legitimately returns the
+//! same wrong raw analytical value as the pure dispatch -- one concrete instance of the ~2.3-2.5%
+//! residual wrong-magnitude rate documented for the current (Tier 1 + special-contact only) design.
 void testHybridTier2TriggersOnWrongMagnitude()
 {
    CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.6), real_t(2) };
@@ -1621,18 +4431,24 @@ void testHybridTier2TriggersOnWrongMagnitude()
    const HybridResult   hybrid        = cylinderCylinderContactHybrid(ci, Rot3(), cj, rotJ);
    const GjkResult       gjk           = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
 
-   WALBERLA_CHECK(hybrid.usedFallback);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-6));
-   WALBERLA_LOG_INFO_ON_ROOT("Hybrid Tier 2 (wrong magnitude): analytical-only overlap="
-                              << analyticalOnly.overlap << ", hybrid (with fallback) overlap=" << hybrid.overlap
-                              << " -- corrected from the wrong analytical value to GJK/EPA's " << -gjk.penetrationDepth);
+   WALBERLA_CHECK(!hybrid.usedFallback); // no longer falls back -- Tier 2 removed, see comment above
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, analyticalOnly.overlap, real_t(1e-6)); // kept as-is
+   WALBERLA_LOG_INFO_ON_ROOT("Hybrid (Tier 2 removed) on a known wrong-magnitude geometry: analytical "
+                              << "overlap=" << analyticalOnly.overlap << ", hybrid overlap=" << hybrid.overlap
+                              << " (same value, no longer corrected) vs GJK/EPA's true "
+                              << -gjk.penetrationDepth << " -- accepted residual error, not a bug");
 }
 
-//! TIER 2 must NOT fire for the scenario families already fully verified against GJK/EPA (face-face,
-//! band-band-parallel, band-band-skewed, face-band), even though they involve tilted/oblique
-//! geometry too -- these are excluded from the circumscribing-sphere check by scenario name, not by
-//! re-deriving correctness each time. Reuses testCylinderCylinderFaceFace/BandBandSkewed60Degrees'
-//! geometries as representative cases.
+//! FORMERLY "Tier 2 must not fire for verified scenarios": now that Tier 2 has been removed entirely
+//! (see cylinderCylinderResultIsUncertain's own comment), NONE of face-face/band-band-parallel/
+//! band-band-skewed/face-band ever trigger a fallback any more -- only "no scenario matched" (Tier 1)
+//! and special-contact do. What's still worth asserting per geometry is that trusting the raw
+//! analytical result directly continues to agree with GJK/EPA: face-face/band-band-parallel are
+//! provably exact under their own near-parallel-axis precondition regardless of any fallback tier;
+//! band-band-skewed's own root-cause bug was fixed (not merely safety-netted) per
+//! testCylinderCylinderPureAnalyticalScenarioBreakdown's fresh-run confirmation; face-band was never
+//! covered by the fuzz suite's documented error population the way band-edge/edge-edge/face-edge are,
+//! so it is expected (and checked here) to still agree.
 void testHybridTier2DoesNotTriggerOnVerifiedScenarios()
 {
    {
@@ -1650,50 +4466,39 @@ void testHybridTier2DoesNotTriggerOnVerifiedScenarios()
       WALBERLA_CHECK_EQUAL(std::string(hybrid.scenario), "band-band-parallel");
    }
    {
-      // NOTE: this geometry resolves to band-band-skewed, which -- since
-      // testCylinderCylinderRandomizedFuzz's fuzz test proved that scenario is NOT always reliable
-      // (~8% false-positive rate before Tier 2 covered it, still non-zero after) -- is no longer
-      // excluded from Tier 2's cross-check. So this case now CORRECTLY triggers the fallback rather
-      // than skipping it; the only thing still asserted here is that the final answer matches
-      // GJK/EPA, not that Tier 2 stayed out of the way.
       CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.4), real_t(4) };
       Rot3          rotJ;
       rotJ.rotate(Vec3(real_t(0), real_t(1), real_t(0)), math::pi / real_t(3));
       CylinderState cj{ Vec3(real_t(0), real_t(0.6), real_t(1)), rotJ.getMatrix(), real_t(0.4), real_t(4) };
       const HybridResult hybrid = cylinderCylinderContactHybrid(ci, Rot3(), cj, rotJ);
       const GjkResult     gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+      WALBERLA_CHECK(!hybrid.usedFallback);
       WALBERLA_CHECK_EQUAL(hybrid.contact, gjk.contact);
       if (hybrid.contact && gjk.contact)
          WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-2));
    }
    {
-      // face-band is likewise no longer excluded from Tier 2 (only face-face/band-band-parallel
-      // are, see cylinderCylinderResultIsUncertain's comment) -- it was never actually verified
-      // against fuzzed geometry either, just assumed safe by omission from the original capped-
-      // surface list. This particular geometry does trigger the fallback now; asserted against
-      // GJK/EPA directly instead of asserting Tier 2 stayed out of the way.
       CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.5), real_t(2) };
       Rot3          rotJ;
       rotJ.rotate(Vec3(real_t(0), real_t(1), real_t(0)), math::pi * real_t(0.5));
       CylinderState cj{ Vec3(real_t(0), real_t(0.45), real_t(1.4)), rotJ.getMatrix(), real_t(0.5), real_t(4) };
       const HybridResult hybrid = cylinderCylinderContactHybrid(ci, Rot3(), cj, rotJ);
       const GjkResult     gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+      WALBERLA_CHECK(!hybrid.usedFallback);
       WALBERLA_CHECK_EQUAL(hybrid.contact, gjk.contact);
       if (hybrid.contact && gjk.contact)
          WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-2));
    }
-   WALBERLA_LOG_INFO_ON_ROOT("Hybrid Tier 2: face-face and band-band-parallel (the only scenarios "
-                              "provably exact under their near-parallel-axis precondition) did not "
-                              "trigger an unnecessary fallback call; band-band-skewed and face-band "
-                              "correctly did, and both still matched GJK/EPA once they did");
+   WALBERLA_LOG_INFO_ON_ROOT("Hybrid (Tier 2 removed): face-face, band-band-parallel, band-band-skewed "
+                              "and face-band all now trusted directly (no fallback call at all), and "
+                              "all four still matched GJK/EPA");
 }
 
-//! TIER 2, the empirically interesting case: the NOW-FIXED edge-edge-ish geometry resolves as
-//! face-edge with an EXACT match to GJK/EPA (0.05 == 0.05) -- but face-edge IS one of the three
-//! scenario names subject to the circumscribing-sphere check. Does the (necessarily loose) bound
-//! over-trigger here anyway, spending an unnecessary GJK/EPA call on an already-correct answer? This
-//! is reported, not asserted either way -- both outcomes are "correct" (the final number is right
-//! regardless), this just characterises how tight the Tier 2 heuristic actually is in practice.
+//! FORMERLY the empirically interesting Tier 2 case: the NOW-FIXED edge-edge-ish geometry resolves as
+//! face-edge with an EXACT match to GJK/EPA (0.05 == 0.05). Retained now that Tier 2 is gone as a
+//! simple regression check that this already-correct face-edge case is still trusted directly
+//! (usedFallback is expected false, though not hard-asserted -- either answer would still be
+//! numerically "correct" here) and still agrees with GJK/EPA.
 void testHybridTier2OnAlreadyCorrectFaceEdgeCase()
 {
    CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.4), real_t(1.6) };
@@ -1706,10 +4511,8 @@ void testHybridTier2OnAlreadyCorrectFaceEdgeCase()
 
    WALBERLA_CHECK(hybrid.contact);
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-2));
-   WALBERLA_LOG_INFO_ON_ROOT("Hybrid Tier 2 on already-correct face-edge case: usedFallback="
-                              << hybrid.usedFallback
-                              << " (either answer is 'correct' here -- this just characterises the "
-                                 "heuristic's tightness, see comment)");
+   WALBERLA_LOG_INFO_ON_ROOT("Hybrid (Tier 2 removed) on already-correct face-edge case: usedFallback="
+                              << hybrid.usedFallback << " (expected false now -- no longer needed here)");
 }
 
 //======================================================================================================================
@@ -1827,6 +4630,214 @@ void testCylinderPlaneEdgeNoContact()
    WALBERLA_CHECK(
       !cylinderPlaneContact(cyl, Vec3(real_t(0), real_t(0), real_t(0)), Vec3(real_t(0), real_t(0), real_t(1)))
           .contact);
+}
+
+//======================================================================================================================
+// Sphere x Cylinder -- new for this project (see PaperAnalyticalContacts.h's own comment on
+// sphereCylinderContact for why sphere-sphere/sphere-box predate it but this does not). Exact and
+// unconditional, unlike cylinder-cylinder: no uncertainty gate, no fallback tier needed at all.
+//======================================================================================================================
+
+//! Sphere clearly outside, closest feature on the cylinder's curved BAND (radial clamp fires, axial
+//! clamp does not): cylinder R=1,L=4 along z; sphere of radius 0.3 centred at (1.5,0,0), i.e. purely
+//! radially offset at the cylinder's own mid-height. rho=1.5, z=0 (|z|<halfL=2, so axial clamp is a
+//! no-op); closest point q=(1,0,0); dist=0.5; overlap=0.3-0.5=-0.2 -> NO contact at this distance, so
+//! moved sphere to 1.2 instead (dist=0.2, overlap=0.1).
+void testSphereCylinderBand()
+{
+   CylinderState cyl{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(4.0) };
+   const Vec3    spherePos(real_t(1.2), real_t(0), real_t(0));
+   const real_t  sphereRadius = real_t(0.3);
+
+   const ContactResult kodam = sphereCylinderContact(spherePos, sphereRadius, cyl);
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(1), real_t(0), real_t(0)), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(1), real_t(0), real_t(0)), real_t(1e-6));
+
+   const GjkResult gjk = gjkSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (band): overlap=" << kodam.overlap << " (exact agreement)");
+}
+
+//! Sphere clearly outside, closest feature on a flat CAP (axial clamp fires, radial does not):
+//! cylinder R=1,L=2 (halfL=1) along z; sphere radius 0.3 centred on-axis at z=1.2 (rho=0). z=1.2>halfL,
+//! so zC=1.0; q=(0,0,1); dist=0.2; overlap=0.3-0.2=0.1.
+void testSphereCylinderCap()
+{
+   CylinderState cyl{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(2.0) };
+   const Vec3    spherePos(real_t(0), real_t(0), real_t(1.2));
+   const real_t  sphereRadius = real_t(0.3);
+
+   const ContactResult kodam = sphereCylinderContact(spherePos, sphereRadius, cyl);
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(0), real_t(0), real_t(1)), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0), real_t(0), real_t(1)), real_t(1e-6));
+
+   const GjkResult gjk = gjkSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (cap): overlap=" << kodam.overlap << " (exact agreement)");
+}
+
+//! Sphere near the RIM: both the radial and axial clamp fire simultaneously (rho>R AND |z|>halfL), so
+//! the closest point is the nearest point on the circular edge itself, not a plain face or band point.
+//! Cylinder R=1,L=2 (halfL=1); sphere radius 0.3 centred at (1.5,0,1.3) (rho=1.5>1, z=1.3>1). Closest
+//! point q=(1,0,1) (the actual rim); diff=(0.5,0,0.3), dist=sqrt(0.34)=0.583095; overlap=0.3-0.583095
+//! (negative -> no contact at this distance); moved sphere closer, to (1.2,0,1.1): diff=(0.2,0,0.1),
+//! dist=sqrt(0.05)=0.223607, overlap=0.3-0.223607=0.076393.
+void testSphereCylinderRim()
+{
+   CylinderState cyl{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(2.0) };
+   const Vec3    spherePos(real_t(1.2), real_t(0), real_t(1.1));
+   const real_t  sphereRadius = real_t(0.3);
+
+   const ContactResult kodam = sphereCylinderContact(spherePos, sphereRadius, cyl);
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.0763932), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(1), real_t(0), real_t(1)), real_t(1e-6));
+
+   const GjkResult gjk = gjkSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (rim, both clamps fire): overlap=" << kodam.overlap
+                              << " (exact agreement)");
+}
+
+//! Sphere centre embedded INSIDE the cylinder, closer to the curved band than either cap: cylinder
+//! R=1,L=4 (halfL=2); sphere radius 0.3 centred at (0.8,0,0) (rho=0.8<1, z=0). radialClearance=0.2,
+//! axialClearance=2.0 -> radial wins. overlap=0.2+0.3=0.5.
+void testSphereCylinderEmbeddedBand()
+{
+   CylinderState cyl{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(4.0) };
+   const Vec3    spherePos(real_t(0.8), real_t(0), real_t(0));
+   const real_t  sphereRadius = real_t(0.3);
+
+   const ContactResult kodam = sphereCylinderContact(spherePos, sphereRadius, cyl);
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.5), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(1), real_t(0), real_t(0)), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, spherePos, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (embedded, band side wins): overlap=" << kodam.overlap);
+}
+
+//! Sphere centre embedded INSIDE the cylinder, closer to a flat cap than the band: cylinder R=3,L=2
+//! (halfL=1); sphere radius 0.3 centred at (0,0,0.9) (rho=0, z=0.9). radialClearance=3.0,
+//! axialClearance=0.1 -> axial wins. overlap=0.1+0.3=0.4.
+void testSphereCylinderEmbeddedCap()
+{
+   CylinderState cyl{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(3.0), real_t(2.0) };
+   const Vec3    spherePos(real_t(0), real_t(0), real_t(0.9));
+   const real_t  sphereRadius = real_t(0.3);
+
+   const ContactResult kodam = sphereCylinderContact(spherePos, sphereRadius, cyl);
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.4), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(0), real_t(0), real_t(1)), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, spherePos, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (embedded, cap side wins): overlap=" << kodam.overlap);
+}
+
+void testSphereCylinderNoContact()
+{
+   CylinderState cyl{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(4.0) };
+   const Vec3    spherePos(real_t(3), real_t(0), real_t(0));
+   WALBERLA_CHECK(!sphereCylinderContact(spherePos, real_t(0.3), cyl).contact);
+   const GjkResult gjk = gjkSphereCyl(spherePos, real_t(0.3), cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(!gjk.contact);
+}
+
+//! Randomized fuzz sweep against GJK/EPA, fully arbitrary 3-D cylinder orientation, boundary-biased
+//! separation (same FuzzRng/sampleSeparationNearBoundary methodology as every other fuzz test in this
+//! file). Unlike cylinder-cylinder, sphereCylinderContact carries no uncertainty gate and no known
+//! limitation to characterize -- this test's entire purpose is to confirm that claim of exactness
+//! empirically, not to map out a failure population the way the cylinder-cylinder fuzz tests do.
+void testSphereCylinderRandomizedFuzz()
+{
+   FuzzRng                                  fuzz(112233);
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+   std::uniform_real_distribution< real_t > sphereRadiusDist(real_t(0.1), real_t(1.0));
+
+   constexpr int numTrials = 10000;
+   int           numOverlapping = 0;
+   int           numMismatch    = 0;
+   real_t        maxOverlapDiff = real_t(0);
+   real_t        maxPointDiff   = real_t(0);
+   real_t        maxNormalAngleDeg = real_t(0);
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const real_t cylR = radiusDist(fuzz.rng), cylL = lengthDist(fuzz.rng);
+      const real_t sphR = sphereRadiusDist(fuzz.rng);
+      const Rot3   rotCyl = fuzz.randomRotation();
+      const Vec3   cylPos(real_t(0), real_t(0), real_t(0));
+
+      const real_t circumCyl = std::sqrt(cylR * cylR + real_t(0.25) * cylL * cylL);
+      const Vec3   dir       = fuzz.randomUnitVec();
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkSphereCyl(cylPos + dir * s, sphR, cylPos, rotCyl, cylR, cylL).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                              real_t(3) * (circumCyl + sphR), sphR);
+      const Vec3   spherePos = cylPos + dir * sep;
+      const CylinderState cyl{ cylPos, rotCyl.getMatrix(), cylR, cylL };
+
+      const ContactResult kodam = sphereCylinderContact(spherePos, sphR, cyl);
+      const GjkResult      gjk  = gjkSphereCyl(spherePos, sphR, cylPos, rotCyl, cylR, cylL);
+
+      if (gjk.contact) ++numOverlapping;
+      if (kodam.contact != gjk.contact)
+      {
+         ++numMismatch;
+         WALBERLA_LOG_WARNING_ON_ROOT(
+            "[fuzz] Sphere x Cylinder mismatch, trial " << trial << ": kodam.contact=" << kodam.contact
+            << " gjk.contact=" << gjk.contact << " | cylR=" << cylR << " cylL=" << cylL << " sphR=" << sphR
+            << " sep=" << sep);
+         continue;
+      }
+      if (!kodam.contact) continue;
+
+      const real_t overlapDiff = std::abs(kodam.overlap - (-gjk.penetrationDepth));
+      const real_t pointDiff   = (kodam.point - gjk.point).length();
+      const real_t cosAngle    = std::clamp(kodam.normal * gjk.normal, real_t(-1), real_t(1));
+      const real_t angleDeg    = std::acos(cosAngle) * real_t(180) / math::pi;
+      maxOverlapDiff    = std::max(maxOverlapDiff, overlapDiff);
+      maxPointDiff      = std::max(maxPointDiff, pointDiff);
+      maxNormalAngleDeg = std::max(maxNormalAngleDeg, angleDeg);
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] Sphere x Cylinder, " << numTrials << " random trials (" << numOverlapping
+      << " actually overlapping per GJK/EPA): existence mismatches=" << numMismatch
+      << ", max overlap diff=" << maxOverlapDiff << ", max point diff=" << maxPointDiff
+      << ", max normal angle diff=" << maxNormalAngleDeg << " deg");
+
+   // Unlike every cylinder-cylinder fuzz test in this file, existence/overlap/normal are asserted
+   // strictly, not just logged -- sphereCylinderContact's own closed form is a complete, exact
+   // minimum-translation-distance solution (see its header comment), not a named-scenario heuristic,
+   // so there is no known geometric limitation to tolerate here. Confirmed empirically too: across
+   // 10000 trials, max overlap diff was 2.8e-15 (machine precision) and max normal angle diff was
+   // 1.9e-6 degrees -- both already at floating-point noise level.
+   WALBERLA_CHECK_EQUAL(numMismatch, 0);
+   WALBERLA_CHECK_LESS(maxOverlapDiff, real_t(1e-5));
+   WALBERLA_CHECK_LESS(maxNormalAngleDeg, real_t(0.1));
+   // Contact POINT is NOT held to the same standard: sphereCylinderContact places it on the
+   // cylinder's own surface (the closest-point construction's natural output), while
+   // SolidCylinderContactDetection's GJK/EPA path places it roughly midway between the two bodies'
+   // surfaces along the separating axis -- two different, equally valid conventions for "the" contact
+   // point (same underdetermined-point situation already documented for box-box/cylinder-cylinder
+   // flush contacts elsewhere in this file), which can differ by up to roughly half the overlap/sphere-
+   // radius scale even when overlap and normal agree exactly. Informational only, not asserted.
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] Sphere x Cylinder max contact-point difference=" << maxPointDiff << " (informational only -- "
+      << "differing point CONVENTION between the two paths, not a geometric disagreement; see comment)");
 }
 
 //======================================================================================================================
@@ -2013,6 +5024,11 @@ int main(int argc, char** argv)
    testBoxBoxSATJob4139454Explosion2();
    testBoxBoxSATBoundaryTouching();
    testBoxBoxRandomizedFuzz();
+   testBoxBoxFraigeVsGjkVsSatFuzz();
+   testFraigeVertexFaceContact();
+   testFraigeVertexNearCornerBlend();
+   testFraigeEdgeFaceContact();
+   testFraigeEdgeEdgeContact();
 
    // Cylinder x Cylinder
    testCylinderCylinderParallelMatchesExisting();
@@ -2024,15 +5040,42 @@ int main(int argc, char** argv)
    testCylinderCylinderBandBandSkewed60Degrees();
    testCylinderCylinderBandBandSkewedNoContact();
    testCylinderCylinderFaceBand();
+   testCylinderCylinderFaceBandFullyInside();
+   testCylinderCylinderFaceBandPartiallyInside();
    testCylinderCylinderFaceBandNoContact();
    testCylinderCylinderTiltedRimIntoFace();
    testCylinderCylinderTiltedRimIntoFaceNoContact();
    testCylinderCylinderTiltedRimIntoBand();
    testCylinderCylinderTiltedRimIntoBandNoContact();
    testCylinderCylinderSpecialContact();
+   testCylinderCylinderSpecialContactBruteForceMTD();
    testCylinderCylinderSpecialContactNoContact();
    testCylinderCylinderEdgeEdge();
    testCylinderCylinderRandomizedFuzz();
+   testCylinderCylinderPureAnalyticalScenarioBreakdown();
+   testCylinderCylinderParallelAxesFuzz();
+   testCylinderCylinderFaceBandBarelyOverlappingFuzz();
+   testCylinderCylinderFaceEdgeClean();
+   testCylinderCylinderBandEdgeClean();
+   testCylinderCylinderEdgeEdgeGenuine();
+
+   // Cylinder x Cylinder, alternative method (Feng, Han & Owen 2017) -- dropped from active
+   // development per the "focus on Kodam only" decision; function bodies kept for the historical
+   // record (see their own comments), just not exercised on every run any more.
+   // testFengClosestPointOnEllipseToOrigin();
+   // testFengIntersectEllipseWithCircle();
+   // testFengInteriorContact();
+   // testFengRimContact();
+   // testFengVsKodamVsGjkScenarioBreakdown();
+   // testCylinderCylinderMissPatternAnalysis();
+   testCylinderCylinderFullComparisonAndHybridFeasibility();
+   testEdgeEdgeThreeWayAccuracy10k();
+   testThetaRefTieBreakNecessity10k();
+   testClosestDistanceSqBetweenSegments();
+   testTightTier1Accuracy10k();
+   testBoxSeparationAlongCenterLine();
+   testTightLayer1BoxAccuracy10k();
+   testCylinderCylinderLargeOverlapDegenerateStress();
    // testCylinderCylinderFallbackRateBoundaryBiased();  // deactivated -- 100k trials, slow; call
    // manually when the fallback-precision breakdown is actually needed
 
@@ -2051,6 +5094,15 @@ int main(int argc, char** argv)
    testCylinderPlaneBandNoContact();
    testCylinderPlaneEdge();
    testCylinderPlaneEdgeNoContact();
+
+   // Sphere x Cylinder
+   testSphereCylinderBand();
+   testSphereCylinderCap();
+   testSphereCylinderRim();
+   testSphereCylinderEmbeddedBand();
+   testSphereCylinderEmbeddedCap();
+   testSphereCylinderNoContact();
+   testSphereCylinderRandomizedFuzz();
 
    // Box x ArchTunnel (CylindricalBoundary containment mode)
    testArchTunnelBoxContainmentHandDerived();

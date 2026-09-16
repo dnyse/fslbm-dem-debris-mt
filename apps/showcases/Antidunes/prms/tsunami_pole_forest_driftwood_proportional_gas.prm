@@ -1,0 +1,321 @@
+// tsunami_pole_forest_driftwood_proportional_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// A PROPORTIONALLY-SCALED version of tsunami_pole_forest_driftwood_gas.prm: every dimension below is
+// derived directly from Watanabe et al. 2023's own stated numbers (Section 4.2, tsunami + tide-
+// protection forest + driftwood, the case closest to this scenario) multiplied by a single scale factor
+// s=1.2, rather than an independently-chosen geometry. The original tsunami_pole_forest_driftwood_gas.prm
+// was checked against Watanabe's real proportions after its first run (job 4180567) and found NOT to be
+// proportional at all -- e.g. its gate-to-forest gap was 0.156 of domain length vs. Watanabe's real 0.348,
+// and its overall domain aspect ratio (2.1:1:1.5) bore no relation to Watanabe's actual tank (26:1:1). This
+// file fixes that: every quantity taken from the paper is Watanabe's own value * 1.2, so ALL of the
+// following ratios now match the real experiment exactly (up to LU rounding):
+//   domain length:width:height, reservoir length/domain length, reservoir depth/domain height,
+//   gate-to-forest gap/domain length, pole diameter/domain width, forest position/domain length.
+//
+// WHY s=1.2 specifically: it's the smallest scale factor that keeps the pole diameter at 6 LU (6 cm at
+// dx=1cm) -- the SAME pole resolution already used (and already accepted) in the non-proportional
+// scenario, so we aren't paying for extra fidelity we can't afford. Watanabe's own pole diameter is 0.05m;
+// this scenario resolves poles across only ~6 cells, notably coarser than Watanabe's own ~20 cells/pole-
+// diameter (which they themselves flagged as marginal) -- a real accuracy trade-off accepted here in
+// exchange for staying single-node/CPU-feasible without AMR or GPUs.
+//
+// NOT independently re-derived from Watanabe's own figures (out of scope -- extracting sub-mm pole/log
+// sub-array coordinates from a scanned PDF figure isn't reliable): the internal STYLE of the pole forest
+// (2 staggered rows of 4, evenly spaced across the tank width) and the driftwood logs' count (8, matching
+// the non-proportional scenario, not Watanabe's 47) and their scattered arrangement upstream of the
+// forest. These follow the same layout convention as the original scenario, just repositioned/rescaled
+// into the new domain -- so the TANK/RESERVOIR/GAP/POLE-DIAMETER/LOG-SIZE proportions are rigorously
+// Watanabe-derived, but the exact pole/log sub-array is this project's own reasonable approximation, not a
+// digitized reproduction of Watanabe's Figure 19/20.
+//
+// SIZE, vs. the non-proportional scenario: domain grows from 128x60x90=691,200 LU cells to
+// 1872x72x72=9,704,448 LU cells (~14x). Still nowhere near Watanabe's own scale (111.7M-436M LU cells,
+// 32 GPUs, ~24h) -- this fits comfortably on 4 CPU nodes (see jobs/run_288_tsunami_pole_forest_driftwood_
+// proportional.sbatch), no AMR/GPUs needed. See that sbatch file / this file's own VTK/EvaluationParameters
+// comments for the resulting output-volume trade-offs of the ~14x larger domain.
+//
+// TIMESTEPS: waterDepth here (30 LU) is smaller than the non-proportional scenario's (54 LU) -- both the
+// deeper run-out AND the shallower reservoir make the wave-front slower in absolute LU/step terms. Scaling
+// the non-proportional scenario's OWN observed front speed (job 4180567: ~0.0092 LU/step at waterDepth=54)
+// by sqrt(30/54) (shallow-water c ~ sqrt(g*depth)) gives an estimated ~0.0068 LU/step here. At that speed:
+// gate (x=660) to forest (x=1312, a 652 LU gap) ~= 95,600 steps; gate to the far wall (x=1872, a 1212 LU
+// gap) ~= 178,000 steps. timesteps below (120,000) is set to comfortably reach and observe the forest/
+// driftwood interaction, without yet chasing the far-wall reflection -- exactly the same "submit, inspect,
+// adjust" situation as the non-proportional scenario's own first estimate (which was later found ~2x off).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 26, 36, 36 >;
+   periodicity                   < 0, 0, 0 >;   // closed tank -- no periodic direction at all
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             30000;   // 4 checkpoints over the 120000-step run
+   snapshotBaseFolder            snapshots;
+}
+
+// wavePeriods/initialAmplitude are INERT placeholders here (only consumed by Antidunes' own
+// sinusoidal-bed init, which tsunami.cpp never calls) -- required fields, kept at harmless defaults.
+// floorHeightFactor CANNOT be 0 (see the non-proportional scenario's own header for why -- a pre-existing
+// invariant of SimulationParams.h::ComputedParams, unrelated to this scenario). liquidHeightFactor+
+// floorHeightFactor together DO still matter: combined with ParticleParameters.avgParticleDiameterOverride
+// =2 below, they set computed.absoluteLiquidHeight = 2 * (liquidHeightFactor+floorHeightFactor) =
+// 2 * (14+1) = 30 -- kept equal to DamBreakParameters.waterDepth below.
+DomainParameters
+{
+   domainSize         <1872, 72, 72>;
+   wavePeriods        1;
+   liquidHeightFactor 14;
+   floorHeightFactor  1;
+   initialAmplitude   0;
+}
+
+// Reservoir: x in [0, gateX) initially liquid up to z=waterDepth; everywhere else starts dry.
+// gateX=660 (Watanabe's 5.5m*1.2), waterDepth=30 (Watanabe's §4.2 0.25m*1.2). yMin/yMax default to the
+// full domain width (0..72), matching Watanabe's own reservoir (spans the whole tank, no side channel).
+DamBreakParameters
+{
+   gateX      660;
+   waterDepth 30;
+}
+
+// unused: targetMeanVelocityMagnitude=0 means setupSimState's accelerationX is exactly 0, and
+// tsunami.cpp never adds the ForcingAdjuster sweep that would otherwise read the other gains -- gravity
+// alone drives this scenario. PIDController is still constructed (setupSimState, shared code path) but
+// never stepped.
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;
+   proportionalGain            0;
+   derivativeGain              0;
+   integralGain                0;
+   maxRamp                     0;
+   minActuatingVariable        0;
+   maxActuatingVariable        0;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   // 120000: see this file's own header "TIMESTEPS" section for the observed-speed-based derivation.
+   timesteps         120000;
+   // Re/Fr/We are mandatory fields but IGNORED under useHardcodedUnits=true (kept at the same values as
+   // every other validated scenario in this project for consistency, not because they are meaningful
+   // here).
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;   // reuse this project's own proven viscosity/gravity/surfaceTension constants
+}
+
+// avgParticleDiameterOverride/dxSIOverride (both > 0) bypass reading a bed-generation file's header
+// entirely -- there is no sediment bed at all in this scenario (useParticleBed=false), just poles and
+// floating logs, so there is nothing for inFileName to meaningfully point at.
+// dxSIOverride=0.01 ties 1 LU = 1 cm -- UNCHANGED from the non-proportional scenario; this scenario's
+// scale-up is entirely in domain/geometry size (more LU cells), not grid spacing.
+ParticleParameters
+{
+   inFileName unused.dat;   // never opened -- see avgParticleDiameterOverride/dxSIOverride above
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;       // unused (no sediment bed); kept for consistency with other scenarios
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.3;   // wet/waterlogged wood-wood, same as every other floater scenario
+   numSubCycles 20;               // see this project's own DEM spring-stability-bound analysis: clears
+                                   // with ~1200x margin at 20, no need for the antidune family's 40
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+   avgParticleDiameterOverride 2;
+   dxSIOverride 0.01;
+}
+
+// 8 freestanding "forest" poles, 2 staggered rows of 4 -- SAME STYLE as the non-proportional scenario
+// (not digitized from Watanabe's Figure 19), repositioned to this domain's forest location (x=1312,
+// Watanabe's 10.93m*1.2) and rescaled Y spacing (evenly spaced across the new 72-wide domain, staggered
+// rows). radius=3 (6 cm diameter = Watanabe's 0.05m*1.2, the anchor this whole file's scale factor was
+// chosen around). center Z is cosmetic (CylindricalBoundary is infinite along its axis).
+CylinderPillars
+{
+   CylinderPillar { center < 1312, 15, 36 >; radius 3; }
+   CylinderPillar { center < 1312, 29, 36 >; radius 3; }
+   CylinderPillar { center < 1312, 43, 36 >; radius 3; }
+   CylinderPillar { center < 1312, 57, 36 >; radius 3; }
+   CylinderPillar { center < 1324, 22, 36 >; radius 3; }
+   CylinderPillar { center < 1324, 36, 36 >; radius 3; }
+   CylinderPillar { center < 1324, 50, 36 >; radius 3; }
+   CylinderPillar { center < 1324, 64, 36 >; radius 3; }
+}
+
+// Driftwood logs, resting on the DRY floor between the gate (x=660) and the forest (x=1312). halfExtents
+// <9,1.2,1.2> = 18x2.4x2.4 cm = Watanabe's 15x2x2 cm wood log * 1.2 -- rigorously scaled. z=1.2 so each box
+// starts exactly resting on the floor plane (z=0). Count (8) and scattered arrangement are carried over
+// from the non-proportional scenario's own convention (not Watanabe's 47 logs -- see this file's header),
+// just repositioned into the new, much longer run-out zone (x in [660,1312) instead of [40,60)) and
+// rescaled Y spread (x72/60 factor). settlingSteps/startInactive left at defaults (0/false), same as
+// before -- these sit still until the incoming water reaches and floats them.
+FloatingBoxes
+{
+   FloatingBox { position < 823,  10, 1.2 >; halfExtents < 9, 1.2, 1.2 >; densityRatio 0.6; }
+   FloatingBox { position < 823,  26, 1.2 >; halfExtents < 9, 1.2, 1.2 >; densityRatio 0.6; }
+   FloatingBox { position < 823,  46, 1.2 >; halfExtents < 9, 1.2, 1.2 >; densityRatio 0.6; }
+   FloatingBox { position < 823,  62, 1.2 >; halfExtents < 9, 1.2, 1.2 >; densityRatio 0.6; }
+   FloatingBox { position < 986,  18, 1.2 >; halfExtents < 9, 1.2, 1.2 >; densityRatio 0.6; }
+   FloatingBox { position < 986,  36, 1.2 >; halfExtents < 9, 1.2, 1.2 >; densityRatio 0.6; }
+   FloatingBox { position < 986,  54, 1.2 >; halfExtents < 9, 1.2, 1.2 >; densityRatio 0.6; }
+   FloatingBox { position < 1149, 67, 1.2 >; halfExtents < 9, 1.2, 1.2 >; densityRatio 0.6; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;  // Box x Box -> boxBoxSAT; Box x CylindricalBoundary is
+                                        // analytic regardless (SolidCylinderContactDetection
+                                        // override) -- no GJK anywhere in this scenario.
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePass3Reresolution          true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   logFloaterHistory             false;
+}
+
+// evaluationFrequency scaled up 8x (500->4000) to keep ~30 avgDataSlices writes over the run, matching the
+// non-proportional scenario's own write count -- each slice is domainX*domainZ=1872*72=134,784 cells
+// (~11.7x the non-proportional scenario's 128*90=11,520), so keeping the same write COUNT (not the same
+// frequency) keeps total eval/ output volume in the same few-hundred-MB ballpark instead of growing both
+// factors at once.
+EvaluationParameters
+{
+   performanceLogFrequency 40000;
+   evaluationFrequency     4000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+   // E/W (x) walls: periodicity<0,..> already makes SetupStages.h add these automatically; listed here
+   // too for documentation/consistency (idempotent).
+   Border { direction E;  walldistance -1; NoSlip{} }
+   Border { direction W;  walldistance -1; NoSlip{} }
+
+   // pole 1 (row A, Y=15)
+   BodyBC
+   {
+      shape Cylinder; min < 1312, 15, 0 >; max < 1312, 15, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 2 (row A, Y=29)
+   BodyBC
+   {
+      shape Cylinder; min < 1312, 29, 0 >; max < 1312, 29, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 3 (row A, Y=43)
+   BodyBC
+   {
+      shape Cylinder; min < 1312, 43, 0 >; max < 1312, 43, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 4 (row A, Y=57)
+   BodyBC
+   {
+      shape Cylinder; min < 1312, 57, 0 >; max < 1312, 57, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 5 (row B, Y=22)
+   BodyBC
+   {
+      shape Cylinder; min < 1324, 22, 0 >; max < 1324, 22, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 6 (row B, Y=36)
+   BodyBC
+   {
+      shape Cylinder; min < 1324, 36, 0 >; max < 1324, 36, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 7 (row B, Y=50)
+   BodyBC
+   {
+      shape Cylinder; min < 1324, 50, 0 >; max < 1324, 50, 72 >; radius 3;
+      NoSlip{}
+   }
+
+   // pole 8 (row B, Y=64)
+   BodyBC
+   {
+      shape Cylinder; min < 1324, 64, 0 >; max < 1324, 64, 72 >; radius 3;
+      NoSlip{}
+   }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      // 6000: at ~9.71M LU cells (~14x the non-proportional scenario's 691,200), each VTK frame is
+      // roughly ~14x that scenario's ~141MB/frame, i.e. ~2GB/frame. writeFrequency=6000 over 120000 steps
+      // gives 20 frames (~40GB total) -- deliberately fewer, larger frames than the non-proportional
+      // scenario's ~65 frames/9.5GB, since matching that scenario's frame COUNT here would cost ~40GB
+      // regardless and matching its frequency (1500) would cost ~14x more (~280GB). Revisit this number
+      // once an actual run shows the true per-frame size.
+      writeFrequency       6000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 0, 0, 0 >; max < 1872, 72, 72 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

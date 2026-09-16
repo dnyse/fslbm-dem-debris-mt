@@ -1,0 +1,34 @@
+BedGeneration{
+    // Thesis item 1b (MEM vs. analytical buoyancy comparison, THESIS_PLAN.md) -- scaling-reference bed
+    // for the R=2 resolution level. See BedGeneration_buoyancy_r1.prm's own header for the full
+    // derivation/rationale -- this file is DELIBERATELY IDENTICAL in domainSize_SI/diameter_SI to the
+    // R=1 file: both are genuine PHYSICAL (SI) quantities that must NOT change with lattice
+    // resolution, only the Antidunes-side domainSize/cellsPerBlock (pure discretization, R=2:
+    // <96,96,192>/<32,32,24>) change. Only outFileName differs, so each resolution level gets its own
+    // clearly-named, independently-regenerated bed file per explicit instruction (rather than one
+    // shared file reused across all three Antidunes prm families).
+    //
+    // Predicted scalingFactor = 96/0.017409318 = 5515.174 (2x of R=1, since domainSize[0]_LU doubled
+    // while domainSize_SI[0] stayed fixed), predicted avgDiameter(LU) = 16.0 (2x), predicted dx_SI =
+    // 0.00018133 (1/2x), predicted gravityOverride ≈ 2.67124e-06 (1/8x, gravityOverride ∝ dx_SI^3) --
+    // see the R=1 file's header for the exact formula. To be confirmed against the real generated
+    // spheres_out_buoyancy_r2.dat, same as R=1.
+    domainSize_SI < 0.017409318, 0.017409318, 0.034818636 >;
+    blocks < 3, 2, 12 >;
+    diameter_SI 0.0029015530199227404;
+    gravity_SI 9.81;
+    densityFluid_SI 1000;
+    densityParticle_SI 2550;
+    generationSpacing_SI 0.0034818636239;
+    initialVelocity_SI 1;
+    dt_SI 5e-5;
+    frictionCoefficient 0.5;
+    restitutionCoefficient 0.1;
+    collisionTime_SI 5e-4;
+    poissonsRatio 0.22;
+    timeSteps 10000;
+    visSpacing 100;
+    outFileName spheres_out_buoyancy_r2.dat;
+    denseBottomLayer False;
+    bottomLayerOffsetFactor 1.0;
+}

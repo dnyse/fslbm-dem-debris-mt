@@ -176,20 +176,28 @@ class MeanVelocityComputer
 class ForcingAdjuster
 {
  public:
-   ForcingAdjuster(const shared_ptr< Vector3<real_t> >& meanVelocity, 
-                   const shared_ptr< Vector3<real_t> >& acceleration, 
+   ForcingAdjuster(const shared_ptr< Vector3<real_t> >& meanVelocity,
+                   const shared_ptr< Vector3<real_t> >& acceleration,
                    const shared_ptr< PIDController >& pidController,
-                   uint_t frequency)
+                   uint_t frequency,
+                   bool enabled = true)
       : meanVelocity_(meanVelocity)
       , acceleration_(acceleration)
       , pidController_(pidController)
       , frequency_(frequency)
       , executionCounter_(uint_c(0))
+      , enabled_(enabled)
    {}
 
    void operator()()
    {
       if (frequency_ == uint_c(0)) { return; }
+
+      // PIDParameters.enabled=false (THESIS_PLAN.md item 3, "constant forcing" mode): never touch
+      // acceleration_ or the PID controller -- it stays pinned at its setupSimState-computed initial
+      // value ("fixed hydraulic gradient") for the whole run. MeanVelocityComputer keeps running
+      // regardless (wired up unconditionally in BuildTimeloop.h), so meanVelocity is still tracked.
+      if (!enabled_) { ++executionCounter_; return; }
 
       real_t newForceX = real_c(0);
       // only evaluate in given frequencies
@@ -203,7 +211,7 @@ class ForcingAdjuster
 
          // send updated external forcing to all other processes
          mpi::broadcastObject(newForceX);
-         
+
          // update the acceleration
          (*acceleration_)[0] = newForceX;
       }
@@ -219,6 +227,7 @@ class ForcingAdjuster
 
    uint_t frequency_;
    uint_t executionCounter_;
+   bool enabled_;
 };
 
 

@@ -14,6 +14,8 @@ DO_BUILD=false
 DO_TESTS=false
 DO_BED=false
 DO_RUN=false
+DO_BUILD_TSUNAMI=false
+DO_RUN_TSUNAMI=false
 FRESH=false
 BUILD_DIR="$REPO_ROOT/build"
 JOBS="$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)"
@@ -21,6 +23,7 @@ NP=72
 BED_NP=72
 PRM="$SCRIPT_DIR/Antidunes.prm"
 BED_PRM="$SCRIPT_DIR/BedGeneration.prm"
+TSUNAMI_PRM="$SCRIPT_DIR/prms/tsunami_pole_forest_driftwood_gas.prm"
 CONDA_ENV="walberla"
 CONDA_PY_VERSION="3.11"
 CONDA_PKGS=("pystencils~=1.3" "lbmpy~=1.3" "jinja2")
@@ -43,6 +46,11 @@ Steps (pick one or more, or use --all):
   --all             configure + build + tests + bed + run
   --sync            rsync repo to remote (excludes build/ and dotfiles)
 
+  --build-tsunami   Build the separate `tsunami` executable (dry-domain dam-break scenario --
+                    see tsunami.cpp / TsunamiDataInitialization.h). NOT included in --all/--build --
+                    a distinct scenario from the main Antidunes pipeline.
+  --run-tsunami     Run tsunami (default prm: prms/tsunami_pole_forest_driftwood_gas.prm)
+
 Environment:
   --local           Skip module loading — use this on a local machine
   --conda-env NAME  Conda environment to activate (default: $CONDA_ENV)
@@ -52,6 +60,7 @@ Paths:
   --build-dir DIR   CMake build directory   (default: $BUILD_DIR)
   --prm FILE        Antidunes parameter file (default: Antidunes.prm in script dir)
   --bed-prm FILE    BedGeneration prm file   (default: BedGeneration.prm in script dir)
+  --tsunami-prm FILE  tsunami parameter file (default: $TSUNAMI_PRM)
   --remote HOST     SSH host for --sync      (default: $REMOTE)
   --remote-path P   Remote destination path  (default: $REMOTE_PATH)
 
@@ -77,6 +86,9 @@ Examples:
 
   # Supercomputer — rerun with different prm, skip rebuild
   ./antidunes.sh --run --prm myparams.prm --np 72
+
+  # Supercomputer — build and run the tsunami (dry-domain dam-break) scenario
+  ./antidunes.sh --configure --build-tsunami --jobs 72 --run-tsunami --np 72
 EOF
 }
 
@@ -92,6 +104,8 @@ while [[ $# -gt 0 ]]; do
         --bed)         DO_BED=true ;;
         --run)         DO_RUN=true ;;
         --all)         DO_CONFIGURE=true; DO_BUILD=true; DO_TESTS=true; DO_BED=true; DO_RUN=true ;;
+        --build-tsunami) DO_BUILD_TSUNAMI=true ;;
+        --run-tsunami)   DO_RUN_TSUNAMI=true ;;
         --fresh)       FRESH=true ;;
         --build-dir)   BUILD_DIR="$2"; shift ;;
         --jobs)        JOBS="$2"; shift ;;
@@ -99,6 +113,7 @@ while [[ $# -gt 0 ]]; do
         --bed-np)      BED_NP="$2"; shift ;;
         --prm)         PRM="$2"; shift ;;
         --bed-prm)     BED_PRM="$2"; shift ;;
+        --tsunami-prm) TSUNAMI_PRM="$2"; shift ;;
         --conda-env)   CONDA_ENV="$2"; shift ;;
         --sync)        DO_SYNC=true ;;
         --remote)      REMOTE="$2"; shift ;;
@@ -114,6 +129,7 @@ BIN_DIR="$BUILD_DIR/apps/showcases/Antidunes"
 # Resolve prm paths to absolute so they survive the 'cd $BIN_DIR' before mpirun
 PRM="$(realpath "$PRM")"
 BED_PRM="$(realpath "$BED_PRM")"
+TSUNAMI_PRM="$(realpath "$TSUNAMI_PRM")"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 log() { echo; echo "==> $*"; }
@@ -222,6 +238,19 @@ if $DO_RUN; then
     }
     cd "$BIN_DIR"
     mpirun -n "$NP" ./Antidunes "$PRM"
+fi
+
+# ── tsunami (dry-domain dam-break) build/run ─────────────────────────────────
+if $DO_BUILD_TSUNAMI; then
+    log "Building tsunami (jobs: $JOBS)"
+    cmake --build "$BUILD_DIR" --target tsunami -- -j"$JOBS"
+fi
+
+if $DO_RUN_TSUNAMI; then
+    log "Running tsunami (np=$NP, prm=$TSUNAMI_PRM)"
+    [[ -f "$BIN_DIR/tsunami" ]] || { echo "tsunami binary not found in $BIN_DIR — did you --build-tsunami?"; exit 1; }
+    cd "$BIN_DIR"
+    mpirun -n "$NP" ./tsunami "$TSUNAMI_PRM"
 fi
 
 log "Done."

@@ -94,7 +94,15 @@ Vec3 Cylinder::support( const Vec3& bfD ) const
       supportPoint[0] = real_t(0);
       supportPoint[1] = real_t(0);
    }
-   supportPoint[2] = math::sign(bfD[2]) * height_ * real_t(0.5);
+   // Axial component: zero unless bfD has a genuinely nonzero axial component. Without this guard,
+   // sign(bfD[2]) still resolves to a definite +-1 even when bfD[2] is floating-point noise around an
+   // intended-exactly-perpendicular direction (band-on, axis exactly tangent to the queried direction)
+   // -- the true support region there is the WHOLE band length (every axial position is an equally
+   // valid maximizer), and jumping to a full +-height_/2 offset picks an arbitrary end instead of the
+   // physically-symmetric band-centre point, injecting a spurious lever arm (found via
+   // DEMValidation's wallImpactCylinder + useRotationalEffectiveMass at tilt=90 degrees: a real,
+   // nonzero contact torque appeared at an orientation where the true physics has none by symmetry).
+   supportPoint[2] = (std::abs(bfD[2]) > real_t(1e-12)) ? math::sign(bfD[2]) * height_ * real_t(0.5) : real_t(0);
    return supportPoint;
 }
 

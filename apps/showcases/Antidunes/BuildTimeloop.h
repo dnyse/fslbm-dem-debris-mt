@@ -150,6 +150,10 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       floaterPointData->addOutput< mesa_pd::data::SelectParticleInteractionRadius >("radius");
       floaterPointData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
       floaterPointData->addOutput< SelectFloaterDensityRatio >("densityRatio");
+      // uid: lets a specific floater spotted in ParaView (e.g. "Select Points On" + Spreadsheet View)
+      // be cross-referenced directly against WALBERLA_LOG_WARNING/CSV output keyed by the same uid,
+      // instead of guessing via nearest-position matching across snapshots (unreliable in a dense jam).
+      floaterPointData->addOutput< mesa_pd::data::SelectParticleUid >("uid");
       floaterPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
          return pIt->getType() == uint_t(1) && !isSet(pIt->getFlags(), GHOST);
@@ -161,13 +165,27 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
    }
 
    // floating boxes (type 3) ---------------------------------------------
-   // One point per floating box, carrying edgeLength, full orientation, and velocity so the
-   // actual ORIENTED solid can be rendered in ParaView (a freely-rotating box needs its
-   // rotation, unlike a sphere). Recipe in ParaView:
-   //   Filters > Glyph: Glyph Type = Box, Scale Array = edgeLength, Scale Mode = Scale by Components,
-   //                    Orientation Mode = ... then Filters > Tensor Glyph using "rotation"
-   //   (the 3x3 body→world matrix, 9 components) to apply the box's actual orientation; or color
-   //   by "velocity". The unit ParaView box (edge 1) scaled by edgeLength gives the true size.
+   // One point per floating box, carrying edgeLength, full orientation, velocity, and a combined
+   // "sizeOrientation" tensor, so the actual ORIENTED, correctly-SIZED solid can be rendered in
+   // ParaView (a freely-rotating box needs its rotation, unlike a sphere) even when different boxes
+   // in the same scenario have different edgeLength (mixed-size scenarios).
+   //
+   // [Claude, 2026-09-14]: the recipe below (Tensor Glyph fed "rotation" alone) was found NOT to work
+   // as documented -- verified directly with a local pvpython test (vtkTensorGlyph, ExtractEigenvalues
+   // OFF, fed a pure rotation matrix): every box renders at the SAME default unit size regardless of
+   // its actual edgeLength. Root cause: unlike the plain "Glyph" filter (which has its own separate
+   // per-point "Scale Array" input), ParaView's "Tensor Glyph" filter derives BOTH orientation AND
+   // size from the one tensor it's fed -- a pure rotation matrix's columns are all unit length, so no
+   // size information survives. Fixed by adding "sizeOrientation" below: the same rotation matrix with
+   // each column pre-scaled by that axis's own edge length, so a single Tensor Glyph call recovers
+   // both pieces at once. Confirmed exact (bounding box of the glyph matches the true edgeLength to
+   // the last digit, for two differently-sized boxes in the same output) via the same pvpython test.
+   //
+   // Recipe in ParaView: Filters > Tensor Glyph, Glyph Type = Box (unit cube, edge length 1),
+   // Extract Eigenvalues = OFF, Tensors = "sizeOrientation", Scale Factor = 1. Color by "velocity" or
+   // "densityRatio". ("edgeLength" and "rotation" are kept as separate fields too, in case a plain
+   // Glyph + Scale-by-Components workflow -- correct for size, but orientation-vector-only, no roll --
+   // is ever preferred instead; they are not needed for the Tensor Glyph recipe above.)
    if (!simParams->floatingBoxes.empty())
    {
       WALBERLA_LOG_INFO_ON_ROOT("AddOutputFloatingBoxes")
@@ -200,12 +218,36 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
                      R(0, 2), R(1, 2), R(2, 2) };
          }
       };
+      // Combined size+orientation tensor for the Tensor Glyph recipe (see this block's own header
+      // comment for why a plain rotation matrix isn't enough): same Rᵀ convention as
+      // SelectParticleRotationMatrix above, but each of R's three columns (the box's own local X/Y/Z
+      // axis directions in world space) is additionally scaled by that axis's own edge length, so a
+      // SINGLE Tensor Glyph (ExtractEigenvalues OFF, unit cube source) reproduces the box's exact
+      // size AND orientation together.
+      struct SelectBoxSizeOrientationTensor
+      {
+         using return_type = std::array< real_t, 9 >;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const auto& shape = p.getBaseShape();
+            mesa_pd::Vec3 edgeLength(real_t(0));
+            if (shape && shape->getShapeType() == mesa_pd::data::Box::SHAPE_TYPE)
+               edgeLength = static_cast< const mesa_pd::data::Box* >(shape.get())->getEdgeLength();
+            const mesa_pd::Mat3 R = p.getRotation().getMatrix();
+            return { R(0, 0) * edgeLength[0], R(1, 0) * edgeLength[0], R(2, 0) * edgeLength[0],
+                     R(0, 1) * edgeLength[1], R(1, 1) * edgeLength[1], R(2, 1) * edgeLength[1],
+                     R(0, 2) * edgeLength[2], R(1, 2) * edgeLength[2], R(2, 2) * edgeLength[2] };
+         }
+      };
 
       auto boxFloaterData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
       boxFloaterData->addOutput< SelectBoxEdgeLength >("edgeLength");
       boxFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
+      boxFloaterData->addOutput< SelectBoxSizeOrientationTensor >("sizeOrientation");
       boxFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
       boxFloaterData->addOutput< SelectFloaterDensityRatio >("densityRatio");
+      // uid: see floaterPointData's own comment above for why.
+      boxFloaterData->addOutput< mesa_pd::data::SelectParticleUid >("uid");
       boxFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
          return pIt->getType() == uint_t(3) && !isSet(pIt->getFlags(), GHOST);
@@ -218,9 +260,19 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
 
    // floating cylinders / logs (type 4) -----------------------------------
    // One point per floating cylinder with glyphScale = (2r, L, 2r), the body→world rotation
-   // tensor, and velocity. ParaView recipe: Glyph Type = Cylinder scaled by glyphScale (Scale by
-   // Components), then Tensor Glyph using "rotation" (Extract Eigenvalues OFF) — NO manual
-   // Transform/Rotate-X-90 step needed, unlike an earlier version of this export.
+   // tensor, a combined "sizeOrientation" tensor, and velocity.
+   //
+   // [Claude, 2026-09-14]: same fix as the box block above -- Tensor Glyph fed "rotation" alone
+   // renders every cylinder at the SAME default unit size regardless of its actual radius/length
+   // (verified with the same local pvpython test used for the box case; Tensor Glyph has no separate
+   // per-point Scale Array the way the plain Glyph filter does). Use "sizeOrientation" instead:
+   // ParaView recipe: Filters > Tensor Glyph, Glyph Type = Cylinder (unit cylinder, radius 0.5,
+   // height 1), Extract Eigenvalues = OFF, Tensors = "sizeOrientation", Scale Factor = 1 — NO manual
+   // Transform/Rotate-X-90 step needed, unlike an earlier version of this export. ("glyphScale" and
+   // "rotation" are kept as separate fields too, for a plain Glyph + Scale-by-Components workflow if
+   // ever preferred -- a cylinder's own rotational symmetry about its axis means that workflow's
+   // orientation-vector-only limitation doesn't lose any real information for a plain cylinder,
+   // unlike for a box.)
    //
    // Axis-convention fix: ParaView's built-in Cylinder glyph source has its OWN long axis along
    // its local Y, but mesa_pd's Cylinder shape defines its axis along its own local Z. Exporting
@@ -264,12 +316,36 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
                     -R(0, 1), -R(1, 1), -R(2, 1) };
          }
       };
+      // Combined size+orientation tensor -- same (R*Rx(+90))^T convention as
+      // SelectParticleRotationMatrix above, but each of the three emitted groups (glyph-local X, Y,
+      // Z respectively after the Rx90 axis-convention fix) is additionally scaled by the matching
+      // glyphScale component (2r, L, 2r), so a SINGLE Tensor Glyph (ExtractEigenvalues OFF, unit
+      // cylinder source) reproduces the cylinder's exact size AND orientation together.
+      struct SelectCylinderSizeOrientationTensor
+      {
+         using return_type = std::array< real_t, 9 >;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const auto* shape = dynamic_cast< const mesa_pd::data::Cylinder* >(p.getBaseShape().get());
+            mesa_pd::Vec3 glyphScale(real_t(0));
+            if (shape)
+               glyphScale = mesa_pd::Vec3(real_t(2) * shape->getRadius(), shape->getHeight(),
+                                          real_t(2) * shape->getRadius());
+            const mesa_pd::Mat3 R = p.getRotation().getMatrix();
+            return { R(0, 0) * glyphScale[0],  R(1, 0) * glyphScale[0],  R(2, 0) * glyphScale[0],
+                     R(0, 2) * glyphScale[1],  R(1, 2) * glyphScale[1],  R(2, 2) * glyphScale[1],
+                    -R(0, 1) * glyphScale[2], -R(1, 1) * glyphScale[2], -R(2, 1) * glyphScale[2] };
+         }
+      };
 
       auto cylinderFloaterData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
       cylinderFloaterData->addOutput< SelectCylinderGlyphScale >("glyphScale");
       cylinderFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
+      cylinderFloaterData->addOutput< SelectCylinderSizeOrientationTensor >("sizeOrientation");
       cylinderFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
       cylinderFloaterData->addOutput< SelectFloaterDensityRatio >("densityRatio");
+      // uid: see floaterPointData's own comment above for why.
+      cylinderFloaterData->addOutput< mesa_pd::data::SelectParticleUid >("uid");
       cylinderFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
          return pIt->getType() == uint_t(4) && !isSet(pIt->getFlags(), GHOST);
@@ -804,6 +880,34 @@ void addAfterTimeStepDataEvaluators(const std::shared_ptr< const SimulationParam
    TotalHydrodynamicForceEvaluator< ParticleAccessor_T > totalHydrodynamicForceEvaluator(
       simObjs->particleAccessor, simObjs->dataCols, simParams->evaluation.evaluationFrequency);
    timeloop->addFuncAfterTimeStep(totalHydrodynamicForceEvaluator, "Evaluator: TotalHydrodynamicForce");
+
+   // clog measurement evaluator (THESIS_PLAN.md item 3) --------------------------------------------------------
+   // only wired up when the optional "ClogMeasurement" prm block is present -- absent block means every
+   // existing prm's timeloop is completely unaffected.
+   if (simParams->evaluation.clogMeasurementEnabled)
+   {
+      ClogMeasurementEvaluator< AntidunesBoundaryHandling_T, PdfField_T, FlagField_T, ScalarField_T >
+         clogMeasurementEvaluator(simObjs->blockForest, simObjs->flagFieldID, simObjs->fillFieldID, simObjs->pdfFieldID,
+                                  simParams->evaluation.clogUpstreamPos, simParams->evaluation.clogDownstreamPos,
+                                  simParams->evaluation.clogProbeHalfWidthXY, simObjs->acceleration,
+                                  simParams->computed.absoluteLiquidHeight, simObjs->dataCols,
+                                  simParams->evaluation.evaluationFrequency);
+      timeloop->addFuncAfterTimeStep(clogMeasurementEvaluator, "Evaluator: ClogMeasurement");
+   }
+
+   // Second, optional probe pair at the pillar's own Y (see EvaluationParams::clogPillarMeasurementEnabled's
+   // own doc comment, SimulationParams.h, for the Schalko/Follett/Nepf 2023 motivation) -- writes to
+   // distinct "clogPillar*" dataCols columns via the same evaluator class, just a different columnPrefix.
+   if (simParams->evaluation.clogPillarMeasurementEnabled)
+   {
+      ClogMeasurementEvaluator< AntidunesBoundaryHandling_T, PdfField_T, FlagField_T, ScalarField_T >
+         clogPillarMeasurementEvaluator(simObjs->blockForest, simObjs->flagFieldID, simObjs->fillFieldID, simObjs->pdfFieldID,
+                                        simParams->evaluation.clogPillarUpstreamPos, simParams->evaluation.clogPillarDownstreamPos,
+                                        simParams->evaluation.clogProbeHalfWidthXY, simObjs->acceleration,
+                                        simParams->computed.absoluteLiquidHeight, simObjs->dataCols,
+                                        simParams->evaluation.evaluationFrequency, "clogPillar");
+      timeloop->addFuncAfterTimeStep(clogPillarMeasurementEvaluator, "Evaluator: ClogPillarMeasurement");
+   }
 }
 
 void addAfterTimeStepForcingAdjuster(const std::shared_ptr< const SimulationParams >& simParams,
@@ -825,7 +929,7 @@ void addAfterTimeStepForcingAdjuster(const std::shared_ptr< const SimulationPara
    // using the computed mean velocity, adjust the acceleration (in X dir) such that the target mean velocity is
    // maintained
    ForcingAdjuster forcingAdjuster(simObjs->meanVelocity, simObjs->acceleration, simObjs->pidController,
-                                   simParams->evaluation.evaluationFrequency);
+                                   simParams->evaluation.evaluationFrequency, simParams->pid.enabled);
 
    timeloop->addFuncAfterTimeStep(forcingAdjuster, "Evaluator: ForcingAdjuster");
 }

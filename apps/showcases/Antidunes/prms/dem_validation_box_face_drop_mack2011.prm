@@ -1,0 +1,27 @@
+// Literal replica of Mack et al. (2011)'s single-cube coefficient-of-restitution drop test methodology
+// (Powder Technology 214:431-442, Section 2.4: e = sqrt(h1/h0), measured for real hexahedra -- but
+// FACE-first (flush, zero tilt), the exact degenerate configuration where Cylinder/Box::support()'s
+// tie-break bug (fixed 2026-09-13) picked an arbitrary corner instead of the true face centre, injecting
+// a spurious lever arm/torque. By symmetry the true post-impact angular velocity is exactly zero and the
+// normal velocity ratio must equal the input e -- any deviation is a direct regression signal.
+DEMValidation{
+    testCase boxFaceDropRestitution;
+
+    boxHalfExtents < 1.0, 1.0, 1.0 >;
+    density 1.0;
+
+    // Mack et al. (2011), Powder Technology 214:431-442, Section 2.4 / Table 2: measured hexahedron
+    // (cube) particle-wall coefficient of restitution e=0.54, sliding friction mu=0.28 (Section 2.3).
+    restitutionCoefficient 0.54;
+    frictionCoefficient 0.28;
+    poissonsRatio 0.22;
+    collisionTime 0.01;
+
+    impactSpeedStart 0.5;
+    impactSpeedEnd 2.0;
+    impactSpeedStep 0.5;
+
+    toleranceRelError 0.02;
+    vtkSpacing 0;
+    outputBaseName box_face_drop_mack2011;
+}

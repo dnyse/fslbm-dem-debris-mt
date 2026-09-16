@@ -9,6 +9,14 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
    target_link_libraries ( Antidunes walberla::blockforest walberla::boundary walberla::core
            walberla::domain_decomposition walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
            walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk AntidunesLatticeModelGeneration )
+
+   # Separate executable (never replaces Antidunes) recreating Watanabe et al. 2023's dry-domain
+   # dam-break tsunami test case -- see tsunami.cpp's own header comment. Reuses every Antidunes setup/
+   # timeloop/DEM function unchanged except its own initial-condition file (TsunamiDataInitialization.h).
+   add_executable ( tsunami tsunami.cpp PIDController.cpp )
+   target_link_libraries ( tsunami walberla::blockforest walberla::boundary walberla::core
+           walberla::domain_decomposition walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
+           walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk AntidunesLatticeModelGeneration )
 endif ()
 
 add_executable ( BedGeneration BedGeneration.cpp )
@@ -22,6 +30,17 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
    # PaperAnalyticalContactTest.cpp require this flag despite not touching LBM directly.
    add_executable ( DEMValidation DEMValidation.cpp )
    target_link_libraries ( DEMValidation walberla::blockforest walberla::boundary walberla::core
+           walberla::domain_decomposition walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
+           walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk AntidunesLatticeModelGeneration )
+
+   # Fluid-free, DEM-only cuboid drop test (DropTest.cpp, SetupStages_drop_test.h). Reuses
+   # ParticleKernels.h/doDEMSubCycles verbatim, which transitively pulls in the generated LBM lattice
+   # model -- same reason DEMValidation above requires this flag despite not touching LBM directly.
+   # PIDController.cpp is linked (though DropTest never constructs a PIDController at runtime) because
+   # SetupStages_drop_test.h's setupSimState() -- an ordinary function DropTest.cpp never calls, but
+   # which still compiles into the object file since it's not a template -- references it.
+   add_executable ( DropTest DropTest.cpp PIDController.cpp )
+   target_link_libraries ( DropTest walberla::blockforest walberla::boundary walberla::core
            walberla::domain_decomposition walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
            walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk AntidunesLatticeModelGeneration )
 endif ()

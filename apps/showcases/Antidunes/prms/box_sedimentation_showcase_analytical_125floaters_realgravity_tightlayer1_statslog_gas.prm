@@ -1,0 +1,338 @@
+// box_sedimentation_showcase_analytical_125floaters_realgravity_tightlayer1_statslog_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// MIRROR of box_sedimentation_showcase_analytical_125floaters_realgravity_gas.prm (same scenario,
+// same seed), with useTightLayer1=true and logContactDetectionStatsPeriodically=true added, timesteps
+// capped 100000->20000 -- a genuine BOX-ONLY scenario (no cylinders at all) to check the NEW Box x Box
+// single-axis Layer 1 pre-filter (paper_analytical::detail::boxesDefinitelySeparatedAlongCenterLine,
+// this session) on its own, distinct from every prior comparison run which was cylinder-only.
+// useAnalyticalContactDetection is already true in the base file (so boxBoxSAT, the thing this
+// pre-filter guards, is actually exercised). Run from a SEPARATE cluster checkout so it can't race
+// any other run's build or output directories.
+//
+// ORIGINAL HEADER, for the unchanged derivation history:
+// GENUINE 5x5x5 GRID (125 floaters) sibling of box_sedimentation_showcase_analytical_18floaters_gas.prm,
+// same box size (halfExtents <3, 9, 3>). Unlike the 9- and 18-floater files (which deliberately used a
+// SINGLE Y position to avoid Y-neighbour contacts entirely, after the original 9-box file's v1-v5
+// crash history), this file uses a real 5(X) x 5(Y) x 5(Z) grid, DELIBERATELY reintroducing
+// Y-neighbour contacts as a stress test -- per explicit request, not an oversight. Domain X and Y are
+// grown (128,60 -> 160,160) to give real spacing for 5 positions each; box size is unchanged.
+//
+// SCALING: uses avgParticleDiameterOverride/dxSIOverride (see SimulationParams.h) instead of the
+// inFileName-derived bed scaling, computed from this checkout's own spheres_out.dat AT THE ORIGINAL
+// domainSize[0]=128 reference (so liquidHeight/floorHeight/absoluteLiquidHeight/gravityOverride below
+// all match the 9-/18-floater files' own established values EXACTLY) -- this also sidesteps
+// getAvgDiameterScalingFactor's domain[1]-vs-bed-copies consistency assertion entirely, which would
+// otherwise be fragile against changing domain X and Y independently: avgParticleDiameter=8.001943372,
+// dx_SI=0.000362694127490625 (both computed 2026-08-23 from the live bed file on this checkout;
+// diameter_SI=0.00290225786958, generationDomainSize_SI=[0.0464248483188,0.0218704558877,
+// 0.145077650996], scalingFactor=128/0.0464248483188=2757.144172). liquidHeight=22.9016,
+// floorHeight=33.1224, absoluteLiquidHeight=56.024 -- identical to the 9-/18-floater files.
+//
+// GRAVITY: true g_SI=9.81 m/s^2, gravityOverride=2.1371500584054327e-05 (= 9.81 * dt_SI^2 / dx_SI,
+// dt_SI = viscosity/viscosity_SI * dx_SI^2 = 2.81095e-05, using the fixed hardcoded-units viscosity
+// 0.000214026). Checked against the LBM incompressibility bound (Eq. 10, Buick & Greated 2000):
+// domainHeight(180) * gravityOverride = 0.00385, far under the required <<1/3 -- stable, unlike an
+// earlier true-g_SI=9.81 attempt for a different (much larger dx_SI) scenario that violated this bound
+// by ~19x and was rejected. useHardcodedUnits stays true (fixed reference viscosity/relaxationRate,
+// matching every other *_gas.prm in this family) -- only gravity is overridden to the true SI value.
+//
+// GEOMETRY: X = 16/48/80/112/144 (5 columns, spacing 32, matching the original 3-column file's own
+// spacing convention), Y = 16/48/80/112/144 (5 positions, same spacing -- 32 LU vs. the box's 18 LU
+// length gives 14 LU clearance, generous), Z = 64/75/86/97/108 (5 rows, spacing 11, same clearance
+// convention as the 18-floater file's 6-row stack, just one row shorter). 5x5x5 = 125 boxes total.
+//
+// Densities: 5 values keyed by X-column (all 25 boxes in a column -- 5 Y-positions x 5 Z-rows --
+// share one density), spanning light to heavy: 0.5, 0.75, 1.0, 1.5, 2.0.
+//
+// Domain: <160, 160, 180> / cellsPerBlock <40, 40, 20> = 4x4x9 = 144 processes (2 nodes,
+// multinode partition, matching the project's existing 144-core precedent
+// jobs/run_144_thousand_spheres_two_pillars_slitpass_collapsed.sbatch).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 40, 40, 20 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic — no side walls, only Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <160, 160, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.862;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   // CAPPED from 100000 -> 20000 (down from the base file): this run is a quick diagnostic to check
+   // the NEW Box x Box Layer 1 pre-filter's effect (2 periodic [ContactDetectionStats] snapshots at
+   // performanceLogFrequency=10000), not a full sedimentation completion attempt.
+   timesteps         20000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;               // keep fixed reference viscosity/relaxationRate; only gravity overridden below
+   gravityOverride   2.1371500584054327e-05;  // true g_SI=9.81 m/s^2 -- see header derivation
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+   avgParticleDiameterOverride 8.001943372119138;  // see header -- matches the 9-/18-floater files' own scale
+   dxSIOverride                0.000362694127490625;
+}
+
+FloatingBoxes
+{
+   // ---- column x=16, densityRatio 0.5 (lightest) ----
+   FloatingBox { position < 16, 16, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 16, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 16, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 16, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 16, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 48, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 48, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 48, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 48, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 48, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 80, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 80, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 80, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 80, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 80, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 112, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 112, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 112, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 112, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 112, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 144, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 144, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 144, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 144, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+   FloatingBox { position < 16, 144, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.5; settlingSteps 0; }
+
+   // ---- column x=48, densityRatio 0.75 ----
+   FloatingBox { position < 48, 16, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 16, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 16, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 16, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 16, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 48, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 48, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 48, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 48, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 48, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 80, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 80, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 80, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 80, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 80, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 112, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 112, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 112, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 112, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 112, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 144, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 144, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 144, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 144, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+   FloatingBox { position < 48, 144, 108 >; halfExtents < 3, 9, 3 >; densityRatio 0.75; settlingSteps 0; }
+
+   // ---- column x=80, densityRatio 1.0 (neutral) ----
+   FloatingBox { position < 80, 16, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 16, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 16, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 16, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 16, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 48, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 48, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 48, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 48, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 48, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 80, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 80, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 80, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 80, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 80, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 112, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 112, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 112, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 112, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 112, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 144, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 144, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 144, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 144, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+   FloatingBox { position < 80, 144, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.0; settlingSteps 0; }
+
+   // ---- column x=112, densityRatio 1.5 ----
+   FloatingBox { position < 112, 16, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 16, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 16, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 16, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 16, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 48, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 48, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 48, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 48, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 48, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 80, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 80, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 80, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 80, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 80, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 112, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 112, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 112, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 112, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 112, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 144, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 144, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 144, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 144, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+   FloatingBox { position < 112, 144, 108 >; halfExtents < 3, 9, 3 >; densityRatio 1.5; settlingSteps 0; }
+
+   // ---- column x=144, densityRatio 2.0 (heaviest) ----
+   FloatingBox { position < 144, 16, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 16, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 16, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 16, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 16, 108 >; halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 48, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 48, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 48, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 48, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 48, 108 >; halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 80, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 80, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 80, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 80, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 80, 108 >; halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 112, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 112, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 112, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 112, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 112, 108 >; halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 144, 64 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 144, 75 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 144, 86 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 144, 97 >;  halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+   FloatingBox { position < 144, 144, 108 >; halfExtents < 3, 9, 3 >; densityRatio 2.0; settlingSteps 0; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useAnalyticalContactDetection true;  // see header note
+   useTightLayer1                true;  // ADDED (absent, i.e. false, in the base file) -- checks the
+                                        // NEW Box x Box single-axis pre-filter (this session,
+                                        // paper_analytical::detail::boxesDefinitelySeparatedAlongCenterLine)
+                                        // ahead of boxBoxSAT, on a genuine box-only scenario (this
+                                        // showcase has no cylinders at all, unlike the widerstacks
+                                        // cylinder-jam runs this flag was already validated against).
+                                        // See SimulationParams.h's useTightLayer1 doc comment.
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+   // ADDED for this run: print+reset [ContactDetectionStats] (including the NEW
+   // boxTightLayer1CheaplyProvedSeparated counter) every performanceLogFrequency (10000) steps instead
+   // of only once at the end -- see EvaluationParams::logContactDetectionStatsPeriodically.
+   logContactDetectionStatsPeriodically true;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   // Only Z (top/bottom) walls — X and Y are periodic (see BlockForestParameters),
+   // so N/S borders are intentionally omitted; setupBoundaryHandling auto-skips
+   // adding walls on periodic faces.
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 0, 0, 0 >;   max < 160, 160, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

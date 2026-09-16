@@ -456,15 +456,27 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       createPlane(*simObjs->particleStorage, bf->getDomain().maxCorner(), Vector3< real_t >(0, -1, 0));
    }
 
+   // Pillars are GLOBAL/FIXED (Utility.h's createBox/createCylinder) and, per BlockForestDataHandling's
+   // own `if (GLOBAL) continue;` guard in both serialize() and deserialize(), are explicitly EXCLUDED
+   // from checkpoint save/load -- unlike floaters (see the loadSnapshot guard around the floater
+   // creation loops below), they are correctly recreated fresh from this same prm-declared config on
+   // EVERY run, load or not, since their position never changes and re-deriving it from the (byte-
+   // identical, same-prm) config is exactly equivalent to restoring it. Logged here (previously silent,
+   // unlike floaters' own "Created floating ..." lines) so a checkpoint-resume run's log directly shows
+   // the reconstructed position for the same kind of verification floaters already get.
    for (const auto& pillar : simParams->pillars)
    {
       auto p = createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
       p->setType(2);
+      WALBERLA_LOG_INFO_ON_ROOT("Created box pillar: center=" << pillar.center
+         << " halfExtents=" << pillar.halfExtents);
    }
 
    for (const auto& pillar : simParams->cylinderPillars)
    {
       createCylinder(*simObjs->particleStorage, pillar.center, pillar.radius);
+      WALBERLA_LOG_INFO_ON_ROOT("Created cylinder pillar: center=" << pillar.center
+         << " radius=" << pillar.radius);
    }
 
    // ModelParams.useArchTunnelAsMesaPDObject (see its own doc comment): when enabled, each arch
@@ -479,6 +491,48 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       }
    }
 
+   // Floater creation (spheres/boxes/cylinders below) is SKIPPED entirely when resuming from a
+   // checkpoint. Unlike the pillars/planes/arch-tunnels above (all GLOBAL, hence explicitly excluded
+   // from checkpoint serialization -- see BlockForestDataHandling.cpp's own `if (GLOBAL) continue;` in
+   // both serialize() and deserialize() -- so recreating them fresh every run, load or not, is correct
+   // by design), floaters are ordinary non-GLOBAL particles and ARE fully captured in
+   // particleStorageFile. Re-running this creation loop on top of an already-loaded checkpoint
+   // therefore tries to insert a SECOND particle with the same UID as one already restored, aborting
+   // with "particle with the same uid(N) already existing at index(M)" -- confirmed directly (a local
+   // round-trip test hit this exact abort before this guard was added).
+   //
+   // KNOWN LIMITATION: since floaterUIDs/floaterBoxUIDs/floaterCylinderUIDs and dormantFloaterUIDs are
+   // only ever populated by the creation loops below, skipping them here means those stay empty on a
+   // loaded run -- releaseSettledFloatingSpheres() (called every step) then has nothing to act on. This
+   // is harmless when the checkpoint was taken AFTER every floater's own settlingSteps has already
+   // passed (the common case for resuming near a late-run crash: all floaters are already active by
+   // then, nothing left to release) but means a checkpoint taken WHILE some floaters are still
+   // startInactive/dormant will leave them parked (FIXED) forever after this kind of resume -- their
+   // dormant state IS correctly restored from the checkpoint (the FIXED flag is ordinary particle
+   // state, not excluded like GLOBAL), they just never get released without the bookkeeping arrays.
+   // Not fixed here: doing so robustly needs a way to re-identify which restored particle corresponds
+   // to which prm-declared floater index without relying on position (particles move) -- e.g. a
+   // persisted per-particle index/settlingSteps property -- a larger change than this specific
+   // investigation needs.
+   if (bfParams.loadSnapshot)
+   {
+      // Sized (to the prm-declared counts) but left as the invalid UID (0) -- see this block's own
+      // opening comment for why: correct indexed access for any downstream code that iterates these
+      // arrays by the same prm-declared size, just with no valid UID to act on (matching
+      // dormantFloaterUIDs being left empty too).
+      simObjs->floaterUIDs.assign(simParams->floatingSpheres.size(), walberla::id_t(0));
+      simObjs->floaterBoxUIDs.assign(simParams->floatingBoxes.size(), walberla::id_t(0));
+      simObjs->floaterCylinderUIDs.assign(simParams->floatingCylinders.size(), walberla::id_t(0));
+      WALBERLA_LOG_INFO_ON_ROOT("loadSnapshot=true: skipping floater (re-)creation -- "
+         << simParams->floatingSpheres.size() << " sphere(s), " << simParams->floatingBoxes.size()
+         << " box(es), " << simParams->floatingCylinders.size() << " cylinder(s) declared in this prm "
+         << "are assumed already present (and, if still startInactive at checkpoint time, already "
+         << "correctly FIXED) in the loaded particleStorage instead. floaterUIDs/floaterBoxUIDs/"
+         << "floaterCylinderUIDs/dormantFloaterUIDs are left empty -- see this block's own comment for "
+         << "why that only matters if some floaters were still dormant at checkpoint time.");
+   }
+   else
+   {
    // Indexed loop so each sphere's UID is captured at the correct index fi.
    // The owning rank (the one whose subdomain contains pos) creates the particle and records its UID.
    // allReduceInplace(SUM) broadcasts each UID to all other ranks (no double-counting because only
@@ -628,6 +682,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    for (size_t ci = 0; ci < simParams->floatingCylinders.size(); ++ci)
       if (simParams->floatingCylinders[ci].startInactive)
          simObjs->dormantFloaterUIDs->insert(simObjs->floaterCylinderUIDs[ci]);
+   } // end of "if (!bfParams.loadSnapshot)" -- see its own opening comment above
 
    // choose particle sync algorithm -----------------------------------------------------
    // blockSyncExtension must be >= the largest floater extent so that SyncNextNeighbors
@@ -685,6 +740,38 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
 
    WALBERLA_LOG_INFO_ON_ROOT("Synchronizing particles");
    simObjs->syncCall();
+
+   // ROOT CAUSE FIX (THESIS_PLAN.md item 1a, checkpoint-resume STALE-PARTICLE-IDX abort): mesa_pd's
+   // SyncGhostOwners::checkAndResolveOverlap() only sends a new ghost copy to ranks in
+   // domain.getNeighborProcesses() -- i.e. ranks topologically ONE HOP away in the block graph from
+   // wherever a particle is currently known (owner or existing ghost), not every rank whose subdomain
+   // actually falls within its interactionRadius+dx. A large floater (e.g. a box with
+   // interactionRadius comparable to several blocks' width) can physically overlap ranks MULTIPLE
+   // hops away from its owning rank. During a continuous run this is never a problem: ghost state
+   // accumulates and is incrementally re-verified every single timestep (doDEMSubCycles' own sync
+   // calls), so it has long since converged to the particle's full multi-hop footprint by any given
+   // step. On a checkpoint resume, `ClearNextNeighborSync`/`ClearGhostOwnerSync` (see the loadSnapshot
+   // branch above) wipes all ghost state, and this is the ONLY sync call before mapParticlesOntoCells()
+   // and the very first FSLBM sweep run -- a single call only reaches one hop out from each particle's
+   // loaded position, exactly like a fresh start's very first call would, EXCEPT a fresh start never
+   // needs more than one hop yet (freshly-created floaters/beds are local to a handful of blocks) and
+   // has 49999+ further per-step calls to reach full convergence long before it matters, while a
+   // resumed run's floaters are already wherever tens of thousands of steps of physics put them and
+   // need the LBM-DEM coupling sweep's own MEM force computation (SimpleBB.h) to already have a
+   // correct multi-hop ghost picture on the very next step. Confirmed directly: job 4236626 (a
+   // resumed cuboid-equilibrium run) had a Y-elongated box with interactionRadius~45 LU, cellsPerBlock
+   // <17,42,30> -- diagonally-adjacent (2-hop) ranks reported zero knowledge of the box after exactly
+   // one syncCall(), producing SimpleBB.h's own "[STALE-PARTICLE-IDX] ... uid no longer maps to a
+   // valid local particle index" hard abort on the very first post-load step. Calling syncCall()
+   // repeatedly lets each round's newly-created ghosts become the "seed" for the next round's
+   // neighbor-of-neighbor propagation, converging to the true multi-hop footprint after enough
+   // rounds -- 4 is a generous margin over the 2 hops needed in the confirmed case above, cheap
+   // relative to the rest of setup, and only runs on the loadSnapshot path so a fresh start's own
+   // (already-correct) single-call behaviour is unchanged.
+   if (bfParams.loadSnapshot)
+   {
+      for (uint_t round = uint_t(0); round < uint_t(4); ++round) simObjs->syncCall();
+   }
 
    // create particle field (mapping of particle UIDs to lbm cells)
    simObjs->particleFieldID = field::addToStorage<lbm_mesapd_coupling::ParticleField_T>(
@@ -756,6 +843,31 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
 void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simParams, const std::shared_ptr< SimulationObjects >& simObjs)
 {
    WALBERLA_LOG_INFO_ON_ROOT("mapParticlesOntoCells");
+
+   // ROOT CAUSE FIX (THESIS_PLAN.md item 3, checkpoint-resume NaN crash): both ParticleMappingKernel and
+   // MovingParticleMappingKernel below only ever claim a cell that boundaryHandling->isDomain() already
+   // reports true (see MovingParticleMapping.h's own "no else -> will not overwrite pre-existing
+   // boundary cells" comment) -- but isDomain() checks the domain_ flag mask, which nothing has set yet
+   // at this point: setupBoundaryHandling() only ran initFromConfig() (Border NoSlip), and
+   // initFlagsFromFillLevel() -- the call that actually classifies the rest of the field as
+   // liquid/interface/gas (all part of domain_) -- runs AFTER this function, in Antidunes.cpp. Every
+   // OTHER caller of these mapping kernels in the codebase (tests/lbm_mesapd_coupling/mapping/
+   // ParticleMapping.cpp, MovingParticleMappingMEM.cpp, SettlingSphereMEM.cpp, etc.) calls
+   // handling->fillWithDomain() before mapping for exactly this reason -- Antidunes never did. The
+   // result: this one-time setup mapping has ALWAYS silently mapped ZERO cells for ANY floater, on
+   // every run, fresh or resumed. Harmless on a fresh start (t=0's fluid field is freshly initialized
+   // sane data everywhere, and the very next per-step mapping in timeloopAfterDEM -- which runs AFTER
+   // initFlagsFromFillLevel() has already executed once during setup -- silently fixes the one-step
+   // gap before it matters). Fatal on any checkpoint resume with active (non-dormant) floaters present:
+   // fillWithDomain() only touches genuinely empty cells (see its own isEmpty() guard), so this is safe
+   // to add unconditionally; it does not overwrite the Border-NoSlip flags initFromConfig() already set.
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      auto* handling = blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(
+         simObjs->antidunesBoundaryHandling->getHandlingID());
+      handling->fillWithDomain(handling->getFlagField()->nrOfGhostLayers());
+   }
+
    // Select all floaters: type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder.
    // Fixed obstacles (pillars, walls) are mapped separately as static NoSlip/FreeSlip. Dormant
    // (startInactive, not yet at settlingSteps) floaters are excluded too -- they are not "in the
@@ -1097,7 +1209,9 @@ void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs,
 // on each rank, then returns true if any NaN was detected globally.
 // Call this after each major sweep to pinpoint which one first corrupts the PDF field.
 bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
-                 const char* const location, const uint_t t)
+                 const char* const location, const uint_t t,
+                 real_t lowRhoPrecursorThreshold = real_t(0),
+                 real_t highVelocityPrecursorThreshold = real_t(0))
 {
    bool localNaN = false;
 
@@ -1135,6 +1249,71 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
          // they are NOT scanned here. (The confirmation that they exist was done; see git history.)
          if (!flagField->isFlagSet(ix, iy, iz, liquidFlag) &&
              !flagField->isFlagSet(ix, iy, iz, interfaceFlag)) continue;
+
+         // Low-rho PRECURSOR check (PhysicsParams.lowRhoPrecursorThreshold, 0 = off): the per-PDF
+         // isfinite scan below only catches a cell that has ALREADY gone non-finite -- by definition
+         // one step too late to see how it got there. This catches the step BEFORE that: a cell whose
+         // aggregate density is still finite but has drained to a suspiciously small value (candidate
+         // for the "drained interface cell, rho->0" state SimpleBB.h's own dry-link comment describes
+         // as expected/benign at a floater's waterline -- the open question this exists to answer is
+         // whether a cell that goes on to actually blow up is distinguishable, in the steps
+         // beforehand, from the many that presumably drain harmlessly). Throttled to the first 20 hits
+         // per rank so a run where this fires often (many ordinary draining interface cells) doesn't
+         // flood the log -- this is meant for a targeted, windowed rerun (denseNanScanEnabled +
+         // From/ToStep bracketing an already-known crash), not routine production use.
+         if (lowRhoPrecursorThreshold > real_t(0))
+         {
+            real_t rhoPrecheck = real_t(0);
+            for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f) rhoPrecheck += pdfField->get(ix, iy, iz, f);
+
+            if (std::isfinite(rhoPrecheck) && rhoPrecheck < lowRhoPrecursorThreshold)
+            {
+               static uint_t lowRhoPrecursorLogCount = uint_t(0);
+               if (lowRhoPrecursorLogCount < uint_t(20))
+               {
+                  const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+                  const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+                  const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+                  WALBERLA_LOG_WARNING("[LOW-RHO-PRECURSOR t=" << t << " after=" << location << "] "
+                     << classify(ix, iy, iz) << " cell block-local=(" << ix << "," << iy << "," << iz
+                     << ") world=(" << wx << "," << wy << "," << wz << ") rho=" << rhoPrecheck
+                     << " (threshold=" << lowRhoPrecursorThreshold << ") fill=" << fillField->get(ix, iy, iz));
+                  ++lowRhoPrecursorLogCount;
+               }
+            }
+         }
+
+         // High-velocity PRECURSOR check (PhysicsParams.highVelocityPrecursorThreshold, 0 = off): the
+         // symmetric counterpart to the low-rho check above -- a blowup does not always show up as a
+         // cell draining toward rho=0 first; it can equally show up as an unrealistically large but
+         // still-finite velocity for a step or two (the classic LBM divergence precursor: local Mach
+         // number pushed far past the scheme's stability bound) before the PDFs actually overflow to
+         // Inf/NaN. Uses PdfField_T::getVelocity(), which for this project's compressible cumulant
+         // model divides by the cell's own actual rho (not an assumed 1) -- see PdfField.h's own
+         // getVelocity() implementation. Same throttling (first 20 hits per rank) and same intended
+         // usage (a targeted, windowed rerun) as the low-rho check.
+         if (highVelocityPrecursorThreshold > real_t(0))
+         {
+            const Vector3< real_t > velPrecheck = pdfField->getVelocity(ix, iy, iz);
+            const real_t velMagSq = velPrecheck.sqrLength();
+
+            if (std::isfinite(velMagSq) && velMagSq > highVelocityPrecursorThreshold * highVelocityPrecursorThreshold)
+            {
+               static uint_t highVelPrecursorLogCount = uint_t(0);
+               if (highVelPrecursorLogCount < uint_t(20))
+               {
+                  const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+                  const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+                  const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+                  WALBERLA_LOG_WARNING("[HIGH-VELOCITY-PRECURSOR t=" << t << " after=" << location << "] "
+                     << classify(ix, iy, iz) << " cell block-local=(" << ix << "," << iy << "," << iz
+                     << ") world=(" << wx << "," << wy << "," << wz << ") |u|=" << std::sqrt(velMagSq)
+                     << " (threshold=" << highVelocityPrecursorThreshold << ") vel=" << velPrecheck
+                     << " fill=" << fillField->get(ix, iy, iz));
+                  ++highVelPrecursorLogCount;
+               }
+            }
+         }
 
          for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f)
          {
@@ -1180,6 +1359,42 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
    mpi::allReduceInplace< uint_t >(globalNaN, mpi::SUM);
    return globalNaN > uint_t(0);
 }
+
+// TEMPORARY DIAGNOSTIC (THESIS_PLAN.md item 1a, R3 equilibrium fresh-run NaN crash) -- checkPdfNaN
+// stops at the FIRST bad cell per block (blockDone=true; break), which is fine for its own
+// abort-and-report purpose but hides how many bad cells actually exist per block. Same scan, no
+// early exit, listing every LIQ/INTF cell with a non-finite PDF (world coordinate + rho only, to
+// keep output compact across many ranks). Call this right before aborting on a checkPdfNaN==true
+// result to see the true extent of the corruption instead of one artifact-of-iteration-order cell
+// per block. Remove once the determination is made.
+void listAllBadCellsNoEarlyExit(const std::shared_ptr< SimulationObjects >& simObjs, const char* const location)
+{
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto* pdfField  = blockIt->getData< const PdfField_T >(simObjs->pdfFieldID);
+      const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto& aabb = blockIt->getAABB();
+
+      for (cell_idx_t iz = 0; iz < cell_idx_c(pdfField->zSize()); ++iz)
+      for (cell_idx_t iy = 0; iy < cell_idx_c(pdfField->ySize()); ++iy)
+      for (cell_idx_t ix = 0; ix < cell_idx_c(pdfField->xSize()); ++ix)
+      {
+         if (!flagField->isFlagSet(ix, iy, iz, liquidFlag) && !flagField->isFlagSet(ix, iy, iz, interfaceFlag)) continue;
+         bool bad = false;
+         for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f)
+            if (!std::isfinite(pdfField->get(ix, iy, iz, f))) { bad = true; break; }
+         if (!bad) continue;
+         const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+         const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+         const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+         WALBERLA_LOG_WARNING("[FULL-BAD-CELL-LIST at=" << location << "] world=(" << wx << "," << wy << "," << wz
+            << ") local=(" << ix << "," << iy << "," << iz << ")");
+      }
+   }
+}
+// END TEMPORARY DIAGNOSTIC
 
 // ModelParameters.highAltitudeWaterScanEnabled/highAltitudeWaterThresholdZ: scans every LOCAL cell
 // whose world-Z exceeds thresholdZ and warns immediately if it is liquid or interface -- see

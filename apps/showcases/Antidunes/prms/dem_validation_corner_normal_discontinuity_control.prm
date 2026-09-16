@@ -1,0 +1,12 @@
+// Control for dem_validation_corner_normal_discontinuity.prm: same physics, zeroed tilt/offset/spin
+// (clean face-aligned approach, single contact mode throughout). See
+// DEMValidationScenarios.h::runCornerNormalDiscontinuity's own header comment.
+DEMValidation{
+    testCase cornerNormalDiscontinuity;
+    lateralOffsetY 0.0;
+    lateralOffsetZ 0.0;
+    tiltDegreesA 0;
+    tiltDegreesB 0;
+    spinRateB 0.0;
+    outputBaseName corner_normal_discontinuity_control;
+}

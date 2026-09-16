@@ -1,0 +1,268 @@
+// clog_debug_extreme_pidon_phase1_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-14] PHASE 1 of a two-phase debug rerun of job 4234953's `reynoldsNumber is nan!`
+// crash (traced to a [DRY-LINK]/[LOW-RHO] cell at global ~(376,25,14), right against pillar 2, first
+// appearing at step 48819 -- see THESIS_PLAN.md item 3 for the full root-cause writeup). Otherwise
+// IDENTICAL to clog_measurement_validation_extreme_pidon_gas.prm (same physics/geometry/debris
+// schedule) except: storeSnapshot=true (snapshotFrequency 500, giving a checkpoint within 500 steps of
+// the known crash instead of needing to re-run the full ~48800 steps every time), and timesteps capped
+// at 50000 (a safety margin past the expected crash, not the original 97500 -- no need to run further
+// once the crash has been reproduced and a nearby checkpoint captured). denseNanScanEnabled/
+// lowRhoPrecursorThreshold/highVelocityPrecursorThreshold are deliberately left OFF here (matching the
+// original run's own performance) -- those are for PHASE 2 (clog_debug_extreme_pidon_phase2_gas.prm),
+// which reloads the checkpoint this phase produces and re-runs only the short remaining window with
+// full diagnostics and tight VTK enabled, per SimulationParams.h's own documented intended usage for
+// denseNanScanEnabled ("resume from the last checkpoint before a known crash... to scan every step in
+// just that window, without paying per-step overhead for the rest of the run").
+// ─────────────────────────────────────────────────────────────────────────────
+// Thesis item 3 (THESIS_PLAN.md): a deliberately bigger/more-extreme sibling of
+// clog_measurement_validation_sanity_clog_pidon_gas.prm -- same physics/geometry family (same
+// pillars/gap ratio, same target velocity, PID gains, particle physics), scaled up in domain size and
+// debris count to produce a bigger, more visually/numerically obvious clog for clearer contrast
+// against the (also-scaled) no-clog reference. NOT a replacement for the small sanity-clog pair above
+// -- both are kept; this is the "make it more extreme" follow-up requested once the small pair's tool
+// validation and flow-spinup timing were confirmed correct.
+//
+// EXTREME, PID ENABLED: 36 spheres (3x the small scenario's 12, radius 4, diameter 8 LU -- still
+// LARGER than the unchanged 6 LU pier gap) fed in from X=40-100 at the channel centerline (Y=20),
+// staggered releases (startInactive+settlingSteps ladder, 200-step gap, first release at t=20000 --
+// same post-spinup timing fix as the small sanity-clog pair, not the original t=5000 the small pair
+// itself used before that fix) across the same 3 density tiers (0.25/0.5/0.75) and Z variation
+// (44/45/46) as the small scenario, simply repeated 3x on the same 12-entry cycle (X-phase period 4 x
+// density/Z-phase period 3 = 12, so 3 repeats give 3 fresh copies of every combination, not new manual
+// positions -- reduces risk of a transcription error vs. hand-designing 36 new spots). Expect a much
+// bigger accumulated pile against the pier faces (not just filling the gap) given 3x the debris mass,
+// and correspondingly larger/clearer clogUpstreamElevation/ExcessPressure divergence and
+// avgParticleTransportRate collapse than the small scenario.
+//
+// [Claude, 2026-09-14]: TWO fixes applied here, after TWO failed attempts, both root-caused from
+// archived data rather than guessed:
+// (1) release zone moved from X=160-220 to X=40-100 (clearance to the pier at X=384 increased from
+//     164-224 LU to 284-344 LU) after job 4234536's first attempt aborted at step 42501 with a
+//     [RELEASE-OVERLAP] error (a freshly-released sphere at X=220 collided with an existing floater
+//     still lingering nearby). This alone was NOT enough: the retry (job 4234802) hit the identical
+//     failure mode at step 48501 at the new zone's own downstream-most position (X=100) -- exactly
+//     one reuse-interval (4 positions x 1500 steps = 6000 steps) later, proving relocation only
+//     delays the problem proportionally rather than fixing it.
+// (2) release spacing compressed from 1500 to 200 steps (last release now at t=27000, not t=72500) --
+//     the actual root cause: pulling avgParticleTransportRate from the aborted run showed the flow
+//     stays at its healthy ~0.0009-0.0014 rate through t=30000, THEN starts declining (down to ~0.0006,
+//     ~40% below baseline, by t=42000, alongside clogUpstreamElevation rising to ~51.7-52.0 vs. a
+//     confirmed ~49.62 undisturbed baseline). Both prior failures happened well into that
+//     already-congested regime (t=42501, t=48501) because releases kept continuing there (out to
+//     t=72500 originally) -- a fixed reuse interval that was perfectly safe under free-flowing
+//     conditions becomes unsafe once the clog has slowed local advection enough. Finishing all 36
+//     releases by t=27000, comfortably before the ~t=30000-32000 slowdown onset, removes the
+//     precondition entirely (no release event ever occurs during the congested regime) without
+//     reducing the debris load or widening the spawn zone further.
+//
+// Domain <768, 40, 90>: X DOUBLED from the small scenario's 384 (every X-valued position below --
+// pillars, probes, release zone -- is simply the small scenario's own X doubled, which preserves every
+// relative distance/margin exactly: e.g. pillars at the new domain's exact midpoint (384, same as the
+// small scenario's pillars sitting at ITS domain's exact midpoint 192), so this is a clean geometric
+// scale-up, not a redesign). Y=40 and the pier gap (still 6 LU, still < the unchanged 8 LU sphere
+// diameter) are left UNCHANGED -- only X grows, giving 2x the queueing/pile-up room without touching
+// the "one sphere physically cannot pass" guarantee the small scenario's own geometry relies on.
+// Z=90 unchanged (same low-water convention as the small scenario, see its own header for why).
+// periodicity <1,0,0> (X periodic, Y walled), same as every two-pillar scenario in this project.
+//
+// cellsPerBlock unchanged <64,20,15> -> numBlocks (768/64, 40/20, 90/15) = (12, 2, 6) = 144 ranks
+// (2x the small scenario's 72) -- 2 nodes on the multinode partition, not 1 (see
+// jobs/run_144_clog_measurement_validation_extreme_all.sbatch).
+//
+// Physics (targetMeanVelocityMagnitude, PID gains, Re/Fr/We, avgParticleDiameterOverride/dxSIOverride,
+// densityRatio, liquidHeightFactor, floorHeightFactor) are IDENTICAL to the small scenario -- this is a
+// pure geometry/debris-count scale-up of the same physical setup, not a different flow regime.
+//
+// timesteps 97500 = last release (72500) + a 25000-step interaction/settling tail (a bit more than the
+// small scenario's own ~20000-step tail, since 3x the debris plausibly needs longer to reach whatever
+// final jam state it settles into).
+//
+// ClogMeasurement probes: upstream X=280, downstream X=500 -- the small scenario's own X=140/250,
+// doubled (i.e. the same 52/58 LU offset from the pier center, scaled with everything else). Pillar-
+// face probe pair (see EvaluationParameters below) at the same doubled X, Y=11 (unchanged, matching the
+// left CylinderPillar's own unchanged Y center) -- see the small scenario's own header for the Schalko,
+// Follett & Nepf (2023) citation motivating this second pair.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 20, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             500;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <768, 40, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.04;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+   enabled                     true;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         50000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+   // no gravityOverride -- dynamically computed, see file header
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;   // never opened -- see avgParticleDiameterOverride below
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8.001943372119138;
+   dxSIOverride                0.000362694127490625;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar { center < 384, 11, 45 >; radius 6; }
+   CylinderPillar { center < 384, 29, 45 >; radius 6; }
+}
+FloatingSpheres
+{
+   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 20200; startInactive true; }
+   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 20400; startInactive true; }
+   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 20600; startInactive true; }
+   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 20800; startInactive true; }
+   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 21000; startInactive true; }
+   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 21200; startInactive true; }
+   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 21400; startInactive true; }
+   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 21600; startInactive true; }
+   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 21800; startInactive true; }
+   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 22000; startInactive true; }
+   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 22200; startInactive true; }
+   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 22400; startInactive true; }
+   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 22600; startInactive true; }
+   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 22800; startInactive true; }
+   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 23000; startInactive true; }
+   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 23200; startInactive true; }
+   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 23400; startInactive true; }
+   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 23600; startInactive true; }
+   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 23800; startInactive true; }
+   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 24200; startInactive true; }
+   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 24400; startInactive true; }
+   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 24600; startInactive true; }
+   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 24800; startInactive true; }
+   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 25000; startInactive true; }
+   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 25200; startInactive true; }
+   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 25400; startInactive true; }
+   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 25600; startInactive true; }
+   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 25800; startInactive true; }
+   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 26000; startInactive true; }
+   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 26200; startInactive true; }
+   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 26400; startInactive true; }
+   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 26600; startInactive true; }
+   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 26800; startInactive true; }
+   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 27000; startInactive true; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+
+   ClogMeasurement
+   {
+      upstreamPos       < 280, 20, 40 >;
+      downstreamPos      < 500, 20, 40 >;
+      probeHalfWidthXY   2;
+
+      // Second probe pair at the pillar's own Y (=11) instead of the gap centreline (Y=20) -- see the
+      // small clog_measurement_validation_sanity_clog_*_gas.prm's own header for the Schalko, Follett &
+      // Nepf (2023) citation motivating this. Same doubled X as the gap probes above.
+      pillarUpstreamPos    < 280, 11, 40 >;
+      pillarDownstreamPos  < 500, 11, 40 >;
+   }
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       10000000000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

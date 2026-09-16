@@ -1,0 +1,315 @@
+// test_bridge_v1_toy_trunk_first_staggered_rotated90_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// 90-DEGREE-ROTATED variant of test_bridge_v1_toy_trunk_first_staggered_gas.prm (job 4176138,
+// COMPLETED cleanly at 150000 steps -- see that file's own header for the full trunk-first-staggered
+// derivation, unchanged here). EVERY floater's long axis is rotated from X (flow-aligned) to Y
+// (broadside-to-flow): FloatingCylinders' axis changed from <1,0,0> to <0,1,0>; FloatingBoxes'
+// halfExtents X/Y components swapped (<6,1,1.5> -> <1,6,1.5>) -- geometrically identical to an actual
+// 90-degree yaw rotation for an axis-aligned shape (there is no yaw parameter on FloatingBoxParams;
+// initialTiltAngleDeg rotates about Y, i.e. tips a piece up on end, not what's wanted here, and
+// FloatingCylinderParams' own `axis` field makes the equivalent trivial and exact, unlike the box).
+// PURPOSE: a broadside trunk is wider (22 LU) than even the widest arch opening (the central arch,
+// 20 LU) -- it cannot pass through any opening at all without contacting the pier/arch curve on both
+// sides simultaneously, unlike the original flow-aligned trunk which could thread an opening
+// end-on. This is intentionally a much more collision-prone, chaotic setup than the base file.
+//
+// GEOMETRIC CONSEQUENCE (read before assuming a crash here is a bug): the base file's 3 groups sit at
+// Y=5/30/55, safely apart (25 LU) for flow-aligned pieces whose Y-footprint is only ~2-4 LU. Rotated,
+// the trunk's Y-footprint grows to 22 LU (half-extent 11) -- at the base file's own Y positions, a
+// rotated trunk centered at Y=5 or Y=55 would already clip the domain's real Y=0/Y=60 mesa_pd wall
+// planes (periodicity<1,0,0> means Y is NOT periodic -- SetupStages.h creates real HalfSpace planes
+// there) BEFORE ever falling -- the same class of t=0 hard-overlap bug found and fixed earlier this
+// session in the tsunami scenario's own FloatingBoxes. Groups moved to Y=12/30/48 (best available
+// spacing) to clear the walls (1 LU margin for the trunk) -- but simple arithmetic shows 3 non-
+// overlapping trunk-sized (22 LU) groups with wall clearance cannot actually fit in this 60-wide
+// domain at all (minimum required span: 2*11 wall margins + 2*22 inter-group gaps = 66 > 60), so the
+// achieved inter-group gap (18 LU) is LESS than the 22 LU two same-size trunks would need to never
+// overlap if released at the exact same instant. Mitigated (not eliminated) by staggering the three
+// groups' own trunk release times (2000/4500/7000 instead of all three at 2000) so they don't
+// materialize simultaneously -- but a trunk that (like the widerstacks scenario's own documented
+// RELEASE-OVERLAP history) drifts little from its own spawn column before the next group's trunk
+// appears could still collide. EXPECT this run may hard-abort with RELEASE-OVERLAP; if so, that is
+// this exact, anticipated geometric tension, not a new bug -- the fix would be widening the domain,
+// reducing the trunk length, or accepting fewer than 3 groups, none of which this "just rotate it"
+// experiment applies on its own initiative.
+//
+// Secondary pieces (radius-1.38-or-halfExtent-6 pieces, i.e. 12 LU long) fit far more comfortably at
+// the new Y positions (half-extent 6, wall margins 6/42/54-ish, inter-group gaps 18 vs a 12-LU-sum
+// requirement) -- they are not expected to reproduce the trunk's own tight-fit problem.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;  // LOW-WATER variant -- see the base file's own header; absoluteLiquidHeight~49.1, below the springing line (56)
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.01;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         150000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+   // no gravityOverride -- dynamically computed gravity
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.3; // wet/waterlogged wood-wood -- these are floating logs, soaked, not dry timber
+   numSubCycles 40;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// DEM bodies matching the BodyBC piers exactly -- UNCHANGED from the base file.
+CylinderPillars
+{
+   CylinderPillar { center < 61, 15, 38 >; radius 5; }
+   CylinderPillar { center < 67, 15, 38 >; radius 5; }
+   CylinderPillar { center < 61, 45, 38 >; radius 5; }
+   CylinderPillar { center < 67, 45, 38 >; radius 5; }
+}
+
+Pillars
+{
+   Pillar { center < 64, 15, 38 >; halfExtents < 3, 5, 38 >; }
+   Pillar { center < 64, 45, 38 >; halfExtents < 3, 5, 38 >; }
+}
+
+ArchTunnels
+{
+   ArchTunnel { center < 0, 5, 56 >;  radius 5;  xMin 61; xMax 67; deckTopZ 76; }  // left arch
+   ArchTunnel { center < 0, 30, 56 >; radius 10; xMin 61; xMax 67; deckTopZ 76; }  // central arch
+   ArchTunnel { center < 0, 55, 56 >; radius 5;  xMin 61; xMax 67; deckTopZ 76; }  // right arch
+}
+
+// Rotated (broadside, axis Y) trunk-first staggered release. Groups moved to Y=12/30/48 (from the
+// base file's 5/30/55) for wall clearance; trunk release times staggered 2000/4500/7000 (from the
+// base file's uniform 2000) -- see this file's own header for why neither fully eliminates the
+// cross-group overlap risk the rotation introduces, only reduces it.
+FloatingCylinders
+{
+   // left group (Y=12): trunk released FIRST at t=2000, then 10 secondary pieces staggered
+   FloatingCylinder { position < 15, 12, 86 >; radius 2; length 22; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  2000; startInactive true; }  // main trunk
+   FloatingCylinder { position < 15, 12, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps   9000; startInactive true; }
+   FloatingCylinder { position < 15, 12, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingCylinder { position < 15, 12, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  25000; startInactive true; }
+   FloatingCylinder { position < 15, 12, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  33000; startInactive true; }
+   FloatingCylinder { position < 15, 12, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  41000; startInactive true; }
+
+   // central group (Y=30): trunk released at t=4500, then 10 secondary pieces staggered
+   FloatingCylinder { position < 15, 30, 86 >; radius 2; length 22; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  4500; startInactive true; }  // main trunk
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps   9000; startInactive true; }
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  25000; startInactive true; }
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  33000; startInactive true; }
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  41000; startInactive true; }
+
+   // right group (Y=48): trunk released at t=7000, then 10 secondary pieces staggered
+   FloatingCylinder { position < 15, 48, 86 >; radius 2; length 22; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  7000; startInactive true; }  // main trunk
+   FloatingCylinder { position < 15, 48, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps   9000; startInactive true; }
+   FloatingCylinder { position < 15, 48, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingCylinder { position < 15, 48, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  25000; startInactive true; }
+   FloatingCylinder { position < 15, 48, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  33000; startInactive true; }
+   FloatingCylinder { position < 15, 48, 86 >; radius 1.38; length 12; axis < 0, 1, 0 >; densityRatio 0.6; settlingSteps  41000; startInactive true; }
+}
+
+FloatingBoxes
+{
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  13000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  21000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  29000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  37000; startInactive true; }
+   FloatingBox { position < 15, 12, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  45000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  13000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  21000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  29000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  37000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  45000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  13000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  21000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  29000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  37000; startInactive true; }
+   FloatingBox { position < 15, 48, 86 >; halfExtents < 1, 6, 1.5 >; densityRatio 0.6; settlingSteps  45000; startInactive true; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;
+   useArchTunnelAsMesaPDObject   true;
+   useContactFilterOwnerTiebreak true;
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePass3Reresolution          true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   logFloaterHistory              false;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+
+   BodyBC
+   {
+      shape LogicalOR;
+      first
+      {
+         shape LogicalOR;
+         first  { shape Cylinder; min < 61, 15, 0 >; max < 61, 15, 76 >; radius 5; }
+         second { shape Cylinder; min < 67, 15, 0 >; max < 67, 15, 76 >; radius 5; }
+      }
+      second { shape Box; min < 61, 10, 0 >; max < 67, 20, 76 >; }
+      NoSlip{}
+   }
+
+   BodyBC
+   {
+      shape LogicalOR;
+      first
+      {
+         shape LogicalOR;
+         first  { shape Cylinder; min < 61, 45, 0 >; max < 61, 45, 76 >; radius 5; }
+         second { shape Cylinder; min < 67, 45, 0 >; max < 67, 45, 76 >; radius 5; }
+      }
+      second { shape Box; min < 61, 40, 0 >; max < 67, 50, 76 >; }
+      NoSlip{}
+   }
+
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 61, 0, 56 >; max < 67, 10, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 61, 5, 56 >; max < 67, 5, 56 >; radius 5; }
+      }
+      NoSlip{}
+   }
+
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 61, 20, 56 >; max < 67, 40, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 61, 30, 56 >; max < 67, 30, 56 >; radius 10; }
+      }
+      NoSlip{}
+   }
+
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 61, 50, 56 >; max < 67, 60, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 61, 55, 56 >; max < 67, 55, 56 >; radius 5; }
+      }
+      NoSlip{}
+   }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 90 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 90 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 90 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

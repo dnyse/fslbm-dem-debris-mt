@@ -1,0 +1,2 @@
+// See DEMValidationScenarios.h::runMultiPointDeepOverlapStability for what this checks.
+DEMValidation{ testCase multiPointDeepOverlapStability; }

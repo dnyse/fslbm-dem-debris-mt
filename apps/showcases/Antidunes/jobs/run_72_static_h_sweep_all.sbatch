@@ -46,7 +46,7 @@ echo "==> Building Antidunes (once, shared by all ${#VARIANTS[@]} variants)"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 if [[ -n "$HPCVAULT" ]]; then
-    ARCHIVE_ROOT="$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_$STAMP"
+    ARCHIVE_ROOT="$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_$STAMP"
 else
     ARCHIVE_ROOT="$BIN_DIR/archive/$STAMP"
 fi

@@ -26,6 +26,7 @@
 
 #include "core/Environment.h"
 #include "core/waLBerlaBuildInfo.h"
+
 #include "sqlite/SQLite.h"
 #include "timeloop/all.h"
 
@@ -76,6 +77,29 @@ int main(int argc, char** argv)
    setupSurfaceGeometryFields (simParams, simObjs);   // curvature + normal + obstacleNormal + smoothFill
    setupParticles             (simParams, simObjs);   // particleStorage + particleField
 
+   // TEMPORARY DIAGNOSTIC (THESIS_PLAN.md item 1a, checkpoint-resume STALE-PARTICLE-IDX abort) --
+   // per-rank dump of what the particle accessor actually knows right after setupParticles() (i.e.
+   // after loadBlockData + syncCall()), to see which ranks have a ghost/local copy of each floater
+   // and which don't, cross-referenced against the block's own AABB (extended by
+   // mesapdDomain-relevant margins) to understand the ghost-sync reach.
+   if (simParams->blockForest.loadSnapshot)
+   {
+      const int rank = mpi::MPIManager::instance()->rank();
+      uint_t totalKnown = uint_c(simObjs->particleAccessor->size());
+      std::ostringstream uidList;
+      simObjs->particleStorage->forEachParticle(false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
+         [&uidList](const size_t idx, auto& ac) {
+            if (ac.getType(idx) == uint_t(3))
+               uidList << ac.getUid(idx) << "(pos=" << ac.getPosition(idx) << ") ";
+         }, *simObjs->particleAccessor);
+      // Print each of this rank's own local blocks' AABB for comparison against the box's own position.
+      std::ostringstream blockAABBs;
+      for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+         blockAABBs << blockIt->getAABB() << " ";
+      WALBERLA_LOG_WARNING("[GHOST-SYNC-DIAG] rank=" << rank << " totalKnownParticles=" << totalKnown
+         << " boxes-known=[ " << uidList.str() << "] blocks=[ " << blockAABBs.str() << "]");
+   }
+
    // Boundary handling and flags
    // ----------------------------------------------------------------------------------------------------------------------------------
    setupBoundaryHandling      (simParams, simObjs);
@@ -94,8 +118,21 @@ int main(int argc, char** argv)
 
    // Communicate after initialization
    // ----------------------------------------------------------------------------------------------------------------------------------
+   // particleFieldID is included here to match BuildTimeloop.h's own per-step communication of it
+   // alongside flagFieldID (see addSweepFluidParticleCoupling's own "Communication (coupling): after
+   // PDF reconstruction (flagField + particleField)" AfterFunction) -- omitting it here left a rank
+   // whose block only sees a floater as a GHOST (not locally mapped) with a correctly-communicated
+   // "obstacle" flag but a stale/never-communicated particleField entry (default invalid UID=0) for
+   // that same cell, until the first per-step coupling sweep runs. On a fresh start this is a
+   // harmless one-step gap (same reasoning as the fillWithDomain() fix in mapParticlesOntoCells());
+   // on a checkpoint resume, if a floater's cross-rank obstacle footprint at load time happens to
+   // include a cell on a rank that only ever sees it as a ghost, the SimpleBB.h MEM force sweep's own
+   // stale-particle-idx guard hard-aborts on that very first post-load step (confirmed directly: job
+   // 4236616, `[STALE-PARTICLE-IDX] ... uid=0` at t=70001, the first step after loading
+   // cuboid_stillwater_realgravity981_3xsphere_hires_d025's own t=70000 checkpoint).
    WALBERLA_LOG_INFO_ON_ROOT("Initial communication");
-   Communication_T(simObjs->blockForest, simObjs->flagFieldID, simObjs->fillFieldID, simObjs->forceDensityFieldID)();
+   Communication_T(simObjs->blockForest, simObjs->flagFieldID, simObjs->fillFieldID, simObjs->forceDensityFieldID,
+                    simObjs->particleFieldID)();
    PdfCommunication_T(simObjs->blockForest, simObjs->pdfFieldID)();
 
    // Create bubble model
@@ -176,7 +213,8 @@ int main(int argc, char** argv)
       timeloopFSLBM->singleStep(timingPool, true);
       if (watchNow) trackWatchCells(simObjs, "post-FSLBM", t, watchCells);
       if (watchNow) checkClosedInterfaceLayer(simObjs, "post-FSLBM", t);
-      if (nanScanNow && checkPdfNaN(simObjs, "timeloopFSLBM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopFSLBM at t=" << t);
+      if (nanScanNow && checkPdfNaN(simObjs, "timeloopFSLBM", t, simParams->physics.lowRhoPrecursorThreshold, simParams->physics.highVelocityPrecursorThreshold))
+      { listAllBadCellsNoEarlyExit(simObjs, "timeloopFSLBM"); WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopFSLBM at t=" << t); }
       if (simParams->model.highAltitudeWaterScanEnabled)
          checkHighAltitudeWater(simObjs, "timeloopFSLBM", t, simParams->model.highAltitudeWaterThresholdZ);
 
@@ -190,7 +228,8 @@ int main(int argc, char** argv)
       if (watchNow) trackWatchCells(simObjs, "post-AfterDEM", t, watchCells);
       if (watchNow) checkClosedInterfaceLayer(simObjs, "post-AfterDEM", t);
       if (watchNow) logFloaterLinkBalance(simObjs, "post-AfterDEM", t);
-      if (nanScanNow && checkPdfNaN(simObjs, "timeloopAfterDEM", t)) WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopAfterDEM at t=" << t);
+      if (nanScanNow && checkPdfNaN(simObjs, "timeloopAfterDEM", t, simParams->physics.lowRhoPrecursorThreshold, simParams->physics.highVelocityPrecursorThreshold))
+      { listAllBadCellsNoEarlyExit(simObjs, "timeloopAfterDEM"); WALBERLA_ABORT("[NaN-SCAN] aborting after timeloopAfterDEM at t=" << t); }
       if (simParams->model.highAltitudeWaterScanEnabled)
          checkHighAltitudeWater(simObjs, "timeloopAfterDEM", t, simParams->model.highAltitudeWaterThresholdZ);
 
@@ -215,6 +254,12 @@ int main(int argc, char** argv)
       {
          WALBERLA_LOG_INFO_ON_ROOT("[" << t << "/" << simParams->physics.timesteps << "] Performance log");
          timingPool.logResultOnRoot();
+
+         if (simParams->evaluation.logContactDetectionStatsPeriodically)
+         {
+            particleKernels.logContactDetectionStatistics(std::to_string(t));
+            particleKernels.resetContactDetectionStatistics();
+         }
       }
 
       if (simParams->blockForest.storeSnapshot &&

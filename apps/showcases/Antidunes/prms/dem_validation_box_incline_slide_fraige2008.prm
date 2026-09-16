@@ -1,0 +1,32 @@
+// Fraige et al. (2008)'s "slide test" methodology (Powder Technology 186:224-240, Section 3.6 / Figs.
+// 7-8): a cube resting face-flush on a plane inclined steeper than the friction angle should slide
+// straight down-slope. Their own single-contact-point DEM-Cube version showed the contact force
+// "jumping" between corners as the box translates, injecting a spurious lateral force -- the same family
+// of degenerate flush-contact tie-break bug fixed in Cylinder/Box::support() this session (2026-09-13).
+// By symmetry the box's world-X position and every angular-velocity component must stay exactly zero for
+// all time; any nonzero drift is a direct regression signal for that bug.
+DEMValidation{
+    testCase boxInclineSlideStraightness;
+
+    boxHalfExtents < 1.0, 1.0, 1.0 >;
+    density 1.0;
+    restitutionCoefficient 0.3;
+
+    // Fraige et al. (2008), Powder Technology 186:224-240, Table 2: measured cube-wall sliding friction
+    // coefficient mu=0.4.
+    frictionCoefficient 0.4;
+    poissonsRatio 0.22;
+    collisionTime 0.01;
+    gravityMagnitude 9.81;
+
+    // Must exceed atan(mu) (~21.8deg for mu=0.4) so the box actually slides rather than sticks.
+    inclineAngleDeg 30.0;
+    slideSteps 2000;
+
+    steadyStateFraction 0.2;
+    toleranceLateralAbs 1e-6;
+    toleranceOutOfPlaneAngVelAbs 1e-6;
+    toleranceSteadyPitchAbs 0.01;
+    vtkSpacing 0;
+    outputBaseName box_incline_slide_fraige2008;
+}

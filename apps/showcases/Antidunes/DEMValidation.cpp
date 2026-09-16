@@ -55,8 +55,20 @@ int main(int argc, char** argv)
    if (testCase == "wallImpactSphere") pass = dem_validation::runWallImpactSphere(block);
    else if (testCase == "wallImpactCylinder") pass = dem_validation::runWallImpactCylinder(block);
    else if (testCase == "wallImpactBox") pass = dem_validation::runWallImpactBox(block);
+   else if (testCase == "boxFaceDropRestitution") pass = dem_validation::runBoxFaceDropRestitution(block);
+   else if (testCase == "boxInclineSlideStraightness") pass = dem_validation::runBoxInclineSlideStraightness(block);
+   else if (testCase == "gjkVsAnalyticalCylinderWall") pass = dem_validation::runGjkVsAnalyticalCylinderWallCheck(block);
    else if (testCase == "pairRestitution") pass = dem_validation::runPairRestitution(block);
    else if (testCase == "energyConservation") pass = dem_validation::runEnergyConservation(block);
+   else if (testCase == "cornerNormalDiscontinuity") pass = dem_validation::runCornerNormalDiscontinuity(block);
+   else if (testCase == "cornerFixComparison") pass = dem_validation::runCornerFixComparison(block);
+   else if (testCase == "multiPointDeepOverlapStability") pass = dem_validation::runMultiPointDeepOverlapStability(block);
+   else if (testCase == "multiPointDeepOverlapFuzz") pass = dem_validation::runMultiPointDeepOverlapFuzz(block);
+   else if (testCase == "multiPointEdgeCases") pass = dem_validation::runMultiPointEdgeCases(block);
+   else if (testCase == "fallOntoPileStability") pass = dem_validation::runFallOntoPileStability(block);
+   else if (testCase == "contactStiffnessCalibrationSweep") pass = dem_validation::runContactStiffnessCalibrationSweep(block);
+   else if (testCase == "multiPointBoxContactFuzz") pass = dem_validation::runMultiPointBoxContactFuzz(block);
+   else if (testCase == "productionCollisionReplay") pass = dem_validation::runProductionCollisionReplay(block);
    else if (testCase == "packing") pass = dem_validation::runPacking(block);
    else if (testCase == "angleOfRepose") pass = dem_validation::runAngleOfRepose(block);
    else if (testCase == "packingSingleShape") pass = dem_validation::runPackingSingleShape(block);
@@ -64,7 +76,12 @@ int main(int argc, char** argv)
    else if (testCase == "archTunnelContainment") pass = dem_validation::runArchTunnelContainment(block);
    else WALBERLA_ABORT("Unknown testCase '" << testCase
                                              << "'. Valid values: wallImpactSphere, wallImpactCylinder, "
-                                                "wallImpactBox, pairRestitution, energyConservation, packing, "
+                                                "wallImpactBox, pairRestitution, energyConservation, "
+                                                "cornerNormalDiscontinuity, cornerFixComparison, "
+                                                "multiPointDeepOverlapStability, multiPointDeepOverlapFuzz, "
+                                                "multiPointEdgeCases, fallOntoPileStability, "
+                                                "contactStiffnessCalibrationSweep, "
+                                                "multiPointBoxContactFuzz, productionCollisionReplay, packing, "
                                                 "angleOfRepose, packingSingleShape, rotatingDrum, "
                                                 "archTunnelContainment.");
 
