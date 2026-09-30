@@ -841,6 +841,9 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
    const real_t tiltEndDeg    = b.getParameter< real_t >("tiltEndDeg", real_t(40));
    const real_t tiltStepDeg   = b.getParameter< real_t >("tiltStepDeg", real_t(10));
    const uint_t vtkSpacing    = b.getParameter< uint_t >("vtkSpacing", uint_t(0));
+   // [Claude, 2026-09-30] was not wired for the box (always the plain translational effective mass); default false keeps
+   // the previous behaviour.
+   const bool   useRotationalEffectiveMass = b.getParameter< bool >("useRotationalEffectiveMass", false);
    const std::string outBase  = b.getParameter< std::string >("outputBaseName", "wall_impact_box");
 
    detail::PassFailAccumulator acc;
@@ -869,7 +872,12 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
       const Vec3 analyticCornerBF(corner[0], real_t(0), corner[2]);
 
       DEMEngine engine(dt, e, mu, poisson, collisionTime, real_t(0),
-                       real_t(30) * std::max({ halfExtents[0], halfExtents[1], halfExtents[2] }));
+                       real_t(30) * std::max({ halfExtents[0], halfExtents[1], halfExtents[2] }),
+                       /*useAnalyticalContactDetection=*/false, /*useRoundedBoxCorners=*/false,
+                       /*boxRoundingRadius=*/real_t(0.05), /*useMultiPointBoxContact=*/false,
+                       /*useBoxOverlapCap=*/false, /*boxOverlapCapFraction=*/real_t(0.3),
+                       /*useAxisHysteresis=*/false, /*axisHysteresisMargin=*/real_t(0.15),
+                       /*useContactManifold=*/false, /*manifoldFadeRate=*/real_t(0.25), useRotationalEffectiveMass);
       const real_t gap = real_t(0.01) * std::min({ halfExtents[0], halfExtents[1], halfExtents[2] });
       // Horizontal velocity component aimed so the leading (lowest) corner strikes squarely, matching
       // Housner's planar rocking-block assumption (velocity, spin axis and contact point all in the

@@ -1189,6 +1189,25 @@ struct ModelParams {
    // boxRoundingRadius's own default for the SAT-patch approach, for a like-for-like comparison.
    real_t      spheroBoxRadius;
 
+   // [Claude, 2026-09-30] cylinderContactSkin (DEFAULT 0 = off): contact skin of the cylindrical floaters (type 4),
+   // in lattice units. For contact detection only, every floating cylinder is replaced by an inflated cylinder with
+   // radius R + m and half-length h + m: the DEM contact force starts when the SURFACE GAP between two rods drops below
+   // 2m (face-face, band-band), and between a rod and a wall plane or a pillar when it drops below m. At the rims the
+   // sharp inflated edge reaches up to (sqrt 2 - 1) m further than a rounded (Minkowski) skin would. Purpose: keep at least one resolved fluid
+   // cell between touching rods, whose line contacts otherwise seal sub-cell liquid channels (THESIS_PLAN.md,
+   // 2026-09-21 rod-bundle test: sealed channel cells collapse in density). This is the "effective diameter /
+   // minimum fluid gap" remedy of the resolved LBM-DEM literature (Rettinger 2023, p. 7, citing Boutt et al. 2007;
+   // Glowinski et al. 2001 use a short-range repulsion for the same purpose). The fluid mapping (MEM) is NOT
+   // dilated. Implementation (ParticleKernels.h, SolidCylinderContactDetection): the Cylinder x Cylinder,
+   // Cylinder x HalfSpace, and Cylinder x CylindricalBoundary (solid pillar) overloads call themselves once with the
+   // inflated shapes, so the unchanged, validated detection (closed forms, GJK/EPA fallback) is used. A GJK/EPA
+   // "margin" formulation was tried first and rejected: mesa_pd's EPA gives up when only the margins overlap
+   // (EPA.cpp, "numPoints == 1"), which is exactly the parallel-rod line contact the skin is meant for.
+   // The rod interaction radius (cheap reject, ghost sync range) is enlarged by 2m (SetupStages.h), which bounds the
+   // circumscribing radius of the inflated cylinder, sqrt((R+m)^2 + (h+m)^2) <= sqrt(R^2+h^2) + sqrt(2) m.
+   // Not applied to Cylinder x Sphere / Cylinder x Box (no such pairs in the rod scenarios).
+   real_t      cylinderContactSkin;
+
    // Only meaningful when useSpheroBoxContact is true -- selects WHICH algorithm computes the
    // spherosimplex (point,normal,overlap) triplet:
    // false → (DEFAULT) mesa_pd's own GJK/EPA run with margin=spheroBoxRadius on the two sharp
@@ -1550,6 +1569,7 @@ struct ModelParams {
       , useRotationalEffectiveMass  { b.getParameter< bool >       ("useRotationalEffectiveMass", false) }
       , useSpheroBoxContact         { b.getParameter< bool >       ("useSpheroBoxContact", false) }
       , spheroBoxRadius             { b.getParameter< real_t >     ("spheroBoxRadius", real_t(0.05)) }
+      , cylinderContactSkin         { b.getParameter< real_t >     ("cylinderContactSkin", real_t(0)) }
       , useSpheroBoxAnalytical      { b.getParameter< bool >       ("useSpheroBoxAnalytical", false) }
       , useFraigeBoxContactModel    { b.getParameter< bool >       ("useFraigeBoxContactModel", false) }
       , logFloaterHistory           { b.getParameter< bool >       ("logFloaterHistory", false) }

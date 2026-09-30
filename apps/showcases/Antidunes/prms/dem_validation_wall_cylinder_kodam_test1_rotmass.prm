@@ -1,0 +1,55 @@
+// [Claude, 2026-09-30] Configuration reported in the thesis (Section 5.2, wall impact): identical to
+// dem_validation_wall_cylinder_kodam_test1.prm plus useRotationalEffectiveMass true and dt = collisionTime/500 (10x finer
+// than the harness default collisionTime/50). Rerun 2026-09-30: PASS (32/32); worst tilt 30 deg, velocity error 1.94 %.
+// Without these two settings the same sweep gives FAIL (20/32); with the rotational effective mass only, FAIL (31/32).
+// DEM validation: a REPLICA of Kodam, Bharadwaj, Curtis, Hancock & Wassgren (2010), Chemical
+// Engineering Science 65(22), 5863-5871, Part II, Section 3.1 "Test 1" -- using their EXACT reported
+// geometry/material parameters (Table 1, p. 5865) and their EXACT stated protocol (p. 5866), not just
+// their formulas applied to our own arbitrary numbers (contrast dem_validation_wall_cylinder.prm).
+//
+// From the paper: cylinder diameter 8.0mm (radius 4.0, used directly as the length unit here -- the
+// test is frictionless and gravity-free, so it is exactly scale-invariant and does not need literal SI
+// units), length 5.3mm (aspect ratio L/D = 0.6625, matching their stated value exactly), coefficient of
+// restitution 0.85 (calibrated by the authors from Plexiglas SPHERE drop tests, reused for the
+// cylinder), FRICTIONLESS contact, gravity neglected, impact velocity purely NORMAL to the wall (zero
+// tangential component -- tangentialSpeedFraction 0, unlike this app's own default oblique sweep) at
+// "an initial center of mass speed of 1 m/s" with zero initial angular velocity, sweeping the
+// cylinder's face/wall tilt angle 0-90deg.
+//
+// The paper itself states Test 1 is a DEM-vs-CLOSED-FORM-ANALYTICAL comparison (Park, 2003, PhD
+// thesis), not a physical experiment -- there is no drop-test rig for this one. Their own paper reports
+// only two explicit numeric anchor points in the text (not a full data table): at tilt=0deg (face-on)
+// and tilt=90deg (band-on), the dimensionless rebound speed Vz+/Vz- equals EXACTLY their coefficient of
+// restitution, 0.85 (p. 5866) -- DEMValidationScenarios.h checks the simulated value against that
+// STATED NUMBER directly at those two angles, not just against our own re-derived formula. At
+// intermediate angles we still only have our own analytical solver to compare against (same one used
+// for the non-replica cylinder test) since Kodam et al.'s Figs. 4-5 curves were never digitized here --
+// but with friction off, the main source of disagreement identified in the non-replica sweep (the
+// Cundall-Strack-vs-idealised-Coulomb friction-model gap) does not apply at all, so this sweep is a
+// meaningfully tighter, more trustworthy comparison than the frictional default test.
+DEMValidation{
+    testCase wallImpactCylinder;
+    useRotationalEffectiveMass true;
+    dt 0.00002;
+
+    cylinderRadius 4.0;
+    cylinderLength 5.3;
+    density 1.0;
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.0;
+    poissonsRatio 0.35;
+    collisionTime 0.01;
+
+    impactSpeed 1.0;
+    tangentialSpeedFraction 0.0;
+    tiltStartDeg 0.0;
+    tiltEndDeg 90.0;
+    tiltStepDeg 10.0;
+
+    // Tighter than the default (0.3): frictionless removes the main documented source of disagreement
+    // (the tangential-spring-vs-idealised-Coulomb gap), so this replica is a stronger, higher-confidence
+    // comparison and should hold to a much tighter bound if the underlying contact/integration is correct.
+    toleranceRelError 0.02;
+    vtkSpacing 0;
+    outputBaseName wall_impact_cylinder_kodam_test1_rotmass;
+}

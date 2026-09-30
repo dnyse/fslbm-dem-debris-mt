@@ -1480,6 +1480,107 @@ void testArchDeckFillBoxNoContactInsideOpenBore()
 } // namespace antidunes
 } // namespace walberla
 
+namespace walberla {
+namespace antidunes {
+using Vec3 = mesa_pd::Vec3;
+
+// ---------------------------------------------------------------------------------------------
+// [Claude, 2026-09-30] cylinderContactSkin (ModelParameters): every floating cylinder is dilated by the skin m for
+// contact detection. Expected values follow from the Minkowski dilation: the signed surface distance to another
+// dilated rod shrinks by 2m, to a plane or a solid pillar by m; normals are unchanged.
+// ---------------------------------------------------------------------------------------------
+void testCylinderSkinCylinderCylinder()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+   auto c0 = ps->create();
+   c0->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   c0->setRotation(mesa_pd::Rot3());
+   auto c1 = ps->create();
+   c1->setPosition(Vec3(real_t(1.3), real_t(0), real_t(0))); // parallel, surface gap 0.3
+   c1->setRotation(mesa_pd::Rot3());
+   const mesa_pd::data::Cylinder cylShape(real_t(0.5), real_t(2));
+
+   // Without skin: separated.
+   SolidCylinderContactDetection scd0;
+   WALBERLA_CHECK(!scd0(0, 1, cylShape, cylShape, ac));
+
+   // Skin 0.25: dilated gap 0.3 - 0.5 = -0.2 -> contact, normal along -x (same sign as testCylinderCylinderContact),
+   // contact point in the middle of the dilated overlap, x = (0.5+0.25 + 1.3-0.5-0.25)/2 = 0.65.
+   SolidCylinderContactDetection scd;
+   scd.cylinderContactSkin = real_t(0.25);
+   WALBERLA_CHECK(scd(0, 1, cylShape, cylShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), real_t(-0.2), real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactNormal(), Vec3(real_t(-1), real_t(0), real_t(0)), real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactPoint()[0], real_t(0.65), real_t(1e-3));
+
+   // Skin 0.1: dilated gap 0.3 - 0.2 = 0.1 > 0 -> still separated.
+   SolidCylinderContactDetection scdSmall;
+   scdSmall.cylinderContactSkin = real_t(0.1);
+   WALBERLA_CHECK(!scdSmall(0, 1, cylShape, cylShape, ac));
+
+   // Already overlapping cores (centres 0.8 apart, overlap 0.2): depth grows by 2m.
+   c1->setPosition(Vec3(real_t(0.8), real_t(0), real_t(0)));
+   SolidCylinderContactDetection scdOv;
+   scdOv.cylinderContactSkin = real_t(0.25);
+   WALBERLA_CHECK(scdOv(0, 1, cylShape, cylShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scdOv.getPenetrationDepth(), real_t(-0.7), real_t(1e-3));
+}
+
+void testCylinderSkinHalfSpaceAndPillar()
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+   // Wall: cylinder (radius 1, height 4, axis z) with its bottom cap 0.3 above the plane z = 0.
+   auto cyl = ps->create();
+   cyl->setPosition(Vec3(real_t(0), real_t(0), real_t(2.3)));
+   cyl->setRotation(mesa_pd::Rot3());
+   auto wall = ps->create();
+   wall->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   const mesa_pd::data::Cylinder  cylShape(real_t(1), real_t(4));
+   const mesa_pd::data::HalfSpace wallShape(Vec3(real_t(0), real_t(0), real_t(1)));
+
+   SolidCylinderContactDetection scd0;
+   WALBERLA_CHECK(!scd0(0, 1, cylShape, wallShape, ac));
+   SolidCylinderContactDetection scd;
+   scd.cylinderContactSkin = real_t(0.5);
+   WALBERLA_CHECK(scd(0, 1, cylShape, wallShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), real_t(-0.2));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(1)));
+   WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(0), real_t(0), real_t(0))); // stays on the plane
+   SolidCylinderContactDetection scdSw;
+   scdSw.cylinderContactSkin = real_t(0.5);
+   WALBERLA_CHECK(scdSw(1, 0, wallShape, cylShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL(scdSw.getPenetrationDepth(), real_t(-0.2));
+
+   // Pillar: log (radius 1, axis z) at x = 2.3 next to a solid pillar of radius 1 at the origin, gap 0.3.
+   auto ps2 = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac2(ps2);
+   auto log = ps2->create();
+   log->setPosition(Vec3(real_t(2.3), real_t(0), real_t(0)));
+   log->setRotation(mesa_pd::Rot3());
+   auto pillar = ps2->create();
+   pillar->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+   const mesa_pd::data::CylindricalBoundary pillarShape(real_t(1), Vec3(real_t(0), real_t(0), real_t(1)));
+
+   SolidCylinderContactDetection scdP0;
+   WALBERLA_CHECK(!scdP0(0, 1, cylShape, pillarShape, ac2));
+   SolidCylinderContactDetection scdP;
+   scdP.cylinderContactSkin = real_t(0.5);
+   WALBERLA_CHECK(scdP(0, 1, cylShape, pillarShape, ac2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scdP.getPenetrationDepth(), real_t(-0.2), real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scdP.getContactNormal(), Vec3(real_t(1), real_t(0), real_t(0)), real_t(1e-6));
+   // Threshold is restored after the call.
+   WALBERLA_CHECK_FLOAT_EQUAL(scdP.getContactThreshold(), real_t(0));
+   SolidCylinderContactDetection scdPSw;
+   scdPSw.cylinderContactSkin = real_t(0.5);
+   WALBERLA_CHECK(scdPSw(1, 0, pillarShape, cylShape, ac2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scdPSw.getPenetrationDepth(), real_t(-0.2), real_t(1e-6));
+}
+
+} // namespace antidunes
+} // namespace walberla
+
 int main(int argc, char** argv)
 {
    walberla::Environment env(argc, argv);
@@ -1517,6 +1618,8 @@ int main(int argc, char** argv)
    testCylinderPillarBruteForceCrossCheck();
    testCylinderHalfSpaceContact();
    testCylinderHalfSpaceNoContact();
+   testCylinderSkinCylinderCylinder();
+   testCylinderSkinHalfSpaceAndPillar();
    testSphereCylindricalBoundaryContainmentContact();
    testSphereCylindricalBoundaryContainmentNoContact();
    testSphereCylindricalBoundaryContainmentAxialBounds();

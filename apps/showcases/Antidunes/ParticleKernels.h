@@ -343,6 +343,16 @@ public:
                    const mesa_pd::data::HalfSpace& hs,
                    Accessor& ac)
    {
+      // cylinderContactSkin (see ModelParameters): detect with the inflated cylinder (radius + m, half-length + m).
+      if (cylinderContactSkin > real_t(0))
+      {
+         const real_t m = cylinderContactSkin;
+         const mesa_pd::data::Cylinder inflated(cyl.getRadius() + m, cyl.getHeight() + real_t(2) * m);
+         cylinderContactSkin = real_t(0);
+         const bool hit = operator()(idx1, idx2, inflated, hs, ac);
+         cylinderContactSkin = m;
+         return hit;
+      }
       getIdx1() = idx1;
       getIdx2() = idx2;
 
@@ -680,11 +690,25 @@ public:
    // and the radial distance to the axis gives the penetration.
    //   penetrationDepth = radial_dist - pillar_radius (< 0 → penetrating)
    //   contactNormal points radially outward from the pillar axis toward the log (world frame)
+   // cylinderContactSkin wrapper (see ModelParameters::cylinderContactSkin): detect with the inflated cylinder
+   // (radius + m, half-length + m); containment mode (arch/tunnel scenarios) is left unchanged.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Cylinder& cyl,
                    const mesa_pd::data::CylindricalBoundary& cb,
                    Accessor& ac)
+   {
+      const real_t m = cylinderContactSkin;
+      if (m <= real_t(0) || cb.isContainment()) return cylinderPillarCore(idx1, idx2, cyl, cb, ac);
+      const mesa_pd::data::Cylinder inflated(cyl.getRadius() + m, cyl.getHeight() + real_t(2) * m);
+      return cylinderPillarCore(idx1, idx2, inflated, cb, ac);
+   }
+
+   template< typename Accessor >
+   bool cylinderPillarCore(const size_t idx1, const size_t idx2,
+                           const mesa_pd::data::Cylinder& cyl,
+                           const mesa_pd::data::CylindricalBoundary& cb,
+                           Accessor& ac)
    {
       getIdx1() = idx1;
       getIdx2() = idx2;
@@ -1275,6 +1299,20 @@ public:
       if (ac.getUid(idx2) < ac.getUid(idx1))
          return operator()(idx2, idx1, cyl2, cyl1, ac);
 
+      // cylinderContactSkin (see ModelParameters): both rods are replaced by inflated cylinders (radius + m,
+      // half-length + m) and resolved by the unchanged dispatch below (closed forms and GJK/EPA fallback). The skin is
+      // cleared during the recursive call so that the inflation is applied exactly once.
+      if (cylinderContactSkin > real_t(0))
+      {
+         const real_t m = cylinderContactSkin;
+         const mesa_pd::data::Cylinder inflated1(cyl1.getRadius() + m, cyl1.getHeight() + real_t(2) * m);
+         const mesa_pd::data::Cylinder inflated2(cyl2.getRadius() + m, cyl2.getHeight() + real_t(2) * m);
+         cylinderContactSkin = real_t(0);
+         const bool hit = operator()(idx1, idx2, inflated1, inflated2, ac);
+         cylinderContactSkin = m;
+         return hit;
+      }
+
       // Cheap raw-center-distance reject, BEFORE either the closed-form solver or the GJK/EPA
       // fallback runs: mirrors the same bound mesa_pd's own detectSphereSphereCollision gets for
       // free from its formula (|pos1-pos2| < r1+r2) -- but Cylinder-Cylinder has no such built-in
@@ -1779,6 +1817,8 @@ public:
    // margin instead of the tiny numerical tolerance GeneralContactDetection::collideGJKEPA uses.
    bool   useSpheroBoxContact = false;
    real_t spheroBoxRadius     = real_t(0.05);
+   // See ModelParameters::cylinderContactSkin's own doc comment (SimulationParams.h). 0 = off.
+   real_t cylinderContactSkin = real_t(0);
    // See ModelParameters::useSpheroBoxAnalytical's own doc comment (SimulationParams.h). Only
    // meaningful when useSpheroBoxContact is true -- selects the closed-form Eberly algorithm
    // (paper_analytical::boxBoxSpheroAnalytical) instead of the default GJK/EPA-with-margin path.
@@ -2258,6 +2298,9 @@ public:
    void setStepInfo(uint_t mainStep, uint_t subCycle) { mainStep_ = mainStep; subCycle_ = subCycle; acd_.shadowMainStep = mainStep; acd_.shadowSubCycle = subCycle; }
 
    // Shadow mode (ModelParameters.shadowAnalyticCylinderLog): see SolidCylinderContactDetection::shadowCompare.
+   // See ModelParameters::cylinderContactSkin (SimulationParams.h).
+   void setCylinderContactSkin(real_t skin) { acd_.cylinderContactSkin = skin; }
+
    void setShadowAnalytic(bool enabled, uint_t startStep, uint_t endStep)
    {
       acd_.shadowAnalyticLog = enabled; acd_.shadowStartStep = startStep; acd_.shadowEndStep = endStep;
@@ -4031,6 +4074,11 @@ public:
       floaterHistoryLogger_.setMinStep(simParams->model.logFloaterHistoryStartStep);
       floaterHistoryLogger_.setMaxStep(simParams->model.logFloaterHistoryEndStep);
       computeContacts.setHistoryLogger(&floaterHistoryLogger_);
+      computeContacts.setCylinderContactSkin(simParams->model.cylinderContactSkin);
+      if (simParams->model.cylinderContactSkin > real_t(0))
+         WALBERLA_LOG_INFO_ON_ROOT("cylinderContactSkin = " << simParams->model.cylinderContactSkin
+                                   << " LU (rod-rod contact below a surface gap of " << real_t(2) * simParams->model.cylinderContactSkin
+                                   << ", rod-wall/pillar below " << simParams->model.cylinderContactSkin << ")");
       computeContacts.setFreshlyActivatedUIDs(freshlyActivatedFloaterUIDs_);
       computeContacts.setShadowAnalytic(simParams->model.shadowAnalyticCylinderLog, simParams->model.shadowAnalyticStartStep, simParams->model.shadowAnalyticEndStep);
       simParams_shadowEnabled_ = simParams->model.shadowAnalyticCylinderLog;

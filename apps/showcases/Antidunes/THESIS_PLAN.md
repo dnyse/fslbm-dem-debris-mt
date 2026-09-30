@@ -921,6 +921,50 @@ diverges from the comparison's purpose (partial-submersion buoyancy isn't what's
 > from the pillar axis) -- worth updating the script and/or evaluating BR at the pillar line itself
 > before relying on either for a real cross-scenario plot. Not actioned this entry, only flagged.
 
+> **[Claude, 2026-09-30] Table 5.4 (`tab:mem-box-noise`) removed as outdated; provenance comments
+> added to both equilibrium `.tex` files; artifact time-to-surface table switched to lattice steps
+> only.** Three follow-up edits, all per explicit request:
+>
+> 1. **Removed `tab:mem-box-noise`** from `mem-vs-analytical-buoyancy.tex`
+>    ("also remove the second table 5.4 we just explain why we had to tilt it t25 degrees and this
+>    data is outdated") -- this was the one-off R=1 $F_{\mathrm{hydro},z}$ noise-statistics table used
+>    to originally justify the 25° box tilt; now superseded by `tab:mem-analytic-rise-tilted`'s
+>    full 18-run confirmation, so keeping both was redundant and the noise numbers were stale relative
+>    to the new table's own R=1 row. Condensed the surrounding two paragraphs + table into a tighter
+>    two-paragraph section (renamed "The box anomaly, and why tilting it fixes it") that keeps the
+>    causal explanation (cell-centre classification + synchronized fluid/solid flips on flush axis-
+>    aligned faces) as prose only, no numbers; removed the now-dangling
+>    `\Cref{tab:mem-box-noise}`-referencing clause from the "fix confirmed" paragraph below it.
+>    Rebuilt clean (2x pdflatex, exit=0 both times, only the pre-existing unrelated
+>    `sec:cc-dispatch-gap` warning); verified via `pdftoppm`-rendered pages 97-98 that Table 5.3 (old,
+>    untouched) -> condensed prose (no table) -> "fix confirmed" paragraph -> Table 5.4 (the tilted
+>    confirmation table, auto-renumbered down from 5.5 by LaTeX with no broken cross-references) ->
+>    Conclusion all render correctly.
+> 2. **Data-provenance `%`-comment blocks added** to both equilibrium chapter files, per
+>    ("for the plots and tables we added the results yesterday can you add comment to the latex file
+>    where the data is stored for these plots and tables"):
+>    - `shape-comparison-highres.tex`: cites the `extract_data.py`/`make_plots.py` pipeline and job
+>      IDs (`bogner3_deep_s32_20260929/{4273570,4273582,4273583}` cuboid;
+>      `bogner3_vtk_101k_20260929/{4278714,4278486,4278485}` sphere; `{4278476,4278477,4278484}`
+>      cylinder), vault/local archive paths, and the artifact URL.
+>    - `mem-vs-analytical-buoyancy.tex`: cites jobs 4278450 (R1) / 4278451 (R2) / 4278452 (R4), notes
+>      the extraction was ad-hoc (direct log grep, no committed script, unlike the equilibrium-plots
+>      pipeline), and gives the vault path
+>      `$HPCVAULT/antidunes-archive/antidunes-buoyancy-r{1,2,4}-compare-tilted25_<jobid>_<timestamp>/`,
+>      the external-drive mirror path, and the artifact URL
+>      (`https://claude.ai/artifact/E8iSnHqoXAdj3Pa7ZxTkKP`).
+> 3. **Artifact "Time to reach the surface" table** (https://claude.ai/artifact/E8iSnHqoXAdj3Pa7ZxTkKP,
+>    now v3) switched from SI-time + step-count columns to **lattice-unit steps only**, per
+>    ("also the Time to reach the surface artifact plot can you change the time to lattice unit time
+>    steps not realtime"). Removed the ms columns entirely rather than just hiding them; updated the
+>    lede text to note that the simulation's own time unit already *is* the lattice step (dt=1, no SI
+>    conversion applied anywhere in this comparison), so showing steps alone is the more honest
+>    framing for this artifact.
+>
+> None of this changes any underlying data or conclusion -- it's presentation cleanup (stale table
+> removed, provenance made traceable, units made consistent with how the rest of this comparison is
+> actually measured).
+
 ---
 
 ## 1c. [ ] Showcase: mixed-density floaters, some float / some sink
@@ -5115,3 +5159,29 @@ tested conditions), not a failure of the study.
 > its own -- but it is a real, not a null, result, and consistent with every other piece of evidence
 > gathered in this investigation (the sphere-vs-rod sealed-cell census above found the identical
 > asymmetry: spheres/point-contacts never produce >=24-neighbour sealed pockets, rods do).
+
+> **[Claude, 2026-09-30] ROD CONTACT SKIN IMPLEMENTED (`ModelParameters.cylinderContactSkin`, default 0 = off); test job 4280159 queued, waiting for the Fritz maintenance.**
+> Motivation: the rod density collapse starts in liquid cells sealed or pinched between nearly touching parallel rods
+> (2026-09-21 bundle test). Line contacts leave sub-cell channels, e.g. an inscribed radius of 0.155 R = 0.46 LU for three
+> touching rods at R = 3. The standard remedy in resolved LBM-DEM is a minimum fluid gap / effective diameter (Rettinger
+> 2023, p. 7, citing Boutt et al. 2007; Glowinski et al. 2001 use a short-range repulsion).
+> **Implementation:** for contact detection only, each rod is replaced by an inflated cylinder, radius R + m and half-length
+> h + m. The Cylinder x Cylinder, Cylinder x HalfSpace and Cylinder x CylindricalBoundary (solid pillar) overloads in
+> `ParticleKernels.h` call themselves once with the inflated shapes, so the unchanged, validated detection is used. The
+> rod-rod force starts below a surface gap of 2m, rod-wall/pillar below m. The rod interaction radius grows by 2m
+> (`SetupStages.h`). The MEM mapping is not dilated. Rims: the sharp inflated edge reaches up to (sqrt 2 - 1) m further
+> than a rounded skin would.
+> **Rejected:** mesa_pd GJK/EPA with margin m. Its EPA returns false when only the margins overlap (EPA.cpp,
+> `numPoints == 1`), which is exactly the parallel-rod line contact. It would silently drop those contacts.
+> **Unit tests:** `ANTIDUNES_ContactDetection` gained testCylinderSkinCylinderCylinder and
+> testCylinderSkinHalfSpaceAndPillar. Both PASS locally, and all existing tests still pass.
+> **Test job 4280159** (`jobs/run_36_rod_skin_bundle_test.sbatch`, `~/mt-dennys`, single node, 4 x 9 ranks in parallel;
+> results in `skin_results/4280159/`):
+>   (A) prescribed three-rod bundle at surface gaps -0.03 (baseline), 1.0 and 2.0 LU, 8000 steps: does one or two resolved
+>       fluid cells remove the density drop? (baseline previously rho_min 0.55-0.80);
+>   (B) free rods starting in contact with skin 0.5, 3000 steps, floater history on: does the skin separate them to a
+>       gap of about 1.0 LU?
+> Evaluate with the FLUID-STATS lines (rho_min, max|u|). A local attempt was stopped after about 200 steps because the
+> local machine is too slow.
+> Not yet covered: Cylinder x Sphere / Cylinder x Box (no such pairs in the rod scenarios); the hopper production run
+> with the skin; the effect on packing and clogging (effective size +2m).

@@ -225,8 +225,10 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
 
    # Closed-form Box x Box (OBBTree SAT) and Cylinder x Cylinder / Cylinder x Plane (Kodam et al.
    # 2010) algorithms from PaperAnalyticalContacts.h, compared here against
-   # SolidCylinderContactDetection's existing GJK/EPA-fallback results for identical geometry. NOT
-   # used by the simulation -- see PaperAnalyticalContacts.h's file header.
+   # SolidCylinderContactDetection's existing GJK/EPA-fallback results for identical geometry. Used by the
+   # simulation only when ModelParameters.useAnalyticalContactDetection is set (opt-in, default false) -- see
+   # PaperAnalyticalContacts.h's file header. [Claude, 2026-09-30] comment corrected (said "NOT used by the simulation").
+   # ANTIDUNES_REFERENCE_DUMP=<dir> additionally dumps random pairs for the thesis's independent brute-force reference.
    waLBerla_add_test_executable ( ANTIDUNES_PaperAnalyticalContacts PaperAnalyticalContactTest.cpp )
    target_include_directories ( ANTIDUNES_PaperAnalyticalContacts PRIVATE ${ANTIDUNES_SRC_DIR} )
    target_link_libraries ( ANTIDUNES_PaperAnalyticalContacts

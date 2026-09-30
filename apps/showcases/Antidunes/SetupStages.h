@@ -643,7 +643,8 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       const auto& fcp = simParams->floatingCylinders[ci];
       const mesa_pd::Vec3 pos(fcp.position[0], fcp.position[1], fcp.position[2]);
       const real_t halfLength = real_t(0.5) * fcp.length;
-      const real_t circumR    = std::sqrt(fcp.radius * fcp.radius + halfLength * halfLength);
+      // + 2 * cylinderContactSkin: bounds the circumscribing radius of the inflated rod (see ModelParameters)
+      const real_t circumR    = std::sqrt(fcp.radius * fcp.radius + halfLength * halfLength) + real_t(2) * simParams->model.cylinderContactSkin;
 
       // Align body-z with fcp.axis: rotate about (ez × axis) by acos(ez·axis); antiparallel → flip
       // about x. Then compose the world-Y tilt on top.
@@ -714,7 +715,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    for (const auto& fcp : simParams->floatingCylinders)
    {
       const real_t circumR = std::sqrt(fcp.radius * fcp.radius +
-                                       real_t(0.25) * fcp.length * fcp.length);
+                                       real_t(0.25) * fcp.length * fcp.length) + real_t(2) * simParams->model.cylinderContactSkin;
       blockSyncExtension = std::max(blockSyncExtension, circumR);
    }
    WALBERLA_LOG_INFO_ON_ROOT("blockSyncExtension = " << blockSyncExtension);
@@ -734,7 +735,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    for (const auto& fcp : simParams->floatingCylinders)
    {
       const real_t circumR = std::sqrt(fcp.radius * fcp.radius +
-                                       real_t(0.25) * fcp.length * fcp.length);
+                                       real_t(0.25) * fcp.length * fcp.length) + real_t(2) * simParams->model.cylinderContactSkin;
       maxParticleDiameter = std::max(maxParticleDiameter, circumR * real_c(2));
    }
 

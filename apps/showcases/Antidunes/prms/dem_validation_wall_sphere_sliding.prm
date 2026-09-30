@@ -1,0 +1,32 @@
+// [Claude, 2026-09-30] Oblique sphere-wall impact extended from the sticking into the sliding regime (tangential/normal
+// velocity ratio 0..6 instead of 0..1.5). With mu = 0.3 and e = 0.85, rigid-body impulse theory predicts sliding
+// throughout for ratios above (7/2) mu (1 + e) = 1.94. Rerun 2026-09-30: sliding regime (ratio >= 3) within 0.3 %;
+// sticking regime deviates by up to 24 % in the spin (tangential spring vs. rigid Coulomb impulse, cf. Chung & Ooi 2011).
+// DEM dry-run validation: sphere oblique wall impact vs. the classic rigid-body-with-Coulomb-friction
+// analytical solution (AnalyticalSolutions.h::sphereWallImpact), sweeping the tangential/normal
+// approach-velocity ratio. Gravity is off -- this is an idealised instantaneous-impact test (a "throw",
+// not a "drop"), matching how the reference formula itself treats the impact as instantaneous.
+DEMValidation{
+    testCase wallImpactSphere;
+
+    sphereRadius 1.0;
+    density 1.0;
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.3;
+    poissonsRatio 0.22;
+    collisionTime 0.01;
+
+    impactSpeed 1.0;
+    tangentialRatioStart 0.0;
+    tangentialRatioEnd 6.0;
+    tangentialRatioStep 0.5;
+
+    // 0.25 (not the tighter 0.15 the normal-only case alone would support): mesa_pd's tangential
+    // contact law is a Cundall-Strack spring clamped by Coulomb friction, not an idealised
+    // instantaneous-impulse Coulomb slide, so induced spin comes in systematically below this
+    // analytical prediction at nonzero tangential ratios -- see AnalyticalSolutions.h's calibration
+    // note on rigidBodyImpact(). The ratio=0 (pure normal) case alone matches to <1%.
+    toleranceRelError 0.25;
+    vtkSpacing 0;
+    outputBaseName wall_impact_sphere_sliding;
+}

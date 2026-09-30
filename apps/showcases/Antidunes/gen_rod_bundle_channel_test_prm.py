@@ -20,6 +20,7 @@ ap.add_argument("--gap", type=float, default=-0.03, help="surface gap between th
 ap.add_argument("--name", default="rod_bundle_channel_test")
 ap.add_argument("--cpb", default="", help="override cellsPerBlock, e.g. 12,9,48 (16 ranks) -- decomposition-independence test")
 ap.add_argument("--guard", type=int, default=0, help="ModelParameters.closeSealedCellsMinNeighbours (0 = off)")
+ap.add_argument("--skin", type=float, default=0.0, help="[Claude, 2026-09-30] ModelParameters.cylinderContactSkin in LU (0 = off); with --vx/--vy/--vz 0 the rods are free (no prescribed motion), so the DEM skin can separate them")
 ap.add_argument("--accel", type=float, default=1e-15, help="accelerationXOverride (driving body acceleration); default = still water")
 ap.add_argument("--flowtest", action="store_true", help="flow-rate evaluator test: ClogMeasurement.flowRateEnabled, planes at x=15 (through the bundle) and x=40 (rod-free), sampled every 100 steps")
 ap.add_argument("--nobundle", action="store_true", help="control: three SPHERES-like isolated rods far apart instead of a bundle (spacing 14 LU)")
@@ -147,7 +148,7 @@ mp = get_block(t, "ModelParameters")
 add = f"""   rodPrescribedVelocityX        {A.vx};    // TEST OPTION: rigid prescribed rod velocity (crash bundle: (-0.0096, 0.0043, 0.0062) at t=16300; z component dropped, the box is small)
    rodPrescribedVelocityY        {A.vy};
    rodPrescribedVelocityZ        {A.vz};
-""" + (f"   closeSealedCellsMinNeighbours {A.guard};   // EXPERIMENT: close sub-cell channels (SealedCellGuard.h)\n" if A.guard else "")
+""" + (f"   closeSealedCellsMinNeighbours {A.guard};   // EXPERIMENT: close sub-cell channels (SealedCellGuard.h)\n" if A.guard else "") + (f"   cylinderContactSkin           {A.skin};   // EXPERIMENT: rod contact skin (SimulationParams.h)\n" if A.skin else "")
 mp_new = mp.rstrip("\n")
 assert mp_new.endswith("}"); mp_new = mp_new[:-1].rstrip("\n") + "\n" + add + "}\n"
 t = t.replace(mp, mp_new)
