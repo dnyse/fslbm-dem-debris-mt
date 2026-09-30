@@ -58,6 +58,7 @@
 #include <core/math/Constants.h>
 #include <core/mpi/MPIManager.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -5083,6 +5084,278 @@ void testArchTunnelBoxContainmentNoContact()
 }
 
 //======================================================================================================================
+// [Claude, 2026-09-30] Continuity of the detection along a path (thesis Section 5.2). For each random pair (uniform
+// SO(3)), cylinder j is translated along a straight line through the contact boundary, from an overlap of 15 % of the
+// smaller radius to a gap of 10 %, in 300 steps of size ds. Under a pure translation the true penetration depth is
+// Lipschitz with constant 1 (it changes at most by ds per step), contact switches exactly once, and the normal turns
+// continuously. Counted per method (GJK/EPA, raw closed form, hybrid, refined): paths with a depth jump > 2 ds,
+// paths whose contact flag switches more than once, paths with a normal jump > 5 deg between consecutive steps, and
+// the largest depth jump in units of ds.
+//======================================================================================================================
+void testCylinderCylinderContinuityAlongPaths()
+{
+   FuzzRng                                  fuzz(97531);
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0)), lengthDist(real_t(0.5), real_t(4.0));
+   constexpr int numPaths = 300, numSteps = 300;
+   struct Stats { int depthJump = 0, flicker = 0, normalJump = 0, bigJump = 0; real_t maxJump = 0, maxJumpRel = 0; };
+   std::map< std::string, Stats > st;
+   const std::vector< std::string > methods = { "gjk", "raw", "hybrid", "refined" };
+   for (int t = 0; t < numPaths; ++t)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng), Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation(), rotJ = fuzz.randomRotation();
+      const Vec3   dir  = fuzz.randomUnitVec();
+      const Vec3   posI(0, 0, 0);
+      const real_t circ = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li) + std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      real_t lo = 0, hi = 3 * circ;
+      for (int it = 0; it < 50; ++it)
+      {
+         const real_t mid = real_t(0.5) * (lo + hi);
+         (gjkCylCyl(posI, rotI, Ri, Li, posI + dir * mid, rotJ, Rj, Lj).contact ? lo : hi) = mid;
+      }
+      const real_t boundary = real_t(0.5) * (lo + hi), minR = std::min(Ri, Rj);
+      const real_t s0 = boundary - real_t(0.15) * minR, s1 = boundary + real_t(0.10) * minR, ds = (s1 - s0) / numSteps;
+      std::map< std::string, bool > prevC, jumped, flick, njump, bjump;
+      std::map< std::string, real_t > prevD;
+      std::map< std::string, Vec3 >   prevN;
+      std::map< std::string, int >    switches;
+      for (int k = 0; k <= numSteps; ++k)
+      {
+         const Vec3          posJ = posI + dir * (s0 + k * ds);
+         const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li }, cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+         const GjkResult     g  = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+         const ContactResult r  = cylinderCylinderContact(ci, cj);
+         const HybridResult  h  = cylinderCylinderContactHybrid(ci, rotI, cj, rotJ);
+         const ContactResult rf = refineCylinderContact(ci, cj, r);
+         const std::map< std::string, std::tuple< bool, real_t, Vec3 > > res = {
+            { "gjk", { g.contact, g.contact ? -g.penetrationDepth : real_t(0), g.normal } },
+            { "raw", { r.contact, r.contact ? r.overlap : real_t(0), r.normal } },
+            { "hybrid", { h.contact, h.contact ? h.overlap : real_t(0), h.normal } },
+            { "refined", { rf.contact, rf.contact ? rf.overlap : real_t(0), rf.normal } } };
+         for (const auto& m : methods)
+         {
+            const auto& [c, d, n] = res.at(m);
+            if (k > 0)
+            {
+               const real_t jump = std::abs(d - prevD[m]);
+               st[m].maxJump = std::max(st[m].maxJump, jump / ds);
+               st[m].maxJumpRel = std::max(st[m].maxJumpRel, jump / minR);
+               if (jump > real_t(0.01) * minR)
+               {
+                  if (m == "refined" && !bjump[m] && std::getenv("ANTIDUNES_CONT_DEBUG"))
+                     WALBERLA_LOG_INFO_ON_ROOT("[cont-big] path " << t << " step " << k << " refined " << prevD[m] << " -> " << d
+                        << " scen " << (c ? rf.scenario : "none") << " raw " << r.scenario << " gjk=" << (g.contact ? -g.penetrationDepth : real_t(0))
+                        << " minR=" << minR);
+                  bjump[m] = true;
+               }
+               if (jump > real_t(2) * ds + real_t(1e-9))
+               {
+                  if (m == "refined" && !jumped[m] && std::getenv("ANTIDUNES_CONT_DEBUG"))
+                     WALBERLA_LOG_INFO_ON_ROOT("[cont-debug] path " << t << " step " << k << " refined " << prevD[m] << " -> " << d
+                        << " (" << (c ? rf.scenario : "none") << ", raw " << r.scenario << ") gjk=" << (g.contact ? -g.penetrationDepth : real_t(0))
+                        << " ds=" << ds);
+                  jumped[m] = true;
+               }
+               if (c != prevC[m]) ++switches[m];
+               if (c && prevC[m] && std::acos(std::clamp(n * prevN[m], real_t(-1), real_t(1))) * real_t(180) / math::pi > real_t(5))
+                  njump[m] = true;
+            }
+            prevC[m] = c; prevD[m] = d; prevN[m] = n;
+         }
+      }
+      for (const auto& m : methods)
+      {
+         st[m].depthJump += jumped[m];
+         st[m].flicker += switches[m] > 1;
+         st[m].normalJump += njump[m];
+         st[m].bigJump += bjump[m];
+      }
+   }
+   for (const auto& m : methods)
+      WALBERLA_LOG_INFO_ON_ROOT("[continuity] " << m << ": paths with depth jump > 2 ds = " << st[m].depthJump << "/"
+                                 << numPaths << ", contact flicker = " << st[m].flicker << ", normal jump > 5 deg = "
+                                 << st[m].normalJump << ", largest depth jump = " << st[m].maxJump << " ds = "
+                                 << st[m].maxJumpRel << " of the smaller radius, paths with a jump > 1 % of it = "
+                                 << st[m].bigJump);
+   // GJK/EPA and the refined detection must be continuous along translations
+   WALBERLA_CHECK_EQUAL(st["gjk"].depthJump, 0);
+   WALBERLA_CHECK_EQUAL(st["refined"].flicker, 0);
+   WALBERLA_CHECK_EQUAL(st["refined"].bigJump, 0); // no jump larger than 1 % of the smaller radius
+}
+
+//======================================================================================================================
+// [Claude, 2026-09-30] Refined cylinder-cylinder detection (refineCylinderContact / cylinderCylinderContactRefined in
+// PaperAnalyticalContacts.h) vs. GJK/EPA, on the same sampling as the master comparison (seed 24680, uniform SO(3)).
+// Four detection variants are compared, all against GJK/EPA:
+//   raw      closed form alone;
+//   hybrid   closed form + GJK/EPA for "no scenario" (Tier 1) and special contacts (current production option);
+//   trust    closed form, "no scenario" trusted as "no contact" (no GJK/EPA at all; special contact kept as is);
+//   refined  closed form + support-function refinement (no GJK/EPA at all).
+// Reported: existence errors (missed / false contacts), depth errors > max(0.01, 5 %), max depth error, normal angle,
+// mean projection-overlap evaluations per refined call, and the time per call of each variant.
+//======================================================================================================================
+void testRefinedCylinderContactVsGjk()
+{
+   FuzzRng                                  fuzz(24680);
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0)), lengthDist(real_t(0.5), real_t(4.0));
+   constexpr int numTrials = 5000;
+   struct Pair { CylinderState ci, cj; Rot3 rotI, rotJ; };
+   std::vector< Pair > pairs;
+   for (int t = 0; t < numTrials; ++t)
+   {
+      const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng), Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+      const Rot3   rotI = fuzz.randomRotation(), rotJ = fuzz.randomRotation();
+      const real_t circ = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li) + std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+      const Vec3   dir  = fuzz.randomUnitVec();
+      const Vec3   posI(0, 0, 0);
+      auto contactAt = [&](real_t sep) { return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * sep, rotJ, Rj, Lj).contact; };
+      const Vec3 posJ = posI + dir * fuzz.sampleSeparationNearBoundary(contactAt, real_t(0), real_t(3) * circ, std::min(Ri, Rj));
+      pairs.push_back(Pair{ CylinderState{ posI, rotI.getMatrix(), Ri, Li }, CylinderState{ posJ, rotJ.getMatrix(), Rj, Lj },
+                            rotI, rotJ });
+   }
+
+   struct Stats { int missed = 0, falsePos = 0, wrongDepth = 0; real_t maxErr = 0, maxErrRel = 0, maxAngle = 0; };
+   Stats raw, hyb, trust, ref;
+   int   contacts = 0;
+   long  evals = 0, refineCalls = 0;
+   auto  score = [](Stats& st, bool c, real_t ov, const Vec3& n, const GjkResult& g) {
+      const real_t go = g.contact ? -g.penetrationDepth : real_t(0);
+      if (g.contact && !c) { ++st.missed; return; }
+      if (!g.contact && c) { ++st.falsePos; return; }
+      if (!c) return;
+      const real_t err = std::abs(ov - go);
+      st.maxErr    = std::max(st.maxErr, err);
+      st.maxErrRel = std::max(st.maxErrRel, err / go);
+      if (err > std::max(real_t(0.01), real_t(0.05) * go)) ++st.wrongDepth;
+      st.maxAngle = std::max(st.maxAngle, std::acos(std::clamp(n * g.normal, real_t(-1), real_t(1))) * real_t(180) / math::pi);
+   };
+   for (const auto& p : pairs)
+   {
+      const GjkResult     g  = gjkCylCyl(p.ci.pos, p.rotI, p.ci.radius, p.ci.length, p.cj.pos, p.rotJ, p.cj.radius, p.cj.length);
+      const ContactResult r  = cylinderCylinderContact(p.ci, p.cj);
+      const HybridResult  h  = cylinderCylinderContactHybrid(p.ci, p.rotI, p.cj, p.rotJ);
+      const ContactResult rf = refineCylinderContact(p.ci, p.cj, r);
+      if (g.contact) ++contacts;
+      score(raw, r.contact, r.overlap, r.normal, g);
+      score(hyb, h.contact, h.overlap, h.normal, g);
+      score(trust, r.contact, r.overlap, r.normal, g); // identical to raw by construction: "no scenario" -> no contact
+      score(ref, rf.contact, rf.overlap, rf.normal, g);
+      if (rf.contact && !g.contact && std::getenv("ANTIDUNES_REFINED_DEBUG"))
+      {
+         Vec3 p0i, p1i, p0j, p1j;
+         detail::cylinderAxisEndpoints(p.ci, p0i, p1i);
+         detail::cylinderAxisEndpoints(p.cj, p0j, p1j);
+         WALBERLA_LOG_INFO_ON_ROOT("[refined-FP] overlap=" << rf.overlap << " scen=" << rf.scenario
+            << " capsuleGap=" << std::sqrt(detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j)) - p.ci.radius - p.cj.radius
+            << " axisDot=" << p.ci.axis() * p.cj.axis() << " R=" << p.ci.radius << "," << p.cj.radius << " L=" << p.ci.length << "," << p.cj.length);
+      }
+      if (!(r.contact && (std::string(r.scenario) == "face-face" || std::string(r.scenario) == "band-band-parallel" ||
+                          std::string(r.scenario) == "band-band-skewed" || std::string(r.scenario) == "face-band")))
+      {
+         Vec3 seeds[6]; int n = 0;
+         if (r.contact) seeds[n++] = -r.normal;
+         n += detail::cylinderSeedDirections(p.ci, p.cj, seeds + n);
+         evals += detail::minimiseCylinderProjectionOverlap(p.ci, p.cj, seeds, n, !r.contact).evaluations;
+         ++refineCalls;
+      }
+   }
+
+   {
+      int positiveNoScenario = 0, convexSeparated = 0;
+      for (const auto& p : pairs)
+      {
+         const ContactResult r = cylinderCylinderContact(p.ci, p.cj);
+         if (r.contact) continue;
+         Vec3 seeds[6];
+         const int ns = detail::cylinderSeedDirections(p.ci, p.cj, seeds);
+         const auto m = detail::minimiseCylinderProjectionOverlap(p.ci, p.cj, seeds, ns, true);
+         if (m.value > real_t(0))
+         {
+            ++positiveNoScenario;
+            if (detail::cylindersSeparatedConvexCheck(p.ci, p.cj, m.direction)) ++convexSeparated;
+         }
+      }
+      WALBERLA_LOG_INFO_ON_ROOT("[refined] no-scenario pairs whose descent ended positive: " << positiveNoScenario
+                                 << ", of which the convex check proved separation: " << convexSeparated);
+   }
+   // timing: each variant over all pairs, repeated
+   using clk = std::chrono::steady_clock;
+   auto  timeIt = [&](auto&& fn) {
+      const auto t0 = clk::now();
+      real_t sink = 0;
+      for (int rep = 0; rep < 5; ++rep)
+         for (const auto& p : pairs) sink += fn(p);
+      const auto t1 = clk::now();
+      WALBERLA_UNUSED(sink);
+      return std::chrono::duration< double, std::micro >(t1 - t0).count() / (5.0 * double(pairs.size()));
+   };
+   const double tGjk = timeIt([&](const Pair& p) {
+      return -gjkCylCyl(p.ci.pos, p.rotI, p.ci.radius, p.ci.length, p.cj.pos, p.rotJ, p.cj.radius, p.cj.length).penetrationDepth; });
+   const double tRaw = timeIt([&](const Pair& p) { return cylinderCylinderContact(p.ci, p.cj).overlap; });
+   const double tHyb = timeIt([&](const Pair& p) { return cylinderCylinderContactHybrid(p.ci, p.rotI, p.cj, p.rotJ).overlap; });
+   const double tRef = timeIt([&](const Pair& p) { return cylinderCylinderContactRefined(p.ci, p.cj).overlap; });
+
+   {
+      // [Claude, 2026-09-30] cost breakdown of the refined detection by category of pair
+      std::map< std::string, std::vector< const Pair* > > cat;
+      for (const auto& p : pairs)
+      {
+         const ContactResult r = cylinderCylinderContact(p.ci, p.cj);
+         const std::string   sc(r.scenario);
+         std::string         k;
+         if (!r.contact) k = "no scenario";
+         else if (sc == "face-face" || sc == "band-band-parallel" || sc == "band-band-skewed" || sc == "face-band") k = "exact scenario";
+         else
+         {
+            const Vec3   L0 = -r.normal;
+            const real_t scale = p.ci.radius + p.cj.radius + real_t(0.5) * (p.ci.length + p.cj.length);
+            const real_t D0 = detail::cylinderProjectionOverlap(p.ci, p.cj, L0);
+            bool         fast = std::abs(D0 - r.overlap) < real_t(1e-6) * scale;
+            Vec3         t1 = L0 % Vec3(real_t(1), real_t(0), real_t(0));
+            if (t1.length() < real_t(0.5)) t1 = L0 % Vec3(real_t(0), real_t(1), real_t(0));
+            t1 /= t1.length();
+            const Vec3 t2 = L0 % t1;
+            for (int kk = 0; kk < 8 && fast; ++kk)
+            {
+               Vec3 Lk = L0 + real_t(1e-4) * (std::cos(kk * real_t(0.25) * math::pi) * t1 + std::sin(kk * real_t(0.25) * math::pi) * t2);
+               Lk /= Lk.length();
+               fast = detail::cylinderProjectionOverlap(p.ci, p.cj, Lk) >= D0 - real_t(1e-12) * scale;
+            }
+            k = fast ? "inexact, fast path" : "inexact, refined";
+         }
+         cat[k].push_back(&p);
+      }
+      for (const auto& [k, v] : cat)
+      {
+         const auto t0 = clk::now();
+         real_t     sink = 0;
+         for (int rep = 0; rep < 5; ++rep)
+            for (const Pair* p : v) sink += cylinderCylinderContactRefined(p->ci, p->cj).overlap;
+         const double us = std::chrono::duration< double, std::micro >(clk::now() - t0).count() / (5.0 * double(v.size()));
+         WALBERLA_UNUSED(sink);
+         WALBERLA_LOG_INFO_ON_ROOT("[refined] cost: " << k << ": " << v.size() << " pairs, " << us << " us/pair");
+      }
+   }
+   auto line = [&](const char* name, const Stats& st, double us) {
+      WALBERLA_LOG_INFO_ON_ROOT("[refined] " << name << ": missed=" << st.missed << " falsePositive=" << st.falsePos
+         << " wrongDepth=" << st.wrongDepth << "/" << contacts << " maxDepthErr=" << st.maxErr << " (rel " << st.maxErrRel
+         << ") maxNormalAngle=" << st.maxAngle << " deg | " << us << " us/pair");
+   };
+   WALBERLA_LOG_INFO_ON_ROOT("[refined] " << numTrials << " pairs (uniform SO(3), seed 24680), " << contacts
+                              << " contacts per GJK/EPA; refinement calls " << refineCalls << ", mean projection-overlap "
+                              << "evaluations per call " << double(evals) / double(std::max(1L, refineCalls)));
+   line("raw closed form      ", raw, tRaw);
+   line("hybrid (GJK fallback)", hyb, tHyb);
+   line("trust no-scenario    ", trust, tRaw);
+   line("refined (no GJK/EPA) ", ref, tRef);
+   WALBERLA_LOG_INFO_ON_ROOT("[refined] GJK/EPA alone: " << tGjk << " us/pair");
+   // regression guard for the refined detection (values of the 2026-09-30 run: 0 / 0 / 0, max depth error 2.2e-4)
+   WALBERLA_CHECK_EQUAL(ref.missed, 0);
+   WALBERLA_CHECK_EQUAL(ref.falsePos, 0);
+   WALBERLA_CHECK_EQUAL(ref.wrongDepth, 0);
+}
+
+//======================================================================================================================
 // [Claude, 2026-09-30] INDEPENDENT-REFERENCE DUMP (opt-in, off by default: runs only if the environment variable
 // ANTIDUNES_REFERENCE_DUMP is set to an output directory). Every other randomized test in this file treats mesa_pd's
 // GJK/EPA as ground truth -- but GJK/EPA is also the PRODUCTION path of the thesis's rod runs
@@ -5111,7 +5384,7 @@ void testIndependentReferenceDump()
    fc.precision(17);
    fc << "trial,Ri,Li,Rj,Lj,xj,yj,zj,Ai00,Ai01,Ai02,Ai10,Ai11,Ai12,Ai20,Ai21,Ai22,Aj00,Aj01,Aj02,Aj10,Aj11,Aj12,Aj20,Aj21,"
          "Aj22,gjk_contact,gjk_depth,gjk_nx,gjk_ny,gjk_nz,cf_contact,cf_overlap,cf_nx,cf_ny,cf_nz,cf_scenario,"
-         "hyb_contact,hyb_overlap,hyb_fallback\n";
+         "hyb_contact,hyb_overlap,hyb_fallback,ref_contact,ref_overlap,ref_nx,ref_ny,ref_nz\n";
    for (int t = 0; t < numTrials; ++t)
    {
       const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng), Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
@@ -5125,12 +5398,14 @@ void testIndependentReferenceDump()
       const GjkResult     g  = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
       const ContactResult cf = cylinderCylinderContact(ci, cj);
       const HybridResult  hy = cylinderCylinderContactHybrid(ci, rotI, cj, rotJ);
+      const ContactResult rf = refineCylinderContact(ci, cj, cf);
       fc << t << ',' << Ri << ',' << Li << ',' << Rj << ',' << Lj << ',' << posJ[0] << ',' << posJ[1] << ',' << posJ[2];
       dumpMat(fc, rotI.getMatrix());
       dumpMat(fc, rotJ.getMatrix());
       fc << ',' << g.contact << ',' << g.penetrationDepth << ',' << g.normal[0] << ',' << g.normal[1] << ',' << g.normal[2]
          << ',' << cf.contact << ',' << cf.overlap << ',' << cf.normal[0] << ',' << cf.normal[1] << ',' << cf.normal[2]
-         << ',' << cf.scenario << ',' << hy.contact << ',' << hy.overlap << ',' << hy.usedFallback << '\n';
+         << ',' << cf.scenario << ',' << hy.contact << ',' << hy.overlap << ',' << hy.usedFallback << ',' << rf.contact
+         << ',' << rf.overlap << ',' << rf.normal[0] << ',' << rf.normal[1] << ',' << rf.normal[2] << '\n';
    }
 
    std::ofstream fb(std::string(dir) + "/box_pairs.csv");
@@ -5277,7 +5552,9 @@ int main(int argc, char** argv)
    testArchTunnelBoxContainmentHandDerived();
    testArchTunnelBoxContainmentNoContact();
 
-   // [Claude, 2026-09-30] opt-in (ANTIDUNES_REFERENCE_DUMP=<dir>), no-op otherwise
+   // [Claude, 2026-09-30] refined detection vs. GJK/EPA; opt-in reference dump (ANTIDUNES_REFERENCE_DUMP=<dir>)
+   testRefinedCylinderContactVsGjk();
+   testCylinderCylinderContinuityAlongPaths();
    testIndependentReferenceDump();
 
    return EXIT_SUCCESS;

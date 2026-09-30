@@ -3189,6 +3189,332 @@ inline bool cylinderCylinderResultIsUncertain(const CylinderState& ci, const Cyl
    return std::string(analytical.scenario) == "special-contact";
 }
 
+//======================================================================================================================
+// [Claude, 2026-09-30] Support-function refinement of cylinder-cylinder contacts (thesis Section 5.2).
+//
+// For two convex, centrally symmetric bodies, the overlap of their projections onto a unit direction L (pointing from
+// ci towards cj) is
+//    D(L) = r_i(L) + r_j(L) - L.(x_j - x_i),       r_k(L) = (length_k/2) |L.a_k| + R_k sqrt(1 - (L.a_k)^2),
+// the bodies are separated iff D(L) < 0 for SOME L (separating-axis theorem), and the penetration depth is min_L D(L),
+// attained along the contact normal. Seen as a positively homogeneous function of L in R^3, D has the gradient
+//    grad D(L) = S_i(L) - S_j(-L),
+// the difference of the two support points (the point of ci farthest along L and the point of cj farthest along -L), and
+// grad D(L).L = D(L). The minimisation over the unit sphere is therefore a projected-gradient descent whose gradient
+// costs two support-point evaluations -- a few dozen flops, no simplex, no polytope.
+//
+// Used for two things:
+//  (a) refineCylinderContact: the closed-form scenarios that are not exact (edge-edge, band-edge, face-edge, special
+//      contact) get their depth and normal from a descent started at their own normal, which is typically close to the
+//      optimum. The exact scenarios (face-face, band-band parallel/skewed, face-band) are returned unchanged.
+//  (b) the "no scenario matched" case: a descent from a few seed directions. Any direction with D < 0 PROVES
+//      separation (early exit). If none is found, the pair is reported as a contact with the refined depth.
+// A local descent can end in a local minimum of D; the result is therefore an UPPER bound of the true depth, and in
+// case (b) a pair could in principle be reported as touching although a separating direction exists elsewhere. Both are
+// measured against GJK/EPA and an independent brute-force reference in PaperAnalyticalContactTest.cpp.
+//======================================================================================================================
+namespace detail
+{
+inline real_t cylinderHalfWidth(const CylinderState& c, const Vec3& L)
+{
+   const real_t ca = std::abs(L * c.axis());
+   return real_t(0.5) * c.length * ca + c.radius * std::sqrt(std::max(real_t(0), real_t(1) - ca * ca));
+}
+
+//! Point of cylinder c farthest along the unit direction L (on an edge where the support set is a face or band segment,
+//! its midpoint along the degenerate direction).
+inline Vec3 cylinderSupportPoint(const CylinderState& c, const Vec3& L)
+{
+   const Vec3   a   = c.axis();
+   const real_t d   = L * a;
+   Vec3         p   = c.pos;
+   if (d > real_t(1e-12)) p += (real_t(0.5) * c.length) * a;
+   else if (d < -real_t(1e-12)) p -= (real_t(0.5) * c.length) * a;
+   const Vec3   rad = L - d * a;
+   const real_t rl  = rad.length();
+   if (rl > real_t(1e-12)) p += (c.radius / rl) * rad;
+   return p;
+}
+
+//! Projection overlap D(L) of ci and cj along the unit direction L (from ci towards cj).
+inline real_t cylinderProjectionOverlap(const CylinderState& ci, const CylinderState& cj, const Vec3& L)
+{
+   return cylinderHalfWidth(ci, L) + cylinderHalfWidth(cj, L) - L * (cj.pos - ci.pos);
+}
+
+struct OverlapMinimum
+{
+   real_t value;     //!< smallest D found
+   Vec3   direction; //!< L at which it was found (unit, from ci towards cj)
+   int    evaluations;
+};
+
+//! Projected-gradient descent of D on the unit sphere from the given seed directions (need not be normalised; zero
+//! seeds are skipped). stopIfSeparated: return as soon as some D < 0 is found (existence only).
+inline OverlapMinimum minimiseCylinderProjectionOverlap(const CylinderState& ci, const CylinderState& cj,
+                                                        const Vec3* seeds, int numSeeds, bool stopIfSeparated,
+                                                        int maxIterations = 40, real_t tolerance = real_t(1e-10))
+{
+   OverlapMinimum best{ std::numeric_limits< real_t >::max(), Vec3(real_t(0)), 0 };
+   const real_t   scale = ci.radius + cj.radius + real_t(0.5) * (ci.length + cj.length);
+   for (int s = 0; s < numSeeds; ++s)
+   {
+      const real_t sl = seeds[s].length();
+      if (sl < real_t(1e-12)) continue;
+      Vec3   L = seeds[s] / sl;
+      real_t D = cylinderProjectionOverlap(ci, cj, L);
+      ++best.evaluations;
+      real_t step = real_t(0.5) / scale; // descent step in 1/length units: L - step * grad, grad has length units
+      for (int it = 0; it < maxIterations; ++it)
+      {
+         if (stopIfSeparated && D < real_t(0)) break;
+         const Vec3   g  = cylinderSupportPoint(ci, L) - cylinderSupportPoint(cj, -L);
+         const Vec3   gt = g - (g * L) * L; // tangential part
+         const real_t gn = gt.length();
+         if (gn * scale < tolerance) break;
+         bool improved = false;
+         for (int bt = 0; bt < 30; ++bt)
+         {
+            Vec3 Ln = L - step * gt;
+            Ln /= Ln.length();
+            const real_t Dn = cylinderProjectionOverlap(ci, cj, Ln);
+            ++best.evaluations;
+            if (Dn < D)
+            {
+               L = Ln; D = Dn; improved = true;
+               step *= real_t(2);
+               break;
+            }
+            step *= real_t(0.5);
+         }
+         if (!improved) break;
+      }
+      if (D < best.value) { best.value = D; best.direction = L; }
+      if (stopIfSeparated && best.value < real_t(0)) break;
+   }
+   return best;
+}
+
+//! Seed directions (from ci towards cj) for the descent: the closest points of the two axis segments, the centre line,
+//! the common perpendicular of the axes, and the two axes, each oriented towards cj. Returns the number written (5).
+inline int cylinderSeedDirections(const CylinderState& ci, const CylinderState& cj, Vec3* seeds)
+{
+   Vec3 p0i, p1i, p0j, p1j, c1, c2;
+   cylinderAxisEndpoints(ci, p0i, p1i);
+   cylinderAxisEndpoints(cj, p0j, p1j);
+   closestPointsBetweenSegments(p0i, p1i, p0j, p1j, c1, c2);
+   const Vec3 w = cj.pos - ci.pos;
+   int        n = 0;
+   seeds[n++]   = c2 - c1;
+   seeds[n++]   = w;
+   Vec3 perp    = ci.axis() % cj.axis();
+   if (perp * w < real_t(0)) perp = -perp;
+   seeds[n++] = perp;
+   // the two axes themselves (face normals): separating directions when one body lies beyond the other's end face
+   seeds[n++] = (ci.axis() * w >= real_t(0)) ? ci.axis() : -ci.axis();
+   seeds[n++] = (cj.axis() * w >= real_t(0)) ? cj.axis() : -cj.axis();
+   return n;
+}
+//! Minimum of D on the great circle of directions perpendicular to the axis a (the band plane of a cylinder): D is not
+//! differentiable across this circle (the axial term |L.a| has a kink there), and the true minimum of an edge-on-band
+//! contact lies exactly on it, where a smooth descent stalls. 1D problem: coarse scan, then golden-section refinement.
+inline OverlapMinimum minimiseOverlapOnBandCircle(const CylinderState& ci, const CylinderState& cj, const Vec3& a)
+{
+   Vec3 u = a % Vec3(real_t(1), real_t(0), real_t(0));
+   if (u.length() < real_t(0.5)) u = a % Vec3(real_t(0), real_t(1), real_t(0));
+   u /= u.length();
+   const Vec3 v  = a % u;
+   auto       Lp = [&](real_t phi) { return std::cos(phi) * u + std::sin(phi) * v; };
+   auto       Dp = [&](real_t phi) { return cylinderProjectionOverlap(ci, cj, Lp(phi)); };
+   constexpr int N = 48;
+   const real_t  h = real_t(2) * math::pi / real_t(N);
+   int           kBest = 0;
+   real_t        dBest = Dp(0);
+   for (int k = 1; k < N; ++k)
+   {
+      const real_t d = Dp(real_t(k) * h);
+      if (d < dBest) { dBest = d; kBest = k; }
+   }
+   real_t lo = (real_t(kBest) - real_t(1)) * h, hi = (real_t(kBest) + real_t(1)) * h;
+   const real_t gr = real_t(0.6180339887498949);
+   real_t x1 = hi - gr * (hi - lo), x2 = lo + gr * (hi - lo), f1 = Dp(x1), f2 = Dp(x2);
+   int evals = N + 2;
+   for (int it = 0; it < 60 && hi - lo > real_t(1e-11); ++it, ++evals)
+   {
+      if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - gr * (hi - lo); f1 = Dp(x1); }
+      else { lo = x1; x1 = x2; f1 = f2; x2 = lo + gr * (hi - lo); f2 = Dp(x2); }
+   }
+   const real_t phi = (f1 < f2) ? x1 : x2;
+   const real_t d   = std::min(f1, f2);
+   return (d < dBest) ? OverlapMinimum{ d, Lp(phi), evals } : OverlapMinimum{ dBest, Lp(real_t(kBest) * h), evals };
+}
+
+//! The best of the non-smooth candidates of D: the two band circles and the four axis directions (end faces).
+inline OverlapMinimum minimiseOverlapOnKinks(const CylinderState& ci, const CylinderState& cj)
+{
+   OverlapMinimum best = minimiseOverlapOnBandCircle(ci, cj, ci.axis());
+   const OverlapMinimum bj = minimiseOverlapOnBandCircle(ci, cj, cj.axis());
+   if (bj.value < best.value) best = bj;
+   for (const Vec3& L : { ci.axis(), -ci.axis(), cj.axis(), -cj.axis() })
+   {
+      const real_t d = cylinderProjectionOverlap(ci, cj, L);
+      ++best.evaluations;
+      if (d < best.value) { best.value = d; best.direction = L; }
+   }
+   return best;
+}
+
+//! Global check for the rare case in which the descent on the sphere ends at a POSITIVE local minimum for a pair without
+//! any closed-form scenario. Extended to the unit BALL, D(x) = r_i(x) + r_j(x) - x.(x_j - x_i) is convex (a support
+//! function of the Minkowski difference), so a projected subgradient method converges to its global minimum: negative
+//! (at |x| = 1) iff the bodies are separated, 0 (at x = 0) iff they overlap. The subgradient is the support-point
+//! difference at x/|x|. Returns the smallest D found on the sphere along the iterates (and its direction); stops as
+//! soon as D < 0 (separation proven). The result replaces the local minimum when it is smaller.
+inline OverlapMinimum cylindersConvexOverlapCheck(const CylinderState& ci, const CylinderState& cj, const Vec3& start,
+                                                  real_t startValue, int maxIterations = 400)
+{
+   OverlapMinimum best{ startValue, start, 0 };
+   Vec3           x = start;
+   for (int k = 1; k <= maxIterations; ++k)
+   {
+      const real_t xl = x.length();
+      if (xl < real_t(1e-9)) break; // converged to the origin: overlapping
+      const Vec3   L = x / xl;
+      const real_t D = cylinderProjectionOverlap(ci, cj, L);
+      ++best.evaluations;
+      if (D < best.value) { best.value = D; best.direction = L; }
+      if (D < real_t(0)) break;
+      const Vec3   g  = cylinderSupportPoint(ci, L) - cylinderSupportPoint(cj, -L);
+      const real_t gl = g.length();
+      if (gl < real_t(1e-14)) break;
+      x -= (real_t(0.2) / std::sqrt(real_t(k))) * (g / gl);
+      const real_t nl = x.length();
+      if (nl > real_t(1)) x /= nl;
+   }
+   return best;
+}
+
+inline bool cylindersSeparatedConvexCheck(const CylinderState& ci, const CylinderState& cj, const Vec3& start,
+                                          int maxIterations = 400)
+{
+   return cylindersConvexOverlapCheck(ci, cj, start, cylinderProjectionOverlap(ci, cj, start), maxIterations).value < real_t(0);
+}
+} // namespace detail
+
+//! Refined cylinder-cylinder contact (see the block comment above). `raw` is the closed-form result for (ci, cj).
+//! Exact scenarios pass through unchanged; inexact scenarios are refined from their own normal (plus the standard
+//! seeds); "no scenario" pairs are decided by the descent (separation proven if D < 0 is found).
+inline ContactResult refineCylinderContact(const CylinderState& ci, const CylinderState& cj, const ContactResult& raw)
+{
+   const std::string sc(raw.scenario);
+   if (raw.contact && (sc == "face-face" || sc == "band-band-parallel" || sc == "band-band-skewed" || sc == "face-band"))
+      return raw;
+
+   Vec3 seeds[6];
+   int  n = 0;
+   if (raw.contact)
+   {
+      // fast path: if the closed-form normal already satisfies the optimality condition (no tangential component of the
+      // gradient S_i(L) - S_j(-L)) and D along it equals the closed-form depth, the closed form found the minimum
+      const Vec3   L0    = -raw.normal; // raw.normal points towards ci; L points towards cj
+      const real_t scale = ci.radius + cj.radius + real_t(0.5) * (ci.length + cj.length);
+      const real_t D0    = detail::cylinderProjectionOverlap(ci, cj, L0);
+      if (std::abs(D0 - raw.overlap) < real_t(1e-6) * scale)
+      {
+         // local optimality test by direct comparison (the minima of the inexact scenarios often lie ON a kink of D,
+         // where the gradient does not vanish): no direction tilted by a small angle may give a smaller overlap
+         Vec3 t1 = L0 % Vec3(real_t(1), real_t(0), real_t(0));
+         if (t1.length() < real_t(0.5)) t1 = L0 % Vec3(real_t(0), real_t(1), real_t(0));
+         t1 /= t1.length();
+         const Vec3   t2  = L0 % t1;
+         const real_t eps = real_t(1e-4);
+         bool         optimal = true;
+         for (int k = 0; k < 8 && optimal; ++k)
+         {
+            const real_t phi = real_t(k) * real_t(0.25) * math::pi;
+            Vec3         Lk  = L0 + eps * (std::cos(phi) * t1 + std::sin(phi) * t2);
+            Lk /= Lk.length();
+            optimal = detail::cylinderProjectionOverlap(ci, cj, Lk) >= D0 - real_t(1e-12) * scale;
+         }
+         if (optimal)
+         {
+            // a local minimum need not be the global one (a misclassified scenario can sit in another basin of D):
+            // accept only if a short descent from the closest-axis-points direction does not find a smaller overlap.
+            // Known limitation: for nearly parallel rods D is almost flat, two minima can differ by a few percent, and the
+            // accepted normal can then be far off (reference pair 2031: depth +3.8 %, normal 54 deg; GJK/EPA 27 deg there)
+            Vec3 std5[5];
+            detail::cylinderSeedDirections(ci, cj, std5);
+            const detail::OverlapMinimum q = detail::minimiseCylinderProjectionOverlap(ci, cj, std5, 1, false, 20, real_t(1e-7));
+            if (q.value >= D0 - real_t(1e-9) * scale) return raw;
+         }
+      }
+      // otherwise descend from the closed-form normal and the closest-axis-points direction only
+      Vec3 std5[5];
+      detail::cylinderSeedDirections(ci, cj, std5);
+      seeds[n++] = L0;
+      seeds[n++] = std5[0];
+   }
+   else
+      n += detail::cylinderSeedDirections(ci, cj, seeds + n);
+
+   detail::OverlapMinimum m = detail::minimiseCylinderProjectionOverlap(ci, cj, seeds, n, !raw.contact, 40, real_t(1e-9));
+   ContactResult r;
+   if (m.value <= real_t(0)) return r; // separated (or exactly touching)
+   // the non-smooth candidates (band circles, end-face normals), where the descent stalls: searched when the descent
+   // ended with a remaining tangential gradient (it stopped on a kink, not at a smooth minimum) and always for pairs
+   // without a scenario
+   const real_t lenScale = ci.radius + cj.radius + real_t(0.5) * (ci.length + cj.length);
+   const Vec3   gm = detail::cylinderSupportPoint(ci, m.direction) - detail::cylinderSupportPoint(cj, -m.direction);
+   const bool   stalled = (gm - (gm * m.direction) * m.direction).length() > real_t(1e-7) * lenScale;
+   if (!raw.contact || stalled)
+   {
+      const detail::OverlapMinimum k = detail::minimiseOverlapOnKinks(ci, cj);
+      if (k.value < m.value) m = k;
+      if (m.value <= real_t(0)) return r;
+   }
+   // no scenario and a positive local minimum: run the convex (global) check, which either proves separation or finds a
+   // smaller overlap than the local minimum; in the latter case polish it with the descent from the new direction
+   if (!raw.contact)
+   {
+      const detail::OverlapMinimum c = detail::cylindersConvexOverlapCheck(ci, cj, m.direction, m.value);
+      if (c.value <= real_t(0)) return r;
+      if (c.value < m.value)
+      {
+         const detail::OverlapMinimum p = detail::minimiseCylinderProjectionOverlap(ci, cj, &c.direction, 1, true);
+         m = (p.value < c.value) ? p : c;
+         if (m.value <= real_t(0)) return r;
+      }
+   }
+   r.contact  = true;
+   r.overlap  = m.value;
+   r.normal   = -m.direction;
+   // Contact point: the overlap along L spans [S_j(-L).L, S_i(L).L]; its midpoint is S_j(-L) + D/2 L = S_i(L) - D/2 L. The
+   // support point of a cylinder is not unique when L is (numerically) its axis (a whole end face) or perpendicular to it
+   // (a whole band line); cylinderSupportPoint then returns the face centre / band middle, which can lie far from the
+   // actual touching region and would give a wrong torque. So the point is taken from the body whose support point is
+   // unique; if neither is (flat on flat), the closed-form point is kept when there is one.
+   {
+      const Vec3   L  = m.direction;
+      auto degenerate = [&](const CylinderState& c, const Vec3& dir) {
+         const real_t d = dir * c.axis();
+         return std::abs(d) < real_t(1e-6) || (dir - d * c.axis()).length() < real_t(1e-6);
+      };
+      const bool   di = degenerate(ci, L), dj = degenerate(cj, -L);
+      const Vec3   si = detail::cylinderSupportPoint(ci, L), sj = detail::cylinderSupportPoint(cj, -L);
+      if (di && !dj) r.point = sj + (real_t(0.5) * m.value) * L;
+      else if (dj && !di) r.point = si - (real_t(0.5) * m.value) * L;
+      else if (di && dj && raw.contact) r.point = raw.point;
+      else r.point = real_t(0.5) * (si + sj);
+   }
+   r.scenario = raw.contact ? raw.scenario : "refined-no-scenario";
+   return r;
+}
+
+//! Closed form followed by the refinement -- the complete detection without any GJK/EPA call.
+inline ContactResult cylinderCylinderContactRefined(const CylinderState& ci, const CylinderState& cj)
+{
+   return refineCylinderContact(ci, cj, cylinderCylinderContact(ci, cj));
+}
+
 } // namespace paper_analytical
 
 //======================================================================================================================

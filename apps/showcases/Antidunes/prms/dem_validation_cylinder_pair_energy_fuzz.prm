@@ -1,0 +1,14 @@
+// [Claude, 2026-09-30] Energy conservation of oblique cylinder-cylinder collisions under each detection mode
+// (gjk / hybrid / pure / refined), e = 1, mu = 0, no gravity; see runCylinderPairEnergyFuzz (DEMValidationScenarios.h).
+DEMValidation{
+    testCase cylinderPairEnergyFuzz;
+    cylinderRadius 1.0;
+    cylinderLength 3.0;
+    density 1.0;
+    poissonsRatio 0.22;
+    collisionTime 0.01;
+    approachSpeed 1.0;
+    numCollisions 200;
+    toleranceRelError 0.02;
+    seed 4242;
+}

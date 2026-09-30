@@ -1391,6 +1391,31 @@ public:
          }
       }
 
+      // [Claude, 2026-09-30] refineCylinderContacts (opt-in): the closed-form result is refined by minimising the
+      // projection overlap over directions (paper_analytical::refineCylinderContact) -- exact scenarios unchanged,
+      // inexact ones (edge-edge, band-edge, face-edge, special contact) get the minimising depth and normal, and
+      // "no scenario" pairs are decided by the same descent (separation proven if a negative overlap is found).
+      // No GJK/EPA call at all; GJK/EPA remains the verification reference in PaperAnalyticalContactTest.cpp.
+      if (refineCylinderContacts)
+      {
+         result = paper_analytical::refineCylinderContact(ci, cj, result);
+         if (!result.contact)
+         {
+            ++contactStats.cylRefinedSeparated;
+            return false;
+         }
+         ++contactStats.cylRefinedContact;
+         const std::string path = std::string("refined closed form (scenario=") + result.scenario + ")";
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), path);
+         logCylComputation(ac.getUid(idx1), ac.getUid(idx2), path, ci, cj, result);
+         getIdx1() = idx1;
+         getIdx2() = idx2;
+         getPenetrationDepth() = -result.overlap;
+         getContactNormal()    = result.normal;
+         getContactPoint()     = result.point;
+         return true;
+      }
+
       if (paper_analytical::cylinderCylinderResultIsUncertain(ci, cj, result, useTightTier1, skipTier1))
       {
          // Tier 1 (analytical found nothing at all) vs special-contact (analytical DID find a
@@ -1581,6 +1606,10 @@ public:
       // farther apart than R_i + R_j) -- must stay 0 unless the closed-form dispatch produced a false
       // positive; a nonzero value in the logs is a red flag worth investigating.
       uint64_t cylCapsuleRejected = 0;
+      // [Claude, 2026-09-30] refineCylinderContacts: pairs the support-function refinement reported as touching / as
+      // separated (no GJK/EPA call in either case, see paper_analytical::refineCylinderContact).
+      uint64_t cylRefinedContact   = 0;
+      uint64_t cylRefinedSeparated = 0;
 
       void bumpCylScenario(const char* scenario)
       {
@@ -1705,6 +1734,8 @@ public:
    // the full rationale -- removes the GJK/EPA safety net for Cylinder x Cylinder entirely, trusting
    // the closed-form Kodam et al. (2010) + Guo et al. (2012) dispatch as-is ("pure Kodam+Guo").
    bool usePureAnalyticalCylinder = false;
+   // [Claude, 2026-09-30] see ModelParameters.refineCylinderContacts
+   bool refineCylinderContacts = false;
 
    // Runtime switch (default false), only meaningful while useAnalyticalContactDetection is also
    // true. See ModelParameters.useTightTier1's own doc comment (SimulationParams.h) -- swaps
@@ -2300,6 +2331,8 @@ public:
    // Shadow mode (ModelParameters.shadowAnalyticCylinderLog): see SolidCylinderContactDetection::shadowCompare.
    // See ModelParameters::cylinderContactSkin (SimulationParams.h).
    void setCylinderContactSkin(real_t skin) { acd_.cylinderContactSkin = skin; }
+   void setRefineCylinderContacts(bool on) { acd_.refineCylinderContacts = on; }
+   void setUsePureAnalyticalCylinder(bool on) { acd_.usePureAnalyticalCylinder = on; }
 
    void setShadowAnalytic(bool enabled, uint_t startStep, uint_t endStep)
    {
@@ -4075,6 +4108,7 @@ public:
       floaterHistoryLogger_.setMaxStep(simParams->model.logFloaterHistoryEndStep);
       computeContacts.setHistoryLogger(&floaterHistoryLogger_);
       computeContacts.setCylinderContactSkin(simParams->model.cylinderContactSkin);
+      computeContacts.setRefineCylinderContacts(simParams->model.refineCylinderContacts);
       if (simParams->model.cylinderContactSkin > real_t(0))
          WALBERLA_LOG_INFO_ON_ROOT("cylinderContactSkin = " << simParams->model.cylinderContactSkin
                                    << " LU (rod-rod contact below a surface gap of " << real_t(2) * simParams->model.cylinderContactSkin
@@ -4241,7 +4275,8 @@ public:
                cylFallbackSpecialContactGjkFoundNoContact = s.cylFallbackSpecialContactGjkFoundNoContact,
                cylTier1CheaplyProvedSeparated = s.cylTier1CheaplyProvedSeparated,
                boxTightLayer1CheaplyProvedSeparated = s.boxTightLayer1CheaplyProvedSeparated,
-               cylCapsuleRejected = s.cylCapsuleRejected;
+               cylCapsuleRejected = s.cylCapsuleRejected,
+               cylRefinedContact = s.cylRefinedContact, cylRefinedSeparated = s.cylRefinedSeparated;
 
       mpi::allReduceInplace(boxBoxSAT,           mpi::SUM);
       mpi::allReduceInplace(cylFaceFace,         mpi::SUM);
@@ -4263,6 +4298,8 @@ public:
       mpi::allReduceInplace(cylTier1CheaplyProvedSeparated, mpi::SUM);
       mpi::allReduceInplace(boxTightLayer1CheaplyProvedSeparated, mpi::SUM);
       mpi::allReduceInplace(cylCapsuleRejected, mpi::SUM);
+      mpi::allReduceInplace(cylRefinedContact, mpi::SUM);
+      mpi::allReduceInplace(cylRefinedSeparated, mpi::SUM);
 
       // cylPureSpecialContactTrusted is a SUB-metric of cylAnalyticalTrusted below (that path also
       // calls bumpCylScenario, so it's already folded into face-face/band-band-skewed/etc.) --
@@ -4303,6 +4340,7 @@ public:
          << " | usePureAnalyticalCylinder rejections (no fallback attempted): tier1="
          << cylPureTier1Rejected
          << " | capsule-bound rejected analytic false positives=" << cylCapsuleRejected
+         << " | refined (no GJK/EPA): contact=" << cylRefinedContact << " separated=" << cylRefinedSeparated
          << " | cylinder-cylinder grand total=" << cylTotal
          << " fallback-rate=" << fallbackRatePercent << "%");
 

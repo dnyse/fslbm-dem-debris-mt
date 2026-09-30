@@ -5185,3 +5185,44 @@ tested conditions), not a failure of the study.
 > local machine is too slow.
 > Not yet covered: Cylinder x Sphere / Cylinder x Box (no such pairs in the rod scenarios); the hopper production run
 > with the skin; the effect on packing and clogging (effective size +2m).
+
+> **[Claude, 2026-09-30] ROD CONTACT SKIN TEST RESULTS (run locally instead of Fritz job 4280159, which was still waiting on the maintenance reservation).**
+> Runner and logs: `skin_results/local_20260930/` (`run_local.sh`: same four cases, 9 ranks each, two at a time;
+> build-release, working tree of 2026-09-30). All four cases completed (exit 0).
+> **(A) Prescribed three-rod bundle, 8000 steps** (rho_min, rho_max and max|u| over all FLUID-STATS lines):
+>   - gap -0.03 LU (touching baseline): rho_min 0.611 (step 6200), rho_max 1.329, max|u| 0.258. The collapse reproduces.
+>   - gap 1.0 LU: rho in [0.9998, 1.0094], max|u| 0.016.
+>   - gap 2.0 LU: rho in [0.9998, 1.0091], max|u| 0.016.
+>   => One resolved fluid cell between the rods removes the density collapse completely.
+> **(B) Free rods, skin 0.5, 3000 steps:**
+>   - Surface gaps, computed by brute force from the floater-history poses (R 3, L 18):
+>     -0.03 (start) -> 0.36 (step 250) -> 0.88 (750) -> 0.99 (1000) -> 0.999 (1250 to the end), for all three pairs.
+>   - The skin separates touching rods to exactly 2m = 1.0 LU.
+>   - rho_min 0.770 only at step 100, while the rods still touch; in the second half rho_min 1.0000 and max|u| 0.012.
+> Next: the hopper production run with cylinderContactSkin 0.5. Note that the effective rod size in contact grows by 2m.
+> Fritz job 4280159 is still queued and now duplicates this; cancel it with `scancel 4280159` if not needed.
+
+> **[Claude, 2026-09-30] REFINED CYLINDER-CYLINDER DETECTION (`ModelParameters.refineCylinderContacts`, default off; no GJK/EPA call).**
+> Code: `PaperAnalyticalContacts.h`, `refineCylinderContact` / `cylinderCylinderContactRefined`; wired in
+> `ParticleKernels.h` ComputeContacts. New ContactDetectionStats counters: refined contact / separated.
+> **Method:**
+> - Minimise the projection overlap D(L) = r_i + r_j - L.(x_j - x_i) by projected gradient. The gradient is
+>   S_i(L) - S_j(-L), the difference of the two support points.
+> - Descent seeds: the closed-form normal, the closest axis points, the centre line, the common perpendicular of the
+>   axes, and both axes.
+> - Kink candidates: the two band circles (1D golden-section search) and the end-face normals.
+> - Fast path: accept the closed-form result if it is a local minimum and a short descent from the closest-axis
+>   direction finds nothing lower.
+> - Pairs without a scenario: a convex subgradient check on the unit ball.
+> - Contact point: taken from the body whose support point is unique.
+> **Tests (PaperAnalyticalContactTest):**
+> - `testRefinedCylinderContactVsGjk`: 0 missed / 0 false / 0 wrong depths out of 1698 contacts, max depth error
+>   2.5e-4, 1.76 µs per pair (GJK/EPA 2.33 µs, hybrid 1.66 µs). These values are asserted.
+> - `testCylinderCylinderContinuityAlongPaths`: the refined largest depth jump is 1.00 step (GJK/EPA 1.04; closed
+>   form up to 127 steps = 11 % of the radius). No jump above 1 % of the radius, which is asserted.
+> - DEMValidation `cylinderPairEnergyFuzz` (new; prm `dem_validation_cylinder_pair_energy_fuzz.prm`, parameter
+>   `modes`): energy error mean / max over 88 oblique elastic collisions: GJK/EPA 0.020 % / 0.071 %, refined
+>   0.020 % / 0.072 %, closed form with or without fallback 0.059 % / 1.38 %.
+> **Known limitation:** nearly parallel rods can yield a second minimum with the normal far off (reference pair 2031:
+> depth +3.8 %, normal 54 deg; GJK/EPA is 27 deg off there).
+> **Next:** a hopper production run with `useAnalyticalContactDetection true` and `refineCylinderContacts true`.

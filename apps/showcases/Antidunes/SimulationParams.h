@@ -955,6 +955,16 @@ struct ModelParams {
    //         cylinderCylinderResultIsUncertain() flags the analytical result.
    bool        usePureAnalyticalCylinder;
 
+   // [Claude, 2026-09-30] true -> (only with useAnalyticalContactDetection=true) Cylinder x Cylinder contacts are
+   //         refined by minimising the projection overlap r_i(L) + r_j(L) - L.(x_j - x_i) over directions L
+   //         (paper_analytical::refineCylinderContact): exact closed-form scenarios unchanged, inexact ones get the
+   //         minimising depth/normal, "no scenario" pairs are decided by the same descent. No GJK/EPA call at all.
+   //         Validated in PaperAnalyticalContactTest.cpp (testRefinedCylinderContactVsGjk and the independent
+   //         brute-force reference): no missed contacts, depth error <= 5e-4; separated pairs closer than ~0.01
+   //         can be reported as grazing contacts (overlap <= 0.006).
+   // false -> (DEFAULT) unchanged behaviour (GJK/EPA fallback for "no scenario" and special contacts).
+   bool        refineCylinderContacts;
+
    // true  → (only meaningful together with useAnalyticalContactDetection=true) cylinderCylinderResultIsUncertain's
    //         Tier 1 check (fired when the analytical dispatch found no scenario at all) uses the tight,
    //         capsule-based bound (detail::closestDistanceSqBetweenSegments: the two cylinders' own axis
@@ -1542,6 +1552,7 @@ struct ModelParams {
       , boxPlaneFitBandFactor        { b.getParameter< real_t >    ("boxPlaneFitBandFactor", real_t(0.8)) }
       , useAnalyticalContactDetection{ b.getParameter< bool >      ("useAnalyticalContactDetection", false) }
       , usePureAnalyticalCylinder   { b.getParameter< bool >       ("usePureAnalyticalCylinder", false) }
+      , refineCylinderContacts      { b.getParameter< bool >       ("refineCylinderContacts", false) }
       , useTightTier1               { b.getParameter< bool >       ("useTightTier1", false) }
       , useTightLayer1              { b.getParameter< bool >       ("useTightLayer1", true) }
       , useCapsuleShapeForCylinders { b.getParameter< bool >       ("useCapsuleShapeForCylinders", false) }

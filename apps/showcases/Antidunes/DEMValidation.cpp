@@ -60,6 +60,7 @@ int main(int argc, char** argv)
    else if (testCase == "gjkVsAnalyticalCylinderWall") pass = dem_validation::runGjkVsAnalyticalCylinderWallCheck(block);
    else if (testCase == "pairRestitution") pass = dem_validation::runPairRestitution(block);
    else if (testCase == "energyConservation") pass = dem_validation::runEnergyConservation(block);
+   else if (testCase == "cylinderPairEnergyFuzz") pass = dem_validation::runCylinderPairEnergyFuzz(block);
    else if (testCase == "cornerNormalDiscontinuity") pass = dem_validation::runCornerNormalDiscontinuity(block);
    else if (testCase == "cornerFixComparison") pass = dem_validation::runCornerFixComparison(block);
    else if (testCase == "multiPointDeepOverlapStability") pass = dem_validation::runMultiPointDeepOverlapStability(block);
