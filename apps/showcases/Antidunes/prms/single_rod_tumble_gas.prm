@@ -1,0 +1,191 @@
+// single_rod_tumble_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-26] MINIMAL SINGLE-BODY REPRODUCTION, per explicit request ("document our
+// instability better for my thesis, have test cases proof this"). Every [MEM-GARBAGE-LINK] event
+// traced this session (jobs 4267519, 4267784, 4267856, 4267857, 4267858) showed the corrupted
+// liquid cell enclosed by a SINGLE rod's own obstacle flag value -- never two different rods, even
+// though the scenario always had 210 rods present. This test isolates that: exactly ONE cylinder
+// (radius 3, length 18, matching production), free to fall and tumble under gravity from a
+// significant initial tilt (45 deg, so it sweeps through many orientations relative to the FIXED
+// lattice as it falls), in an otherwise completely empty, still-water domain -- no second body, no
+// channel flow, no pillars. If the near-total-enclosure precondition (a liquid cell surrounded by
+// >=~20/26 neighbours belonging to the SAME rod) arises here too, that proves the trigger is a
+// single-body lattice-alignment effect, not a multi-body contact effect -- a purely numerical
+// artefact of representing a continuously-orientable curved surface on a fixed cubic grid, with no
+// physical analogue.
+//
+// ModelParameters.useCapsuleShapeForCylinders can be set true (or via a companion prm) to repeat
+// this exact test with the pill/capsule shape instead of the flat-capped cylinder.
+//
+// Domain: <48, 40, 60> / cellsPerBlock <16, 40, 60> = 3 processes (mesa_pd's own minimum block
+// count along a periodic direction when using particles). Rod starts at mid-water depth with ample
+// room to fall and tumble before reaching the floor.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 16, 40, 60 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 false;
+   snapshotFrequency             0;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <48, 40, 60>;
+   wavePeriods        1;
+   liquidHeightFactor 50;
+   floorHeightFactor  5;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water -- isolates the single-rod tumble/fall itself
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         8000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+   denseNanScanEnabled true;
+   denseNanScanFromStep 0;
+   denseNanScanToStep   8000;
+   populationPrecursorThreshold 10;
+   highVelocityPrecursorThreshold 0.3;
+   densityPrecursorLow  0.5;
+   densityPrecursorHigh 1.5;
+   densityPrecursorLiquidOnly false;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 1.0;
+   dxSIOverride                1.0;
+   densityRatio 1.1;              // mildly negatively buoyant -- sinks slowly while tumbling, not a fast drop
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingCylinders
+{
+   // Free from step 0 (settlingSteps 0, no startInactive), initial 45 deg tilt so it sweeps through
+   // many orientations relative to the fixed lattice as it falls and tumbles under gravity/torque --
+   // no second rod, no flow, nothing else in the domain.
+   // axis <1,0,0> (NOT <0,1,0>): initialTiltAngleDeg rotates about world-Y, so an axis already
+   // along world-Y would make the "tilt" a spin about the rod's own long axis -- physically
+   // invisible for a circular cross-section (confirmed empirically: job 4268210 showed tiltY
+   // essentially frozen at 0.0002deg with axis<0,1,0>). With axis<1,0,0>, the same rotation
+   // genuinely tips the rod's axis into the XZ-plane.
+   FloatingCylinder { position < 24, 20, 40 >; radius 3; length 18; axis < 1, 0, 0 >; densityRatio 1.3; settlingSteps 0; initialTiltAngleDeg 45; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;
+   usePureAnalyticalCylinder     false;
+   useContactFilterOwnerTiebreak true;
+   useCapsuleShapeForCylinders   false;  // set true in the companion capsule variant
+
+   useTightTier1                 false;
+   useTightLayer1                true;
+   skipTier1                     false;
+   useRoundedBoxCorners          false;
+   useMultiPointBoxContact       false;
+   useBoxOverlapCap              false;
+   useAxisHysteresis             false;
+   useContactManifold            false;
+   useRotationalEffectiveMass    true;
+   useSpheroBoxContact           false;
+   useSpheroBoxAnalytical        false;
+   useFraigeBoxContactModel      false;
+   useFullVolumeAnalyticBuoyancy false;
+   usePass3Reresolution          false;
+   useAnalyticBoxBuoyancy        false;
+
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 1000;
+   evaluationFrequency     200;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       50;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

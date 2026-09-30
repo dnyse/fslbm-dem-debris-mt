@@ -25,6 +25,9 @@
 #include "PIDController.h"
 #include "Utility.h"
 
+#include <deque>
+#include <utility>
+
 namespace walberla
 {
 namespace antidunes
@@ -176,17 +179,29 @@ class MeanVelocityComputer
 class ForcingAdjuster
 {
  public:
+   // switchOffStep > 0 (PIDParameters.switchOffStep): PID control runs normally until that ABSOLUTE
+   // timestep (beginTimeStep + calls so far, so it stays correct across a checkpoint resume), then
+   // acceleration_[0] is frozen at the mean of the PID's own commanded values over the last
+   // switchOffAveragingWindow steps and never touched again -- a "constant force" phase that starts
+   // from a self-consistently spun-up flow instead of a hand-set force. 0 = feature off.
    ForcingAdjuster(const shared_ptr< Vector3<real_t> >& meanVelocity,
                    const shared_ptr< Vector3<real_t> >& acceleration,
                    const shared_ptr< PIDController >& pidController,
                    uint_t frequency,
-                   bool enabled = true)
+                   bool enabled = true,
+                   uint_t beginTimeStep = uint_c(0),
+                   uint_t switchOffStep = uint_c(0),
+                   uint_t switchOffAveragingWindow = uint_c(0))
       : meanVelocity_(meanVelocity)
       , acceleration_(acceleration)
       , pidController_(pidController)
       , frequency_(frequency)
       , executionCounter_(uint_c(0))
       , enabled_(enabled)
+      , beginTimeStep_(beginTimeStep)
+      , switchOffStep_(switchOffStep)
+      , switchOffAveragingWindow_(switchOffAveragingWindow)
+      , frozen_(false)
    {}
 
    void operator()()
@@ -197,7 +212,38 @@ class ForcingAdjuster
       // acceleration_ or the PID controller -- it stays pinned at its setupSimState-computed initial
       // value ("fixed hydraulic gradient") for the whole run. MeanVelocityComputer keeps running
       // regardless (wired up unconditionally in BuildTimeloop.h), so meanVelocity is still tracked.
-      if (!enabled_) { ++executionCounter_; return; }
+      if (!enabled_ || frozen_) { ++executionCounter_; return; }
+
+      const uint_t step = beginTimeStep_ + executionCounter_;
+
+      // PIDParameters.switchOffStep: freeze at the mean of the PID's recent commanded values.
+      // history_ is identical on every rank (each entry is the broadcast value), so every rank
+      // computes the identical frozen value without another reduction. On a resume at/after the
+      // switch-off step history_ is empty; acceleration_[0] then already holds the checkpointed
+      // (frozen) value, so it is left untouched.
+      if (switchOffStep_ > uint_c(0) && step >= switchOffStep_)
+      {
+         if (!history_.empty())
+         {
+            real_t sum = real_c(0);
+            for (const auto& entry : history_) { sum += entry.second; }
+            const real_t mean          = sum / real_c(history_.size());
+            const real_t instantaneous = (*acceleration_)[0];
+            (*acceleration_)[0]        = mean;
+            WALBERLA_LOG_INFO_ON_ROOT("[PID-SWITCHOFF] step=" << step << ": PID control ended, acceleration_x frozen at "
+                                      << mean << " (mean of " << history_.size() << " PID updates over the last "
+                                      << switchOffAveragingWindow_ << " steps; instantaneous value was " << instantaneous << ")");
+         }
+         else
+         {
+            WALBERLA_LOG_INFO_ON_ROOT("[PID-SWITCHOFF] step=" << step << ": PID control ended, no PID history in this run "
+                                      "(resumed at/after the switch-off step) -- acceleration_x stays at the loaded value "
+                                      << (*acceleration_)[0]);
+         }
+         frozen_ = true;
+         ++executionCounter_;
+         return;
+      }
 
       real_t newForceX = real_c(0);
       // only evaluate in given frequencies
@@ -214,6 +260,15 @@ class ForcingAdjuster
 
          // update the acceleration
          (*acceleration_)[0] = newForceX;
+
+         if (switchOffStep_ > uint_c(0))
+         {
+            history_.emplace_back(step, newForceX);
+            // keep only the last switchOffAveragingWindow_ steps (always at least the newest entry;
+            // window 0 therefore degenerates to the instantaneous value)
+            const uint_t window = switchOffAveragingWindow_ > uint_c(0) ? switchOffAveragingWindow_ : uint_c(1);
+            while (history_.size() > uint_c(1) && history_.front().first + window <= step) { history_.pop_front(); }
+         }
       }
 
       ++executionCounter_;
@@ -228,6 +283,12 @@ class ForcingAdjuster
    uint_t frequency_;
    uint_t executionCounter_;
    bool enabled_;
+
+   uint_t beginTimeStep_;
+   uint_t switchOffStep_;
+   uint_t switchOffAveragingWindow_;
+   bool   frozen_;
+   std::deque< std::pair< uint_t, real_t > > history_; // (absolute step, PID-commanded acceleration_x)
 };
 
 

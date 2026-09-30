@@ -109,7 +109,8 @@ class BoundaryBlockDataHandling
       typename B::MovingObstacle_T curvedLinear(B::movingObstacleBoundaryID, B::movingObstacleFlagID, pdfField,
                                                 flagField, particleField, boundary_->getParticleAccessor(), domainMask,
                                                 *boundary_->getBlockForest(), *block,
-                                                boundary_->getHydrostaticDensityFct(), fillLevelFct);
+                                                boundary_->getHydrostaticDensityFct(), fillLevelFct,
+                                                boundary_->getUseInterpolatedBounceBack());
 
       return new BoundaryHandling_T("Boundary Handling", flagField, domainMask, noslip, ubb, ubbInflow, pressure,
                                     pressureOutflow, outlet, freeSlip, curvedLinear);
@@ -156,10 +157,10 @@ template< typename LatticeModel_T, typename FlagField_T, typename ScalarField_T,
 AntidunesBoundaryHandling< LatticeModel_T, FlagField_T, ScalarField_T, ParticleAccessor_T >::AntidunesBoundaryHandling(
    const std::shared_ptr< StructuredBlockForest >& blockForest, BlockDataID pdfFieldID, BlockDataID fillLevelID,
    BlockDataID particleFieldID, const shared_ptr< ParticleAccessor_T >& ac,
-   std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct, bool useFillWeighting)
+   std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct, bool useFillWeighting, bool useInterpolatedBounceBack)
    : blockForest_(blockForest), pdfFieldID_(pdfFieldID), fillFieldID_(fillLevelID), particleFieldID_(particleFieldID),
      ac_(ac), hydrostaticDensityFct_(std::move(hydrostaticDensityFct)), useFillWeighting_(useFillWeighting),
-     comm_(blockForest)
+     useInterpolatedBounceBack_(useInterpolatedBounceBack), comm_(blockForest)
 {
    // initialize obstacleIDs
    Set< FlagUID > obstacleIDs;

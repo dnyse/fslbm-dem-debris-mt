@@ -38,6 +38,8 @@
 
 #include "FlagInfo.h"
 
+#include <set>
+
 namespace walberla
 {
 namespace free_surface
@@ -51,6 +53,11 @@ namespace free_surface
 // own doc comment). denseStepPtr left null (the default) disables gating entirely -- every other
 // discovered block (including "fluid_field" itself) always fires on its own writeFrequency,
 // unaffected, exactly as before this parameter was added.
+//
+// snapshotStepPtr/snapshotSteps: same idea, but for a DISCRETE, typically non-uniform set of steps
+// instead of a continuous window -- gates a VTK output block named "fluid_field_snapshots" (see
+// VTKParams::snapshotsEnabled's own doc comment) to fire ONLY on steps contained in snapshotSteps.
+// snapshotStepPtr left null (the default) disables gating entirely, same contract as denseStepPtr.
 template< typename LatticeModel_T, typename FreeSurfaceBoundaryHandling_T, typename PdfField_T, typename FlagField_T,
           typename ScalarField_T, typename VectorField_T, bool useCodegen = false,
           typename VectorFieldFlattened_T = GhostLayerField< real_t, 3 > >
@@ -61,7 +68,9 @@ void addVTKOutput(const std::weak_ptr< StructuredBlockForest >& blockForestPtr, 
                   const BlockDataID& forceDensityFieldID, const BlockDataID& curvatureFieldID,
                   const BlockDataID& normalFieldID, const BlockDataID& obstacleNormalFieldID,
                   const std::shared_ptr< const uint_t >& denseStepPtr = nullptr, uint_t denseFromStep = uint_t(0),
-                  uint_t denseToStep = uint_t(0))
+                  uint_t denseToStep = uint_t(0),
+                  const std::shared_ptr< const uint_t >& snapshotStepPtr = nullptr,
+                  const std::set< uint_t >& snapshotSteps = {})
 {
    using value_type       = typename FlagField_T::value_type;
    const auto blockForest = blockForestPtr.lock();
@@ -227,6 +236,19 @@ void addVTKOutput(const std::weak_ptr< StructuredBlockForest >& blockForestPtr, 
             [function, denseStepPtr, denseFromStep, denseToStep]() {
                const uint_t step = *denseStepPtr;
                if (step >= denseFromStep && step < denseToStep) function();
+            },
+            std::string("VTK: ") + label);
+      }
+      else if (label == "fluid_field_snapshots" && snapshotStepPtr)
+      {
+         // "fluid_field_snapshots" (see this function's own doc comment) fires ONLY on the discrete
+         // steps in snapshotSteps -- every other step, function() is never called at all, so its own
+         // internal execution counter simply doesn't advance while skipped (same reasoning as the
+         // fluid_field_dense branch above, just a set-membership test instead of a range test).
+         timeloop.addFuncBeforeTimeStep(
+            [function, snapshotStepPtr, snapshotSteps]() {
+               const uint_t step = *snapshotStepPtr;
+               if (snapshotSteps.count(step) > 0) function();
             },
             std::string("VTK: ") + label);
       }

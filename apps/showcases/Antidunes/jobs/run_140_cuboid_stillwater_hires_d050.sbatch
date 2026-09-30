@@ -41,20 +41,30 @@ for dir in vtk-out eval snapshots; do
     fi
 done
 
-STAMP="$(date +%Y%m%d_%H%M%S)"
-if [[ -n "${HPCVAULT:-}" ]] && mkdir -p "$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_$STAMP" 2>/dev/null; then
-    ARCHIVE_ROOT="$HPCVAULT/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_$STAMP"
-else
-    ARCHIVE_ROOT="$BIN_DIR/archive/$STAMP"
-    mkdir -p "$ARCHIVE_ROOT"
-fi
-
 "$SH" --build --jobs "$(nproc)"
 
 echo "############################################################"
 echo "## cuboid stillwater hires, densityRatio=0.5"
 echo "############################################################"
 "$SH" --run --np 140 --prm "$PRM_DIR/cuboid_stillwater_realgravity981_3xsphere_hires_gas.prm"
+
+# [Claude, 2026-09-16]: prefer $HPCVAULT, decided and verified HERE (right before use), not at job
+# start -- $HPCVAULT is autofs-mounted, and a prior run this session (jobs 4238846/4239167) showed a
+# job-start mkdir can go stale by the time a multi-hour run's end-of-script mv actually happens
+# ("mv: cannot move ... /home/vault/... No such file or directory" despite $HPCVAULT being valid and
+# the earlier mkdir having reported success). Falling back to local-only risks the WORKING DIRECTORY's
+# quota on an unattended overnight run, so local is a last resort, not a default.
+STAMP="$(date +%Y%m%d_%H%M%S)"
+VAULT_CANDIDATE="${HPCVAULT:-}/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_${STAMP}"
+if [[ -n "${HPCVAULT:-}" ]] && mkdir -p "$VAULT_CANDIDATE" 2>/dev/null \
+   && touch "$VAULT_CANDIDATE/.write_test" 2>/dev/null; then
+    rm -f "$VAULT_CANDIDATE/.write_test"
+    ARCHIVE_ROOT="$VAULT_CANDIDATE"
+else
+    ARCHIVE_ROOT="$BIN_DIR/archive/$STAMP"
+    mkdir -p "$ARCHIVE_ROOT"
+    echo "WARNING: \$HPCVAULT unavailable at archive time -- falling back to LOCAL archive at $ARCHIVE_ROOT (move this off manually to avoid quota pressure)" >&2
+fi
 
 for d in vtk-out eval snapshots; do
     [[ -d "$BIN_DIR/$d" ]] && mkdir -p "$ARCHIVE_ROOT/d050" && mv "$BIN_DIR/$d" "$ARCHIVE_ROOT/d050/$d"

@@ -138,7 +138,7 @@ log() { echo; echo "==> $*"; }
 if $DO_SYNC; then
     log "Syncing to $REMOTE:$REMOTE_PATH"
     rsync -avz \
-        --exclude='build/' \
+        --exclude='build*/' \
         --exclude='.*' \
         "$REPO_ROOT/" "$REMOTE:$REMOTE_PATH"
 fi

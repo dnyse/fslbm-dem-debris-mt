@@ -1,0 +1,245 @@
+// clog_measurement_validation_noclog_reference_extreme_pidswitch_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-18] PID-THEN-CONSTANT-FORCE variant: PID control runs until t=20000, then acceleration_x
+// is frozen at the mean of the PID's own commanded values over steps 15000-20000 and never adjusted
+// again (PIDParameters.switchOffStep / switchOffAveragingWindow, ForcingAdjuster in Forcing.h). t=20000
+// is exactly when the first debris batch is released in the clog scenario, so the flow is spun up
+// self-consistently to the 0.04 target BEFORE the jam can affect it, and the jam then forms under a fixed
+// force -- the physically natural sequence for a slope-driven reach (normal flow first, debris arrives,
+// slope unchanged). Replaces the hand-set accelerationXOverride approach of the plain PID-off runs, which
+// started from a guessed force and settled at 0.0376 instead of 0.04. The mean (not the instantaneous
+// value) is frozen because the PID's command oscillates by ~+-20% around its converged value at this stage.
+// Copied from clog_measurement_validation_noclog_reference_extreme_gas.prm (no debris, 144 ranks / 2 nodes). Its job is to show the frozen force keeps the CLEAN channel at 0.04 -- the baseline the clog run is judged against.
+// Otherwise byte-identical to the file it was copied from.
+// ─────────────────────────────────────────────────────────────────────────────
+// Thesis item 3 (THESIS_PLAN.md): the no-clog reference counterpart to the "extreme"
+// clog_measurement_validation_extreme_pidon/pidoff_gas.prm pair -- same doubled domain/pillar
+// geometry, but NO floating spheres at all (like the small clog_measurement_validation_noclog_
+// reference_gas.prm is to the small sanity-clog pair). Establishes the baseline needed for the
+// reference-subtracted afflux metric (THESIS_PLAN.md item 3) at the extreme scale.
+//
+// Domain <768, 40, 90>: X DOUBLED from the small scenario's 384 (every X-valued position below --
+// pillars, probes, release zone -- is simply the small scenario's own X doubled, which preserves every
+// relative distance/margin exactly: e.g. pillars at the new domain's exact midpoint (384, same as the
+// small scenario's pillars sitting at ITS domain's exact midpoint 192), so this is a clean geometric
+// scale-up, not a redesign). Y=40 and the pier gap (still 6 LU, still < the unchanged 8 LU sphere
+// diameter) are left UNCHANGED -- only X grows, giving 2x the queueing/pile-up room without touching
+// the "one sphere physically cannot pass" guarantee the small scenario's own geometry relies on.
+// Z=90 unchanged (same low-water convention as the small scenario, see its own header for why).
+// periodicity <1,0,0> (X periodic, Y walled), same as every two-pillar scenario in this project.
+//
+// cellsPerBlock unchanged <64,20,15> -> numBlocks (768/64, 40/20, 90/15) = (12, 2, 6) = 144 ranks
+// (2x the small scenario's 72) -- 2 nodes on the multinode partition, not 1 (see
+// jobs/run_144_clog_measurement_validation_extreme_all.sbatch).
+//
+// Physics (targetMeanVelocityMagnitude, PID gains, Re/Fr/We, avgParticleDiameterOverride/dxSIOverride,
+// densityRatio, liquidHeightFactor, floorHeightFactor) are IDENTICAL to the small scenario -- this is a
+// pure geometry/debris-count scale-up of the same physical setup, not a different flow regime.
+//
+// [Claude, 2026-09-17]: timesteps extended 97500 -> 115000 and VTK writeFrequency 19500 -> 23000, to
+// exactly match clog_measurement_validation_extreme_pidon/pidoff_gas.prm's own 2026-09-16 extension
+// (widened release stagger pushed their own last release from t=28750 to t=46250, extending timesteps
+// by the same +17500 to preserve the settling tail). This reference run has no debris/releases at all,
+// so the extension isn't needed for ITS own sake -- it's needed so this run's late-time window
+// (t=95000-114900) is directly comparable to the with-debris runs' own late-time window, as the fair,
+// wave-controlled baseline for the elevation-difference metric (the pre-release phase of the with-
+// debris runs is dominated by a large flow-spinup transient in the free-surface elevation, up to
+// +-11 LU between the upstream/downstream probes, that has nothing to do with clogging -- this
+// reference run experiences that exact same transient with zero debris, isolating it).
+// NOTE on VTK dump count: writeFrequency=timesteps/5 gives dumps -- FIVE dumps, not six, since the main
+// loop is `for (t=0; t!=timesteps; ++t)` and therefore t never actually reaches `timesteps` itself; the
+// true final state is never written. Known, not yet fixed.
+//
+// [Claude, 2026-09-17]: re-synced end to end against clog_measurement_validation_extreme_pidon/
+// pidoff_gas.prm's own 2026-09-17 pillar/sphere-size redesign (single central pillar replacing the old
+// two, 60%/40% pillar/open split, sphere diameter 8->10) -- this reference run has no floaters of its
+// own, but EVERYTHING the flow itself interacts with (pillar geometry) or that the probes measure
+// (their Y positions) must match the with-debris runs exactly, or the reference-subtraction/afflux
+// methodology would be comparing two different flow fields rather than isolating the debris effect.
+// Updated: CylinderPillars (single pillar, radius 12), ClogMeasurement probe Y positions (4/36,
+// matching the new left/right slit centrelines), timesteps (115000 -> 124750, matching the with-debris
+// runs' own extended duration so the late-time comparison window lines up), VTK writeFrequency
+// (23000 -> 24950) and writers (added mapped_flag, matching the with-debris runs' own visualization fix).
+// See those files' own headers for the full geometry derivation.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 20, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 false;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <768, 40, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.04;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+   switchOffStep               20000;   // PID -> constant force here (= first debris release in the clog case)
+   switchOffAveragingWindow    5000;    // freeze at the mean PID command over steps 15000-20000
+   enabled                     true;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         124750;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+   // no gravityOverride -- dynamically computed, see file header
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;   // never opened -- see avgParticleDiameterOverride below
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8.001943372119138;
+   dxSIOverride                0.000362694127490625;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   // [Claude, 2026-09-17]: synced to match clog_measurement_validation_extreme_pidon/pidoff_gas.prm's
+   // own 2026-09-17 pillar redesign -- single big central pillar, radius 12 (60% of Y=40), leaving an
+   // 8 LU slit on each side (< the with-debris runs' own 10 LU sphere diameter). This reference run has
+   // no floaters of its own, but the pillar geometry the FLOW interacts with must match exactly for the
+   // reference-subtraction/afflux methodology to isolate the debris effect rather than a geometry
+   // difference.
+   CylinderPillar { center < 384, 20, 45 >; radius 12; }
+}
+
+
+
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+
+   ClogMeasurement
+   {
+      // [Claude, 2026-09-17]: repositioned to match the with-debris runs' own left/right slit
+      // centrelines (Y=4/Y=36) either side of the new single pillar -- see CylinderPillars above and
+      // the with-debris prms' own header for the full derivation.
+      upstreamPos       < 280, 4, 40 >;
+      downstreamPos      < 500, 4, 40 >;
+      probeHalfWidthXY   2;
+
+      pillarUpstreamPos    < 280, 36, 40 >;
+      pillarDownstreamPos  < 500, 36, 40 >;
+   }
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   // [Claude, 2026-09-17]: added BodyBC entries for the CylinderPillars above -- traced every single
+   // usage of simParams->cylinderPillars in this codebase (BuildTimeloop.h's own disabled #if 0 VTK
+   // block; SetupStages.h's bed-generation exclusion check; SetupStages.h's own createCylinder DEM
+   // rigid-body creation) and confirmed NONE of them ever touch the LBM flag field/boundary handling --
+   // CylinderPillars only gives the pillar DEM contact physics (floaters bounce off it), it does NOT by
+   // itself make the fluid see it as solid. The actual fluid-blocking NoSlip classification comes
+   // exclusively from here, via setupBoundaryHandling's initFromConfig(BoundaryParameters) (see that
+   // function's own "CellInterval pillar defined in Antidunes.prm" comment) -- confirmed against
+   // nine_stacked_release_pillar_gas.prm, which declares BOTH CylinderPillars (contact) AND matching
+   // BodyBC (fluid) for its own two pillars; this file previously had only the former.
+   BodyBC { shape Cylinder; min < 384, 20, 0 >; max < 384, 20, 90 >; radius 12; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+// [Claude, 2026-09-16]: writeFrequency dropped from disabled (1e10) to timesteps/5 so this run
+// produces sparse VTK dumps -- fluid_field, sphere, and cylinder_pillar VTK all share this same
+// simParams->vtk.writeFrequency (see BuildTimeloop.h), so one setting gives synchronized
+// fluid+floater+pillar snapshots for thesis figures, cheaply. [2026-09-17: see the FIVE-not-six-dumps
+// note near the top of this file -- writeFrequency updated to 24950 to match the with-debris runs'
+// own extended timesteps=124750 (pillar/sphere-size redesign, see CylinderPillars above).]
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       24950;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;
+      }
+
+      // [Claude, 2026-09-17]: without this, gas AND obstacle cells (the pillars) retain
+      // whatever stale PDF-derived velocity/density last happened to be there (never updated by
+      // the solver, since "the PDF values in these cells are not important" -- VtkWriter.h's own
+      // comment), rendering as salt-and-pepper noise across the free-surface/gas region AND
+      // making the pillars indistinguishable from the noisy fluid in ParaView -- found directly
+      // from a screenshot showing exactly this on the completed extreme pidoff/pidon runs
+      // (jobs 4240981/4240982), which never had this line, unlike every other scenario prm in
+      // this project (e.g. nine_stacked_release_pillar_gas.prm).
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

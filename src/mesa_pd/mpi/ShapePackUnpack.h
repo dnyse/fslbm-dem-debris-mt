@@ -32,6 +32,7 @@
 #include <mesa_pd/data/shape/CylindricalBoundary.h>
 #include <mesa_pd/data/shape/Box.h>
 #include <mesa_pd/data/shape/Cylinder.h>
+#include <mesa_pd/data/shape/Capsule.h>
 #include <mesa_pd/data/shape/Ellipsoid.h>
 #include <mesa_pd/data/shape/ConvexPolyhedron.h>
 
@@ -87,6 +88,10 @@ namespace mpi {
             break;
          case Cylinder::SHAPE_TYPE :
             bs = std::make_unique<mesa_pd::data::Cylinder>();
+            bs->unpack(buf);
+            break;
+         case Capsule::SHAPE_TYPE :
+            bs = std::make_unique<mesa_pd::data::Capsule>();
             bs->unpack(buf);
             break;
          case Ellipsoid::SHAPE_TYPE :

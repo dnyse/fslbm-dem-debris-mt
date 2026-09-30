@@ -1467,12 +1467,16 @@ inline real_t solveRealCubicOneRealRoot(real_t a, real_t b, real_t c)
 //! y^4 + p*y^2 + q*y + r (x = y - c3/(4*c4)), solve the resolvent cubic
 //! m^3 + p*m^2 + (p^2/4 - r)*m - q^2/8 = 0 for one real root m (solveRealCubicOneRealRoot), then factor
 //! the quartic into two quadratics via that m and solve each in closed form. No iteration at all --
-//! O(1) instead of solveQuarticDurandKerner's fixed 30 sweeps -- but see that function's own comment
-//! for why this file uses Durand-Kerner in production: the resolvent cubic's discriminant sign is a
-//! genuine branch (handled here, but still a branch), and this closed form loses accuracy near
-//! clustered/repeated quartic roots in a way the iterative methods degrade more gracefully from.
-//! Exists ONLY for the direct time/accuracy comparison against Durand-Kerner and Aberth-Ehrlich
-//! (QuarticSolverComparisonTest.cpp) -- not wired into any production call site.
+//! O(1) instead of solveQuarticDurandKerner's fixed 30 sweeps.
+//! [Claude, 2026-09-29] This IS the production solver: every quartic solve in the cylinder-cylinder
+//! dispatch defaults to QuarticSolverMethod::Ferrari (closestThetaOnCircleToLine, findRimCrossing,
+//! cylinderCylinderContact). The previous comment here ("not wired into any production call site",
+//! "Durand-Kerner in production") was outdated. No case has been found where it fails. Known
+//! theoretical weak points, kept here as documentation: (1) the resolvent cubic's discriminant sign is a
+//! branch (handled in solveRealCubicOneRealRoot); (2) m = 0 (q = 0, biquadratic quartic) needs the
+//! special handling below to avoid dividing by sqrt(2m); (3) like any closed-form quartic formula it can
+//! lose accuracy through cancellation when roots nearly coincide, where iterative solvers degrade more
+//! gracefully. Durand-Kerner / Aberth-Ehrlich remain available for comparison only.
 inline void solveQuarticFerrari(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
                                  std::complex< real_t > roots[4])
 {
@@ -1579,10 +1583,10 @@ inline void solveQuarticAberthEhrlich(real_t c4, real_t c3, real_t c2, real_t c1
 }
 
 //! Selects which of the three quartic solvers above (see QuarticSolverComparisonTest.cpp for the
-//! time/accuracy comparison that motivated exposing this as a real runtime choice, not just leaving
-//! Ferrari/Aberth-Ehrlich as dead code): DurandKerner is production's unchanged default; Ferrari and
-//! AberthEhrlich are opt-in alternatives threaded through closestThetaOnCircleToLine / findRimCrossing /
-//! cylinderCylinderContact's own solver-choice parameters, same pattern as useFastEdgeEdgeReference.
+//! time/accuracy comparison). [Claude, 2026-09-29] Ferrari is the production default everywhere
+//! (closestThetaOnCircleToLine / findRimCrossing / cylinderCylinderContact); DurandKerner and
+//! AberthEhrlich are kept only as comparison alternatives. (This comment previously said the opposite,
+//! which was outdated.)
 enum class QuarticSolverMethod
 {
    DurandKerner,
@@ -2083,7 +2087,10 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
                                     const Vec3& targetPos, const Vec3& eTarget, real_t targetRadius,
                                     real_t targetHalfLength, bool useFastReference = false,
                                     int maxIterations = 30,
-                                    QuarticSolverMethod quarticSolver = QuarticSolverMethod::DurandKerner,
+                                    // [Claude, 2026-09-29] default changed DurandKerner -> Ferrari to match
+                                    // every other entry point (production always passed Ferrari explicitly
+                                    // via cylinderCylinderContact; the only direct test call passes a solver).
+                                    QuarticSolverMethod quarticSolver = QuarticSolverMethod::Ferrari,
                                     int* candidateCountA = nullptr, int* candidateCountB = nullptr,
                                     bool lazyThetaRef = true)
 {
@@ -2253,6 +2260,57 @@ inline Vec3 rimPointTowardPlane(const CylinderState& cyl, const Vec3& planePos, 
 
    return cyl.pos + math::sign(zCyl) * cyl.radius * radialAwayFromPlane -
           math::sign(zCyl) * math::sign(axisDotN) * halfL * eZ;
+}
+
+//! [Claude, 2026-09-29] ALL crossings of a rim circle (centre C, in-plane basis u/v, radius R) with the
+//! INFINITE lateral surface of a target cylinder (axis through targetPos along eTarget, radius
+//! targetRadius) -- Kodam et al. (2010) eq. 83, the same quartic findRimCrossing solves for its point A.
+//! findRimCrossing keeps only ONE crossing (tie-broken by a reference angle, as its edge-edge chord
+//! construction needs); the corrected special-contact depth below needs every crossing, so this returns
+//! all real roots that satisfy the crossing condition (up to 4, plus theta = pi, which the Weierstrass
+//! substitution t = tan(theta/2) cannot reach). Deliberately a separate function: findRimCrossing is left
+//! byte-for-byte unchanged so the edge-edge results cannot shift. Returns the number of thetas written.
+inline int allRimCrossingsWithLateralSurface(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
+                                             const Vec3& targetPos, const Vec3& eTarget, real_t targetRadius,
+                                             real_t thetasOut[5])
+{
+   const Vec3   a  = C - targetPos;
+   const real_t A0 = a * eTarget;
+   const real_t A1 = u * eTarget;
+   const real_t A2 = v * eTarget;
+   const real_t Mp = real_t(2) * R * ((a * u) - A0 * A1);
+   const real_t Np = real_t(2) * R * ((a * v) - A0 * A2);
+   const real_t K2 = a.sqrLength() + R * R - A0 * A0 - targetRadius * targetRadius -
+                      real_t(0.5) * R * R * (A1 * A1 + A2 * A2);
+   const real_t P2 = real_t(-0.5) * R * R * (A1 * A1 - A2 * A2);
+   const real_t Q2 = -R * R * A1 * A2;
+
+   const real_t c4 = K2 - Mp + P2;
+   const real_t c3 = real_t(2) * Np - real_t(4) * Q2;
+   const real_t c2 = real_t(2) * K2 - real_t(6) * P2;
+   const real_t c1 = real_t(2) * Np + real_t(4) * Q2;
+   const real_t c0 = K2 + Mp + P2;
+
+   int  n = 0;
+   auto accept = [&](real_t theta) {
+      const Vec3   P      = C + R * std::cos(theta) * u + R * std::sin(theta) * v;
+      const Vec3   rel    = P - targetPos;
+      const Vec3   radial = rel - (rel * eTarget) * eTarget;
+      if (std::abs(radial.sqrLength() - targetRadius * targetRadius) >
+          real_t(1e-6) * std::max(real_t(1), targetRadius * targetRadius))
+         return;
+      if (n < 5) thetasOut[n++] = theta;
+   };
+   if (std::abs(c4) > real_t(1e-12) * std::max(real_t(1), std::abs(c0)))
+   {
+      std::complex< real_t > roots[4];
+      solveQuarticGeneric(c4, c3, c2, c1, c0, roots, QuarticSolverMethod::Ferrari);
+      for (const auto& r : roots)
+         if (std::abs(r.imag()) < real_t(1e-6) * std::max(real_t(1), std::abs(r.real())))
+            accept(real_t(2) * std::atan(r.real()));
+   }
+   accept(math::pi);
+   return n;
 }
 
 //! Kodam et al. (2010) eq. 40-44: exact face-band contact point, replacing an earlier version of
@@ -2546,6 +2604,12 @@ inline Vec3 faceFaceStyleContactPoint(const Vec3& relBodyI, real_t Ri, real_t Li
 //! demonstrated produce false negatives for oblique tilts. This version uses the closed form for the
 //! face-edge candidate, the numeric search only for the band-edge/special-contact candidate (matching
 //! Kodam's own eq. 67-77, which does need it), and Guo et al.'s corrected dispatch logic throughout.
+//! Which end-cap circle of the probe the band-edge branch examines. true (DEFAULT since 2026-09-20) = Kodam et al. (2010) Eq. 68-70: S = sign(d_bottom - d_top) with d = the cap centre's distance from
+//! the HOST'S AXIS measured in the host's xy-plane, i.e. the cap circle closer to the host's axis. false = the previous behaviour of this file: the cap whose centre is closer to the host's CENTRE
+//! (3D distance). The old rule was a deviation from the paper: for a rod pair that is nested it picked the circle that merely grazes the band (overlap ~0.003 LU, wrong normal) instead of the one
+//! that dips into it (job 4251049, rods ...486/...489, steps 3484-3485.6; see THESIS_PLAN.md). The switch is kept so tests can reproduce the old behaviour.
+inline bool kodamCapSelectionByAxisDistance = true;
+
 inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderState& probe)
 {
    ContactResult result;
@@ -2577,7 +2641,14 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
          result.contact  = true;
          result.overlap  = deltaA; // eq. 49, unchanged by Guo's correction (only the dispatch changed)
          result.normal   = host.R * Vec3(real_t(0), real_t(0), math::sign(relE[2]));
-         result.point    = E - result.normal * real_t(0.5) * deltaA;
+         // [Claude, 2026-09-29] contact point sign fix: E is the probe's rim point that has penetrated
+         // deepest into the host (|relE_z| < halfLHost), deltaA its distance below the host face at
+         // z = sign(relE_z)*halfLHost, and result.normal (host->probe here) points from E towards that
+         // face. The overlap along the normal therefore spans [E, E + deltaA*normal], whose midpoint is
+         // E + 0.5*deltaA*normal. The previous "E - ..." placed the point 0.5*deltaA deeper inside the
+         // host, outside the probe (i.e. outside the overlap region) -- inconsistent with band-edge
+         // below, which already used P + 0.5*deltaRp*nHat. Checked by testCylinderCylinderFaceEdgeClean.
+         result.point    = E + result.normal * real_t(0.5) * deltaA;
          result.scenario = "face-edge";
          return result;
       }
@@ -2590,7 +2661,15 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
    detail::perpendicularBasis(probe.axis(), uP, vP);
    const Vec3   capTop      = probe.pos + real_t(0.5) * probe.length * probe.axis();
    const Vec3   capBottom   = probe.pos - real_t(0.5) * probe.length * probe.axis();
-   const Vec3   capCentre   = ((capTop - host.pos).length() < (capBottom - host.pos).length()) ? capTop : capBottom;
+   Vec3 capCentre;
+   if (kodamCapSelectionByAxisDistance)
+   {
+      const Vec3 relTop = host.R.getTranspose() * (capTop - host.pos), relBottom = host.R.getTranspose() * (capBottom - host.pos);
+      const real_t dTop = std::sqrt(relTop[0] * relTop[0] + relTop[1] * relTop[1]), dBottom = std::sqrt(relBottom[0] * relBottom[0] + relBottom[1] * relBottom[1]);
+      capCentre = (dTop < dBottom) ? capTop : capBottom;
+   }
+   else
+      capCentre = ((capTop - host.pos).length() < (capBottom - host.pos).length()) ? capTop : capBottom;
    const real_t theta       = detail::closestThetaOnCircleToLine(capCentre, uP, vP, probe.radius, host.pos, eHost);
    const Vec3   P           = capCentre + probe.radius * std::cos(theta) * uP + probe.radius * std::sin(theta) * vP;
    const Vec3   relP        = host.R.getTranspose() * (P - host.pos);
@@ -2609,15 +2688,62 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
    // too-large radial overlap) -- treated as an axial-overlap contact with a face-normal-like normal.
    const bool sameSide            = relP[2] * relProbeCentre[2] > real_t(0);
    const bool probeCentreBeyondFace = std::abs(relProbeCentre[2]) > halfLHost;
+   // [Claude, 2026-09-29] Guo's criterion compared delta_a AT P with delta_r. P (closest to the host axis) is the
+   // probe's deepest point RADIALLY, but not axially, so delta_a(P) underestimates the axial penetration and the
+   // comparison picks the axial ("special") contact too often: in the fuzz suite, most special-contact
+   // disagreements with GJK/EPA had GJK normals ~90 degrees from the host axis, i.e. the true escape direction
+   // was radial. The comparison now uses the corrected axial depth computed below (deepest rim point inside the
+   // host); if it is not smaller than delta_r, the contact falls through to band-edge (radial depth at P).
    if (sameSide && probeCentreBeyondFace && deltaAp < deltaRp)
    {
+      // [Claude, 2026-09-29] CORRECTED special-contact depth. Guo et al. (2012, Table 1 / Fig. 8) place this
+      // contact "at the point P with overlap delta_a", P being the rim point closest to the host AXIS. For a
+      // tilted probe, P is in general NOT the probe's deepest point inside the host: the rim is a tilted
+      // circle whose height varies along it, and its deepest point inside the host lies where the rim leaves
+      // the host's face disc, i.e. where it crosses the host's lateral surface (or at the rim's lowest point
+      // itself, if that lies inside the disc). On testCylinderCylinderSpecialContact's geometry Guo's value is
+      // 0.181 while GJK/EPA and an independent brute-force MTD give 0.610. Candidates: (a) the rim's own
+      // deepest point towards the host face, if inside the host; (b) every crossing of the rim with the
+      // host's lateral surface inside the host's length (Kodam eq. 83 quartic). The deepest candidate
+      // defines the overlap; normal stays axial (Guo). P itself is kept as a last resort.
+      const real_t s        = math::sign(relP[2]); // side of the host face the probe comes from
+      const Vec3   eHostW   = eHost;
+      real_t       bestSZ   = relP[2] * s;          // s*z of the deepest candidate so far (smaller = deeper)
+      Vec3         bestPt   = P;
+      auto consider = [&](const Vec3& Q) {
+         const Vec3   relQ = host.R.getTranspose() * (Q - host.pos);
+         const real_t rho2 = relQ[0] * relQ[0] + relQ[1] * relQ[1];
+         if (std::abs(relQ[2]) >= halfLHost) return;                                   // outside host length
+         if (rho2 > host.radius * host.radius * (real_t(1) + real_t(1e-9))) return;    // outside host disc
+         if (relQ[2] * s < bestSZ) { bestSZ = relQ[2] * s; bestPt = Q; }
+      };
+      // (a) lowest rim point towards the host face: minimises s*(Q - host.pos).eHost along the rim.
+      {
+         const real_t A1 = uP * eHostW, A2 = vP * eHostW;
+         const real_t thetaLow = std::atan2(-s * A2, -s * A1);
+         consider(capCentre + probe.radius * std::cos(thetaLow) * uP + probe.radius * std::sin(thetaLow) * vP);
+      }
+      // (b) crossings of the rim with the host's lateral surface.
+      real_t thetas[5];
+      const int nCross = detail::allRimCrossingsWithLateralSurface(capCentre, uP, vP, probe.radius, host.pos, eHostW,
+                                                                   host.radius, thetas);
+      for (int k = 0; k < nCross; ++k)
+         consider(capCentre + probe.radius * std::cos(thetas[k]) * uP + probe.radius * std::sin(thetas[k]) * vP);
+
+      const real_t deltaCorrected = halfLHost - bestSZ;
+      if (deltaCorrected < deltaRp)
+      {
       result.contact  = true;
-      result.overlap  = deltaAp;
-      result.normal   = host.R * Vec3(real_t(0), real_t(0), math::sign(relP[2]));
-      result.point    = P - result.normal * real_t(0.5) * deltaAp;
+      result.overlap  = deltaCorrected;
+      result.normal   = host.R * Vec3(real_t(0), real_t(0), s);
+      result.point    = bestPt + result.normal * real_t(0.5) * deltaCorrected;
       result.scenario = "special-contact";
       return result;
+      }
+      // else: axial penetration is the larger one -> band-edge below (radial depth at P).
    }
+   // [Claude, 2026-09-29] the original Guo et al. special-contact result (overlap = deltaAp at P, point
+   // P + 0.5*deltaAp*n) was replaced by the corrected depth above.
 
    // Band-edge (eq. 79-81), CORRECTED per Guo et al.: Kodam's original delta_r < delta_a requirement
    // is dropped entirely (their Fig. 7 shows a genuine band-edge contact where it doesn't hold); the
@@ -2770,17 +2896,29 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
          // standard closest-point-between-two-lines formula directly in WORLD vectors (mathematically
          // the same computation Vega & Lago's l_i*/l_j* solve for; this form avoids an extra
          // frame transform that would otherwise need independent double-checking).
+         //
+         // NEAR-PARALLEL axes (1 - (e_i.e_j)^2 = sin^2(theta) < 1e-10, i.e. theta < 1e-5 rad -- ordinary
+         // floating-point rotation noise of a body that was placed axis-aligned): the two infinite
+         // centrelines only approach each other about (separation / theta) ~ 1e5-1e6 LU away along the
+         // axes, so eq. 63's |l*| < L/2 conditions REJECT the band-band contact -- and that is the
+         // right answer, because any near-parallel pair that really touches band-to-band or face-to-face
+         // is caught by the parallel-axes branch at the top of this function (|zIJ| < (L_i+L_j)/2 AND
+         // rhoIJ < R_i+R_j). This branch used to set l* = 0 in that regime ("guard against division by
+         // ~0"), which made BOTH l* conditions vacuously true while r_hat = (e_i x e_j)/|e_i x e_j| is a
+         // pure noise direction (any unit vector perpendicular to both axes, e.g. perpendicular to the
+         // actual separation => d = |x.r_hat| = 0): two rods separated by a clear gap were reported as
+         // overlapping by R_i+R_j (a 6 LU false contact -> cylinder hopper [RELEASE-OVERLAP] abort, job
+         // 4248725). Kodam's equations are fine; only that guard deviated from them. Now the branch is
+         // simply not applicable in that regime (see CylinderNearParallelSkewedTest.cpp, which checks
+         // against a literal implementation of eq. 55-66 with the exact l*).
+         const Vec3   w0     = ci.pos - cj.pos;
+         const real_t a_     = eI * eI, b_ = eI * eJ, c_ = eJ * eJ;
+         const real_t d_     = eI * w0, e_ = eJ * w0;
+         const real_t denom2 = a_ * c_ - b_ * b_;
+         if (denom2 > real_t(1e-10))
          {
-            const Vec3   w0     = ci.pos - cj.pos;
-            const real_t a_     = eI * eI, b_ = eI * eJ, c_ = eJ * eJ;
-            const real_t d_     = eI * w0, e_ = eJ * w0;
-            const real_t denom2 = a_ * c_ - b_ * b_;
-            real_t       liW = real_t(0), ljW = real_t(0);
-            if (std::abs(denom2) > real_t(1e-10))
-            {
-               liW = (b_ * e_ - c_ * d_) / denom2;
-               ljW = (a_ * e_ - b_ * d_) / denom2;
-            }
+            const real_t liW = (b_ * e_ - c_ * d_) / denom2;
+            const real_t ljW = (a_ * e_ - b_ * d_) / denom2;
 
             // Guo, Wassgren, Ketterhagen, Hancock & Curtis (2012), Powder Technology 228, 193-198,
             // Table 1 "Band-band contact (skewed)": Kodam et al.'s original criterion (the first four
@@ -2911,14 +3049,13 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
                   // cj); Pj is on rim j, positioned where rim j crosses INTO cylinder i (so physically
                   // near ci). This file's convention is "normal points toward the 1st argument (ci)"
                   // (see the face-face branch's own comment) -- i.e. from the cj-side point toward the
-                  // ci-side point, which is Pj-Pi, NOT Pi-Pj. A 5000-trial fuzz run confirmed this was
-                  // backwards UNIVERSALLY (213/213 edge-edge firings had their normal within 20 degrees
-                  // of exactly antiparallel to GJK/EPA's, never just off by a little) -- currently
-                  // harmless in production only because cylinderCylinderResultIsUncertain's Tier 2
-                  // circumscribing-sphere bound already flags every edge-edge firing as uncertain (its
-                  // characteristically small near-first-contact overlap never survives that loose
-                  // bound), so the hybrid always substitutes GJK/EPA's own (correct) normal anyway --
-                  // see PaperAnalyticalContactTest.cpp's edge-edge sign-check diagnostic.
+                  // ci-side point, which is Pj-Pi, NOT Pi-Pj. Trusted directly (no Tier 2 substitution --
+                  // that gate was removed, see cylinderCylinderResultIsUncertain's own comment): a fuzz
+                  // run against GJK/EPA confirms this direction agrees to a few degrees on trials where
+                  // the reported magnitude is also correct (see PaperAnalyticalContactTest.cpp's
+                  // edge-edge normal-angle breakdown, PASSING rows). The residual edge-edge disagreement
+                  // documented elsewhere in this file is a wrong-MAGNITUDE issue (the curvature-coupling
+                  // feature gap), not a sign/direction error in this formula.
                   result.normal   = (Pj - Pi).getNormalizedOrZero();
                   result.point    = real_t(0.5) * (Pi + Pj); // eq. 101
                   result.scenario = "edge-edge";

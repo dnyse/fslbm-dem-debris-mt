@@ -1,0 +1,169 @@
+// bogner_exact_3box_s16_seed5_rho075_nopin_omega1p9_50k_tilt10_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-24] STARTING-ANGLE SENSITIVITY TEST at the "corrected" density 0.7665 (see
+// bogner_exact_3box_s16_seed5_rho075_nopin_omega1p9_100k_densitycheck_gas.prm, job 4260604): that run,
+// seeded at 5deg, tracked the true 26.565deg equilibrium closely and with small amplitude for ~15,000
+// steps, then grew into a completely different, wide (~55-60deg) chaotic orbit. This variant tests
+// whether that outcome depends on the SEED ANGLE: same density (0.7665), same omega (1.9), same
+// everything else, only initialTiltAngleDeg changed to 10deg (a steeper seed than the original 5deg) and
+// timesteps shortened to 50000 (half of the density-check run, enough to see whether/when the
+// instability sets in). Run alongside the 2.9deg and 26.565deg (released AT equilibrium) siblings on
+// the other two checkouts, all three simultaneously.
+//  * Everything else byte-identical to the 100k densitycheck rho075 prm: basin 130x40x40, ONE box
+//    halfExtents<8,16,8> at rho=0.7665, tau=1/1.9, gravityOverride 0.00075, fully free 6-DOF (no pins).
+//  * Domain 130x40x40 / cellsPerBlock <10,8,40> = 13x5x1 = 65 processes; 50000 timesteps, VTK every 2000.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 10, 8, 40 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic, Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <130, 40, 40>;
+   wavePeriods        1;
+   liquidHeightFactor 1.25;
+   floorHeightFactor  1.25;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              50000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;
+   relaxationRateOverride 1.9;          // Bogner's tau = 1/1.9 = 0.526; lower omega = more viscous damping (Bogner's own value)
+   gravityOverride        0.00075;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;   // never opened -- see avgParticleDiameterOverride
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8;
+   dxSIOverride                0.0004;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      position             < 21.6667, 20, 16 >;
+      halfExtents          < 8, 16, 8 >;
+      densityRatio         0.75;
+      settlingSteps        0;
+      initialTiltAngleDeg  10;   // steeper seed heel
+      comOffsetZ           0;
+      pinPosition          false;         // fully free (6 DOF)
+      pinRotation          false;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   useAnalyticBoxBuoyancy        false;   // explicitly OFF: no analytic buoyancy in this experiment
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     1;
+   dataSliceFrequency      500;   // avoid the job 4255656 vault file-count quota bug
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;
+         density;
+      }
+
+      // one mid-width plane (the boxes' cross-section is in X-Z)
+      CellBB_filter_0 { min < 0, 20, 0 >;  max < 130, 21, 40 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

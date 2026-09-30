@@ -1,0 +1,242 @@
+// small_rods_24x_2x4x3_clog_resume_crash4271048_verify_mirror1_reconstructiononly_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-27] Per explicit request ("one two mirrors run the only reconstruction and the
+// other one with continued freeze"): companion to
+// small_rods_24x_2x4x3_clog_resume_crash4271048_verify_gas.prm (mt-dennys-mirror2, freeze ON) --
+// this variant runs on mt-dennys-mirror with useObstaclePdfFreeze FALSE, i.e. reconstruction-only
+// (the original, pre-fix behaviour): obstacle cells are left to whatever the unmasked stream+collide
+// kernels compute, corrected only by PdfReconstructionManager's EquilibriumReconstructor at the
+// obstacle->fluid transition. Identical population/physics/fixes-off state and identical checkpoint
+// (copied byte-for-byte from mirror2's own step-20000 backup) otherwise -- the ONLY difference
+// between this prm and its mirror2 companion is useObstaclePdfFreeze. Loads from the STEP-20000
+// BACKUP on THIS mirror (copied from mirror2), storeSnapshot false (observe-only, nothing written).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  true;
+   storeSnapshot                 false;
+   // Required by the parser even though storeSnapshot=false means it's never actually used to
+   // write anything -- any value is fine.
+   snapshotFrequency             50;
+   snapshotBaseFolder            /home/hpc/iwia/iwia148h/mt-dennys-mirror/apps/showcases/Antidunes/resume_snapshots/small_rods_24x_from_4268494_BACKUP_step20000_20260927;
+}
+
+DomainParameters
+{
+   domainSize         <768, 40, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.04;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+   enabled                     true;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         51000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+
+   densityPrecursorLow        0.1;
+   densityPrecursorHigh       1.9;
+   densityPrecursorLiquidOnly true;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8.001943372119138;
+   dxSIOverride                0.000362694127490625;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar { center < 384, 0, 45 >; radius 12; }
+   CylinderPillar { center < 384, 40, 45 >; radius 12; }
+}
+
+FloatingCylinders
+{
+   // Row 1 (X=364) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 364, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 364, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 500; }
+   FloatingCylinder { position < 364, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 364, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 364, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 500; }
+   FloatingCylinder { position < 364, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 2 (X=357, 7 LU behind row 1) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 357, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 357, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 500; }
+   FloatingCylinder { position < 357, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 357, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 357, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 500; }
+   FloatingCylinder { position < 357, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 3 (X=350, 7 LU behind row 2) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 350, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 350, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 500; }
+   FloatingCylinder { position < 350, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 350, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 350, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 500; }
+   FloatingCylinder { position < 350, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 4 (X=343, 7 LU behind row 3) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 343, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 343, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 500; }
+   FloatingCylinder { position < 343, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 343, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 343, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.0; settlingSteps 500; }
+   FloatingCylinder { position < 343, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;
+   usePureAnalyticalCylinder     false;
+   useContactFilterOwnerTiebreak true;
+   useCapsuleShapeForCylinders   false;
+
+   useTightTier1                 false;
+   useTightLayer1                true;
+   skipTier1                     false;
+   useRoundedBoxCorners          false;
+   useMultiPointBoxContact       false;
+   useBoxOverlapCap              false;
+   useAxisHysteresis             false;
+   useContactManifold            false;
+   useRotationalEffectiveMass    true;
+   useSpheroBoxContact           false;
+   useSpheroBoxAnalytical        false;
+   useFraigeBoxContactModel      false;
+   useFullVolumeAnalyticBuoyancy false;
+   usePass3Reresolution          false;
+   useAnalyticBoxBuoyancy        false;
+
+   diagnosticSweepEnabled        true;
+
+   // [Claude, 2026-09-27] Per explicit request ("one two mirrors run the only reconstruction and
+   // the other one with continued freeze"): THIS mirror (mt-dennys-mirror) runs WITHOUT the freeze
+   // -- reconstruction-only, the original pre-fix behaviour. The companion run on mt-dennys-mirror2
+   // (small_rods_24x_2x4x3_clog_resume_crash4271048_verify_gas.prm) leaves this at its default
+   // (true) to A/B test the freeze concurrently on a separate mirror. This is the ONLY difference
+   // between the two prms.
+   useObstaclePdfFreeze          false;
+
+   logFloaterHistory             true;
+   floaterHistoryBaseFolder      floater-history;
+   logFloaterHistoryStartStep    22200;
+   logFloaterHistoryEndStep      22300;
+
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+
+   ClogMeasurement
+   {
+      upstreamPos       < 336, 20, 40 >;
+      downstreamPos     < 432, 20, 40 >;
+      probeHalfWidthXY  2;
+
+      pillarUpstreamPos    < 336, 6, 40 >;
+      pillarDownstreamPos  < 432, 6, 40 >;
+   }
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 384, 0, 0 >;  max < 384, 0, 180 >;  radius 12; NoSlip{} }
+   BodyBC { shape Cylinder; min < 384, 40, 0 >; max < 384, 40, 180 >; radius 12; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+// fluid cropped near the pillars and all four rows (X 250..500, Z 0..100); the rods are unfiltered.
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       10000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 250, 0, 0 >;  max < 500, 40, 100 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

@@ -181,6 +181,23 @@ void initPdfFieldPoiseuille(const std::shared_ptr<const SimulationParams>& simPa
    auto bf = simObjs->blockForest;
    const real_t rho = real_c(1);
 
+   // [Claude, 2026-09-18]: deliberately NOT (*simObjs->acceleration)[0] here. That value can be
+   // PIDParameters.accelerationXOverride -- a fixed driving force calibrated against a real BodyBC
+   // obstacle's own hydraulic drag (see THESIS_PLAN.md item 3, 2026-09-18), which can be many times
+   // larger than what an unobstructed channel would need for the same target mean velocity. This
+   // formula, however, assumes exactly that unobstructed-channel relationship between acceleration
+   // and the resulting parabolic profile -- feeding it an obstacle-inclusive force overshoots the
+   // true profile by the same factor, producing an initial peak velocity that can badly violate the
+   // LBM's low-Mach stability limit (verified: 7.801745e-07 override -> peak ~0.514 LU/step vs.
+   // ~0.064 LU/step from the plain formula, on the noclog_reference_extreme scenario's own
+   // viscosity/liquidHeight -- job 4245047 blew up to NaN on the very first sweep as a direct
+   // result). Always use the plain-channel analytical estimate for this initial GUESS, independent
+   // of whatever the actual applied driving force is; the flow develops its own correct profile
+   // near the obstacle over subsequent timesteps regardless of the starting guess.
+   const real_t accelerationXInitGuess = real_c(3) * simParams->pid.targetMeanVelocityMagnitude *
+                                          simParams->computed.viscosity /
+                                          (simParams->computed.liquidHeight * simParams->computed.liquidHeight);
+
    for (auto blockIt = bf->begin(); blockIt != bf->end(); ++blockIt)
    {
       PdfField_T* const pdfField           = blockIt->getData< PdfField_T >(simObjs->pdfFieldID);
@@ -198,9 +215,9 @@ void initPdfFieldPoiseuille(const std::shared_ptr<const SimulationParams>& simPa
          const real_t fillLevel = fillField->get(x, y, z);
 
          if (heightAboveBed >= real_c(0) && fillLevel > real_c(0)) {
-            velocity[0] = (*simObjs->acceleration)[0] / (real_c(2) * simParams->computed.viscosity) * heightAboveBed *
+            velocity[0] = accelerationXInitGuess / (real_c(2) * simParams->computed.viscosity) * heightAboveBed *
                           (real_c(2) * (simParams->computed.liquidHeight + real_c(0.5)) - heightAboveBed);
-         } 
+         }
 
          pdfField->setToEquilibrium(x, y, z, velocity, rho);
       ) // WALBERLA_FOR_ALL_CELLS_XYZ

@@ -21,17 +21,67 @@
 
 #pragma once
 
-#include "SimulationParams.h" 
-#include "SimulationObjects.h" 
+#include "SimulationParams.h"
+#include "SimulationObjects.h"
+
+#include <filesystem> 
 
 namespace walberla {
 namespace antidunes {
 
-void writeCheckpoint(const std::shared_ptr<const SimulationParams>& simParams, const std::shared_ptr<SimulationObjects>& simObjs, uint_t timestep)
+void writeCheckpoint(const std::shared_ptr<const SimulationParams>& simParams, const std::shared_ptr<SimulationObjects>& simObjs, uint_t timestep, bool keepUnique = false, bool alternateGeneration = false)
 {
+   // [Claude, 2026-09-24] keepUnique=true (BlockForestParams::keepAllSnapshots): write into a
+   // dedicated step_<timestep> subfolder instead of the shared rolling checkpoint, so every call
+   // is retained on disk rather than overwriting the previous one. Diagnostic use only (see
+   // SimulationParams.h's BlockForestParams comment).
+   //
+   // [Claude, 2026-09-27] alternateGeneration=true (BlockForestParams::keepLastTwoSnapshots):
+   // write into snapshotBaseFolder/gen_0 or gen_1, alternating by checkpoint index parity
+   // (timestep/snapshotFrequency) % 2 -- so the write that just completed and the ONE BEFORE it both
+   // survive on disk (whichever generation folder wasn't just overwritten), instead of a single
+   // rolling checkpoint where only the very latest write ever survives. Mutually exclusive with
+   // keepUnique in practice (see SimulationParams.h's own comment).
+   const std::string& snapshotDir = keepUnique
+      ? simParams->blockForest.snapshotBaseFolder + "/step_" + std::to_string(timestep)
+      : alternateGeneration
+         ? simParams->blockForest.snapshotBaseFolder + "/gen_" +
+              std::to_string((timestep / simParams->blockForest.snapshotFrequency) % uint_t(2))
+         : simParams->blockForest.snapshotBaseFolder;
+   if (keepUnique || alternateGeneration)
+   {
+      WALBERLA_ROOT_SECTION()
+      {
+         std::filesystem::create_directories(snapshotDir);
+         // [Claude, 2026-09-27] BUG FOUND AND FIXED: setupBlockForest (SetupStages.h) only ever
+         // writes blockForestFile ("blockForest.file") on a FRESH start that also stores
+         // (storeSnapshot && !loadSnapshot) -- during a RESUME (loadSnapshot=true), that file is
+         // never (re)written anywhere, including into a keepUnique/alternateGeneration subfolder,
+         // even though every other field gets written here every checkpoint. A subfolder without its
+         // own blockForest.file cannot be loaded on its own (confirmed directly: job 4271677 aborted
+         // at setup with "Loading BlockForest from file '.../gen_0/blockForest.file' failed: Opening
+         // the file failed. Does the file even exist?"). The block decomposition itself never changes
+         // during a run (same domain/rank count throughout), so a plain copy from the shared base
+         // folder (where it DOES exist, either from the original fresh-start run or from whatever
+         // checkpoint this run itself was loaded from) is always valid and cheap -- copied on every
+         // checkpoint call rather than once, for simplicity, since the source never changes.
+         const std::string& baseBlockForestFile = simParams->blockForest.snapshotBaseFolder + "/" + simObjs->blockForestFile;
+         const std::string& subfolderBlockForestFile = snapshotDir + "/" + simObjs->blockForestFile;
+         if (std::filesystem::exists(baseBlockForestFile))
+            std::filesystem::copy_file(baseBlockForestFile, subfolderBlockForestFile,
+               std::filesystem::copy_options::overwrite_existing);
+         else
+            WALBERLA_LOG_WARNING("[writeCheckpoint] " << baseBlockForestFile << " does not exist -- "
+               << subfolderBlockForestFile << " will be missing too, and that subfolder will not be "
+               "loadable on its own. This should only happen if snapshotBaseFolder itself was never "
+               "properly seeded with a blockForest.file before this run started.");
+      }
+      WALBERLA_MPI_BARRIER();
+   }
+
    // Write to tmp_ files first, then atomically rename. This prevents corrupt snapshots if the job is killed mid-write.
-   const std::string& baseTmp = simParams->blockForest.snapshotBaseFolder + "/tmp_";
-   const std::string& baseActual = simParams->blockForest.snapshotBaseFolder + "/";
+   const std::string& baseTmp = snapshotDir + "/tmp_";
+   const std::string& baseActual = snapshotDir + "/";
 
    // save fields ----------------------------------------
    WALBERLA_LOG_INFO_ON_ROOT("Storing snapshots in " << baseTmp << "*");

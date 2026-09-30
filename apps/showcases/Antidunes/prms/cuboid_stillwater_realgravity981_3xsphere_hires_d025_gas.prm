@@ -60,9 +60,9 @@ BlockForestParameters
 {
    cellsPerBlock                 < 17, 42, 30 >;
    periodicity                   < 1, 0, 0 >;
-   loadSnapshot                  true;
+   loadSnapshot                  false;
    storeSnapshot                 true;
-   snapshotFrequency             5000;
+   snapshotFrequency             10000;
    snapshotBaseFolder            snapshots;
 }
 
@@ -171,11 +171,17 @@ MeshOutputParameters
    baseFolder     mesh-out;
 }
 
+// [Claude, 2026-09-18]: writeFrequency brought in line with the d050/d075 siblings -- dropped from
+// 2000 (51 dumps) to timesteps/5 = 20000 (6 sparse dumps: steps 0, 20000, ..., 100000), matching the
+// sparse-VTK-for-thesis-figures convention adopted this session (THESIS_PLAN.md item 3). This file
+// was skipped when that convention was first applied to d050/d075 because it had already completed
+// once under the old dense setting -- now rerun fresh (multi-hop ghost-sync fix, see THESIS_PLAN.md
+// 2026-09-18) is the natural point to also fix this, so all three density cases stay consistent.
 VTK
 {
    fluid_field
    {
-      writeFrequency       2000;
+      writeFrequency       20000;
       ghostLayers          0;
       baseFolder           vtk-out;
       samplingResolution   1;

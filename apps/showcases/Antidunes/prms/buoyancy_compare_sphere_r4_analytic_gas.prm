@@ -40,7 +40,7 @@
 
 BlockForestParameters
 {
-   cellsPerBlock                 < 32, 32, 24 >;
+   cellsPerBlock                 < 32, 32, 48 >;   // [Claude, 2026-09-29] changed from <32,32,24> (6x6x16=576/8 nodes) to fit 4 nodes per explicit request
    periodicity                   < 1, 1, 0 >;
    loadSnapshot                  false;
    storeSnapshot                 false;

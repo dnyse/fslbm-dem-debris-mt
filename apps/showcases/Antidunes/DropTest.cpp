@@ -236,6 +236,65 @@ int main(int argc, char** argv)
       writeFloaterCylinderVtk = vtk::writeFiles(cylinderFloaterVTKOutput);
    }
 
+   // Capsule ("pill") floaters (type 5) -- [Claude, 2026-09-23] NEW SHAPE, same treatment as the
+   // cylinder block above, EXCEPT the glyph: ParaView's Tensor Glyph filter has no native capsule
+   // source, so this renders each capsule as a same-radius/same-length CYLINDER glyph -- a visual
+   // stand-in only (the physics is the real Capsule shape; only the rendered rims are flat instead of
+   // rounded). Good enough to confirm position/orientation/falling/resting behaviour by eye.
+   std::function< void() > writeFloaterCapsuleVtk = []() {};
+   if (!simParams->floatingCapsules.empty())
+   {
+      struct SelectFloaterDensityRatio
+      {
+         using return_type = real_t;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const auto& shape = p.getBaseShape();
+            if (!shape || shape->getVolume() < real_t(1e-12)) return real_t(0);
+            return shape->getMass() / shape->getVolume();
+         }
+      };
+      struct SelectCapsuleGlyphScale
+      {
+         using return_type = mesa_pd::Vec3;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const auto* shape = dynamic_cast< const mesa_pd::data::Capsule* >(p.getBaseShape().get());
+            if (!shape) return mesa_pd::Vec3(real_t(0));
+            return mesa_pd::Vec3(real_t(2) * shape->getRadius(), shape->getHeight(),
+                                 real_t(2) * shape->getRadius());
+         }
+      };
+      // Same (R * Rx(+90))^T construction as the cylinder block -- glyph-local Y is the capsule's own
+      // axis, body-local Z is; see BuildTimeloop.h's cylinder selector for the full derivation.
+      struct SelectParticleRotationMatrix
+      {
+         using return_type = std::array< real_t, 9 >;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const mesa_pd::Mat3 R = p.getRotation().getMatrix();
+            return { R(0, 0),  R(1, 0),  R(2, 0),
+                     R(0, 2),  R(1, 2),  R(2, 2),
+                    -R(0, 1), -R(1, 1), -R(2, 1) };
+         }
+      };
+
+      auto capsuleFloaterData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
+      capsuleFloaterData->addOutput< SelectCapsuleGlyphScale >("glyphScale");
+      capsuleFloaterData->addOutput< SelectParticleRotationMatrix >("rotation");
+      capsuleFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      capsuleFloaterData->addOutput< SelectFloaterDensityRatio >("densityRatio");
+      capsuleFloaterData->addOutput< mesa_pd::data::SelectParticleUid >("uid");
+      capsuleFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
+         using namespace walberla::mesa_pd::data::particle_flags;
+         return pIt->getType() == uint_t(5) && !isSet(pIt->getFlags(), GHOST);
+      });
+      auto capsuleFloaterVTKOutput = vtk::createVTKOutput_PointData(
+         capsuleFloaterData, "floaterCapsule", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
+         std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
+      writeFloaterCapsuleVtk = vtk::writeFiles(capsuleFloaterVTKOutput);
+   }
+
    // Main loop -- no LBM, no LBM-DEM coupling, no PID. Just wave release + DEM sub-cycles + VTK.
    // ----------------------------------------------------------------------------------------------------------------
    WcTimingPool timingPool;
@@ -263,6 +322,7 @@ int main(int argc, char** argv)
 
       writeFloaterBoxVtk();
       writeFloaterCylinderVtk();
+      writeFloaterCapsuleVtk();
       const auto tAfterVtk = std::chrono::steady_clock::now();
 
       const double releaseMs = std::chrono::duration< double, std::milli >(tAfterRelease - tStepStart).count();

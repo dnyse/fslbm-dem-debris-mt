@@ -305,7 +305,7 @@ class PdfReconstructionManager
    template< typename ScalarFieldPtr_T >
    void seedConvertedCellFill(ScalarFieldPtr_T fillField, FlagField_T* flagField, cell_idx_t x, cell_idx_t y,
                               cell_idx_t z, flag_t targetFlag, flag_t gasFlag, flag_t liquidFlag,
-                              flag_t interfaceFlag) const
+                              flag_t interfaceFlag, const IBlock* block = nullptr) const
    {
       real_t seededFill;
       if (isFlagSet(targetFlag, gasFlag)) { seededFill = real_t(0); }
@@ -341,6 +341,30 @@ class PdfReconstructionManager
                   }
                }
          seededFill = (cnt > uint_t(0)) ? sum / real_c(cnt) : real_t(0.5);
+
+         // [Claude, 2026-09-24] FALLBACK-ISOLATED-INTERFACE: cnt==0 means this newly-converted
+         // interface cell found NO real interface neighbour to average its fill from -- it is being
+         // seeded from nothing (fill=0.5, no informed velocity/density either), the same fragile
+         // starting condition traced to a real crash (THESIS_PLAN.md, step-444 investigation: such a
+         // cell's PDFs survive streaming intact but blow up on the VERY NEXT LBM collision step).
+         // Same throttling/world-coordinate convention as this file's own [PASS3-UNRESOLVED-ISLAND].
+         if (cnt == uint_t(0) && block != nullptr)
+         {
+            static uint_t fallbackIsolatedLogCount = uint_t(0);
+            ++fallbackIsolatedLogCount;
+            if (fallbackIsolatedLogCount <= uint_t(20) || (fallbackIsolatedLogCount % uint_t(5000) == uint_t(0)))
+            {
+               const auto&  aabb = block->getAABB();
+               const real_t cdx  = aabb.xSize() / real_c(flagField->xSize());
+               WALBERLA_LOG_WARNING("[FALLBACK-ISOLATED-INTERFACE] (#" << fallbackIsolatedLogCount << ") cell ("
+                  << x << ", " << y << ", " << z << ") world≈("
+                  << (aabb.xMin() + (real_c(x) + real_t(0.5)) * cdx) << ","
+                  << (aabb.yMin() + (real_c(y) + real_t(0.5)) * cdx) << ","
+                  << (aabb.zMin() + (real_c(z) + real_t(0.5)) * cdx) << ") seeded fill=0.5 with ZERO real "
+                     "interface neighbours -- a fragile, uninformed reconstruction that has been traced to a "
+                     "real cumulant-collision NaN one step later; worth watching if this cell crashes soon.");
+            }
+         }
       }
       fillField->get(x, y, z) = seededFill;
    }
@@ -722,7 +746,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
                if constexpr (!std::is_void_v< ScalarField_T >)
                   if (fillField != nullptr)
                      seedConvertedCellFill(fillField, flagField, x, y, z, targetFlag, bognerGas, bognerLiquid,
-                                           bognerInterface);
+                                           bognerInterface, block);
                removeFlag(flagField->get(x, y, z), formerObstacle);
                particleField->get(x, y, z) = ac_->getInvalidUid();
             })
@@ -737,7 +761,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             if constexpr (!std::is_void_v< ScalarField_T >)
                if (fillField != nullptr)
                   seedConvertedCellFill(fillField, flagField, x, y, z, targetFlag, bognerGas, bognerLiquid,
-                                        bognerInterface);
+                                        bognerInterface, block);
             removeFlag(flagField->get(x, y, z), formerObstacle);
             particleField->get(x, y, z) = ac_->getInvalidUid();
          })
@@ -816,7 +840,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
          if constexpr (!std::is_void_v< ScalarField_T >)
             if (fillField != nullptr)
                seedConvertedCellFill(fillField, flagField, decision.cell.x(), decision.cell.y(), decision.cell.z(),
-                                     newFlag, bognerGas, bognerLiquid, bognerInterface);
+                                     newFlag, bognerGas, bognerLiquid, bognerInterface, block);
          if (decision.inner)
          {
             if (decision.state == BognerNeighbourhoodState::Gas) { ++convPass3ToGas_; }

@@ -25,6 +25,7 @@
 #pragma once
 
 #include "core/DataTypes.h"
+#include "core/cell/Cell.h"
 #include "core/math/Vector3.h"
 #include "core/mpi/Reduce.h"
 #include "core/timing/TimingPool.h"
@@ -35,6 +36,8 @@
 #include "lbm/free_surface/FlagInfo.h"
 #include "lbm/free_surface/bubble_model/BubbleModel.h"
 #include "lbm/sweeps/StreamPull.h"
+
+#include "stencil/D3Q27.h"
 
 #include "PdfReconstructionModel.h"
 #include "functionality/AdvectMass.h"
@@ -58,13 +61,14 @@ class StreamReconstructAdvectSweep
                                 BlockDataID pdfField, ConstBlockDataID normalFieldID, ConstBlockDataID curvatureFieldID,
                                 const FlagInfo_T& flagInfo, BubbleModelBase* bubbleModel,
                                 const PdfReconstructionModel& pdfReconstructionModel, bool useSimpleMassExchange,
-                                real_t cellConversionThreshold, real_t cellConversionForceThreshold)
+                                real_t cellConversionThreshold, real_t cellConversionForceThreshold,
+                                bool seedPdfCloneOnFirstUse = false)
       : sigma_(sigma), handlingID_(handlingID), fillFieldID_(fillFieldID), flagFieldID_(flagFieldID),
         pdfFieldID_(pdfField), normalFieldID_(normalFieldID), curvatureFieldID_(curvatureFieldID), flagInfo_(flagInfo),
         bubbleModel_(bubbleModel), neighborhoodFlagFieldClone_(flagFieldID), fillFieldClone_(fillFieldID),
         pdfFieldClone_(pdfField), pdfReconstructionModel_(pdfReconstructionModel),
         useSimpleMassExchange_(useSimpleMassExchange), cellConversionThreshold_(cellConversionThreshold),
-        cellConversionForceThreshold_(cellConversionForceThreshold)
+        cellConversionForceThreshold_(cellConversionForceThreshold), seedPdfCloneOnFirstUse_(seedPdfCloneOnFirstUse)
    {}
 
    void operator()(IBlock* const block);
@@ -92,6 +96,9 @@ class StreamReconstructAdvectSweep
    bool useSimpleMassExchange_;
    real_t cellConversionThreshold_;
    real_t cellConversionForceThreshold_;
+   // [Claude, 2026-09-28] false (DEFAULT, upstream behaviour): the scratch PDF clone keeps its uninitialised first-creation memory.
+   // true: copy the real PDF field into the clone once on its first creation (see the 2026-09-25 comment in operator()).
+   bool seedPdfCloneOnFirstUse_;
 }; // class StreamReconstructAdvectSweep
 
 template< typename LatticeModel_T, typename BoundaryHandling_T, typename FlagField_T, typename FlagInfo_T,
@@ -108,9 +115,30 @@ void StreamReconstructAdvectSweep< LatticeModel_T, BoundaryHandling_T, FlagField
    FlagField_T* const flagField              = block->getData< FlagField_T >(flagFieldID_);
 
    // temporary fields that act as destination fields
-   PdfField_T* const pdfDstField            = pdfFieldClone_.get(block);
+   bool pdfCloneJustCreated = false;
+   PdfField_T* const pdfDstField            = pdfFieldClone_.get(block, pdfCloneJustCreated);
    FlagField_T* const neighborhoodFlagField = neighborhoodFlagFieldClone_.get(block);
    ScalarField_T* const fillDstField        = fillFieldClone_.get(block);
+
+   // [Claude, 2026-09-25] FIX (THESIS_PLAN.md, Antidunes hopper-clogging investigation): pdfFieldClone_
+   // allocates its buffer via cloneUninitialized() (FieldClone.h) on its ONE-TIME first creation -- this
+   // does NOT copy the real field's actual values, genuinely uninitialized memory. The obstacle branch
+   // below never writes into pdfDstFieldIt at all (only the fill level is carried forward), so any PDF
+   // component of an obstacle-flagged cell that is ALSO never independently refreshed by a boundary
+   // condition's per-link bounce-back (i.e. one facing another obstacle cell, not real fluid) can remain
+   // on this never-written memory indefinitely -- which typical OS zero-fill-on-first-touch behaviour
+   // makes read back as exactly 0.0, and a subsequent 1/rho collision-kernel division then turns that
+   // into a full NaN once this buffer becomes "current" via the src/dst swap below. This only matters on
+   // the FIRST-ever creation of this clone (every later call reuses the same persistent object), so fix
+   // it at the source: seed the fresh clone with the real field's own current, properly-initialised
+   // contents once, so it starts as a genuine mirror rather than blank memory.
+   if (pdfCloneJustCreated && seedPdfCloneOnFirstUse_)
+   {
+      WALBERLA_FOR_ALL_CELLS_XYZ(pdfSrcField,
+         for (uint_t f = uint_t(0); f < PdfField_T::F_SIZE; ++f)
+            pdfDstField->get(x, y, z, f) = pdfSrcField->get(x, y, z, f);
+      )
+   }
 
    // combine all neighbor flags using bitwise OR and write them to the neighborhood field
    // this is simply a pre-computation of often required values
@@ -154,6 +182,44 @@ void StreamReconstructAdvectSweep< LatticeModel_T, BoundaryHandling_T, FlagField
             // update fill level after LBM stream and mass exchange
             *fillDstFieldIt        = (*fillSrcFieldIt * oldRho + deltaMass) / newRho;
             const real_t deltaFill = *fillDstFieldIt - *fillSrcFieldIt;
+
+            // [Claude, 2026-09-25] DIAGNOSTIC: prove/disprove the hypothesis that a near-total obstacle
+            // enclosure degrades reconstructInterfaceCellLegacy's curvature/normal-based reconstruction
+            // enough to make newRho itself degenerate (zero or non-finite), which this division then
+            // turns directly into a non-finite fill level with no guard at all (THESIS_PLAN.md,
+            // hopper clogging investigation). Fires only when the fill actually IS non-finite, so a
+            // healthy run stays silent; throttled the same way as PdfReconstructionManager.h's own
+            // [FALLBACK-ISOLATED-INTERFACE]/[PASS3-UNRESOLVED-ISLAND] warnings (first 20, then every
+            // 5000th) since this is a generic library file with no Antidunes-specific step-window config
+            // available here.
+            if (!std::isfinite(*fillDstFieldIt))
+            {
+               static uint_t degenerateFillLogCount = uint_t(0);
+               ++degenerateFillLogCount;
+               if (degenerateFillLogCount <= uint_t(20) || (degenerateFillLogCount % uint_t(5000) == uint_t(0)))
+               {
+                  const Cell cell = pdfSrcFieldIt.cell();
+                  uint_t obstacleNbrCount = uint_t(0);
+                  for (auto dir = stencil::D3Q27::beginNoCenter(); dir != stencil::D3Q27::end(); ++dir)
+                  {
+                     const flag_t nbrFlag = flagField->get(cell.x() + dir.cx(), cell.y() + dir.cy(), cell.z() + dir.cz());
+                     if (flagInfo_.isObstacle(nbrFlag)) ++obstacleNbrCount;
+                  }
+                  const auto& aabb = block->getAABB();
+                  const real_t cdx = aabb.xSize() / real_c(flagField->xSize());
+                  WALBERLA_LOG_WARNING("[DEGENERATE-FILL-RECONSTRUCTION] (#" << degenerateFillLogCount << ") cell ("
+                     << cell.x() << "," << cell.y() << "," << cell.z() << ") world~("
+                     << (aabb.xMin() + (real_c(cell.x()) + real_t(0.5)) * cdx) << ","
+                     << (aabb.yMin() + (real_c(cell.y()) + real_t(0.5)) * cdx) << ","
+                     << (aabb.zMin() + (real_c(cell.z()) + real_t(0.5)) * cdx) << ") fillNew=" << *fillDstFieldIt
+                     << " fillOld=" << *fillSrcFieldIt << " oldRho=" << oldRho << " newRho=" << newRho
+                     << " rhoGas=" << rhoGas << " bubbleDensity=" << bubbleDensity << " deltaMass=" << deltaMass
+                     << " curvature=" << *curvatureFieldIt << " normal=" << *normalFieldIt
+                     << " obstacleNeighbours=" << obstacleNbrCount << "/26 -- degenerate newRho from"
+                        " reconstructInterfaceCellLegacy suspected if obstacleNeighbours is large (near-total"
+                        " enclosure starves the curvature/normal computation of real fluid geometry).");
+               }
+            }
 
             // update the volume of bubbles
             bubbleModel_->reportFillLevelChange(block, fillSrcFieldIt.cell(), deltaFill);

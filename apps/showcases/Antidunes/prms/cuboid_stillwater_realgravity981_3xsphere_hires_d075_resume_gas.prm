@@ -1,0 +1,237 @@
+// cuboid_stillwater_realgravity981_3xsphere_hires_d075_resume_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-18] RESUME of job 4246210's own t=90000 checkpoint (loadSnapshot=true), extending
+// timesteps 100000 -> 300000. Motivation: the completed run's own tiltY log showed densityRatio=0.75
+// still visibly relaxing at t=100000 -- a ~12deg drift in just the last 20000 steps (65.8deg at
+// t=80500 down to 54.9deg at t=99500), an order of magnitude faster than densityRatio 0.25's ~2deg
+// drift over the same window and far beyond densityRatio 0.5's near-zero drift (both converged).
+// Compared against Bogner (2017) thesis Sec. 5.3.3's own closed-form target for this box geometry
+// (26.565deg for rho=0.25/0.75, 45deg for rho=0.5): 0.5 matched almost exactly, but 0.75's own
+// 55.1deg late-window figure was a mid-relaxation snapshot, not a converged equilibrium -- this run
+// gives it the extra time to actually reach that equilibrium (or show where it really settles).
+// [Claude, 2026-09-18]: an earlier note here attributed the slower relaxation to Bogner's own
+// Scribanti formula (Sec. 5.3.2, B0M = I/Nabla * (1+0.5*tan^2(alpha))) -- checked this again and it
+// does not hold up: that formula is derived for a DIFFERENT validation case in the thesis (a wide
+// 6:4 box's small-heel wall-sided stability check, not the square-cube large-angle 45/26.565deg
+// result this run is compared against, which the thesis derives via a separate large-angle
+// geometric argument instead). Plugging our own box's dimensions into the Scribanti formula at
+// alpha=0 doesn't even give a monotonic trend with density (GM ~ -0.042, -0.083, -0.014 at
+// rho=0.25, 0.5, 0.75) -- it does not support "weaker righting at higher density" as stated. The
+// slower relaxation at rho=0.75 is real (measured directly from the tiltY log); the mechanism is
+// NOT confirmed. Retracted rather than left standing.
+// Everything below is the original production prm's own header/config, unchanged except
+// loadSnapshot (false->true) and timesteps (100000->300000) further down.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// [Claude, 2026-09-15] HIGHER-RESOLUTION, LONGER-DURATION rerun of
+// cuboid_stillwater_realgravity981_3xsphere_gas.prm, per THESIS_PLAN.md item 1a's own "Goal now"
+// (rerun at longer duration and higher resolution so each configuration clearly settles to its true
+// Archimedes equilibrium rather than being cut off mid-transient). Same physical scenario (FREE-
+// FLOATING Y-ELONGATED CUBOID, STILL WATER, TRUE g=9.81 m/s^2, Bogner buoyancy), same 3-density
+// family {0.25, 0.5, 0.75}, at ~1.24x finer linear resolution and 2x the timesteps (50000 -> 100000).
+//
+// RESOLUTION DERIVATION (every number below re-derived from first principles, not guessed):
+// This family reads spheres_out.dat's header purely for its length-scale conversion
+// (getAvgDiameterScalingFactor, Utility.h) -- useParticleBed=false, no bed particles are actually
+// loaded. That header (confirmed identical on all 3 cluster checkouts) gives
+// generationDomainSize_SI = (0.0464248483188, 0.0218704558877, 0.145077650996) m. The ORIGINAL
+// domainSize[0]=96 gives particleScalingFactor=96/0.0464248483188=2067.858 LU/m, i.e.
+// dx_SI=1/2067.858=0.00048359217 m (matching this family's own stated dx_SI=0.000483592). Increasing
+// domainSize[0] increases particleScalingFactor (and hence resolution) proportionally, BUT
+// domainSize[1] must independently satisfy Utility.h's own exact-match check
+// (uint_c(particleScalingFactor * generationDomainSize_SI[1] * bedCopiesInY) == domainSize[1], or the
+// run aborts with "Generated bed with copies and simulation domain do not match!") -- this is why
+// domainSize[0] here is 119, not a round 120: 120 gives domainSize[1]=169 (only divisible by 1/13/169,
+// unusable for a sane rank decomposition), while 119 gives domainSize[1]=168 (=2^3*3*7, plenty of
+// clean divisors) at an almost-identical scale factor (119/96=1.23958 vs 120/96=1.25 -- a 0.83%
+// difference, not worth the decomposition headache). domainSize[2] is NOT part of this check at all
+// (the function only reads the bed file's X/Y footprint), so it is freely set to 150 (=120*1.25 exactly).
+//
+// Resulting exact values (Python-verified against the real bed-file header, not hand-approximated):
+//   scale factor (X-based)  = 119/96 = 1.239583...
+//   dx_SI_new                = 1/(119/0.0464248483188) = 0.00039012478 m  (old: 0.00048359217 m)
+//   dt_SI_new = viscosity/viscosity_SI * dx_SI_new^2 = 0.000214026/1.0016e-6 * dx_SI_new^2
+//             = 3.25221526e-05 s  (old: 4.99725e-05 s; ratio 0.6508, i.e. dt ~ dx^2 as diffusive
+//             scaling requires -- viscosity itself is the SAME fixed lattice value 0.000214026
+//             regardless of resolution, exactly as intended: only the SI<->LU mapping changes)
+//   gravityOverride_new = g_SI * dt_SI_new^2 / dx_SI_new = 9.81 * dt_SI_new^2/dx_SI_new
+//             = 2.65964726e-05  (old: 5.06585e-05)
+//   halfExtents scale by the same 1.239583 factor: <15,30,15> -> <18.59375, 37.1875, 18.59375>
+//   position: exact new domain centre <119/2, 168/2, 150/2> = <59.5, 84, 75>
+//   liquidHeightFactor/floorHeightFactor UNCHANGED (9.9681/0.01): both multiply avgParticleDiameter,
+//   which itself scales with particleScalingFactor automatically, so the physical water depth stays
+//   correct at the new resolution with no manual rescaling needed.
+//
+// Cost: ~1.24^3 (cells) * 2 (timesteps, 50000->100000) ~= 3.8x the original run's lattice-updates.
+// Original single-density run measured at ~2h22m-2h30m wall-clock (jobs 4038342-4038344, 72 ranks) ->
+// estimated ~9-9.5h per density case at 84 ranks here. Requested 12:00:00 per job for margin. All 3
+// densities exceed the multinode partition's 24h MaxTime if combined into one sequential job
+// (~28h total), so each density is its own job, chained via --dependency=afterok so they run
+// back-to-back on the same checkout without a build-directory collision (see the .sbatch family).
+//
+// Domain <119, 168, 150>, cellsPerBlock <17, 42, 30> -> numBlocks (7, 4, 5) = 140 processes
+// (previous <119,7,25>=144 choice FAILED: numBlocksX=1 in the periodic X direction with
+// particles present violates SetupStages.h's own "at least three blocks per periodic
+// direction" assertion -- confirmed directly, job 4235873 aborted at 0.09s. 140 is the
+// closest valid factorisation with numBlocksX>=3 -- X's only useful divisors >=3 are 7
+// and 17, neither divides 144 evenly, so exact 144 was never actually achievable here.)
+// (full use of 2x72-core nodes -- 84 would have left 60 cores idle on a 2-node allocation;
+// <119,7,25> is the ONLY exact-144 factorisation since X=119=7*17 has no other useful divisor).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 17, 42, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  true;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <119, 168, 150>;
+   wavePeriods        1;
+   liquidHeightFactor 9.9681;
+   floorHeightFactor  0.01;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              300000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;         // keep physical constants valid while U = 0; viscosity=0.000214026 fixed
+   gravityOverride        2.6596472613474883e-05;  // solved for g_SI = 9.81 m/s^2 at this resolution's dx_SI/dt_SI (see header)
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 3;   // scaling-math lever only (useParticleBed false) -- see sphere sibling's header
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // densityRatio 0.75 -> Archimedes equilibrium: 75% submerged.
+      position             < 59.5, 84, 75 >;
+      halfExtents          < 18.59375, 37.1875, 18.59375 >;
+      densityRatio         0.75;
+      settlingSteps        0;
+      initialTiltAngleDeg  5;
+      comOffsetZ           0;
+      pinPosition          false;   // fully free
+      pinRotation          false;   // fully free
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+// [Claude, 2026-09-16]: writeFrequency dropped from 2000 (51 dumps) to timesteps/5 = 20000 (6 sparse
+// dumps: steps 0, 20000, ..., 100000) to match the sparse-VTK-for-thesis-figures convention adopted
+// this session (see THESIS_PLAN.md item 3) -- the d025 sibling already ran/completed at the old dense
+// setting and is left as-is, this only affects the not-yet-run d050/d075 cases.
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       20000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+      }
+
+      CellBB_filter_0 { min < 0, 84, 0 >;   max < 119, 85, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;    max < 1, 168, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;    max < 119, 168, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "AntidunesBoundaryHandling.h"
+
 #include "core/timing/TimingPool.h"
 
 #include "lbm_mesapd_coupling/utility/AverageHydrodynamicForceTorqueKernel.h"
@@ -59,7 +61,10 @@
 #include "SimulationObjects.h"
 
 #include <algorithm>
+#include <array>
+#include <filesystem>
 #include <fstream>
+#include <memory>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -872,6 +877,114 @@ public:
       return operator()(idx2, idx1, cyl, cb, ac);
    }
 
+   // [Claude, 2026-09-26] Capsule (pill-shaped rod) vs CylindricalBoundary (solid pillar) -- mirrors
+   // the Cylinder x CylindricalBoundary overload above for the SAME reason: the generic
+   // GeneralContactDetection::operator()(CylindricalBoundary, GEO2_T) fallback this pair would
+   // otherwise use (src/mesa_pd/collision_detection/GeneralContactDetection.h) implements
+   // CONTAINMENT semantics UNCONDITIONALLY (collision when the OTHER body's FARTHEST point from the
+   // axis EXCEEDS the boundary's radius) -- exactly backwards from what a solid pillar needs
+   // (collision when the body's CLOSEST point gets nearer than the radius). It does not consult
+   // CylindricalBoundary::isContainment() at all. Found via ANTIDUNES_CapsuleShape's
+   // testCapsuleCylindricalBoundaryContact (penetrationDepth came out as 1.8, not the expected 0.2 --
+   // traced directly to that file's `if (dist > radius*radius)` check) BEFORE the job that would
+   // have used it (4267741) ever ran -- caught by the test, not by a corrupted cluster result.
+   //
+   // Only handles the non-containment ("solid pillar") case this showcase actually uses; containment
+   // mode (arch/tunnel scenarios) is left to the generic path, which already implements that
+   // semantics correctly.
+   //
+   // Closed-form, NOT iterative like the Cylinder overload: a capsule's closest SURFACE point to any
+   // line is exactly its CORE SEGMENT's closest point, moved `radius` toward that line -- no radial
+   // clamp is needed at all (unlike a cylinder's flat cap + curved side, which need a joint
+   // radial-and-axial clamp iterated to convergence), only a 1-D axial clamp of the segment's own
+   // parameter to [-coreHalfLength,+coreHalfLength]. Derived directly from the two-lines
+   // closest-point normal equations (line 1 = the capsule's own body-z axis; line 2 = the pillar's
+   // infinite axis) then clamped -- exact by convexity (squared distance is a convex quadratic in
+   // the single free axial parameter), so a single evaluation suffices; no iteration to converge.
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::Capsule& capsule,
+                   const mesa_pd::data::CylindricalBoundary& cb,
+                   Accessor& ac)
+   {
+      if (cb.isContainment())
+         return GeneralContactDetection::operator()(idx1, idx2, capsule, cb, ac);
+
+      getIdx1() = idx1;
+      getIdx2() = idx2;
+
+      const mesa_pd::Vec3& c         = ac.getPosition(idx1);
+      const mesa_pd::Vec3& cylCenter = ac.getPosition(idx2);
+      const mesa_pd::Mat3  R         = ac.getRotation(idx1).getMatrix(); // capsule body → world
+      const mesa_pd::Mat3  Rt        = R.getTranspose();                 // world → capsule body
+
+      const real_t rCap = capsule.getRadius();
+      const real_t a    = capsule.getCoreHalfLength();
+
+      // Pillar axis as a line in the capsule's body frame.
+      mesa_pd::Vec3 d  = Rt * cb.getAxis();
+      const real_t  dl = d.length();
+      d = (dl > real_t(1e-10)) ? d / dl : mesa_pd::Vec3(real_t(0), real_t(0), real_t(1));
+      const mesa_pd::Vec3 a0 = Rt * (cylCenter - c);
+
+      // Closed-form closest point of the (infinite) body-z axis to the pillar axis line: from
+      // d/dz|P|^2=0 and d/dt|P|^2=0 for P=(0,0,z)-a0-t*d, eliminating t gives
+      // z*(1-d_z^2) = a0_z - (a0.d)*d_z. Falls back to z=0 if the two axes are (near-)parallel
+      // (denom ~ 0, a genuinely degenerate configuration with no unique closest point anyway).
+      const real_t denom  = real_t(1) - d[2] * d[2];
+      const real_t zStar  = (std::abs(denom) > real_t(1e-10)) ? (a0[2] - (a0 * d) * d[2]) / denom : real_t(0);
+      const real_t zClamp = std::clamp(zStar, -a, a);
+
+      const mesa_pd::Vec3 segPt(real_t(0), real_t(0), zClamp);
+      const mesa_pd::Vec3 vec    = segPt - a0;
+      const mesa_pd::Vec3 radial = vec - (vec * d) * d;
+      const real_t        dist   = radial.length(); // core-segment-to-axis distance; subtract rCap below for the surface
+
+      real_t penetrationDepth = (dist - rCap) - cb.getRadius();
+      if (penetrationDepth < getContactThreshold())
+      {
+         // Same envelope safety clamp as the Cylinder overload (job 4140767 postmortem): a capsule
+         // deeply enveloping the pillar yields a near-radius overlap + degenerate normal, which would
+         // otherwise blow up into an unbounded spring force.
+         const real_t maxOverlap = real_t(1.0);
+         bool envelopClamped = false;
+         if (penetrationDepth < -maxOverlap)
+         {
+            envelopClamped = true;
+            static uint_t envelopLogCount = uint_t(0);
+            if (envelopLogCount < uint_t(20))
+            {
+               WALBERLA_LOG_WARNING("[CAPSULE-CYL-ENVELOP] floating capsule uid=" << ac.getUid(idx1)
+                  << " deeply overlaps/envelops pillar uid=" << ac.getUid(idx2)
+                  << " (raw penetration=" << penetrationDepth << ", core-segment-to-axis dist=" << dist
+                  << ") — clamping overlap to " << -maxOverlap
+                  << "; the capsule is likely too large for this pillar geometry.");
+               ++envelopLogCount;
+            }
+            penetrationDepth = -maxOverlap;
+         }
+         getPenetrationDepth() = penetrationDepth;
+         const mesa_pd::Vec3 nBody = (dist > real_t(1e-6))
+                                        ? radial / dist
+                                        : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+         getContactNormal() = R * nBody;                        // body → world, pillar → capsule
+         getContactPoint()  = c + R * (segPt - rCap * nBody);   // body → world, actual capsule surface point
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            envelopClamped ? "pillar exterior (Capsule, ENVELOP-clamped)" : "pillar exterior (Capsule)");
+         return true;
+      }
+      return false;
+   }
+
+   template< typename Accessor >
+   bool operator()(const size_t idx1, const size_t idx2,
+                   const mesa_pd::data::CylindricalBoundary& cb,
+                   const mesa_pd::data::Capsule& capsule,
+                   Accessor& ac)
+   {
+      return operator()(idx2, idx1, capsule, cb, ac);
+   }
+
    // Box vs Box / Cylinder vs Cylinder — OPTIONAL closed-form alternative (PaperAnalyticalContacts.h)
    // to the two operator() overloads these pairs would otherwise inherit unchanged from
    // GeneralContactDetection (GJK/EPA). Gated at runtime by useAnalyticalContactDetection so both
@@ -1211,9 +1324,35 @@ public:
       }
 
       if (!useAnalyticalContactDetection)
-         return GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
+      {
+         const bool gjkHit = GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
+         if (shadowAnalyticLog) shadowCompare(idx1, idx2, ci, cj, gjkHit, ac);
+         return gjkHit;
+      }
 
-      const auto result = paper_analytical::cylinderCylinderContact(ci, cj);
+      auto result = paper_analytical::cylinderCylinderContact(ci, cj);
+
+      // Capsule-bound safety net (always on, independent of useTightLayer1): a cylinder is a subset of
+      // the capsule of the same radius around its axis SEGMENT, so two cylinders can only touch if their
+      // axis segments are within R_i + R_j of each other. Any analytic "contact" violating this is a
+      // false positive of the closed-form dispatch (e.g. the near-parallel band-band-skewed one fixed in
+      // PaperAnalyticalContacts.h, see CylinderNearParallelSkewedTest.cpp) and must never reach the
+      // contact solver -- in particular not in usePureAnalyticalCylinder mode, which trusts the
+      // dispatch without any GJK/EPA cross-check. Cheap (one segment-segment distance) and it can never
+      // reject a real contact (tiny relative slack for round-off only).
+      if (result.contact)
+      {
+         mesa_pd::Vec3 p0i, p1i, p0j, p1j;
+         paper_analytical::detail::cylinderAxisEndpoints(ci, p0i, p1i);
+         paper_analytical::detail::cylinderAxisEndpoints(cj, p0j, p1j);
+         const real_t reach = (ci.radius + cj.radius) * (real_t(1) + real_t(1e-9));
+         if (paper_analytical::detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) > reach * reach)
+         {
+            ++contactStats.cylCapsuleRejected;
+            return false;
+         }
+      }
+
       if (paper_analytical::cylinderCylinderResultIsUncertain(ci, cj, result, useTightTier1, skipTier1))
       {
          // Tier 1 (analytical found nothing at all) vs special-contact (analytical DID find a
@@ -1400,6 +1539,10 @@ public:
       // Box x Box pairs the useTightLayer1 single-axis pre-filter proved definitely separated before
       // boxBoxSAT ever ran -- see ModelParameters.useTightLayer1's own doc comment.
       uint64_t boxTightLayer1CheaplyProvedSeparated = 0;
+      // Cylinder x Cylinder analytic "contacts" rejected by the always-on capsule bound (axis segments
+      // farther apart than R_i + R_j) -- must stay 0 unless the closed-form dispatch produced a false
+      // positive; a nonzero value in the logs is a red flag worth investigating.
+      uint64_t cylCapsuleRejected = 0;
 
       void bumpCylScenario(const char* scenario)
       {
@@ -1415,6 +1558,105 @@ public:
       }
    };
    ContactDetectionStats contactStats;
+
+   // ---- SHADOW MODE (ModelParameters.shadowAnalyticCylinderLog): closed-form result computed next to the GJK/EPA result that is actually used, never applied. Cumulative (NOT reset with contactStats).
+   struct ShadowScenarioStat
+   {
+      uint64_t n = 0, wrong = 0, verifierFlagged = 0, normalFlipped = 0, normalOff = 0;   // wrong: |overlap - GJK overlap| > 5 % R (a closed-form contact where GJK sees none counts as wrong)
+      double   sumAbsErr = 0, maxUnder = 0, maxOver = 0;                                    // over/under = closed-form overlap minus GJK overlap (>0 over-estimate)
+   };
+   static constexpr size_t kShadowScenarios = 9;   // face-face, band-band-parallel, face-band, band-band-skewed, face-edge, special-contact, band-edge, edge-edge, none (closed form found nothing)
+   struct ShadowStats
+   {
+      std::array< ShadowScenarioStat, kShadowScenarios > byScenario{};
+      uint64_t gjkContacts = 0, bothContact = 0, closedFormOnly = 0, gjkOnly = 0;
+   };
+   static const char* shadowScenarioName(size_t i)
+   {
+      static const char* names[kShadowScenarios] = { "face-face", "band-band-parallel", "face-band", "band-band-skewed", "face-edge", "special-contact", "band-edge", "edge-edge", "none" };
+      return names[i];
+   }
+   static size_t shadowScenarioIndex(const char* scenario)
+   {
+      for (size_t i = 0; i + 1 < kShadowScenarios; ++i) if (std::string(scenario) == shadowScenarioName(i)) return i;
+      return kShadowScenarios - 1;
+   }
+   bool  shadowAnalyticLog = false;
+   uint_t shadowStartStep = 0, shadowEndStep = 0;
+   uint_t shadowMainStep = 0, shadowSubCycle = 0;
+   ShadowStats shadowStats;
+   std::shared_ptr< std::ofstream > shadowFile_;
+
+   static double shadowSupport(const mesa_pd::Vec3& n, const mesa_pd::Vec3& axis, double radius, double halfLength)
+   {
+      const double c = std::abs(double(n * axis));
+      return halfLength * c + radius * std::sqrt(std::max(0.0, 1.0 - c * c));
+   }
+   //! distance B must move along +-n (the smaller of the two orientations) to separate from A
+   static double shadowNeeded(const mesa_pd::Vec3& n, const paper_analytical::CylinderState& a, const paper_analytical::CylinderState& b)
+   {
+      const mesa_pd::Vec3 d = b.pos - a.pos, ea = a.axis(), eb = b.axis();
+      auto f = [&](const mesa_pd::Vec3& m) {
+         return shadowSupport(m, ea, double(a.radius), 0.5 * double(a.length)) + shadowSupport(m, eb, double(b.radius), 0.5 * double(b.length)) - double(d * m); };
+      return std::min(f(n), f(-n));
+   }
+   //! upper bound of the exact penetration depth: min of shadowNeeded over a few canonical directions
+   static double shadowUpperBound(const mesa_pd::Vec3& reported, const paper_analytical::CylinderState& a, const paper_analytical::CylinderState& b)
+   {
+      const mesa_pd::Vec3 d = b.pos - a.pos, ea = a.axis(), eb = b.axis();
+      std::array< mesa_pd::Vec3, 6 > cand{ reported, ea, eb, d, ea % eb, d - ea * (d * ea) };
+      double ub = shadowNeeded(cand[0], a, b);
+      for (size_t k = 1; k < cand.size(); ++k)
+         if (cand[k].length() > real_t(1e-9)) ub = std::min(ub, shadowNeeded(cand[k] / cand[k].length(), a, b));
+      const mesa_pd::Vec3 r2 = d - eb * (d * eb);
+      if (r2.length() > real_t(1e-9)) ub = std::min(ub, shadowNeeded(r2 / r2.length(), a, b));
+      return ub;
+   }
+
+   //! Called right after the GJK/EPA result (the one actually used) is known; reads it from getPenetrationDepth()/getContactNormal() if gjkHit.
+   template< typename Accessor >
+   void shadowCompare(const size_t idx1, const size_t idx2, const paper_analytical::CylinderState& ci, const paper_analytical::CylinderState& cj, const bool gjkHit, Accessor& ac)
+   {
+      const auto res = paper_analytical::cylinderCylinderContact(ci, cj);
+      if (!gjkHit && !res.contact) return;
+      const double tol = 0.05 * double(std::min(ci.radius, cj.radius));
+      const double gjkOverlap = gjkHit ? -double(getPenetrationDepth()) : 0.0;
+      const mesa_pd::Vec3 gjkN = gjkHit ? getContactNormal() : mesa_pd::Vec3(real_t(0), real_t(0), real_t(0));
+      const size_t si = shadowScenarioIndex(res.contact ? res.scenario : "none");
+      auto& st = shadowStats.byScenario[si];
+      double err = 0.0, need = -1.0, ub = -1.0; bool flagged = false, flipped = false, normalOff = false;
+      if (gjkHit) ++shadowStats.gjkContacts;
+      if (gjkHit && res.contact) ++shadowStats.bothContact; else if (res.contact) ++shadowStats.closedFormOnly; else ++shadowStats.gjkOnly;
+      if (res.contact)
+      {
+         err = double(res.overlap) - gjkOverlap;
+         need = shadowNeeded(res.normal, ci, cj); ub = shadowUpperBound(res.normal, ci, cj);
+         flagged = (need - double(res.overlap) > tol) || (double(res.overlap) - ub > tol);
+         if (gjkHit) { const double dot = double(res.normal * gjkN); flipped = dot < 0.0; normalOff = !flipped && dot < 0.94; }
+      }
+      else err = -gjkOverlap;                                                       // closed form missed a contact GJK sees
+      ++st.n; st.sumAbsErr += std::abs(err); st.maxUnder = std::max(st.maxUnder, -err); st.maxOver = std::max(st.maxOver, err);
+      if (std::abs(err) > tol) ++st.wrong;
+      if (flagged) ++st.verifierFlagged;
+      if (flipped) ++st.normalFlipped;
+      if (normalOff) ++st.normalOff;
+
+      if (shadowEndStep != uint_t(0) && shadowMainStep >= shadowStartStep && shadowMainStep <= shadowEndStep)
+      {
+         if (!shadowFile_)
+         {
+            const int rank = mpi::MPIManager::instance()->rank();
+            std::error_code ec; std::filesystem::create_directories("shadow-analytic", ec);
+            shadowFile_ = std::make_shared< std::ofstream >("shadow-analytic/rank_" + std::to_string(rank) + ".csv", std::ios::out | std::ios::trunc);
+            *shadowFile_ << "mainStep,subCycle,rank,uidA,uidB,gjkContact,gjkOverlap,gjkNx,gjkNy,gjkNz,closedFormContact,scenario,cfOverlap,cfNx,cfNy,cfNz,errCfMinusGjk,neededAlongCfNormal,upperBound,checkFlags,normalDot\n";
+         }
+         *shadowFile_ << shadowMainStep << ',' << shadowSubCycle << ',' << mpi::MPIManager::instance()->rank() << ',' << ac.getUid(idx1) << ',' << ac.getUid(idx2) << ','
+                      << int(gjkHit) << ',' << gjkOverlap << ',' << gjkN[0] << ',' << gjkN[1] << ',' << gjkN[2] << ',' << int(res.contact) << ',' << (res.contact ? res.scenario : "none") << ','
+                      << (res.contact ? double(res.overlap) : 0.0) << ',' << (res.contact ? double(res.normal[0]) : 0.0) << ',' << (res.contact ? double(res.normal[1]) : 0.0) << ',' << (res.contact ? double(res.normal[2]) : 0.0) << ','
+                      << err << ',' << need << ',' << ub << ',' << int(flagged) << ',' << ((gjkHit && res.contact) ? double(res.normal * gjkN) : 0.0) << '\n';
+         shadowFile_->flush();
+      }
+   }
 
    // Runtime switch (default false = exact pre-existing GJK/EPA-only behaviour). Public so
    // ComputeContacts can set it once at construction from ModelParameters.useAnalyticalContactDetection.
@@ -1441,7 +1683,7 @@ public:
    // cylinderCylinderResultIsUncertain's own comment in PaperAnalyticalContacts.h for the proof.
    bool skipTier1 = false;
 
-   // Runtime switch (default false). See ModelParameters.useTightLayer1's own doc comment
+   // Runtime switch (default TRUE since 2026-09-20). See ModelParameters.useTightLayer1's own doc comment
    // (SimulationParams.h) -- swaps the cheap "definitely too far apart to touch" pre-filter that runs
    // BEFORE any real contact detection (Cylinder x Cylinder's own reject, and, newly, a Box x Box one
    // that didn't exist before this flag) from a circumscribing-sphere-sum bound to each shape's own
@@ -1449,7 +1691,7 @@ public:
    // for boxes). Meaningful for Cylinder x Cylinder regardless of useAnalyticalContactDetection (that
    // reject runs either way); only has an effect for Box x Box when useAnalyticalContactDetection is
    // also true (boxBoxSAT, the only thing this pre-filter guards for boxes, is only reached then).
-   bool useTightLayer1 = false;
+   bool useTightLayer1 = true; // default ON since 2026-09-20 (user request)
 
    // Runtime switches (both default false). See ModelParameters.useRoundedBoxCorners/
    // useMultiPointBoxContact's own doc comments (SimulationParams.h) -- both are togglable mitigations
@@ -1814,6 +2056,22 @@ private:
 };
 
 
+//! Diagnostic artificial caps for cylinder floaters (ModelParameters.rodCap*), per rank; see SimulationParams.h. All zero = off.
+struct RodCaps { real_t hydroForce = real_t(0), hydroTorque = real_t(0), velocity = real_t(0), angularVelocity = real_t(0), overlap = real_t(0);
+                 bool any() const { return hydroForce > real_t(0) || hydroTorque > real_t(0) || velocity > real_t(0) || angularVelocity > real_t(0) || overlap > real_t(0); } };
+struct RodCapStats { uint64_t hydroForce = 0, hydroTorque = 0, velocity = 0, angularVelocity = 0, overlap = 0, nonFinite = 0;
+                     real_t maxHydroForce = real_t(0), maxHydroTorque = real_t(0), maxVelocity = real_t(0), maxAngularVelocity = real_t(0), maxOverlap = real_t(0); };
+inline RodCaps     g_rodCaps;
+inline RodCapStats g_rodCapStats;
+//! [Claude, 2026-09-21] ModelParameters.rodPrescribedVelocity (test option, default off): constant rigid velocity imposed on all rods after every sub-cycle's velocity update
+inline Vector3< real_t > g_rodPrescribedVelocity{ real_t(0) };
+inline bool              g_rodPrescribedVelocityOn = false;
+inline void logRodCapHit(const char* what, walberla::id_t uid, uint_t step, uint_t sub, real_t before, real_t cap)
+{
+   static uint_t logCount = uint_t(0);
+   if (logCount < uint_t(40)) { ++logCount; WALBERLA_LOG_WARNING("[ROD-CAP " << what << "] uid=" << uid << " step=" << step << " subCycle=" << sub << " value " << before << " -> capped to " << cap); }
+}
+
 class ComputeLubrication {
 public:
    ComputeLubrication(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain, real_t viscosity,
@@ -1924,7 +2182,7 @@ public:
       real_t collisionTime, real_t particleTimestepSize, real_t frictionCoefficient,
       uint_t numParticleTypes = uint_t(2), bool useAnalyticalContactDetection = false,
       bool usePureAnalyticalCylinder = false, bool useContactFilterOwnerTiebreak = false,
-      bool useTightTier1 = false, bool useTightLayer1 = false, bool skipTier1 = false,
+      bool useTightTier1 = false, bool useTightLayer1 = true, bool skipTier1 = false,
       bool useRoundedBoxCorners = false, real_t boxRoundingRadius = real_t(0.05),
       bool useMultiPointBoxContact = false, bool useBoxOverlapCap = false,
       real_t boxOverlapCapFraction = real_t(0.3), bool useAxisHysteresis = false,
@@ -1997,7 +2255,14 @@ public:
    // sub-cycle from doDEMSubCycles, mirroring the existing addExternalForces.setStepInfo/setSubCycle
    // pattern already used there.
    void setHistoryLogger(FloaterHistoryLogger* logger) { historyLogger_ = logger; }
-   void setStepInfo(uint_t mainStep, uint_t subCycle) { mainStep_ = mainStep; subCycle_ = subCycle; }
+   void setStepInfo(uint_t mainStep, uint_t subCycle) { mainStep_ = mainStep; subCycle_ = subCycle; acd_.shadowMainStep = mainStep; acd_.shadowSubCycle = subCycle; }
+
+   // Shadow mode (ModelParameters.shadowAnalyticCylinderLog): see SolidCylinderContactDetection::shadowCompare.
+   void setShadowAnalytic(bool enabled, uint_t startStep, uint_t endStep)
+   {
+      acd_.shadowAnalyticLog = enabled; acd_.shadowStartStep = startStep; acd_.shadowEndStep = endStep;
+   }
+   const SolidCylinderContactDetection::ShadowStats& shadowStats() const { return acd_.shadowStats; }
 
    // Debug/validation hook for the "flying floater" release-time-overlap bug (see
    // SimulationObjects::freshlyActivatedFloaterUIDs' own doc comment) -- nullptr/disabled by
@@ -2123,18 +2388,53 @@ public:
                                      ? ac.getBaseShape(acd_.getIdx1())->getShapeType() : uint_t(999);
                   const auto s2 = ac.getBaseShape(acd_.getIdx2())
                                      ? ac.getBaseShape(acd_.getIdx2())->getShapeType() : uint_t(999);
-                  WALBERLA_ABORT(
-                     "[RELEASE-OVERLAP] Real contact detected (mainStep=" << mainStep_ << " subCycle="
-                     << subCycle_ << ") involving a just-released floater: "
-                     "uid=" << uid1 << " (shapeType=" << s1 << ", pos=" << ac.getPosition(acd_.getIdx1())
-                     << ", freshlyActivated=" << (freshlyActivatedUIDs_->count(uid1) > 0) << ")  <->  "
-                     "uid=" << uid2 << " (shapeType=" << s2 << ", pos=" << ac.getPosition(acd_.getIdx2())
-                     << ", freshlyActivated=" << (freshlyActivatedUIDs_->count(uid2) > 0) << "). "
-                     "penetration=" << acd_.getPenetrationDepth() << " normal=" << n
-                     << " contactPoint=" << acd_.getContactPoint() << ". "
-                     "This is the release-time insertion-overlap mechanism behind the 'flying floater' "
-                     "launches investigated in this scenario -- increase the release-timing stagger "
-                     "between floaters sharing this spawn point.");
+                  // Only a contact at sub-cycle 0 can be an INSERTION overlap: the detection at the start of the
+                  // first sub-cycle runs on the positions/orientations the floaters had at the instant they were
+                  // released, before anything has moved. A contact at a LATER sub-cycle of that first step means the
+                  // floaters moved or rotated within it -- not an overlap at activation -- so the message below
+                  // ("insertion overlap ... increase the release stagger") would misdiagnose it. Log the full state
+                  // of both bodies instead (throttled) and continue; the contact is then handled like any other.
+                  if (subCycle_ == uint_t(0))
+                  {
+                     WALBERLA_ABORT(
+                        "[RELEASE-OVERLAP] Real contact detected (mainStep=" << mainStep_ << " subCycle="
+                        << subCycle_ << ") involving a just-released floater: "
+                        "uid=" << uid1 << " (shapeType=" << s1 << ", pos=" << ac.getPosition(acd_.getIdx1())
+                        << ", freshlyActivated=" << (freshlyActivatedUIDs_->count(uid1) > 0) << ")  <->  "
+                        "uid=" << uid2 << " (shapeType=" << s2 << ", pos=" << ac.getPosition(acd_.getIdx2())
+                        << ", freshlyActivated=" << (freshlyActivatedUIDs_->count(uid2) > 0) << "). "
+                        "penetration=" << acd_.getPenetrationDepth() << " normal=" << n
+                        << " contactPoint=" << acd_.getContactPoint() << ". "
+                        "This is the release-time insertion-overlap mechanism behind the 'flying floater' "
+                        "launches investigated in this scenario -- increase the release-timing stagger "
+                        "between floaters sharing this spawn point.");
+                  }
+                  else
+                  {
+                     static uint_t laterContactLogCount = uint_t(0);
+                     if (laterContactLogCount < uint_t(40))
+                     {
+                        ++laterContactLogCount;
+                        auto describe = [&ac](const size_t i) {
+                           using namespace mesa_pd::data::particle_flags;
+                           std::ostringstream o;
+                           o << "uid=" << ac.getUid(i) << " shapeType="
+                             << (ac.getBaseShape(i) ? ac.getBaseShape(i)->getShapeType() : uint_t(999))
+                             << " fixed=" << isSet(ac.getFlags(i), FIXED) << " ghost=" << isSet(ac.getFlags(i), GHOST)
+                             << " owner=" << ac.getOwner(i) << " pos=" << ac.getPosition(i)
+                             << " quat=" << ac.getRotation(i).getQuaternion() << " vel=" << ac.getLinearVelocity(i)
+                             << " angVel=" << ac.getAngularVelocity(i) << " force=" << ac.getForce(i)
+                             << " torque=" << ac.getTorque(i) << " hydroForce=" << ac.getHydrodynamicForce(i)
+                             << " hydroTorque=" << ac.getHydrodynamicTorque(i);
+                           return o.str();
+                        };
+                        WALBERLA_LOG_WARNING("[RELEASE-CONTACT-LATER] contact at sub-cycle " << subCycle_ << " (mainStep="
+                           << mainStep_ << ") of the FIRST step after a release, i.e. NOT an insertion overlap (sub-cycle 0 "
+                           "was clean): penetration=" << acd_.getPenetrationDepth() << " normal=" << n << " contactPoint="
+                           << acd_.getContactPoint() << " | body1: " << describe(acd_.getIdx1()) << " | body2: "
+                           << describe(acd_.getIdx2()));
+                     }
+                  }
                }
             }
 
@@ -2308,6 +2608,13 @@ public:
                ++contactCountThisSubCycle_[uidB];
             }
 
+            // DIAGNOSTIC artificial cap (ModelParameters.rodCapOverlap): limit the penetration depth fed into the force law for contacts involving a rod (type 4)
+            if (g_rodCaps.overlap > real_t(0) && (ac.getType(acd_.getIdx1()) == uint_t(4) || ac.getType(acd_.getIdx2()) == uint_t(4)))
+            {
+               const real_t pen = -acd_.getPenetrationDepth();
+               g_rodCapStats.maxOverlap = std::max(g_rodCapStats.maxOverlap, pen);
+               if (pen > g_rodCaps.overlap) { logRodCapHit("overlap", ac.getUid(acd_.getIdx1()), mainStep_, subCycle_, pen, g_rodCaps.overlap); acd_.getPenetrationDepth() = -g_rodCaps.overlap; ++g_rodCapStats.overlap; }
+            }
             auto meff = real_c(1) / (ac.getInvMass(idx1) + ac.getInvMass(idx2));
             // useRotationalEffectiveMass (any shape pair, see ModelParameters' own doc comment in
             // SimulationParams.h): replace the plain translational reduced mass with the generalized
@@ -3177,6 +3484,18 @@ public:
          WALBERLA_LOG_WARNING("[AddExternalForces] NaN/Inf hydrodynamic torque on uid=" << ac.getUid(idx)
             << " pos=" << ac.getPosition(idx));
 
+      // DIAGNOSTIC artificial caps (ModelParameters.rodCapHydroForce/Torque) -- rods (type 4) only
+      if ((g_rodCaps.hydroForce > real_t(0) || g_rodCaps.hydroTorque > real_t(0)) && ac.getType(idx) == uint_t(4))
+      {
+         const uint_t stepNow = stepCounter_ ? *stepCounter_ : uint_t(0);
+         if (!(std::isfinite(hydro_force[0]) && std::isfinite(hydro_force[1]) && std::isfinite(hydro_force[2]))) { hydro_force = Vector3< real_t >(real_t(0)); ++g_rodCapStats.nonFinite; }
+         if (!(std::isfinite(hydro_torque[0]) && std::isfinite(hydro_torque[1]) && std::isfinite(hydro_torque[2]))) { hydro_torque = Vector3< real_t >(real_t(0)); ++g_rodCapStats.nonFinite; }
+         const real_t fm = hydro_force.length(), tm = hydro_torque.length();
+         g_rodCapStats.maxHydroForce = std::max(g_rodCapStats.maxHydroForce, fm); g_rodCapStats.maxHydroTorque = std::max(g_rodCapStats.maxHydroTorque, tm);
+         if (g_rodCaps.hydroForce > real_t(0) && fm > g_rodCaps.hydroForce) { logRodCapHit("hydroForce", ac.getUid(idx), stepNow, subCycle_, fm, g_rodCaps.hydroForce); hydro_force *= g_rodCaps.hydroForce / fm; ++g_rodCapStats.hydroForce; }
+         if (g_rodCaps.hydroTorque > real_t(0) && tm > g_rodCaps.hydroTorque) { logRodCapHit("hydroTorque", ac.getUid(idx), stepNow, subCycle_, tm, g_rodCaps.hydroTorque); hydro_torque *= g_rodCaps.hydroTorque / tm; ++g_rodCapStats.hydroTorque; }
+      }
+
       // MEM-WATCH: hydro_force is the fluid->particle momentum-exchange force, computed ONCE per LBM
       // step (reduceAndAvgHydroForces, called before doDEMSubCycles) and held fixed across all
       // sub-cycles of this step -- so if it is ALREADY large at subCycle_==0, the fluid coupling fed
@@ -3228,6 +3547,18 @@ public:
       if (logForces_ && isFloater)
       {
          const auto fContact = ac.getForce(idx);
+         // Y-tilt angle, same convention as [BoxRightingMoment]'s own tiltDeg (Bogner & Rüde 2013,
+         // Fig. 5.6 validation, further up this file): for a pure rotation about Y, R(0,2)=sinθ,
+         // R(0,0)=cosθ. Only meaningful for box/cylinder floaters (spheres are rotationally symmetric,
+         // so their own rotation state carries no physical tilt information) -- gated the same way
+         // [BoxTorque]/[CylTorque] below already gate their own box/cylinder-only output.
+         std::string tiltStr;
+         if (ptype == uint_t(3) || ptype == uint_t(4))
+         {
+            const auto& R = ac.getRotation(idx).getMatrix();
+            const real_t tiltYDeg = std::atan2(R(0, 2), R(0, 0)) * real_t(180) / math::pi;
+            tiltStr = "  tiltY=" + std::to_string(tiltYDeg) + "deg";
+         }
          WALBERLA_LOG_INFO((ptype == uint_t(3) ? "[BoxForces]"
                             : ptype == uint_t(4) ? "[CylForces]" : "[FloaterForces]")
             << " uid=" << ac.getUid(idx) << " step=" << (stepCounter_ ? *stepCounter_ : uint_t(0))
@@ -3244,7 +3575,8 @@ public:
             << hydroForceRaw[0] << "," << hydroForceRaw[1] << "," << hydroForceRaw[2] << ")]"
             << "  F_contact+lub=(" << fContact[0] << "," << fContact[1] << "," << fContact[2] << ")"
             << "  vel=" << ac.getLinearVelocity(idx)
-            << "  pos=" << ac.getPosition(idx));
+            << "  pos=" << ac.getPosition(idx)
+            << tiltStr);
       }
 
       mesa_pd::addForceAtomic(idx, ac, hydro_force + bodyForce);
@@ -3613,6 +3945,11 @@ public:
       , flagFieldID_(simObjs->flagFieldID)
       , normalFieldID_(simObjs->normalFieldID)
       , pdfFieldID_(simObjs->pdfFieldID)
+      , particleFieldID_(simObjs->particleFieldID)
+      , boundaryHandlingID_(simObjs->antidunesBoundaryHandling->getHandlingID())
+      , debugForceObstacleClearAtStep_(simParams->model.debugForceObstacleClearAtStep)
+      , diagnosticSweepEnabled_(simParams->model.diagnosticSweepEnabled)
+      , diagnosticEvents_(simObjs->diagnosticEvents)
       , vvIntegratorPreForce(simParams->computed.particleTimestepSize)
       , vvIntegratorPostForce(simParams->computed.particleTimestepSize)
       , computeLubrication(simObjs->mesapdDomain, simParams->computed.viscosity,
@@ -3624,7 +3961,7 @@ public:
          simParams->computed.particleCollisionTime,
          simParams->computed.particleTimestepSize,
          simParams->particle.frictionCoefficient,
-         uint_t(5), // 5 types: 0=bed/wall, 1=sphere floater, 2=pillar, 3=box floater, 4=cylinder floater
+         uint_t(6), // 6 types: 0=bed/wall, 1=sphere floater, 2=pillar, 3=box floater, 4=cylinder floater, 5=capsule floater
          simParams->model.useAnalyticalContactDetection,
          simParams->model.usePureAnalyticalCylinder,
          simParams->model.useContactFilterOwnerTiebreak,
@@ -3654,7 +3991,7 @@ public:
          simParams->model.useMemOnlyBuoyancy)
       , useLubricationCorrection(simParams->particle.useLubricationCorrection)
       , evalFrequency_(simParams->evaluation.evaluationFrequency)
-      , stepCounter_(uint_t(0))
+      , stepCounter_(simObjs->beginTimeStep) // absolute (resume-safe): a checkpoint resume must NOT restart the step numbering at 0 -- logs/floater-history steps must match the original run's ([STALE-PARTICLE-IDX] etc.)
       , ringBand_(simParams->particle.floaterRingBand)
       , planeFitRadiusFactor_(simParams->model.floaterPlaneFitRadiusFactor)
       , boxPlaneFitBandFactor_(simParams->model.boxPlaneFitBandFactor)
@@ -3695,6 +4032,16 @@ public:
       floaterHistoryLogger_.setMaxStep(simParams->model.logFloaterHistoryEndStep);
       computeContacts.setHistoryLogger(&floaterHistoryLogger_);
       computeContacts.setFreshlyActivatedUIDs(freshlyActivatedFloaterUIDs_);
+      computeContacts.setShadowAnalytic(simParams->model.shadowAnalyticCylinderLog, simParams->model.shadowAnalyticStartStep, simParams->model.shadowAnalyticEndStep);
+      simParams_shadowEnabled_ = simParams->model.shadowAnalyticCylinderLog;
+      g_rodCaps.hydroForce = simParams->model.rodCapHydroForce; g_rodCaps.hydroTorque = simParams->model.rodCapHydroTorque; g_rodCaps.velocity = simParams->model.rodCapVelocity;
+      g_rodCaps.angularVelocity = simParams->model.rodCapAngularVelocity; g_rodCaps.overlap = simParams->model.rodCapOverlap;
+      g_rodPrescribedVelocity = Vector3< real_t >(simParams->model.rodPrescribedVelocityX, simParams->model.rodPrescribedVelocityY, simParams->model.rodPrescribedVelocityZ); g_rodPrescribedVelocityOn = g_rodPrescribedVelocity.length() > real_t(0);
+      if (g_rodPrescribedVelocityOn)
+         WALBERLA_LOG_WARNING_ON_ROOT("[RodPrescribedVelocity] TEST OPTION ACTIVE: all rods move with the constant velocity " << g_rodPrescribedVelocity << " and zero angular velocity (forces ignored) -- changes the physics, not for production");
+      if (g_rodCaps.any())
+         WALBERLA_LOG_WARNING_ON_ROOT("[RodCaps] DIAGNOSTIC artificial caps ACTIVE for rods: hydroForce=" << g_rodCaps.hydroForce << " hydroTorque=" << g_rodCaps.hydroTorque << " velocity=" << g_rodCaps.velocity
+            << " angularVelocity=" << g_rodCaps.angularVelocity << " overlap=" << g_rodCaps.overlap << " (0 = that cap off) -- changes the physics, not for production");
       computeContacts.setLogContactAnomalies(simParams->model.logContactAnomalies,
          simParams->model.contactAnomalyStartStep, simParams->model.contactAnomalyEndStep);
       computeLubrication.setHistoryLogger(&floaterHistoryLogger_);
@@ -3845,7 +4192,8 @@ public:
                cylFallbackSpecialContactGjkFoundContact   = s.cylFallbackSpecialContactGjkFoundContact,
                cylFallbackSpecialContactGjkFoundNoContact = s.cylFallbackSpecialContactGjkFoundNoContact,
                cylTier1CheaplyProvedSeparated = s.cylTier1CheaplyProvedSeparated,
-               boxTightLayer1CheaplyProvedSeparated = s.boxTightLayer1CheaplyProvedSeparated;
+               boxTightLayer1CheaplyProvedSeparated = s.boxTightLayer1CheaplyProvedSeparated,
+               cylCapsuleRejected = s.cylCapsuleRejected;
 
       mpi::allReduceInplace(boxBoxSAT,           mpi::SUM);
       mpi::allReduceInplace(cylFaceFace,         mpi::SUM);
@@ -3866,6 +4214,7 @@ public:
       mpi::allReduceInplace(cylFallbackSpecialContactGjkFoundNoContact, mpi::SUM);
       mpi::allReduceInplace(cylTier1CheaplyProvedSeparated, mpi::SUM);
       mpi::allReduceInplace(boxTightLayer1CheaplyProvedSeparated, mpi::SUM);
+      mpi::allReduceInplace(cylCapsuleRejected, mpi::SUM);
 
       // cylPureSpecialContactTrusted is a SUB-metric of cylAnalyticalTrusted below (that path also
       // calls bumpCylScenario, so it's already folded into face-face/band-band-skewed/etc.) --
@@ -3905,8 +4254,43 @@ public:
          << cylTier1CheaplyProvedSeparated
          << " | usePureAnalyticalCylinder rejections (no fallback attempted): tier1="
          << cylPureTier1Rejected
+         << " | capsule-bound rejected analytic false positives=" << cylCapsuleRejected
          << " | cylinder-cylinder grand total=" << cylTotal
          << " fallback-rate=" << fallbackRatePercent << "%");
+
+      if (g_rodCaps.any())
+      {
+         uint64_t c[6] = { g_rodCapStats.hydroForce, g_rodCapStats.hydroTorque, g_rodCapStats.velocity, g_rodCapStats.angularVelocity, g_rodCapStats.overlap, g_rodCapStats.nonFinite };
+         real_t m[5] = { g_rodCapStats.maxHydroForce, g_rodCapStats.maxHydroTorque, g_rodCapStats.maxVelocity, g_rodCapStats.maxAngularVelocity, g_rodCapStats.maxOverlap };
+         for (int i = 0; i < 6; ++i) mpi::allReduceInplace(c[i], mpi::SUM);
+         for (int i = 0; i < 5; ++i) mpi::allReduceInplace(m[i], mpi::MAX);
+         WALBERLA_LOG_INFO_ON_ROOT("[RodCaps]" << (stepLabel.empty() ? "" : " step=" + stepLabel) << " cap hits (cumulative): hydroForce=" << c[0] << " hydroTorque=" << c[1] << " velocity=" << c[2] << " angularVelocity=" << c[3]
+            << " overlap=" << c[4] << " non-finite-zeroed=" << c[5] << " | largest value seen before capping: |F_hydro|=" << m[0] << " |T_hydro|=" << m[1] << " |v|=" << m[2] << " |omega|=" << m[3] << " overlap=" << m[4]);
+      }
+
+      if (simParams_shadowEnabled_)
+      {
+         const auto& sh = computeContacts.shadowStats();
+         constexpr size_t K = SolidCylinderContactDetection::kShadowScenarios;
+         std::vector< uint64_t > cnt(K * 5 + 4, uint64_t(0)); std::vector< double > sums(K, 0.0), mx1(K, 0.0), mx2(K, 0.0);
+         for (size_t i = 0; i < K; ++i)
+         {
+            const auto& b = sh.byScenario[i];
+            cnt[i * 5 + 0] = b.n; cnt[i * 5 + 1] = b.wrong; cnt[i * 5 + 2] = b.verifierFlagged; cnt[i * 5 + 3] = b.normalFlipped; cnt[i * 5 + 4] = b.normalOff;
+            sums[i] = b.sumAbsErr; mx1[i] = b.maxUnder; mx2[i] = b.maxOver;
+         }
+         cnt[K * 5 + 0] = sh.gjkContacts; cnt[K * 5 + 1] = sh.bothContact; cnt[K * 5 + 2] = sh.closedFormOnly; cnt[K * 5 + 3] = sh.gjkOnly;
+         mpi::allReduceInplace(cnt, mpi::SUM); mpi::allReduceInplace(sums, mpi::SUM); mpi::allReduceInplace(mx1, mpi::MAX); mpi::allReduceInplace(mx2, mpi::MAX);
+         std::ostringstream os;
+         os << "[ShadowAnalytic]" << (stepLabel.empty() ? "" : " step=" + stepLabel) << " GJK/EPA is USED; closed form computed only for comparison. GJK contacts=" << cnt[K * 5 + 0]
+            << " closed-form also finds contact=" << cnt[K * 5 + 1] << " closed-form finds NOTHING where GJK has a contact=" << cnt[K * 5 + 3] << " closed-form contact where GJK has none=" << cnt[K * 5 + 2]
+            << " (counts include duplicate computations of the same pair on neighbouring ranks). Per closed-form scenario [n | wrong(|d|>5%R) | mean|d| | max under | max over | check flags | normal flipped | normal off>20deg]:";
+         for (size_t i = 0; i < K; ++i)
+            if (cnt[i * 5] > 0)
+               os << "\n   " << SolidCylinderContactDetection::shadowScenarioName(i) << ": n=" << cnt[i * 5] << " wrong=" << cnt[i * 5 + 1] << " (" << (100.0 * double(cnt[i * 5 + 1]) / double(cnt[i * 5]))
+                  << "%) mean|d|=" << sums[i] / double(cnt[i * 5]) << " maxUnder=" << mx1[i] << " maxOver=" << mx2[i] << " checkFlags=" << cnt[i * 5 + 2] << " normalFlipped=" << cnt[i * 5 + 3] << " normalOff=" << cnt[i * 5 + 4];
+         WALBERLA_LOG_INFO_ON_ROOT(os.str());
+      }
    }
 
    // Zeroes computeContacts' per-rank ContactDetectionStats tallies in place -- call right after
@@ -3926,21 +4310,18 @@ public:
 
    template< typename TP >
    void reduceAndAvgHydroForces(timing::TimingPool<TP> & tp, bool initializeOldValues){
-      // TEMP DIAGNOSTIC (remove after investigation): [PRE-REDUCE] -- logs THIS rank's own local
-      // accumulator for a floater, on BOTH local and ghost copies, BEFORE any cross-rank combination
-      // happens at all. [NAN-LINK] (SimpleBB.h) only proves that wherever an add actually occurs, the
-      // added value is finite -- it says nothing about whether every term that ends up in the
-      // MPI-reduced sum corresponds to a real, observed add. This checks the other half: is every
-      // rank's own pre-reduce total for this uid already clean going INTO ReduceProperty? If every
-      // rank's value here is finite for a uid that [RAW-HYDRO] later finds non-finite, the corruption
-      // is in ReduceProperty<HydrodynamicForceTorqueNotification>'s own MPI combine/notification-
-      // packing step, not in anything Antidunes computes. If some rank's value is ALREADY non-finite
-      // here despite [NAN-LINK] never firing on that rank, something other than SimpleBB is also
-      // writing into hydrodynamicForce. Runs on ALL floaters this rank knows about (local + ghost, not
-      // just SelectLocal) since a ghost copy's stale/uninitialized accumulator is exactly the
-      // suspected mechanism. Throttled per rank.
+      // [PRE-REDUCE] -- logs THIS rank's own local accumulator for a floater, on BOTH local and ghost
+      // copies, BEFORE any cross-rank combination happens at all. [NAN-LINK] (SimpleBB.h) only proves
+      // that wherever an add actually occurs, the added value is finite -- it says nothing about
+      // whether every term that ends up in the MPI-reduced sum corresponds to a real, observed add.
+      // This checks the other half: is every rank's own pre-reduce total for this uid already clean
+      // going INTO ReduceProperty? Runs on ALL floaters this rank knows about (local + ghost, not just
+      // SelectLocal) since a ghost copy's stale/uninitialized accumulator is exactly the suspected
+      // mechanism. Once per main step (no sub-cycle here at all).
+      //
+      // [Claude, 2026-09-27] Converted to push into diagnosticEvents_ (gated by diagnosticSweepEnabled_)
+      // instead of an unconditional direct WALBERLA_LOG_WARNING, same rationale as VELOCITY-JUMP.
       {
-         static uint_t preReduceLogCount = uint_t(0);
          particleStorage->forEachParticle(useOpenMP,
             [](size_t idx, auto& ac) {
                const uint_t t = ac.getType(idx);
@@ -3953,17 +4334,13 @@ public:
                const auto& ht = ac.getHydrodynamicTorque(idx);
                const bool finite = std::isfinite(hf[0]) && std::isfinite(hf[1]) && std::isfinite(hf[2]) &&
                                     std::isfinite(ht[0]) && std::isfinite(ht[1]) && std::isfinite(ht[2]);
-               if (!finite)
+               if (!finite && diagnosticSweepEnabled_)
                {
-                  static uint_t& logCount = preReduceLogCount;
-                  if (logCount < uint_t(50))
-                  {
-                     WALBERLA_LOG_WARNING("[PRE-REDUCE] uid=" << ac.getUid(idx) << " pos=" << ac.getPosition(idx)
-                        << " isGhost=" << isSet(ac.getFlags(idx), GHOST) << " owner=" << ac.getOwner(idx)
-                        << " step=" << stepCounter_
-                        << "  local pre-reduce hydForce=" << hf << " hydTorque=" << ht);
-                     ++logCount;
-                  }
+                  std::ostringstream detail;
+                  detail << "isGhost=" << isSet(ac.getFlags(idx), GHOST) << " owner=" << ac.getOwner(idx)
+                         << " local pre-reduce hydForce=" << hf << " hydTorque=" << ht;
+                  diagnosticEvents_->push_back(
+                     { stepCounter_, uint_t(0), "PRE-REDUCE", ac.getUid(idx), ac.getPosition(idx), real_t(0), detail.str() });
                }
             },
             *particleAccessor);
@@ -3973,20 +4350,16 @@ public:
       mesa_pd::mpi::ReduceProperty{}.operator()< mesa_pd::HydrodynamicForceTorqueNotification >(*particleStorage);
       tp["MESAPD: ReduceProperty(HydrodynamicForceTorqueNotification)"].end();
 
-      // TEMP DIAGNOSTIC (remove after investigation): [NAN-LINK] in SimpleBB.h proved every individual
-      // per-link contribution to a particle's force is finite (never fired across 1161+ [DRY-LINK]-
-      // protected opportunities in a crashed run) -- so if AddExternalForces later sees a NaN/Inf
-      // hydrodynamic force, it must be entering at THIS stage: the MPI-summed "raw" force right after
-      // ReduceProperty (a sum of finite per-link values can't itself be NaN by arithmetic, unless the
-      // reduce/migration path itself is broken -- e.g. a ghost contribution treated as garbage instead
-      // of zero, or oldHydrodynamicForce not carried correctly across an ownership migration), or in
-      // AverageHydrodynamicForceTorqueKernel's blend with a stale "old" value from a previous step.
-      // Logs BOTH the raw just-reduced value and the current "old" value (pre-average, pre-overwrite)
-      // so the two failure modes are distinguishable. SelectLocal only -- ghost copies don't carry a
-      // meaningful hydrodynamicForce (see FloaterHistoryLogger's own doc comment). Throttled to the
-      // first 50 hits per rank.
+      // [RAW-HYDRO] -- [NAN-LINK] in SimpleBB.h proved every individual per-link contribution to a
+      // particle's force is finite -- so if AddExternalForces later sees a NaN/Inf hydrodynamic force,
+      // it must be entering at THIS stage: the MPI-summed "raw" force right after ReduceProperty, or
+      // in AverageHydrodynamicForceTorqueKernel's blend with a stale "old" value from a previous step.
+      // Logs BOTH the raw just-reduced value and the current "old" value so the two failure modes are
+      // distinguishable. SelectLocal only. Once per main step (no sub-cycle here at all).
+      //
+      // [Claude, 2026-09-27] Converted to push into diagnosticEvents_ (gated by diagnosticSweepEnabled_),
+      // same rationale as PRE-REDUCE/VELOCITY-JUMP above.
       {
-         static uint_t rawHydroLogCount = uint_t(0);
          particleStorage->forEachParticle(useOpenMP,
             [](size_t idx, auto& ac) {
                using namespace mesa_pd::data::particle_flags;
@@ -4004,17 +4377,14 @@ public:
                                        std::isfinite(ht[0]) && std::isfinite(ht[1]) && std::isfinite(ht[2]);
                const bool oldFinite = std::isfinite(ohf[0]) && std::isfinite(ohf[1]) && std::isfinite(ohf[2]) &&
                                        std::isfinite(oht[0]) && std::isfinite(oht[1]) && std::isfinite(oht[2]);
-               if (!rawFinite || !oldFinite)
+               if ((!rawFinite || !oldFinite) && diagnosticSweepEnabled_)
                {
-                  static uint_t& logCount = rawHydroLogCount;
-                  if (logCount < uint_t(50))
-                  {
-                     WALBERLA_LOG_WARNING("[RAW-HYDRO] uid=" << ac.getUid(idx) << " pos=" << ac.getPosition(idx)
-                        << " rawFinite=" << rawFinite << " oldFinite=" << oldFinite
-                        << "  raw hydForce=" << hf << " hydTorque=" << ht
-                        << "  old hydForce=" << ohf << " hydTorque=" << oht);
-                     ++logCount;
-                  }
+                  std::ostringstream detail;
+                  detail << "rawFinite=" << rawFinite << " oldFinite=" << oldFinite
+                         << " raw hydForce=" << hf << " hydTorque=" << ht
+                         << " old hydForce=" << ohf << " hydTorque=" << oht;
+                  diagnosticEvents_->push_back(
+                     { stepCounter_, uint_t(0), "RAW-HYDRO", ac.getUid(idx), ac.getPosition(idx), real_t(0), detail.str() });
                }
             },
             *particleAccessor);
@@ -4108,23 +4478,16 @@ public:
                *particleAccessor);
          }
 
-         // TEMP DIAGNOSTIC (remove after investigation): [VELOCITY-JUMP] -- catches the ONSET of a
-         // runaway, not just its aftermath. Every routine per-floater log (BoxForces/BoxTorque) only
-         // fires once per evalFrequency_ (1000 steps), so a corruption that starts and escalates
-         // WITHIN that window is invisible until the next 1000-step snapshot already shows it fully
-         // blown up (exactly what happened investigating job 4179027: normal at step 59000, ~100x
-         // torque jump at step 60000, no visibility into which step in between it actually started or
-         // how fast it grew). This runs once per MAIN step (subCycle==0, using each floater's velocity
-         // as left by the END of the PREVIOUS main step, before this step's own integration touches
-         // it), comparing against lastVelocityForJumpCheck_ and logging if the per-MAIN-STEP change
-         // exceeds a threshold far above ordinary floater dynamics (observed normal steps: |v| changes
-         // by <<0.001 LU/step per 1000-step window in this scenario) but far below an already-runaway
-         // value (observed post-corruption: tens to hundreds of LU/step) -- 0.05 LU/step/mainstep gives
-         // ~2 orders of magnitude of margin on both sides. Throttled per rank.
-         if (subCycle == uint_t(0))
+         // TEST-ONLY: [DEBUG-FORCE-OBSTACLE-CLEAR] -- DISABLED, 2026-09-27, per explicit request
+         // ("comment out... the failure that you manually introduced as well") while isolating the
+         // gated-guard hang (job 4270904). Not needed for this test (debugForceObstacleClearAtStep_
+         // is 0/off in the prm being used anyway) and removed from the build entirely so it can't be
+         // a confounding factor. See ModelParameters::debugForceObstacleClearAtStep's own doc comment
+         // (SimulationParams.h) and THESIS_PLAN.md for what this block did.
+#if 0
+         if (debugForceObstacleClearAtStep_ != uint_t(0) && subCycle == uint_t(0) &&
+             stepCounter_ == debugForceObstacleClearAtStep_)
          {
-            static uint_t velocityJumpLogCount = uint_t(0);
-            constexpr real_t velocityJumpThreshold = real_t(0.05);
             particleStorage->forEachParticle(useOpenMP,
                [](size_t idx, auto& ac) {
                   using namespace mesa_pd::data::particle_flags;
@@ -4135,21 +4498,171 @@ public:
                *particleAccessor,
                [this](size_t idx, auto& ac) {
                   const walberla::id_t uid = ac.getUid(idx);
+                  uint_t clearedCount       = uint_t(0);
+                  for (auto blockIt = blockForest_->begin(); blockIt != blockForest_->end(); ++blockIt)
+                  {
+                     auto* pf = blockIt->getData< lbm_mesapd_coupling::ParticleField_T >(particleFieldID_);
+                     if (pf == nullptr) continue;
+                     auto* boundaryHandling =
+                        blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(boundaryHandlingID_);
+                     auto* flagField = boundaryHandling->getFlagField();
+                     auto* pdfField  = blockIt->getData< PdfField_T >(pdfFieldID_);
+                     auto* fillField = blockIt->getData< ScalarField_T >(fillFieldID_);
+                     if (!flagField->flagExists(AntidunesBoundaryHandling_T::movingObstacleFlagID)) continue;
+                     const auto obstacleFlag = flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID);
+                     WALBERLA_FOR_ALL_CELLS_XYZ(pf,
+                        if (pf->get(x, y, z) == uid && isFlagSet(flagField->get(x, y, z), obstacleFlag))
+                        {
+                           boundaryHandling->removeBoundary(obstacleFlag, x, y, z);
+                           pdfField->setToEquilibrium(x, y, z, Vector3< real_t >(real_t(0)), real_t(1));
+                           fillField->get(x, y, z) = real_t(1);
+                           pf->get(x, y, z)        = particleAccessor->getInvalidUid();
+                           ++clearedCount;
+                        }
+                     ) // WALBERLA_FOR_ALL_CELLS_XYZ
+                  }
+                  WALBERLA_LOG_WARNING("[DEBUG-FORCE-OBSTACLE-CLEAR] rank=" << mpi::MPIManager::instance()->rank()
+                     << " uid=" << uid << " step=" << stepCounter_ << " clearedCellCount=" << clearedCount
+                     << " -- deliberately cleared this floater's own current obstacle cells to quiescent "
+                        "liquid, reproducing the reverted guard's side effect on a real (not orphaned) body.");
+               },
+               *particleAccessor);
+         }
+#endif
+
+         // TEMP DIAGNOSTIC: [EARLY-CELL-CORRUPTION] -- per explicit request ("I don't really know if
+         // it's cell collapsed -> crazy mem force -> teleport -> stale id, or due to the update...
+         // improve the logging"). MEM-GARBAGE-LINK/STALE-PARTICLE-IDX only ever get checked once per
+         // MAIN step (inside reduceAndAvgHydroForces, before this sub-cycle loop even starts) -- so
+         // between a rod's own force being confirmed normal at step N and confirmed garbage at step
+         // N+9 (observed in job 4269772), there is a multi-step BLIND WINDOW with zero sub-cycle-level
+         // visibility into which of the ~90 intervening sub-cycles a cell actually first went bad, or
+         // whether that happened before or after any given rank's ghost-drop. This runs EVERY
+         // sub-cycle (not gated by GHOST-VANISHED at all -- deliberately independent, so it can't
+         // just re-detect what that check already found), for every LOCAL floater this rank owns:
+         // scans that floater's own currently-mapped obstacle cells' D3Q27 fluid neighbours for any
+         // |PDF component| > 10 (same threshold SimpleBB's own MEM-GARBAGE-LINK check uses) and logs
+         // the first several hits -- giving sub-cycle-resolution timing of exactly when a cell first
+         // goes bad, decoupled from the once-per-step force-computation check.
+         //
+         // DISABLED, 2026-09-27, per explicit request ("comment out all the logging that we
+         // introduced") while isolating the gated-guard hang (job 4270904) -- this block adds
+         // per-sub-cycle iteration cost of its own and is not needed to test the guard itself.
+#if 0
+         {
+            static uint_t earlyCorruptionLogCount = uint_t(0);
+            if (earlyCorruptionLogCount < uint_t(60))
+            {
+               particleStorage->forEachParticle(useOpenMP,
+                  [](size_t idx, auto& ac) {
+                     using namespace mesa_pd::data::particle_flags;
+                     if (isSet(ac.getFlags(idx), GHOST)) return false;
+                     const uint_t t = ac.getType(idx);
+                     return t == uint_t(1) || t == uint_t(3) || t == uint_t(4); // sphere/box/cylinder floaters
+                  },
+                  *particleAccessor,
+                  [this, subCycle](size_t idx, auto& ac) {
+                     if (earlyCorruptionLogCount >= uint_t(60)) return;
+                     const walberla::id_t uid = ac.getUid(idx);
+                     for (auto blockIt = blockForest_->begin();
+                          blockIt != blockForest_->end() && earlyCorruptionLogCount < uint_t(60); ++blockIt)
+                     {
+                        const auto* pf =
+                           blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(particleFieldID_);
+                        if (pf == nullptr) continue;
+                        const auto* pdfField = blockIt->getData< const PdfField_T >(pdfFieldID_);
+                        auto* boundaryHandling =
+                           blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(boundaryHandlingID_);
+                        const auto* flagField = boundaryHandling->getFlagField();
+                        if (!flagField->flagExists(AntidunesBoundaryHandling_T::movingObstacleFlagID)) continue;
+                        const auto obstacleFlag = flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID);
+                        const auto cellBB = pf->xyzSize();
+                        for (cell_idx_t z = cellBB.zMin(); z <= cellBB.zMax() && earlyCorruptionLogCount < uint_t(60); ++z)
+                        for (cell_idx_t y = cellBB.yMin(); y <= cellBB.yMax() && earlyCorruptionLogCount < uint_t(60); ++y)
+                        for (cell_idx_t x = cellBB.xMin(); x <= cellBB.xMax() && earlyCorruptionLogCount < uint_t(60); ++x)
+                        {
+                           if (pf->get(x, y, z) != uid) continue;
+                           for (cell_idx_t dz = -1; dz <= 1 && earlyCorruptionLogCount < uint_t(60); ++dz)
+                           for (cell_idx_t dy = -1; dy <= 1 && earlyCorruptionLogCount < uint_t(60); ++dy)
+                           for (cell_idx_t dx = -1; dx <= 1 && earlyCorruptionLogCount < uint_t(60); ++dx)
+                           {
+                              if (dx == 0 && dy == 0 && dz == 0) continue;
+                              const cell_idx_t nx = x + dx, ny = y + dy, nz = z + dz;
+                              if (!pdfField->xyzSizeWithGhostLayer().contains(nx, ny, nz)) continue;
+                              if (isFlagSet(flagField->get(nx, ny, nz), obstacleFlag)) continue; // only fluid neighbours
+                              for (uint_t q = 0; q < uint_t(27); ++q)
+                              {
+                                 const real_t val = pdfField->get(nx, ny, nz, q);
+                                 if (std::abs(val) > real_t(10))
+                                 {
+                                    WALBERLA_LOG_WARNING("[EARLY-CELL-CORRUPTION] rank="
+                                       << mpi::MPIManager::instance()->rank() << " uid=" << uid
+                                       << " step=" << stepCounter_ << " subCycle=" << subCycle
+                                       << " fluidCell=(" << nx << "," << ny << "," << nz << ")"
+                                       << " q=" << q << " pdf=" << val
+                                       << " density=" << pdfField->getDensity(nx, ny, nz)
+                                       << " -- caught at sub-cycle resolution, independent of "
+                                          "GHOST-VANISHED/MEM-GARBAGE-LINK's own once-per-step timing.");
+                                    ++earlyCorruptionLogCount;
+                                    break;
+                                 }
+                              }
+                           }
+                        }
+                     }
+                  },
+                  *particleAccessor);
+            }
+         }
+#endif
+
+         // [VELOCITY-JUMP] -- catches the ONSET of a runaway, not just its aftermath. Every routine
+         // per-floater log (BoxForces/BoxTorque) only fires once per evalFrequency_ (1000 steps), so a
+         // corruption that starts and escalates WITHIN that window is invisible until the next
+         // 1000-step snapshot already shows it fully blown up (exactly what happened investigating
+         // job 4179027: normal at step 59000, ~100x torque jump at step 60000, no visibility into
+         // which step in between it actually started or how fast it grew). Runs once per MAIN step
+         // (subCycle==0, using each floater's velocity as left by the END of the PREVIOUS main step),
+         // comparing against lastVelocityForJumpCheck_ and flagging if the per-MAIN-STEP change
+         // exceeds a threshold far above ordinary floater dynamics (observed normal steps: |v| changes
+         // by <<0.001 LU/step per 1000-step window in this scenario) but far below an already-runaway
+         // value (observed post-corruption: tens to hundreds of LU/step) -- 0.05 LU/step/mainstep gives
+         // ~2 orders of magnitude of margin on both sides.
+         //
+         // [Claude, 2026-09-27] Converted, per explicit request, from an unconditional direct
+         // WALBERLA_LOG_WARNING to pushing into the shared diagnosticEvents_ buffer -- now gated
+         // behind diagnosticSweepEnabled_ (off by default) instead of always running, and its output
+         // is drained/logged once per step by BuildTimeloop.h's addAfterTimeStepDiagnosticSweep
+         // instead of being formatted here inline. The velocity-tracking itself (lastVelocityForJumpCheck_
+         // bookkeeping) still runs unconditionally -- it's just a map update, negligible cost -- so
+         // turning the sweep on mid-run still has a valid "previous step" baseline to compare against.
+         if (subCycle == uint_t(0))
+         {
+            constexpr real_t velocityJumpThreshold = real_t(0.05);
+            particleStorage->forEachParticle(useOpenMP,
+               [](size_t idx, auto& ac) {
+                  using namespace mesa_pd::data::particle_flags;
+                  if (isSet(ac.getFlags(idx), GHOST)) return false;
+                  const uint_t t = ac.getType(idx);
+                  return t == uint_t(1) || t == uint_t(3) || t == uint_t(4); // sphere/box/cylinder floaters
+               },
+               *particleAccessor,
+               [this, subCycle](size_t idx, auto& ac) {
+                  const walberla::id_t uid = ac.getUid(idx);
                   const auto& vel = ac.getLinearVelocity(idx);
                   auto it = lastVelocityForJumpCheck_.find(uid);
                   if (it != lastVelocityForJumpCheck_.end())
                   {
                      const real_t deltaV = (vel - it->second).length();
-                     if (deltaV > velocityJumpThreshold && velocityJumpLogCount < uint_t(50))
+                     if (diagnosticSweepEnabled_ && deltaV > velocityJumpThreshold)
                      {
-                        WALBERLA_LOG_WARNING("[VELOCITY-JUMP] rank=" << mpi::MPIManager::instance()->rank()
-                           << " uid=" << uid << " step=" << stepCounter_
-                           << " prevVel=" << it->second << " newVel=" << vel
-                           << " |deltaV|=" << deltaV << " pos=" << ac.getPosition(idx)
-                           << " -- velocity changed by more than " << velocityJumpThreshold
-                           << " LU/step over this ONE main step -- catches the onset of a runaway, not "
-                              "just its aftermath.");
-                        ++velocityJumpLogCount;
+                        std::ostringstream detail;
+                        detail << "prevVel=" << it->second << " newVel=" << vel << " |deltaV|=" << deltaV
+                               << " threshold=" << velocityJumpThreshold
+                               << " -- velocity changed by more than the threshold over this ONE main "
+                                  "step -- catches the onset of a runaway, not just its aftermath.";
+                        diagnosticEvents_->push_back(
+                           { stepCounter_, subCycle, "VELOCITY-JUMP", uid, ac.getPosition(idx), deltaV, detail.str() });
                      }
                   }
                   lastVelocityForJumpCheck_[uid] = vel;
@@ -4239,12 +4752,139 @@ public:
                const walberla::id_t uid = *it;
                if (particleAccessor->uidToIdx(uid) == particleAccessor->getInvalidIdx())
                {
-                  if (ghostVanishedLogCount < uint_t(50))
+                  // [STALE-CELL-GUARD] REVERTED, 2026-09-26 -- per explicit request, after empirical
+                  // testing on both crashed jobs (see THESIS_PLAN.md): actually clearing orphaned
+                  // cells (removing the obstacle flag, resetting PDFs to quiescent equilibrium,
+                  // fill=1, particleField_ to invalid) DID eliminate the targeted STALE-PARTICLE-IDX
+                  // abort in both jobs, but both then crashed anyway, LATER, via a WORSE failure mode
+                  // -- exactly the one the original STALE-PARTICLE-IDX diagnostic message itself
+                  // warned about ("a multi-order-of-magnitude hydrodynamic force spike and a
+                  // subsequent invalid-quaternion crash several steps later"): giant-rod job 4268749
+                  // hit an invalid-quaternion assertion (Quaternion.h:241, r/i/j/k all -nan) at step
+                  // ~21400 (vs. its old 7872 abort); small-rod job 4268750 hit a global
+                  // "reynoldsNumber is nan" abort (WriteData.h:109) at step 22700, traced back to a
+                  // NaN first appearing just 3 steps after the guard cleared >1000 cells at once
+                  // (step 22584) -- an abrupt, geometry-blind fill-level discontinuity that the
+                  // free-surface curvature/normal reconstruction couldn't tolerate (confirmed NOT a
+                  // near-total-enclosure/pinching case: the first NaN cell had obstacleNeighbours=
+                  // 0/26). So the guard just delays and obscures the same underlying instability
+                  // instead of fixing it, trading a clean, immediately-diagnosable abort for a later,
+                  // harder-to-trace one. Reverted back to scan-and-log only (no cell modification) --
+                  // the original SimpleBB.h:313 abort remains the correct, intentional behaviour
+                  // until a real fix (not just clearing cells after the fact) is found. World
+                  // coordinates added to the log (via blockForest_->getBlockLocalCellCenter) so a
+                  // future origin-trace doesn't require cross-referencing block-local coordinates
+                  // against each rank's own block origin by hand.
+                  //
+                  // [STALE-CELL-GUARD-GATED] RE-INTRODUCED, 2026-09-27 -- per explicit request ("one
+                  // last test with guard one where we have 20 obstacle neighbors"). The reverted
+                  // guard's own failure case (above) had obstacleNeighbours=0/26 at the cell where the
+                  // fatal NaN first appeared -- i.e. it cleared a cell sitting right at the fluid
+                  // interface, where the abrupt fill-level jump destabilised curvature/normal
+                  // reconstruction. This gated variant only clears an orphaned cell when at least
+                  // `guardMinObstacleNeighbors` of its 26 D3Q27 neighbours are ALSO obstacle-flagged --
+                  // i.e. only when it is safely buried deep inside the object's own solid interior, far
+                  // from any real fluid/interface cell, where turning it into quiescent fluid cannot
+                  // touch the free-surface reconstruction at all. Orphaned cells that don't meet the
+                  // threshold are left untouched (scan-and-log only, as in the pure revert above) --
+                  // so the original SimpleBB.h:313 abort still fires for those, same as before this
+                  // change.
+                  //
+                  // BUG FOUND, 2026-09-27, while debugging job 4270904's hang: this block was calling
+                  // removeBoundary()/setToEquilibrium() on any cell where particleField_ == uid,
+                  // WITHOUT first checking that the cell's own flagField actually still has the
+                  // obstacle flag set. That is exactly the desync case this code exists to handle --
+                  // particleField_ can reference a uid whose flag state has already moved on (e.g. via
+                  // the formerObstacle->fluid reconstruction pipeline) -- so removeBoundary() could be
+                  // called on a cell that was never flagged obstacle in the first place. The proven-
+                  // working [DEBUG-FORCE-OBSTACLE-CLEAR] block (now disabled above) always guarded this
+                  // with `&& isFlagSet(flagField->get(x, y, z), obstacleFlag)`; this block was missing
+                  // that same guard. Added below -- this is the leading suspect for the hang.
+                  // [Claude, 2026-09-27] Guard turned OFF, per explicit request ("turn the guard off
+                  // and rerun"), as the control counterpart to job 4271079 (guard on, confirmed firing
+                  // -- 314 cells cleared across all 4 ranks -- yet the SAME STALE-PARTICLE-IDX abort
+                  // still happened at the same step 22012). This run answers: with clearing fully
+                  // disabled, does the crash happen at the identical step/signature, confirming the
+                  // guard's clearing of deeply-buried cells has no effect on the outcome either way?
+                  // Scan/count logic (orphanCount) is untouched -- only the actual clear is gated off.
+                  constexpr bool   guardEnabled              = false;
+                  constexpr uint_t guardMinObstacleNeighbors = uint_t(20);
+                  uint_t orphanCount  = uint_t(0);
+                  uint_t clearedCount = uint_t(0);
+                  Cell firstOrphanCell;
+                  Vector3< real_t > firstOrphanWorldPos;
+                  bool foundFirstOrphan = false;
+                  for (auto blockIt = blockForest_->begin(); blockIt != blockForest_->end(); ++blockIt)
+                  {
+                     auto* pf = blockIt->getData< lbm_mesapd_coupling::ParticleField_T >(particleFieldID_);
+                     if (pf == nullptr) continue;
+                     auto* boundaryHandling =
+                        blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(boundaryHandlingID_);
+                     auto* flagField = boundaryHandling->getFlagField();
+                     auto* pdfField  = blockIt->getData< PdfField_T >(pdfFieldID_);
+                     auto* fillField = blockIt->getData< ScalarField_T >(fillFieldID_);
+                     const bool haveObstacleFlag = flagField->flagExists(AntidunesBoundaryHandling_T::movingObstacleFlagID);
+                     const auto obstacleFlag =
+                        haveObstacleFlag ? flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID)
+                                         : typename FlagField_T::flag_t(0);
+                     WALBERLA_FOR_ALL_CELLS_XYZ(pf,
+                        if (pf->get(x, y, z) == uid)
+                        {
+                           ++orphanCount;
+                           if (!foundFirstOrphan)
+                           {
+                              firstOrphanCell     = Cell(x, y, z);
+                              firstOrphanWorldPos = blockForest_->getBlockLocalCellCenter(*blockIt, firstOrphanCell);
+                              foundFirstOrphan    = true;
+                           }
+                           // Bug fix, 2026-09-27: must also verify THIS cell's own flag state before
+                           // touching it -- see the dated comment above. Without this, removeBoundary()
+                           // could be called on a cell that was never actually obstacle-flagged.
+                           if (haveObstacleFlag && isFlagSet(flagField->get(x, y, z), obstacleFlag))
+                           {
+                              uint_t obstacleNeighbors = uint_t(0);
+                              for (cell_idx_t dz = -1; dz <= 1; ++dz)
+                              for (cell_idx_t dy = -1; dy <= 1; ++dy)
+                              for (cell_idx_t dx = -1; dx <= 1; ++dx)
+                              {
+                                 if (dx == 0 && dy == 0 && dz == 0) continue;
+                                 const cell_idx_t nx = x + dx;
+                                 const cell_idx_t ny = y + dy;
+                                 const cell_idx_t nz = z + dz;
+                                 if (!flagField->xyzSizeWithGhostLayer().contains(nx, ny, nz)) continue;
+                                 if (isFlagSet(flagField->get(nx, ny, nz), obstacleFlag)) ++obstacleNeighbors;
+                              }
+                              if (guardEnabled && obstacleNeighbors >= guardMinObstacleNeighbors)
+                              {
+                                 boundaryHandling->removeBoundary(obstacleFlag, x, y, z);
+                                 pdfField->setToEquilibrium(x, y, z, Vector3< real_t >(real_t(0)), real_t(1));
+                                 fillField->get(x, y, z) = real_t(1);
+                                 pf->get(x, y, z)        = particleAccessor->getInvalidUid();
+                                 ++clearedCount;
+                              }
+                           }
+                        }
+                     ) // WALBERLA_FOR_ALL_CELLS_XYZ
+                  }
+                  // [Claude, 2026-09-27] Re-enabled, minimal: per explicit request ("activate it"),
+                  // after the previous run left a cell sitting right at the guard's own threshold
+                  // (20/26 obstacle neighbours, [MEM-GARBAGE-LINK] job 4271068) with no way to tell
+                  // whether the gate actually engaged. Unlike the fully-disabled version above, this
+                  // ONLY logs when clearedCount > 0 -- i.e. only when the guard actually clears
+                  // something -- so it stays silent for the ~300 routine orphanCellCount=0 no-ops per
+                  // run (same volume problem the original always-on version had) while still
+                  // definitively answering "did the gate ever fire".
+                  if (clearedCount > 0 && ghostVanishedLogCount < uint_t(50))
                   {
                      WALBERLA_LOG_WARNING("[GHOST-VANISHED] rank=" << mpi::MPIManager::instance()->rank()
                         << " uid=" << uid << " step=" << stepCounter_ << " subCycle=" << subCycle
                         << " -- this rank can no longer see this UID at all (local or ghost), but "
-                           "particleField_ may still reference it from the last mapping sweep.");
+                           "particleField_ may still reference it from the last mapping sweep."
+                        << " orphanCellCount=" << orphanCount
+                        << " clearedCellCount=" << clearedCount << " (guard fires only at >="
+                        << guardMinObstacleNeighbors << "/26 obstacle neighbours)"
+                        << " firstOrphanCell=" << (foundFirstOrphan ? firstOrphanCell : Cell(-1, -1, -1))
+                        << " firstOrphanWorldPos=" << (foundFirstOrphan ? firstOrphanWorldPos : Vector3< real_t >(real_t(-1))));
                      ++ghostVanishedLogCount;
                   }
                   it = ghostMappingSnapshot_.erase(it);
@@ -4256,13 +4896,18 @@ public:
             }
          }
 
-         // TEMP DIAGNOSTIC (remove after investigation): [MIGRATION-NAN] -- see lastKnownOwner_'s own
-         // doc comment. Fires the first time a LOCAL floater's hydrodynamicForce/oldHydrodynamicForce
-         // is non-finite right after this sub-cycle's syncCall(), reporting whether its owner rank
-         // just changed since the last time this rank observed it (a fresh migration landing here vs.
-         // an already-owned particle whose force went bad by some other means). Throttled per rank.
+         // [MIGRATION-NAN] -- see lastKnownOwner_'s own doc comment. Fires the first time a LOCAL
+         // floater's hydrodynamicForce/oldHydrodynamicForce is non-finite right after this
+         // sub-cycle's syncCall(), reporting whether its owner rank just changed since the last time
+         // this rank observed it (a fresh migration landing here vs. an already-owned particle whose
+         // force went bad by some other means).
+         //
+         // [Claude, 2026-09-27] Converted, per explicit request, to push into diagnosticEvents_
+         // (gated by diagnosticSweepEnabled_) instead of an unconditional direct WALBERLA_LOG_WARNING
+         // -- see the VELOCITY-JUMP comment above for the same rationale. lastKnownOwner_ bookkeeping
+         // still runs unconditionally (cheap map update) so the ownership-migration comparison stays
+         // valid even if the sweep is toggled on mid-run.
          {
-            static uint_t migrationNanLogCount = uint_t(0);
             particleStorage->forEachParticle(useOpenMP,
                [](size_t idx, auto& ac) {
                   using namespace mesa_pd::data::particle_flags;
@@ -4286,20 +4931,15 @@ public:
                   const bool everSeenOnThisRank = (it != lastKnownOwner_.end());
                   const bool justMigratedHere = everSeenOnThisRank && it->second != curOwner;
                   lastKnownOwner_[uid] = curOwner;
-                  if (!finite)
+                  if (!finite && diagnosticSweepEnabled_)
                   {
-                     static uint_t& logCount = migrationNanLogCount;
-                     if (logCount < uint_t(50))
-                     {
-                        WALBERLA_LOG_WARNING("[MIGRATION-NAN] uid=" << uid << " pos=" << ac.getPosition(idx)
-                           << " subCycle=" << subCycle << " step=" << stepCounter_
-                           << " curOwner=" << curOwner
-                           << " everSeenBeforeOnThisRank=" << everSeenOnThisRank
-                           << " justMigratedHereSinceLastSeen=" << justMigratedHere
-                           << "  hydForce=" << hf << " hydTorque=" << ht
-                           << " oldHydForce=" << ohf << " oldHydTorque=" << oht);
-                        ++logCount;
-                     }
+                     std::ostringstream detail;
+                     detail << "curOwner=" << curOwner << " everSeenBeforeOnThisRank=" << everSeenOnThisRank
+                            << " justMigratedHereSinceLastSeen=" << justMigratedHere
+                            << " hydForce=" << hf << " hydTorque=" << ht
+                            << " oldHydForce=" << ohf << " oldHydTorque=" << oht;
+                     diagnosticEvents_->push_back(
+                        { stepCounter_, subCycle, "MIGRATION-NAN", uid, ac.getPosition(idx), real_t(0), detail.str() });
                   }
                },
                *particleAccessor);
@@ -4451,6 +5091,49 @@ public:
             mesa_pd::kernel::SelectLocal(), *particleAccessor,
             vvIntegratorPostForce, *particleAccessor);
          tp["MESAPD: VelocityVerletPostForceUpdate"].end();
+
+         // DIAGNOSTIC artificial velocity caps (ModelParameters.rodCapVelocity/AngularVelocity) -- rods (type 4), local only
+         if (g_rodCaps.velocity > real_t(0) || g_rodCaps.angularVelocity > real_t(0))
+         {
+            particleStorage->forEachParticle(useOpenMP,
+               [](size_t idx, auto& ac) {
+                  using namespace mesa_pd::data::particle_flags;
+                  if (isSet(ac.getFlags(idx), GHOST)) return false;
+                  return ac.getType(idx) == uint_t(4);
+               },
+               *particleAccessor,
+               [this, subCycle](size_t idx, auto& ac) {
+                  auto& v = ac.getLinearVelocityRef(idx); auto& w = ac.getAngularVelocityRef(idx);
+                  if (!(std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]))) { v = Vector3< real_t >(real_t(0)); ++g_rodCapStats.nonFinite; }
+                  if (!(std::isfinite(w[0]) && std::isfinite(w[1]) && std::isfinite(w[2]))) { w = Vector3< real_t >(real_t(0)); ++g_rodCapStats.nonFinite; }
+                  const real_t vm = v.length(), wm = w.length();
+                  g_rodCapStats.maxVelocity = std::max(g_rodCapStats.maxVelocity, vm); g_rodCapStats.maxAngularVelocity = std::max(g_rodCapStats.maxAngularVelocity, wm);
+                  if (g_rodCaps.velocity > real_t(0) && vm > g_rodCaps.velocity) { logRodCapHit("velocity", ac.getUid(idx), stepCounter_, subCycle, vm, g_rodCaps.velocity); v *= g_rodCaps.velocity / vm; ++g_rodCapStats.velocity; }
+                  if (g_rodCaps.angularVelocity > real_t(0) && wm > g_rodCaps.angularVelocity) { logRodCapHit("angularVelocity", ac.getUid(idx), stepCounter_, subCycle, wm, g_rodCaps.angularVelocity); w *= g_rodCaps.angularVelocity / wm; ++g_rodCapStats.angularVelocity; }
+                  return true;
+               },
+               *particleAccessor);
+         }
+
+         // TEST OPTION (ModelParameters.rodPrescribedVelocity): rigid prescribed motion of all rods,
+         // applied after the velocity update and before the sync so ghosts see it. [Claude, 2026-09-23]
+         // Extended from cylinder-only (type 4) to also cover sphere (1) and box (3) floaters, for a
+         // same-setup shape comparison (does the wall-pinch sealed-cell instability reproduce with
+         // spheres/boxes the same way it does with rods?) -- capsule (5) deliberately excluded, unrelated
+         // to this comparison.
+         if (g_rodPrescribedVelocityOn)
+         {
+            particleStorage->forEachParticle(useOpenMP,
+               [](size_t idx, auto& ac) {
+                  using namespace mesa_pd::data::particle_flags;
+                  if (isSet(ac.getFlags(idx), GHOST)) return false;
+                  const uint_t t = ac.getType(idx);
+                  return t == uint_t(1) || t == uint_t(3) || t == uint_t(4);
+               },
+               *particleAccessor,
+               [](size_t idx, auto& ac) { ac.setLinearVelocity(idx, g_rodPrescribedVelocity); ac.setAngularVelocity(idx, Vector3< real_t >(real_t(0))); return true; },
+               *particleAccessor);
+         }
 
          // pin translation of pinPosition boxes (rotation left free), before the sync so ghosts see it -
          pinBoxTranslations();
@@ -5420,6 +6103,14 @@ private:
    BlockDataID                                        flagFieldID_;
    BlockDataID                                        normalFieldID_;
    BlockDataID                                        pdfFieldID_;
+   BlockDataID                                        particleFieldID_;
+   BlockDataID                                        boundaryHandlingID_;
+   uint_t                                              debugForceObstacleClearAtStep_;
+   // See SimulationObjects::DiagnosticEvent's own doc comment -- shared buffer that per-sub-cycle
+   // checks below push a lightweight record into (when diagnosticSweepEnabled_) instead of logging
+   // directly; drained once per main step by BuildTimeloop.h's addAfterTimeStepDiagnosticSweep.
+   bool                                                diagnosticSweepEnabled_;
+   std::shared_ptr< std::vector< SimulationObjects::DiagnosticEvent > > diagnosticEvents_;
    std::vector< walberla::id_t >                      floaterUIDs_;         // sphere floaters, same size on all ranks
    std::vector< real_t >                              floaterRadii_;        // indexed by floaterUIDs_
    std::vector< real_t >                              floaterDensities_;    // density ratio per sphere floater (indexed by floaterUIDs_)
@@ -5501,6 +6192,7 @@ private:
    bool useLubricationCorrection;
    uint_t                                             evalFrequency_;
    uint_t                                             stepCounter_;
+   bool                                               simParams_shadowEnabled_ = false;
    real_t                                             ringBand_; // sphere V_sub contact-ring half-width (prm: floaterRingBand)
    real_t                                             planeFitRadiusFactor_; // sphere surface plane-fit lateral reach, in units of r (prm: floaterPlaneFitRadiusFactor)
    real_t                                             boxPlaneFitBandFactor_; // box/cylinder plane-fit shell reach, in units of max(halfExtents) (prm: boxPlaneFitBandFactor)

@@ -27,6 +27,7 @@
 #include <mesa_pd/common/ParticleFunctions.h>
 
 #include <mesa_pd/data/shape/Box.h>
+#include <mesa_pd/data/shape/Capsule.h>
 #include <mesa_pd/data/shape/Cylinder.h>
 #include <mesa_pd/data/shape/CylindricalBoundary.h>
 #include <mesa_pd/data/shape/Ellipsoid.h>
@@ -80,6 +81,20 @@ bool isPointInsideCylinderBF(const Vec3& pointBF,
 {
    return (pointBF[0] * pointBF[0] + pointBF[1] * pointBF[1] <= radius * radius) &&
           (std::fabs(pointBF[2]) <= real_t(0.5) * height);
+}
+
+inline
+bool isPointInsideCapsuleBF(const Vec3& pointBF,
+                            const real_t radius, const real_t coreHalfLength )
+{
+   // closest point on the body-z-axis core segment [-coreHalfLength, +coreHalfLength] to pointBF,
+   // then a plain sphere-radius test against that point -- the Minkowski-sum-of-segment-and-ball
+   // definition of a capsule, mirroring Capsule::support()'s own construction.
+   const real_t zClamped = std::clamp(pointBF[2], -coreHalfLength, coreHalfLength);
+   const real_t dx = pointBF[0];
+   const real_t dy = pointBF[1];
+   const real_t dz = pointBF[2] - zClamped;
+   return (dx * dx + dy * dy + dz * dz) <= radius * radius;
 }
 
 inline
@@ -148,6 +163,14 @@ struct ContainsPointFunctor
       static_assert(std::is_base_of_v<mesa_pd::data::IAccessor, ParticleAccessor_T>, "Provide a valid accessor as template");
 
       return isPointInsideCylinderBF(mesa_pd::transformPositionFromWFtoBF(particleIdx, ac, point), cylinder.getRadius(), cylinder.getHeight());
+   }
+
+   template<typename ParticleAccessor_T>
+   bool operator()(const size_t particleIdx, const mesa_pd::data::Capsule& capsule, const ParticleAccessor_T& ac, const Vector3<real_t>& point )
+   {
+      static_assert(std::is_base_of_v<mesa_pd::data::IAccessor, ParticleAccessor_T>, "Provide a valid accessor as template");
+
+      return isPointInsideCapsuleBF(mesa_pd::transformPositionFromWFtoBF(particleIdx, ac, point), capsule.getRadius(), capsule.getCoreHalfLength());
    }
 
    template<typename ParticleAccessor_T>

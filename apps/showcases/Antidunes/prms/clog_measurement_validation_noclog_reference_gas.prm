@@ -174,6 +174,18 @@ BoundaryParameters
 {
    Border { direction T;  walldistance -1; NoSlip{} }
    Border { direction B;  walldistance -1; NoSlip{} }
+   // [Claude, 2026-09-17]: added BodyBC entries for the CylinderPillars above -- traced every single
+   // usage of simParams->cylinderPillars in this codebase (BuildTimeloop.h's own disabled #if 0 VTK
+   // block; SetupStages.h's bed-generation exclusion check; SetupStages.h's own createCylinder DEM
+   // rigid-body creation) and confirmed NONE of them ever touch the LBM flag field/boundary handling --
+   // CylinderPillars only gives the pillar DEM contact physics (floaters bounce off it), it does NOT by
+   // itself make the fluid see it as solid. The actual fluid-blocking NoSlip classification comes
+   // exclusively from here, via setupBoundaryHandling's initFromConfig(BoundaryParameters) (see that
+   // function's own "CellInterval pillar defined in Antidunes.prm" comment) -- confirmed against
+   // nine_stacked_release_pillar_gas.prm, which declares BOTH CylinderPillars (contact) AND matching
+   // BodyBC (fluid) for its own two pillars; this file previously had only the former.
+   BodyBC { shape Cylinder; min < 192, 11, 0 >; max < 192, 11, 90 >; radius 6; NoSlip{} }
+   BodyBC { shape Cylinder; min < 192, 29, 0 >; max < 192, 29, 90 >; radius 6; NoSlip{} }
 }
 
 MeshOutputParameters
@@ -182,11 +194,15 @@ MeshOutputParameters
    baseFolder     mesh-out;
 }
 
+// [Claude, 2026-09-16]: writeFrequency dropped from disabled (1e10) to timesteps/5 so this run
+// produces exactly 6 sparse VTK dumps (steps 0, 11300, ..., 56500) -- fluid_field, sphere, and
+// cylinder_pillar VTK all share this same simParams->vtk.writeFrequency (see BuildTimeloop.h), so
+// one setting gives synchronized fluid+floater+pillar snapshots for thesis figures, cheaply.
 VTK
 {
    fluid_field
    {
-      writeFrequency       10000000000;
+      writeFrequency       11300;
       ghostLayers          0;
       baseFolder           vtk-out;
       samplingResolution   1;
@@ -196,6 +212,16 @@ VTK
       {
          velocity;
       }
+
+      // [Claude, 2026-09-17]: without this, gas AND obstacle cells (the pillars) retain
+      // whatever stale PDF-derived velocity/density last happened to be there (never updated by
+      // the solver, since "the PDF values in these cells are not important" -- VtkWriter.h's own
+      // comment), rendering as salt-and-pepper noise across the free-surface/gas region AND
+      // making the pillars indistinguishable from the noisy fluid in ParaView -- found directly
+      // from a screenshot showing exactly this on the completed extreme pidoff/pidon runs
+      // (jobs 4240981/4240982), which never had this line, unlike every other scenario prm in
+      // this project (e.g. nine_stacked_release_pillar_gas.prm).
+      before_functions { gas_cell_zero_setter; }
    }
 
    domain_decomposition

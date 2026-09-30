@@ -84,7 +84,7 @@ class AntidunesBoundaryHandling
                              BlockDataID fillLevelID, BlockDataID particleFieldID,
                              const shared_ptr< ParticleAccessor_T >& ac,
                              std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct,
-                             bool useFillWeighting = true);
+                             bool useFillWeighting = true, bool useInterpolatedBounceBack = false);
 
    // initialize fluid field from config file using (quotes indicate the string to be used in the file):
    // - "CellInterval" (see src/geometry/initializer/BoundaryFromCellInterval.h)
@@ -160,6 +160,7 @@ class AntidunesBoundaryHandling
       return hydrostaticDensityFct_;
    }
    inline bool getUseFillWeighting() const { return useFillWeighting_; }
+   inline bool getUseInterpolatedBounceBack() const { return useInterpolatedBounceBack_; }
 
    // executes standard waLBerla boundary handling
    class ExecuteBoundaryHandling
@@ -227,6 +228,7 @@ class AntidunesBoundaryHandling
    shared_ptr< ParticleAccessor_T > ac_;
    std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct_;
    bool useFillWeighting_;
+   bool useInterpolatedBounceBack_;
 
    BlockDataID handlingID_;
 

@@ -1,0 +1,9 @@
+=== [2026-09-23 14:41:07] starting SAT-cuboid (250) (np=36) ===
+=== [2026-09-23 15:35:51] finished SAT-cuboid (250), exit=0 ===
+=== [2026-09-23 15:35:51] starting Kodam packing (closed-form) (np=9) ===
+=== [2026-09-23 16:19:25] finished Kodam packing (closed-form), exit=0 ===
+=== [2026-09-23 16:19:25] starting Kodam packing (GJK-only) (np=9) ===
+=== [2026-09-23 17:06:27] finished Kodam packing (GJK-only), exit=0 ===
+=== [2026-09-23 17:06:27] starting Kodam packing (pure-analytical) (np=9) ===
+=== [2026-09-23 17:45:54] finished Kodam packing (pure-analytical), exit=0 ===
+=== ALL DONE ===

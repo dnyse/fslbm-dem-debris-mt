@@ -1,0 +1,178 @@
+// bogner_exact_3box_s16_seed5_rho075_nopin_omega1p9_50k_tilt5_correctedz_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-24] Closing a real gap in the original rho=0.75 equilibrium-offset investigation
+// (THESIS_PLAN.md): the free 6-DOF rho=0.75 box settles ~30-36deg instead of the theoretical
+// 26.565deg, while a pinned (X/Y+pitch/yaw locked) control correctly gets 27.0deg -- and everything
+// tested so far as a cause (wall placement/IBB, fill-weighting, local density, init height) has been
+// ruled out or found insufficient. The strongest remaining explanation is a coupled roll-translate
+// limit cycle (tilt peaks exactly at velocity-zero-crossings). One thing never actually tested: EVERY
+// seeded-tilt run (including the ORIGINAL rho=0.75/5deg sweep) used a fixed position Z=16 for the
+// box's centre, which is only the exact geometric Archimedes equilibrium centroid for rho=0.75 AT
+// ZERO TILT -- for any nonzero seed angle, Z=16 is not quite right, so every run starts with a small
+// residual HEAVE mismatch layered on top of the intentional roll seed. This prm corrects that: for
+// rho=0.75 at 5deg tilt, the exact submerged-area-fraction=rho centroid (same bisection method used
+// for the rho=0.7665 corrected 25/26deg runs, jobs 4261349/4261350) is z_centre=16.0152 (vs naive
+// 16.0, delta +0.0152 -- much smaller than the rho=0.7665 case's own corrections, since rho=0.75 was
+// already exact at 0deg). Tests whether removing even this small heave transient changes which orbit
+// the free box falls into.
+//  * densityRatio 0.75 (the ORIGINAL, uncorrected density -- not 0.7665), initialTiltAngleDeg 5
+//    (matching the original archived seed5 sweep), position Z corrected to 16.0152.
+//  * Everything else identical to the rho=0.75 sweep siblings: basin 130x40x40, ONE box
+//    halfExtents<8,16,8>, tau=1/1.9, gravityOverride 0.00075, fully free 6-DOF, normal VTK
+//    (mid-width Y=20-21 plane, writeFrequency 2000 -- NOT the diagnostic hot-spot region).
+//  * Domain 130x40x40 / cellsPerBlock <10,8,40> = 13x5x1 = 65 processes; 50000 timesteps.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 10, 8, 40 >;
+   periodicity                   < 1, 1, 0 >;   // X and Y periodic, Z floor/ceiling
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <130, 40, 40>;
+   wavePeriods        1;
+   liquidHeightFactor 1.25;
+   floorHeightFactor  1.25;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              50000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;
+   relaxationRateOverride 1.9;          // Bogner's tau = 1/1.9 = 0.526; lower omega = more viscous damping (Bogner's own value)
+   gravityOverride        0.00075;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;   // never opened -- see avgParticleDiameterOverride
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8;
+   dxSIOverride                0.0004;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      position             < 21.6667, 20, 16.0152 >;   // [Claude, 2026-09-24] CORRECTED: exact geometric Archimedes equilibrium z_centre for rho=0.75 at 5deg tilt (was 16.0 in the original sweep)
+      halfExtents          < 8, 16, 8 >;
+      densityRatio         0.75;
+      settlingSteps        0;
+      initialTiltAngleDeg  5;   // matches the original archived seed5 sweep's own seed heel
+      comOffsetZ           0;
+      pinPosition          false;         // fully free (6 DOF)
+      pinRotation          false;
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   useAnalyticBoxBuoyancy        false;   // explicitly OFF: no analytic buoyancy in this experiment
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     1;
+   dataSliceFrequency      500;   // avoid the job 4255656 vault file-count quota bug
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       2000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;
+         density;
+      }
+
+      // one mid-width plane (the boxes' cross-section is in X-Z)
+      CellBB_filter_0 { min < 0, 20, 0 >;  max < 130, 21, 40 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

@@ -171,11 +171,15 @@ MeshOutputParameters
    baseFolder     mesh-out;
 }
 
+// [Claude, 2026-09-16]: writeFrequency dropped from 2000 (51 dumps) to timesteps/5 = 20000 (6 sparse
+// dumps: steps 0, 20000, ..., 100000) to match the sparse-VTK-for-thesis-figures convention adopted
+// this session (see THESIS_PLAN.md item 3) -- the d025 sibling already ran/completed at the old dense
+// setting and is left as-is, this only affects the not-yet-run d050/d075 cases.
 VTK
 {
    fluid_field
    {
-      writeFrequency       2000;
+      writeFrequency       20000;
       ghostLayers          0;
       baseFolder           vtk-out;
       samplingResolution   1;

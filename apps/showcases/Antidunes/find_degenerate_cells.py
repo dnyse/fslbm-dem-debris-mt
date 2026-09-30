@@ -34,8 +34,10 @@ Usage:
 Options:
   --steps N [N ...]   only check these step numbers (default: all available)
   --max-examples N    world-coordinate examples to print per category (default 15)
-  --vel-threshold F   velocity-magnitude flag threshold, lattice units (default 0.3, the
-                       rough Mach-number stability ceiling for this D3Q27 cumulant LBM)
+  --vel-threshold F   velocity-magnitude |u| flag threshold, lattice units (default 0.17 = lattice
+                       Mach number 0.3 with cs = 1/sqrt(3); Kruger et al. 2017 Sect. 7.2 p. 279: Ma < 0.3 is
+                       'small', larger Ma gives significant compressibility errors. An accuracy warning, not a
+                       collapse threshold. Before 2026-09-21 the default was |u| = 0.3, which is Ma = 0.52.)
   --non-periodic-x    domain is NOT periodic in X (default: periodic, matches this showcase)
   --non-periodic-y    domain is NOT periodic in Y (default: periodic, matches this showcase)
   --periodic-z        domain IS periodic in Z (default: not periodic)
@@ -261,7 +263,7 @@ def main():
     ap.add_argument('path')
     ap.add_argument('--steps', type=int, nargs='+', default=None)
     ap.add_argument('--max-examples', type=int, default=15)
-    ap.add_argument('--vel-threshold', type=float, default=0.3)
+    ap.add_argument('--vel-threshold', type=float, default=0.17)
     ap.add_argument('--non-periodic-x', action='store_true')
     ap.add_argument('--non-periodic-y', action='store_true')
     ap.add_argument('--periodic-z', action='store_true')

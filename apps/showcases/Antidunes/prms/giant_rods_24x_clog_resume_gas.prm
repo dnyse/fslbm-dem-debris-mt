@@ -1,0 +1,243 @@
+// giant_rods_24x_clog_resume_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-26] RESUME of `giant_rods_24x_clog_gas.prm` (job 4268581), per explicit request
+// ("let both from the crashed continue via their last checkpoint"). Job 4268581 hit the exact same
+// fatal STALE-PARTICLE-IDX abort as 4268494 (see THESIS_PLAN.md), at step 7409/51000 -- a cross-rank
+// ghost-ownership desync, confirmed via code trace to require no anomalous displacement. This
+// resumes from that job's last (and only) snapshot, at step 5000 (snapshotFrequency 5000), copied to
+// `resume_snapshots/giant_rods_24x_from_4268581/` on this mirror so the sbatch script's own
+// leftover-output rescue logic (which only touches $BIN_DIR/{vtk-out,eval,snapshots}) doesn't sweep
+// it away. Same population/physics/fixes-off state as the original -- purpose is to see whether the
+// desync reproduces again shortly after resuming (confirming a robust, reproducible instability at
+// this rod-count/rank-count regime) or whether the run manages to continue further this time.
+// `loadSnapshot true` + an absolute `snapshotBaseFolder` pointing at the copied snapshot; new
+// checkpoints during this resumed run will overwrite that copy going forward (the ORIGINAL crash
+// snapshot under the job's own archive folder is untouched).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  true;
+   storeSnapshot                 true;
+   snapshotFrequency             5000;
+   snapshotBaseFolder            /home/hpc/iwia/iwia148h/mt-dennys/apps/showcases/Antidunes/resume_snapshots/giant_rods_24x_from_4268581;
+}
+
+DomainParameters
+{
+   domainSize         <768, 40, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.04;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+   enabled                     true;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         51000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8.001943372119138;
+   dxSIOverride                0.000362694127490625;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar { center < 384, 0, 45 >; radius 12; }
+   CylinderPillar { center < 384, 40, 45 >; radius 12; }
+}
+
+FloatingCylinders
+{
+   // Row 1 (X=364, at the pillars) -- deep/mid/shallow, heavy-to-light.
+   FloatingCylinder { position < 364, 20, 15 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.85; settlingSteps 500; }
+   FloatingCylinder { position < 364, 20, 30 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.75; settlingSteps 500; }
+   FloatingCylinder { position < 364, 20, 45 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.65; settlingSteps 500; }
+
+   // Row 2 (X=350) -- same three depths/densities.
+   FloatingCylinder { position < 350, 20, 15 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.85; settlingSteps 500; }
+   FloatingCylinder { position < 350, 20, 30 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.75; settlingSteps 500; }
+   FloatingCylinder { position < 350, 20, 45 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.65; settlingSteps 500; }
+
+   // Row 3 (X=336) -- same three depths/densities.
+   FloatingCylinder { position < 336, 20, 15 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.85; settlingSteps 500; }
+   FloatingCylinder { position < 336, 20, 30 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.75; settlingSteps 500; }
+   FloatingCylinder { position < 336, 20, 45 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.65; settlingSteps 500; }
+
+   // Row 4 (X=322) -- same three depths/densities.
+   FloatingCylinder { position < 322, 20, 15 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.85; settlingSteps 500; }
+   FloatingCylinder { position < 322, 20, 30 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.75; settlingSteps 500; }
+   FloatingCylinder { position < 322, 20, 45 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.65; settlingSteps 500; }
+
+   // Row 5 (X=308, new in this doubling step) -- same three depths/densities.
+   FloatingCylinder { position < 308, 20, 15 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.85; settlingSteps 500; }
+   FloatingCylinder { position < 308, 20, 30 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.75; settlingSteps 500; }
+   FloatingCylinder { position < 308, 20, 45 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.65; settlingSteps 500; }
+
+   // Row 6 (X=294, new in this doubling step) -- same three depths/densities.
+   FloatingCylinder { position < 294, 20, 15 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.85; settlingSteps 500; }
+   FloatingCylinder { position < 294, 20, 30 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.75; settlingSteps 500; }
+   FloatingCylinder { position < 294, 20, 45 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.65; settlingSteps 500; }
+
+   // Row 7 (X=280, new in this doubling step) -- same three depths/densities.
+   FloatingCylinder { position < 280, 20, 15 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.85; settlingSteps 500; }
+   FloatingCylinder { position < 280, 20, 30 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.75; settlingSteps 500; }
+   FloatingCylinder { position < 280, 20, 45 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.65; settlingSteps 500; }
+
+   // Row 8 (X=266, new in this doubling step) -- same three depths/densities.
+   FloatingCylinder { position < 266, 20, 15 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.85; settlingSteps 500; }
+   FloatingCylinder { position < 266, 20, 30 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.75; settlingSteps 500; }
+   FloatingCylinder { position < 266, 20, 45 >; radius 6; length 36; axis < 0, 1, 0 >; densityRatio 0.65; settlingSteps 500; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;
+   usePureAnalyticalCylinder     false;
+   useContactFilterOwnerTiebreak true;
+   useCapsuleShapeForCylinders   false;
+
+   useTightTier1                 false;
+   useTightLayer1                true;
+   skipTier1                     false;
+   useRoundedBoxCorners          false;
+   useMultiPointBoxContact       false;
+   useBoxOverlapCap              false;
+   useAxisHysteresis             false;
+   useContactManifold            false;
+   useRotationalEffectiveMass    true;
+   useSpheroBoxContact           false;
+   useSpheroBoxAnalytical        false;
+   useFraigeBoxContactModel      false;
+   useFullVolumeAnalyticBuoyancy false;
+   usePass3Reresolution          false;
+   useAnalyticBoxBuoyancy        false;
+
+   // [Claude, 2026-09-26] Per explicit request ("try to log the cylinders positional data per time
+   // step"): windowed around the known crash step (original 4268581 crashed at 7409, first resume
+   // 4268636 re-crashed at 7614 -- same checkpoint, same population, so this rerun should land in
+   // the same neighborhood again) -- gives per-SUB-CYCLE position/velocity/ownership for every
+   // floater, not just the coarse every-100-step CylForces log, without paying that cost for the
+   // whole run (see logFloaterHistoryStartStep/EndStep's own doc comments, SimulationParams.h).
+   logFloaterHistory             true;
+   floaterHistoryBaseFolder      floater-history;
+   logFloaterHistoryStartStep    6500;
+   logFloaterHistoryEndStep      8000;
+
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+
+   ClogMeasurement
+   {
+      upstreamPos       < 336, 20, 40 >;
+      downstreamPos     < 432, 20, 40 >;
+      probeHalfWidthXY  2;
+
+      pillarUpstreamPos    < 336, 6, 40 >;
+      pillarDownstreamPos  < 432, 6, 40 >;
+   }
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 384, 0, 0 >;  max < 384, 0, 180 >;  radius 12; NoSlip{} }
+   BodyBC { shape Cylinder; min < 384, 40, 0 >; max < 384, 40, 180 >; radius 12; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+// fluid cropped near the pillars and all eight rows (X 200..500, Z 0..100); the rods are unfiltered.
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       10000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 200, 0, 0 >;  max < 500, 40, 100 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

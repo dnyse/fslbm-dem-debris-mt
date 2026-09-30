@@ -27,12 +27,16 @@
 #include "blockforest/Initialization.h"
 
 #include <cmath>
+#include <fstream>
 #include <iomanip>
+#include <limits>
+#include <set>
 #include <sstream>
 #include <vector>
 
 #include "lbm/field/AddToStorage.h"
 
+#include "mesa_pd/data/shape/Capsule.h"
 #include "mesa_pd/data/shape/Cylinder.h"
 #include "mesa_pd/data/shape/Sphere.h"
 #include "mesa_pd/domain/BlockForestDataHandling.h"
@@ -119,8 +123,10 @@ void setupSimState(const std::shared_ptr< const SimulationParams >& simParams, c
 
    simObjs->beginTimeStep = uint_c(0);
 
-   const real_t accelerationX = real_c(3) * simParams->pid.targetMeanVelocityMagnitude * simParams->computed.viscosity /
-                                 (simParams->computed.liquidHeight * simParams->computed.liquidHeight);
+   const real_t accelerationX = simParams->pid.accelerationXOverride > real_c(0)
+                                 ? simParams->pid.accelerationXOverride
+                                 : real_c(3) * simParams->pid.targetMeanVelocityMagnitude * simParams->computed.viscosity /
+                                   (simParams->computed.liquidHeight * simParams->computed.liquidHeight);
    simObjs->acceleration = std::make_shared< Vector3< real_t > >(accelerationX, real_c(0.0), -simParams->computed.gravity);
 
    simObjs->pidController = std::make_shared< PIDController >(
@@ -659,7 +665,14 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       {
          auto p = simObjs->particleStorage->create(false);
          p->setPosition(pos);
-         p->setBaseShape(std::make_shared< mesa_pd::data::Cylinder >(fcp.radius, fcp.length));
+         // [Claude, 2026-09-26] EXPERIMENTAL toggle (ModelParameters.useCapsuleShapeForCylinders,
+         // default false): a Capsule (cylinder + hemispherical end caps) has the same (radius, length)
+         // constructor signature and the same body-z axis convention as Cylinder, so nothing else in
+         // this loop (position, rotation, interactionRadius, FIXED flag, settlingSteps) needs to change.
+         if (simParams->model.useCapsuleShapeForCylinders)
+            p->setBaseShape(std::make_shared< mesa_pd::data::Capsule >(fcp.radius, fcp.length));
+         else
+            p->setBaseShape(std::make_shared< mesa_pd::data::Cylinder >(fcp.radius, fcp.length));
          p->getBaseShapeRef()->updateMassAndInertia(fcp.densityRatio);
          p->setOwner(mpi::MPIManager::instance()->rank());
          p->setType(4);
@@ -747,31 +760,35 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    // wherever a particle is currently known (owner or existing ghost), not every rank whose subdomain
    // actually falls within its interactionRadius+dx. A large floater (e.g. a box with
    // interactionRadius comparable to several blocks' width) can physically overlap ranks MULTIPLE
-   // hops away from its owning rank. During a continuous run this is never a problem: ghost state
-   // accumulates and is incrementally re-verified every single timestep (doDEMSubCycles' own sync
-   // calls), so it has long since converged to the particle's full multi-hop footprint by any given
-   // step. On a checkpoint resume, `ClearNextNeighborSync`/`ClearGhostOwnerSync` (see the loadSnapshot
-   // branch above) wipes all ghost state, and this is the ONLY sync call before mapParticlesOntoCells()
-   // and the very first FSLBM sweep run -- a single call only reaches one hop out from each particle's
-   // loaded position, exactly like a fresh start's very first call would, EXCEPT a fresh start never
-   // needs more than one hop yet (freshly-created floaters/beds are local to a handful of blocks) and
-   // has 49999+ further per-step calls to reach full convergence long before it matters, while a
-   // resumed run's floaters are already wherever tens of thousands of steps of physics put them and
-   // need the LBM-DEM coupling sweep's own MEM force computation (SimpleBB.h) to already have a
-   // correct multi-hop ghost picture on the very next step. Confirmed directly: job 4236626 (a
+   // hops away from its owning rank. During a continuous run this is never a problem past the first
+   // step: ghost state accumulates and is incrementally re-verified every single timestep
+   // (doDEMSubCycles' own sync calls), so it has long since converged to the particle's full
+   // multi-hop footprint by any given later step. On a checkpoint resume, `ClearNextNeighborSync`/
+   // `ClearGhostOwnerSync` (see the loadSnapshot branch above) wipes all ghost state, and this is the
+   // ONLY sync call before mapParticlesOntoCells() and the very first FSLBM sweep run -- a single call
+   // only reaches one hop out from each particle's loaded position. Confirmed directly: job 4236626 (a
    // resumed cuboid-equilibrium run) had a Y-elongated box with interactionRadius~45 LU, cellsPerBlock
    // <17,42,30> -- diagonally-adjacent (2-hop) ranks reported zero knowledge of the box after exactly
    // one syncCall(), producing SimpleBB.h's own "[STALE-PARTICLE-IDX] ... uid no longer maps to a
-   // valid local particle index" hard abort on the very first post-load step. Calling syncCall()
+   // valid local particle index" hard abort on the very first post-load step.
+   //
+   // [Claude, 2026-09-18]: the multi-round call below was originally gated to loadSnapshot only, on
+   // the assumption that "a fresh start never needs more than one hop yet (freshly-created floaters/
+   // beds are local to a handful of blocks)". That assumption is false for a floater whose own
+   // multi-hop footprint (governed by blockSyncExtension, not its raw geometric size) already spans
+   // more than one hop at creation -- confirmed directly via job 4245028/4245089 (this scenario's own
+   // FloatingBox, halfExtents<15,30,15>, cellsPerBlock<16,45,30>): the [GHOST-SYNC-DIAG] diagnostic
+   // showed the owning rank at block index (3,1,2) with all 26 of its Moore-neighborhood neighbors
+   // correctly ghost-synced after the single call above, but ranks 13/17/21 at block indices
+   // (1,0,1)/(1,1,1)/(1,2,1) -- Chebyshev distance 2 from the owner -- showed zero knowledge of the
+   // box, and each owns a real fluid cell genuinely adjacent (confirmed against the box's own
+   // 5-degree-tilted, hence enlarged, AABB) to the box's true surface. Same abort, same mechanism,
+   // just a fresh start instead of a resume -- so the gate is now removed. Calling syncCall()
    // repeatedly lets each round's newly-created ghosts become the "seed" for the next round's
    // neighbor-of-neighbor propagation, converging to the true multi-hop footprint after enough
-   // rounds -- 4 is a generous margin over the 2 hops needed in the confirmed case above, cheap
-   // relative to the rest of setup, and only runs on the loadSnapshot path so a fresh start's own
-   // (already-correct) single-call behaviour is unchanged.
-   if (bfParams.loadSnapshot)
-   {
-      for (uint_t round = uint_t(0); round < uint_t(4); ++round) simObjs->syncCall();
-   }
+   // rounds -- 4 is a generous margin over the 2 hops needed in both confirmed cases above, and cheap
+   // relative to the rest of setup (a one-time cost, not a per-step one) regardless of which path.
+   for (uint_t round = uint_t(0); round < uint_t(4); ++round) simObjs->syncCall();
 
    // create particle field (mapping of particle UIDs to lbm cells)
    simObjs->particleFieldID = field::addToStorage<lbm_mesapd_coupling::ParticleField_T>(
@@ -817,7 +834,8 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
       simObjs->blockForest, simObjs->pdfFieldID, simObjs->fillFieldID, simObjs->particleFieldID,
       simObjs->particleAccessor,
       hydrostaticFtor,
-      simParams->model.useFillWeighting);
+      simParams->model.useFillWeighting,
+      simParams->model.useInterpolatedBounceBack);
 
    // initialize BCs from config (NoSlip top/bottom, CellInterval pillar defined in Antidunes.prm)
    simObjs->antidunesBoundaryHandling->initFromConfig(simParams->cfgPtr->getOneBlock("BoundaryParameters"));
@@ -894,7 +912,8 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
    else {
       // same as above but it also stores the UID of the particle in particleFieldID (but no hydro forces are computed here)
       lbm_mesapd_coupling::MovingParticleMappingKernel< AntidunesBoundaryHandling_T::BoundaryHandling_T >
-         kernel(simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simObjs->particleFieldID);
+         kernel(simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simObjs->particleFieldID,
+                simParams->model.mappingTieOffset);
       simObjs->particleStorage->forEachParticle(false, floaterSelector, *simObjs->particleAccessor,
                                              kernel, *simObjs->particleAccessor,
                                              AntidunesBoundaryHandling_T::movingObstacleFlagID);
@@ -1154,9 +1173,44 @@ void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs,
       const auto* pdfField  = blockIt->getData< const PdfField_T  >(simObjs->pdfFieldID);
       const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
       const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      // [Claude, 2026-09-25] force-density field, printed alongside PDFs below: the generated
+      // Cumulant collision kernel reads this DIRECTLY (xi_29/30/31 = xi_3*_data_force[...], folded
+      // into velocity and every higher-order cumulant) as an input entirely separate from the PDF
+      // field -- structurally invisible to every PDF-based NaN/precursor check in this investigation.
+      // THESIS_PLAN.md hopper crash investigation: raw PDFs at the actual crash cell were confirmed
+      // clean/ordinary right up to collide, so this field is the one remaining unverified input.
+      const auto* forceField = blockIt->getData< const VectorFieldFlattened_T >(simObjs->forceDensityFieldID);
+      // [Claude, 2026-09-27] particleField_ owning UID, added per explicit request ("what about
+      // obstacle neighbors... contested ownership between the two nearby rods" discussion): lets a
+      // cube trace show whether a cell's obstacle-ownership stamp is stable or flip-flopping between
+      // two nearby floaters across steps, independent of the flag classification above (a cell can be
+      // OBST-flagged by one uid one step and a DIFFERENT uid the next without the flag itself ever
+      // changing category).
+      const auto* particleFieldPtr =
+         blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(simObjs->particleFieldID);
+      // [Claude, 2026-09-27] Curvature/normal fields, added per explicit request to test the
+      // "free-surface curvature/normal reconstruction degeneracy" hypothesis (mechanism #3) against
+      // Bogner's dissertation (2017, Section 4.4.3.1): the FD curvature method this codebase uses
+      // (CurvatureSweepFiniteDifferences, BuildTimeloop.h -- Bogner's least-stable of the three
+      // methods he compared) can enter a self-sustaining, non-converging oscillation when spurious
+      // currents from curvature error perturb the interface layer, which changes the curvature
+      // computation again, "thus explaining the oscillations" (Bogner, p.99). Logging these lets a
+      // cube trace show whether curvature/normal values are already degenerate/unstable at this
+      // heavily-obstacle-surrounded cell before the density collapse.
+      const auto* curvatureField = blockIt->getData< const ScalarField_T >(simObjs->curvatureFieldID);
+      const auto* normalField    = blockIt->getData< const VectorField_T >(simObjs->normalFieldID);
+      const auto* obstacleNormalField =
+         blockIt->getData< const VectorField_T >(simObjs->obstacleNormalFieldID);
 
       const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
       const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      // [Claude, 2026-09-24] richer classification (was INTERFACE/LIQUID/OTHER, lumping GAS and
+      // OBSTACLE together) -- matches checkPdfNaN's own classify() so a cube trace can distinguish
+      // a genuinely-gas cell from an obstacle-covered one.
+      const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+      const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      const FlagUID formerMOuid("former moving obstacle");
+      const flag_t formerMOFlag = flagField->flagExists(formerMOuid) ? flagField->getFlag(formerMOuid) : flag_t(0);
 
       for (const auto& wc : watchCoords)
       {
@@ -1180,9 +1234,13 @@ void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs,
             rho += pdfField->get(ix, iy, iz, f);
 
          const real_t fill = fillField->get(ix, iy, iz);
-         const bool isInterface = flagField->isFlagSet(ix, iy, iz, interfaceFlag);
-         const bool isLiquid    = flagField->isFlagSet(ix, iy, iz, liquidFlag);
-         const char* flagStr = isInterface ? "INTERFACE" : (isLiquid ? "LIQUID" : "OTHER");
+         const flag_t fl = flagField->get(ix, iy, iz);
+         const char* flagStr =
+            (fl & obstacleMask) != flag_t(0)                        ? "OBST" :
+            isFlagSet(fl, interfaceFlag)                            ? "INTF" :
+            isFlagSet(fl, liquidFlag)                                ? "LIQ " :
+            isFlagSet(fl, gasFlag)                                   ? "GAS " :
+            (formerMOFlag != flag_t(0) && isFlagSet(fl, formerMOFlag)) ? "fMO " : "??? ";
 
          // build PDF list string
          std::ostringstream pdfStr;
@@ -1193,15 +1251,248 @@ void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs,
             if (f + 1 < PdfField_T::Stencil::Size) pdfStr << " ";
          }
 
+         const real_t fx = forceField->get(ix, iy, iz, uint_t(0));
+         const real_t fy = forceField->get(ix, iy, iz, uint_t(1));
+         const real_t fz = forceField->get(ix, iy, iz, uint_t(2));
+         const walberla::id_t owningUid = particleFieldPtr->get(ix, iy, iz);
+         const real_t curvature = curvatureField->get(ix, iy, iz);
+         const Vector3< real_t > normal         = normalField->get(ix, iy, iz);
+         const Vector3< real_t > obstacleNormal = obstacleNormalField->get(ix, iy, iz);
+
          WALBERLA_LOG_INFO("[WATCH t=" << t << " " << label
             << "] world=(" << wc[0] << "," << wc[1] << "," << wc[2] << ")"
             << " local=(" << ix << "," << iy << "," << iz << ")"
             << " flag=" << flagStr
+            << " owningUid=" << owningUid
             << " rho=" << std::scientific << std::setprecision(6) << rho
             << " fill=" << fill
+            << " curvature=" << curvature
+            << " normal=" << normal
+            << " obstacleNormal=" << obstacleNormal
+            << " force=(" << fx << "," << fy << "," << fz << ")"
             << " | " << pdfStr.str());
       }
    }
+}
+
+// [Claude, 2026-09-27] Per explicit request ("create a box around all the cylinders in the crash
+// area, log out their values and see the crash evolution"): logs EVERY OBSTACLE-or-INTERFACE cell
+// inside a fixed world-space box, once per MAIN step (the fluid field only changes once per main
+// step -- see CLAUDE.md's per-timestep execution order; sub-cycle resolution would multiply row
+// count 10x for zero additional fluid-state information), to a per-rank CSV. Complements
+// trackWatchCells' handful of hardcoded single cells with the FULL spatial evolution of a region
+// known to contain a recurring crash's rods -- restricted to OBST/INTF cells (not every cell in the
+// box) to keep row count bounded (a 2-3-rod-sized box is a few thousand cells, not tens of
+// thousands). Gated by ModelParameters.logFluidBoxHistory (+ Min/Max/StartStep/EndStep,
+// SimulationParams.h); each rank opens (and truncates) its own CSV on first call via a function-
+// local static, mirroring FloaterHistoryLogger's per-rank-file convention (ParticleKernels.h) but
+// without needing its own class since this is called from exactly one place (BuildTimeloop.h's
+// addAfterTimeStepDiagnosticSweep).
+void logFluidBoxHistory(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
+                        const std::string& baseFolder,
+                        const Vector3< real_t >& boxMin, const Vector3< real_t >& boxMax)
+{
+   static std::ofstream file;
+   static bool opened = false;
+   if (!opened)
+   {
+      const int rank = mpi::MPIManager::instance()->rank();
+      file.open(baseFolder + "/rank_" + std::to_string(rank) + ".csv", std::ios::out | std::ios::trunc);
+      WALBERLA_CHECK(file.is_open(), "[FluidBoxHistory] failed to open CSV for rank " << rank
+         << " in \"" << baseFolder << "\" -- does the directory exist?");
+      file << "mainStep,rank,worldX,worldY,worldZ,flag,owningUid,density,fill,maxAbsPdf\n";
+      opened = true;
+   }
+
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto& aabb = blockIt->getAABB();
+      // Skip blocks that don't overlap the box at all -- avoids paying the field-lookup cost below
+      // for every block on every rank when the box is small relative to the domain.
+      if (aabb.xMax() < boxMin[0] || aabb.xMin() > boxMax[0] ||
+          aabb.yMax() < boxMin[1] || aabb.yMin() > boxMax[1] ||
+          aabb.zMax() < boxMin[2] || aabb.zMin() > boxMax[2]) continue;
+
+      const auto* pdfField  = blockIt->getData< const PdfField_T  >(simObjs->pdfFieldID);
+      const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      const auto* particleFieldPtr =
+         blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(simObjs->particleFieldID);
+
+      const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+      const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      const FlagUID formerMOuid("former moving obstacle");
+      const flag_t formerMOFlag = flagField->flagExists(formerMOuid) ? flagField->getFlag(formerMOuid) : flag_t(0);
+
+      for (cell_idx_t iz = 0; iz < cell_idx_c(pdfField->zSize()); ++iz)
+      for (cell_idx_t iy = 0; iy < cell_idx_c(pdfField->ySize()); ++iy)
+      for (cell_idx_t ix = 0; ix < cell_idx_c(pdfField->xSize()); ++ix)
+      {
+         const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+         const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+         const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+         if (wx < boxMin[0] || wx > boxMax[0] || wy < boxMin[1] || wy > boxMax[1] ||
+             wz < boxMin[2] || wz > boxMax[2]) continue;
+
+         const flag_t fl = flagField->get(ix, iy, iz);
+         const bool isObstacle  = (fl & obstacleMask) != flag_t(0);
+         const bool isInterface = isFlagSet(fl, interfaceFlag);
+         if (!isObstacle && !isInterface) continue; // keep row count bounded -- see comment above
+
+         const char* flagStr =
+            isObstacle  ? "OBST" :
+            isInterface ? "INTF" :
+            isFlagSet(fl, liquidFlag)                                     ? "LIQ" :
+            isFlagSet(fl, gasFlag)                                        ? "GAS" :
+            (formerMOFlag != flag_t(0) && isFlagSet(fl, formerMOFlag))    ? "fMO" : "???";
+
+         real_t rho = real_t(0);
+         real_t maxAbsPdf = real_t(0);
+         for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f)
+         {
+            const real_t v = pdfField->get(ix, iy, iz, f);
+            rho += v;
+            maxAbsPdf = std::max(maxAbsPdf, std::abs(v));
+         }
+         const real_t fill = fillField->get(ix, iy, iz);
+         const walberla::id_t owningUid = particleFieldPtr->get(ix, iy, iz);
+
+         file << t << ',' << mpi::MPIManager::instance()->rank() << ','
+              << wx << ',' << wy << ',' << wz << ','
+              << flagStr << ',' << owningUid << ','
+              << rho << ',' << fill << ',' << maxAbsPdf << '\n';
+      }
+   }
+   // Flush every call (once per main step, not per cell), same crash-survivability rationale as
+   // FloaterHistoryLogger -- this run can WALBERLA_ABORT/MPI_ABORT at any point.
+   file.flush();
+}
+
+// [Claude, 2026-09-28] Per explicit request to investigate the sphere/cylinder/cuboid still-water
+// equilibrium position bias (settles consistently HIGHER -- less submerged -- than the naive
+// constant-density Archimedes target, growing with density ratio): logs EVERY cell (all flags, not
+// just OBST/INTF -- unlike logFluidBoxHistory above) along the full domain height at one fixed
+// world (x, y) column, once per MAIN step, to a per-rank CSV. Point of this: get the ACTUAL
+// far-field density profile rho(z), to check whether the settled fluid is hydrostatically
+// stratified under the gravity body force (weakly-compressible LBM: p = cs^2*rho, so rho should
+// decrease with height) rather than the uniform rho=1 the simple Archimedes target assumes -- and,
+// independently, to get a precise fill-level-based free-surface height instead of guessing at a
+// "waterline". Gated by ModelParameters.logDensityColumn (+ X/Y/StartStep/EndStep, SimulationParams.h).
+void logDensityColumn(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
+                      const std::string& baseFolder, const real_t columnX, const real_t columnY)
+{
+   static std::ofstream file;
+   static bool opened = false;
+   if (!opened)
+   {
+      const int rank = mpi::MPIManager::instance()->rank();
+      file.open(baseFolder + "/rank_" + std::to_string(rank) + ".csv", std::ios::out | std::ios::trunc);
+      WALBERLA_CHECK(file.is_open(), "[DensityColumn] failed to open CSV for rank " << rank
+         << " in \"" << baseFolder << "\" -- does the directory exist?");
+      file << "mainStep,rank,worldX,worldY,worldZ,flag,density,fill\n";
+      opened = true;
+   }
+
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto& aabb = blockIt->getAABB();
+      // Skip blocks that don't overlap the (x, y) column at all.
+      if (columnX < aabb.xMin() || columnX > aabb.xMax() ||
+          columnY < aabb.yMin() || columnY > aabb.yMax()) continue;
+
+      const auto* pdfField  = blockIt->getData< const PdfField_T  >(simObjs->pdfFieldID);
+      const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+
+      const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+      const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      const FlagUID formerMOuid("former moving obstacle");
+      const flag_t formerMOFlag = flagField->flagExists(formerMOuid) ? flagField->getFlag(formerMOuid) : flag_t(0);
+
+      const cell_idx_t ix = cell_idx_c(std::floor(columnX - aabb.xMin()));
+      const cell_idx_t iy = cell_idx_c(std::floor(columnY - aabb.yMin()));
+      if (ix < 0 || iy < 0 || ix >= cell_idx_c(pdfField->xSize()) || iy >= cell_idx_c(pdfField->ySize())) continue;
+
+      for (cell_idx_t iz = 0; iz < cell_idx_c(pdfField->zSize()); ++iz)
+      {
+         const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+
+         const flag_t fl = flagField->get(ix, iy, iz);
+         const bool isObstacle  = (fl & obstacleMask) != flag_t(0);
+         const bool isInterface = isFlagSet(fl, interfaceFlag);
+         const char* flagStr =
+            isObstacle  ? "OBST" :
+            isInterface ? "INTF" :
+            isFlagSet(fl, liquidFlag)                                  ? "LIQ" :
+            isFlagSet(fl, gasFlag)                                     ? "GAS" :
+            (formerMOFlag != flag_t(0) && isFlagSet(fl, formerMOFlag)) ? "fMO" : "???";
+
+         real_t rho = real_t(0);
+         for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f)
+            rho += pdfField->get(ix, iy, iz, f);
+         const real_t fill = fillField->get(ix, iy, iz);
+
+         file << t << ',' << mpi::MPIManager::instance()->rank() << ','
+              << columnX << ',' << columnY << ',' << wz << ','
+              << flagStr << ',' << rho << ',' << fill << '\n';
+      }
+   }
+   file.flush();
+}
+
+// [Claude, 2026-09-28] ModelParameters.logWaterHeight: fill-integrated free-surface height on a regular X x Y grid of
+// columns (see SimulationParams.h). Every rank appends, for each grid column its blocks intersect, the partial sum of
+// fill over its liquid+interface cells (obstacle/gas/former-MO cells contribute 0) plus the number of obstacle cells in
+// its part of the column. The analysis sums partialFillSum over ranks per (step, gx, gy).
+void logWaterHeights(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t, const std::string& baseFolder,
+                     const uint_t gridX, const uint_t gridY)
+{
+   static std::ofstream file;
+   static bool opened = false;
+   if (!opened)
+   {
+      const int rank = mpi::MPIManager::instance()->rank();
+      file.open(baseFolder + "/rank_" + std::to_string(rank) + ".csv", std::ios::out | std::ios::trunc);
+      WALBERLA_CHECK(file.is_open(), "[WaterHeight] failed to open CSV for rank " << rank << " in \"" << baseFolder << "\"");
+      file << "mainStep,rank,gx,gy,partialFillSum,nObstacleCells\n";
+      opened = true;
+   }
+   const auto domain = simObjs->blockForest->getDomain();
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto& aabb = blockIt->getAABB();
+      const auto* pdfField  = blockIt->getData< const PdfField_T >(simObjs->pdfFieldID);
+      const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      for (uint_t jy = 0; jy < gridY; ++jy)
+      for (uint_t jx = 0; jx < gridX; ++jx)
+      {
+         const real_t wx = (real_c(jx) + real_t(0.5)) * domain.xSize() / real_c(gridX);
+         const real_t wy = (real_c(jy) + real_t(0.5)) * domain.ySize() / real_c(gridY);
+         if (wx < aabb.xMin() || wx >= aabb.xMax() || wy < aabb.yMin() || wy >= aabb.yMax()) continue;
+         const cell_idx_t ix = cell_idx_c(std::floor(wx - aabb.xMin()));
+         const cell_idx_t iy = cell_idx_c(std::floor(wy - aabb.yMin()));
+         if (ix < 0 || iy < 0 || ix >= cell_idx_c(pdfField->xSize()) || iy >= cell_idx_c(pdfField->ySize())) continue;
+         real_t sum = real_t(0);
+         uint_t nObst = 0;
+         for (cell_idx_t iz = 0; iz < cell_idx_c(pdfField->zSize()); ++iz)
+         {
+            const flag_t fl = flagField->get(ix, iy, iz);
+            if ((fl & obstacleMask) != flag_t(0)) { ++nObst; continue; }
+            if (isFlagSet(fl, liquidFlag) || isFlagSet(fl, interfaceFlag)) sum += fillField->get(ix, iy, iz);
+         }
+         file << t << ',' << mpi::MPIManager::instance()->rank() << ',' << cell_idx_t(std::floor(wx)) << ',' << cell_idx_t(std::floor(wy))
+              << ',' << sum << ',' << nObst << '\n';
+      }
+   }
+   file.flush();
 }
 
 // Scan every liquid and interface cell on every local block for NaN/Inf PDFs.
@@ -1211,15 +1502,22 @@ void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs,
 bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
                  const char* const location, const uint_t t,
                  real_t lowRhoPrecursorThreshold = real_t(0),
-                 real_t highVelocityPrecursorThreshold = real_t(0))
+                 real_t highVelocityPrecursorThreshold = real_t(0),
+                 real_t populationPrecursorThreshold = real_t(0),
+                 real_t densityPrecursorLow = real_t(0), real_t densityPrecursorHigh = real_t(0), bool densityPrecursorLiquidOnly = false)
 {
    bool localNaN = false;
+   // density-window watcher state (see PhysicsParams::densityPrecursorLow/High)
+   const bool densityWatch = (densityPrecursorLow > real_t(0)) || (densityPrecursorHigh > real_t(0));
+   uint_t densNBelow = 0, densNAbove = 0; real_t densMin = std::numeric_limits< real_t >::max(), densMax = std::numeric_limits< real_t >::lowest();
+   std::string densFirst, densLowest, densHighest;
 
    for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
    {
       const auto* pdfField  = blockIt->getData< const PdfField_T >(simObjs->pdfFieldID);
       const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
       const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      const auto* particleFieldPtr = blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(simObjs->particleFieldID);
       const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
       const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
       const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
@@ -1315,6 +1613,88 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
             }
          }
 
+         // Density WINDOW watcher (PhysicsParams.densityPrecursorLow/High): rho = sum_i f_i outside [low, high]
+         if (densityWatch && (!densityPrecursorLiquidOnly || flagField->isFlagSet(ix, iy, iz, liquidFlag)))
+         {
+            real_t rhoW = real_t(0);
+            for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f) rhoW += pdfField->get(ix, iy, iz, f);
+            const bool below = densityPrecursorLow > real_t(0) && rhoW < densityPrecursorLow, above = densityPrecursorHigh > real_t(0) && rhoW > densityPrecursorHigh;
+            if (std::isfinite(rhoW) && (below || above))
+            {
+               densNBelow += below; densNAbove += above;
+               auto describe = [&]() {
+                  real_t maxAbs = real_t(0); for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f) { const real_t v = pdfField->get(ix, iy, iz, f); if (std::isfinite(v)) maxAbs = std::max(maxAbs, std::abs(v)); }
+                  uint_t pairs = 0, obst = 0, fmoN = 0, intfN = 0, gasN = 0; std::set< walberla::id_t > owners;
+                  for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+                  {
+                     if (dx == 0 && dy == 0 && dz == 0) continue;
+                     const flag_t fl = flagField->get(ix + dx, iy + dy, iz + dz); const bool o1 = (fl & obstacleMask) != flag_t(0);
+                     obst += o1; if (formerMOFlag != flag_t(0) && isFlagSet(fl, formerMOFlag)) ++fmoN; if (isFlagSet(fl, interfaceFlag)) ++intfN; if (isFlagSet(fl, gasFlag)) ++gasN;
+                     if (o1 && owners.size() < 4) owners.insert(particleFieldPtr->get(ix + dx, iy + dy, iz + dz));
+                     if (dz > 0 || (dz == 0 && dy > 0) || (dz == 0 && dy == 0 && dx > 0)) pairs += (o1 && ((flagField->get(ix - dx, iy - dy, iz - dz) & obstacleMask) != flag_t(0)));
+                  }
+                  std::ostringstream os;
+                  os << classify(ix, iy, iz) << " cell block-local=(" << ix << "," << iy << "," << iz << ") world=(" << aabb.xMin() + real_c(ix) + real_t(0.5) << "," << aabb.yMin() + real_c(iy) + real_t(0.5) << ","
+                     << aabb.zMin() + real_c(iz) + real_t(0.5) << ") rho=" << rhoW << " fill=" << fillField->get(ix, iy, iz) << " max|f|=" << maxAbs << " pinched pairs=" << pairs << "/13, obstacle neighbours=" << obst
+                     << "/26, fMO neighbours=" << fmoN << ", interface neighbours=" << intfN << ", gas neighbours=" << gasN << ", obstacle owners=[ ";
+                  for (const auto u : owners) os << u << " ";
+                  os << "]";
+                  return os.str();
+               };
+               if (densNBelow + densNAbove == uint_t(1)) densFirst = describe();
+               if (rhoW < densMin) { densMin = rhoW; densLowest = describe(); }
+               if (rhoW > densMax) { densMax = rhoW; densHighest = describe(); }
+            }
+         }
+
+         // Population PRECURSOR check (PhysicsParams.populationPrecursorThreshold, 0 = off): see that parameter's doc comment.
+         if (populationPrecursorThreshold > real_t(0))
+         {
+            real_t maxAbs = real_t(0); uint_t maxIdx = uint_t(0);
+            for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f)
+            {
+               const real_t v = pdfField->get(ix, iy, iz, f);
+               if (std::isfinite(v) && std::abs(v) > maxAbs) { maxAbs = std::abs(v); maxIdx = f; }
+            }
+            if (maxAbs > populationPrecursorThreshold)
+            {
+               static uint_t popPrecursorLogCount = uint_t(0);
+               if (popPrecursorLogCount < uint_t(40))
+               {
+                  ++popPrecursorLogCount;
+                  uint_t pinchedPairs = 0, obstNeighbours = 0;
+                  for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+                  {
+                     if (dx == 0 && dy == 0 && dz == 0) continue;
+                     const bool o1 = (flagField->get(ix + dx, iy + dy, iz + dz) & obstacleMask) != flag_t(0);
+                     obstNeighbours += o1;
+                     if (dz > 0 || (dz == 0 && dy > 0) || (dz == 0 && dy == 0 && dx > 0))
+                        pinchedPairs += (o1 && ((flagField->get(ix - dx, iy - dy, iz - dz) & obstacleMask) != flag_t(0)));
+                  }
+                  // recent-history / dynamics context of the neighbourhood: cells a rod has just LEFT (former moving obstacle), interface/gas neighbours, fastest neighbouring fluid cell, owners of the obstacle neighbours
+                  uint_t fmoNeighbours = 0, interfaceNeighbours = 0, gasNeighbours = 0; real_t maxNbrSpeed = real_t(0); std::set< walberla::id_t > owners;
+                  for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+                  {
+                     if (dx == 0 && dy == 0 && dz == 0) continue;
+                     const cell_idx_t cx = ix + dx, cy = iy + dy, cz = iz + dz; const flag_t fl = flagField->get(cx, cy, cz);
+                     if (formerMOFlag != flag_t(0) && isFlagSet(fl, formerMOFlag)) ++fmoNeighbours;
+                     if (isFlagSet(fl, interfaceFlag)) ++interfaceNeighbours;
+                     if (isFlagSet(fl, gasFlag)) ++gasNeighbours;
+                     if ((fl & obstacleMask) != flag_t(0)) { if (owners.size() < 4) owners.insert(particleFieldPtr->get(cx, cy, cz)); }
+                     else if (isFlagSet(fl, liquidFlag) || isFlagSet(fl, interfaceFlag)) { const real_t sp = pdfField->getVelocity(cx, cy, cz).length(); if (std::isfinite(sp)) maxNbrSpeed = std::max(maxNbrSpeed, sp); }
+                  }
+                  std::ostringstream ownerStr; for (const auto u : owners) ownerStr << u << " ";
+                  real_t rho = real_t(0); for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f) rho += pdfField->get(ix, iy, iz, f);
+                  const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5), wy = aabb.yMin() + real_c(iy) + real_t(0.5), wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+                  WALBERLA_LOG_WARNING("[POP-PRECURSOR t=" << t << " after=" << location << "] " << classify(ix, iy, iz) << " cell block-local=(" << ix << "," << iy << "," << iz
+                     << ") world=(" << wx << "," << wy << "," << wz << ") max|f|=" << maxAbs << " at f[" << maxIdx << "] (threshold=" << populationPrecursorThreshold << ") rho=" << rho
+                     << " fill=" << fillField->get(ix, iy, iz) << " | obstacle geometry: pinched opposite pairs=" << pinchedPairs << "/13, obstacle neighbours=" << obstNeighbours << "/26"
+                     << " | context: former-moving-obstacle neighbours=" << fmoNeighbours << ", interface neighbours=" << interfaceNeighbours << ", gas neighbours=" << gasNeighbours
+                     << ", fastest fluid neighbour |u|=" << maxNbrSpeed << ", obstacle owners (uids)=[ " << ownerStr.str() << "]");
+               }
+            }
+         }
+
          for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f)
          {
             const real_t val = pdfField->get(ix, iy, iz, f);
@@ -1351,6 +1731,77 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
             blockDone = true;
             break;
          }
+
+         // [Claude, 2026-09-24] VELOCITY-derived NaN check, distinct from the raw-PDF isfinite scan
+         // just above: getVelocity() = momentum/density. If a cell's individual PDFs are ALL
+         // technically finite (e.g. all exactly 0) but happen to sum to exactly zero density, the
+         // division produces 0/0 = NaN velocity WITHOUT any single f_i ever being non-finite -- the
+         // scan above cannot see this case at all. Found via mean-velocity chain-of-custody analysis
+         // (THESIS_PLAN.md, step-444 crash investigation): the ONLY consumer that ever sees the
+         // failure is Forcing.h's MeanVelocityComputer, which sums getVelocity() over every
+         // liquid/interface cell -- exactly the quantity checked here.
+         if (!blockDone)
+         {
+            const Vector3< real_t > velCheck = pdfField->getVelocity(ix, iy, iz);
+            if (!std::isfinite(velCheck[0]) || !std::isfinite(velCheck[1]) || !std::isfinite(velCheck[2]))
+            {
+               real_t rhoCheck = real_t(0);
+               for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f) rhoCheck += pdfField->get(ix, iy, iz, f);
+
+               const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+               const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+               const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+               WALBERLA_LOG_WARNING("[VEL-NaN-SCAN t=" << t << " after=" << location << "] FATAL fluid-cell velocity NaN "
+                  "(all raw PDFs individually finite -- this is a 0/0-in-getVelocity() case the plain PDF isfinite scan cannot see)"
+                  << " block-local=(" << ix << "," << iy << "," << iz << ")"
+                  << " world=(" << wx << "," << wy << "," << wz << ")"
+                  << " vel=" << velCheck << " rho=" << rhoCheck << " fill=" << fillField->get(ix, iy, iz)
+                  << " flag=" << classify(ix, iy, iz));
+
+               WALBERLA_LOG_WARNING("[VEL-NaN-SCAN t=" << t << "] 3x3x3 neighbourhood  [flag rho fill]:");
+               for (int ddz = -1; ddz <= 1; ++ddz)
+                  for (int ddy = -1; ddy <= 1; ++ddy)
+                  {
+                     std::ostringstream row;
+                     row << std::scientific << std::setprecision(3);
+                     for (int ddx = -1; ddx <= 1; ++ddx)
+                     {
+                        const cell_idx_t cx = ix + cell_idx_c(ddx);
+                        const cell_idx_t cy = iy + cell_idx_c(ddy);
+                        const cell_idx_t cz = iz + cell_idx_c(ddz);
+                        real_t r = real_t(0);
+                        for (uint_t ff = 0; ff < PdfField_T::Stencil::Size; ++ff) r += pdfField->get(cx, cy, cz, ff);
+                        row << "[" << classify(cx, cy, cz) << " " << r << " " << fillField->get(cx, cy, cz) << "]  ";
+                     }
+                     WALBERLA_LOG_WARNING("   dz=" << ddz << " dy=" << ddy << "  (dx=-1,0,+1):  " << row.str());
+                  }
+
+               localNaN  = true;
+               blockDone = true;
+            }
+         }
+      }
+   }
+
+   if (densityWatch)
+   {
+      if (densNBelow + densNAbove > uint_t(0))
+      {
+         static uint_t densLogCount = uint_t(0);
+         if (densLogCount < uint_t(60))
+         {
+            ++densLogCount;
+            WALBERLA_LOG_WARNING("[DENSITY-PRECURSOR t=" << t << " after=" << location << "] this rank: " << densNBelow << " cells with rho < " << densityPrecursorLow << ", " << densNAbove << " cells with rho > "
+               << densityPrecursorHigh << " | FIRST offending: " << densFirst << " | LOWEST: " << densLowest << " | HIGHEST: " << densHighest);
+         }
+      }
+      uint_t glob[2] = { densNBelow, densNAbove };
+      mpi::allReduceInplace(glob[0], mpi::SUM); mpi::allReduceInplace(glob[1], mpi::SUM);
+      if (glob[0] + glob[1] > uint_t(0))
+      {
+         static uint_t densRootCount = uint_t(0);
+         if (densRootCount < uint_t(400)) { ++densRootCount; WALBERLA_LOG_WARNING_ON_ROOT("[DENSITY-WINDOW t=" << t << " after=" << location << "] cells outside rho in [" << densityPrecursorLow << ", " << densityPrecursorHigh
+            << "] over all ranks: " << glob[0] << " below, " << glob[1] << " above" << (densityPrecursorLiquidOnly ? " (liquid cells only)" : " (liquid + interface cells)")); }
       }
    }
 
@@ -1358,6 +1809,225 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
    uint_t globalNaN = localNaN ? uint_t(1) : uint_t(0);
    mpi::allReduceInplace< uint_t >(globalNaN, mpi::SUM);
    return globalNaN > uint_t(0);
+}
+
+// [Claude, 2026-09-25] Narrow, reactive safety net for the hopper-clogging collide-stage NaN
+// (THESIS_PLAN.md): the confirmed root cause is that an obstacle-flagged cell's PDF array can end up
+// reading as genuinely all-zero -- streamReconstructAdvect never writes PDFs for obstacle cells at all
+// (only carries the fill level forward), and the internal FieldClone scratch buffer that sweep ping-
+// pongs with the real field is created via cloneUninitialized() (never explicitly initialised, unlike
+// the real field's own equilibrium fill at setup) -- so a component that is never independently
+// refreshed by SimpleBB's per-link bounce-back (i.e. one facing another obstacle cell, not real fluid)
+// can be sitting on genuinely untouched memory, which reads back as exactly 0.0. collide then computes
+// m_000=0 -> xi_0=1/m_000=inf -> every downstream cumulant collapses to NaN. Confirmed directly via a
+// raw in-kernel diagnostic reading collide's own _data_pdfs[...] pointer arithmetic (job 4266339).
+//
+// Unlike checkPdfNaN above (which only scans liquid/interface cells and aborts), this scans OBSTACLE
+// cells specifically and REPAIRS a degenerate one in place -- resetting it to the D3Q27 rest-equilibrium
+// distribution (rho=1, u=0; the same weights every ordinary near-equilibrium cell in this codebase's own
+// logs already shows: w0=8/27, w[1-6]=2/27, w[7-18]=1/54, w[19-26]=1/216) -- since nothing downstream
+// ever reads an obstacle cell's own stored PDF value except collide itself: SimpleBB::treatDirection
+// only reads the FLUID-side cell's PDF (never the obstacle cell's own, confirmed from source);
+// PdfReconstructionManager's seedConvertedCellFill derives fill from neighbour averaging, not this
+// cell's frozen history; MovingParticleMapping's transition code never reads or writes pdfField at all.
+// Only touches a cell that is ALREADY non-finite or non-positive -- the vast majority of obstacle
+// cells (including ones actively receiving legitimate SimpleBB bounce-back writes every step) are never
+// modified. Returns the number of cells repaired on this rank (for logging by the caller).
+inline uint_t repairDegenerateObstacleCells(const std::shared_ptr< SimulationObjects >& simObjs, const char* const location, const uint_t t)
+{
+   uint_t totalRepaired = 0;
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      auto* pdfField         = blockIt->getData< PdfField_T >(simObjs->pdfFieldID);
+      const auto* flagField  = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto obstacleMask = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      const auto& aabb = blockIt->getAABB();
+
+      for (cell_idx_t iz = 0; iz < cell_idx_c(pdfField->zSize()); ++iz)
+      for (cell_idx_t iy = 0; iy < cell_idx_c(pdfField->ySize()); ++iy)
+      for (cell_idx_t ix = 0; ix < cell_idx_c(pdfField->xSize()); ++ix)
+      {
+         if ((flagField->get(ix, iy, iz) & obstacleMask) == flag_t(0)) continue; // not an obstacle cell -- untouched
+
+         real_t rho = real_t(0);
+         for (uint_t q = 0; q < PdfField_T::Stencil::Size; ++q) rho += pdfField->get(ix, iy, iz, q);
+
+         if (std::isfinite(rho) && rho > real_t(0)) continue; // healthy -- leave completely alone
+
+         static uint_t repairLogCount = uint_t(0);
+         ++repairLogCount;
+         if (repairLogCount <= uint_t(20) || (repairLogCount % uint_t(5000) == uint_t(0)))
+         {
+            const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
+            const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
+            const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
+            WALBERLA_LOG_WARNING("[OBSTACLE-CELL-REPAIR] (#" << repairLogCount << ") t=" << t << " after=" << location
+               << " block-local=(" << ix << "," << iy << "," << iz << ") world=(" << wx << "," << wy << "," << wz
+               << ") had rho=" << rho << " -- resetting to rest equilibrium (rho=1, u=0)");
+         }
+
+         pdfField->get(ix, iy, iz, uint_t(0)) = real_t(8.0 / 27.0);
+         for (uint_t q = uint_t(1); q <= uint_t(6);  ++q) pdfField->get(ix, iy, iz, q) = real_t(2.0 / 27.0);
+         for (uint_t q = uint_t(7); q <= uint_t(18); ++q) pdfField->get(ix, iy, iz, q) = real_t(1.0 / 54.0);
+         for (uint_t q = uint_t(19); q <= uint_t(26); ++q) pdfField->get(ix, iy, iz, q) = real_t(1.0 / 216.0);
+
+         ++totalRepaired;
+      }
+   }
+   return totalRepaired;
+}
+
+// FLUID SANITY SWEEP (PhysicsParams::fluidSanity*): per-step range check of every LIQUID/INTERFACE cell (gas, obstacle, former-moving-obstacle and boundary cells are never checked; fluidSanityLiquidOnly also drops the interface
+// cells), see the parameters' doc comment (SimulationParams.h). Returns the GLOBAL number of violating cells.
+// Log throttling: the first 30 violating steps are always printed, afterwards only steps whose count at least doubles vs. the last printed one (or every 100th step), so a benign steady-state violation cannot fill the budget
+// and hide the escalation.
+inline bool fluidSanityShouldLog(uint_t& printed, uint_t& lastCount, const uint_t count, const uint_t t, const uint_t cap)
+{
+   if (printed >= cap) return false;
+   if (printed < uint_t(30) || count >= uint_t(2) * lastCount || t % uint_t(100) == uint_t(0)) { ++printed; lastCount = count; return true; }
+   return false;
+}
+
+inline uint_t fluidSanitySweep(const std::shared_ptr< SimulationObjects >& simObjs, const std::shared_ptr< const SimulationParams >& simParams, const uint_t t)
+{
+   const auto& P = simParams->physics;
+   struct Cat { uint_t nonFinite = 0, rhoLow = 0, rhoHigh = 0, velHigh = 0, popHigh = 0, fillBad = 0, excess = 0, velJump = 0, rhoJump = 0, topology = 0; } cat;
+   uint_t violating = 0, checked = 0;
+   real_t rhoMin = std::numeric_limits< real_t >::max(), uMax = real_t(0), fMax = real_t(0);            // among violating cells
+   real_t sRhoMin = std::numeric_limits< real_t >::max(), sRhoMax = std::numeric_limits< real_t >::lowest(), sUMax = real_t(0), sFMax = real_t(0), sFillMin = std::numeric_limits< real_t >::max(), sFillMax = std::numeric_limits< real_t >::lowest();
+   std::string first, lowest, fastest, biggest, statsFastest;
+   const bool doJumps = P.fluidSanityMaxNeighbourVelocityJump > real_t(0) || P.fluidSanityMaxNeighbourDensityJump > real_t(0);
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto* pdfField   = blockIt->getData< const PdfField_T >(simObjs->pdfFieldID);
+      const auto* flagField  = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField  = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      const auto* excessField = blockIt->getData< const ScalarField_T >(simObjs->excessMassFieldID);
+      const auto* particleFieldPtr = blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(simObjs->particleFieldID);
+      const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+      const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      const FlagUID formerMOuid("former moving obstacle");
+      const flag_t formerMOFlag = flagField->flagExists(formerMOuid) ? flagField->getFlag(formerMOuid) : flag_t(0);
+      const auto& aabb = blockIt->getAABB();
+      const cell_idx_t nx = cell_idx_c(pdfField->xSize()), ny = cell_idx_c(pdfField->ySize()), nz = cell_idx_c(pdfField->zSize());
+      auto klass = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) -> const char* {
+         const flag_t fl = flagField->get(cx, cy, cz);
+         if ((fl & obstacleMask) != flag_t(0)) return "OBST"; if (isFlagSet(fl, interfaceFlag)) return "INTF"; if (isFlagSet(fl, liquidFlag)) return "LIQ"; if (isFlagSet(fl, gasFlag)) return "GAS";
+         if (formerMOFlag != flag_t(0) && isFlagSet(fl, formerMOFlag)) return "fMO"; return "???"; };
+      auto describe = [&](cell_idx_t ix, cell_idx_t iy, cell_idx_t iz, real_t rho, real_t maxF, real_t speed) {
+         uint_t pairs = 0, obst = 0, fmoN = 0, intfN = 0, gasN = 0; std::set< walberla::id_t > owners;
+         for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
+         {
+            if (dx == 0 && dy == 0 && dz == 0) continue;
+            const flag_t fl = flagField->get(ix + dx, iy + dy, iz + dz); const bool o1 = (fl & obstacleMask) != flag_t(0);
+            obst += o1; if (formerMOFlag != flag_t(0) && isFlagSet(fl, formerMOFlag)) ++fmoN; if (isFlagSet(fl, interfaceFlag)) ++intfN; if (isFlagSet(fl, gasFlag)) ++gasN;
+            if (o1 && owners.size() < 4) owners.insert(particleFieldPtr->get(ix + dx, iy + dy, iz + dz));
+            if (dz > 0 || (dz == 0 && dy > 0) || (dz == 0 && dy == 0 && dx > 0)) pairs += (o1 && ((flagField->get(ix - dx, iy - dy, iz - dz) & obstacleMask) != flag_t(0)));
+         }
+         std::ostringstream os;
+         os << klass(ix, iy, iz) << " block-local=(" << ix << "," << iy << "," << iz << ") world=(" << aabb.xMin() + real_c(ix) + real_t(0.5) << "," << aabb.yMin() + real_c(iy) + real_t(0.5) << ","
+            << aabb.zMin() + real_c(iz) + real_t(0.5) << ") rho=" << rho << " fill=" << fillField->get(ix, iy, iz) << " excessMass=" << excessField->get(ix, iy, iz) << " max|f|=" << maxF << " |u|=" << speed
+            << " pinched pairs=" << pairs << "/13, obstacle nbrs=" << obst << "/26, fMO nbrs=" << fmoN << ", interface nbrs=" << intfN << ", gas nbrs=" << gasN << ", owners=[ ";
+         for (const auto u : owners) os << u << " ";
+         os << "]"; return os.str(); };
+      // pass 1: moments of every checked (liquid / interface) cell of this block's interior
+      const uint_t nCells = uint_c(nx) * uint_c(ny) * uint_c(nz);
+      std::vector< uint8_t > isChecked(nCells, uint8_t(0));
+      std::vector< real_t > rhoV(nCells, real_t(0)), maxFV(nCells, real_t(0));
+      std::vector< Vector3< real_t > > uV(nCells, Vector3< real_t >(real_t(0)));
+      std::vector< uint8_t > finiteV(nCells, uint8_t(1));
+      auto idx = [&](cell_idx_t ix, cell_idx_t iy, cell_idx_t iz) { return (uint_c(iz) * uint_c(ny) + uint_c(iy)) * uint_c(nx) + uint_c(ix); };
+      for (cell_idx_t iz = 0; iz < nz; ++iz) for (cell_idx_t iy = 0; iy < ny; ++iy) for (cell_idx_t ix = 0; ix < nx; ++ix)
+      {
+         const bool isLiquid = flagField->isFlagSet(ix, iy, iz, liquidFlag), isInterface = flagField->isFlagSet(ix, iy, iz, interfaceFlag);
+         if (!isLiquid && !(isInterface && !P.fluidSanityLiquidOnly)) continue;
+         const uint_t c = idx(ix, iy, iz);
+         isChecked[c] = uint8_t(1); ++checked;
+         real_t rho = real_t(0), maxF = real_t(0); bool finite = true;
+         for (uint_t f = 0; f < PdfField_T::Stencil::Size; ++f) { const real_t v = pdfField->get(ix, iy, iz, f); rho += v; if (!std::isfinite(v)) finite = false; else maxF = std::max(maxF, std::abs(v)); }
+         rhoV[c] = rho; maxFV[c] = maxF; finiteV[c] = uint8_t(finite);
+         if (finite) uV[c] = pdfField->getVelocity(ix, iy, iz);
+      }
+      // pass 2: checks
+      for (cell_idx_t iz = 0; iz < nz; ++iz) for (cell_idx_t iy = 0; iy < ny; ++iy) for (cell_idx_t ix = 0; ix < nx; ++ix)
+      {
+         const uint_t c = idx(ix, iy, iz);
+         if (!isChecked[c]) continue;
+         const bool isInterface = flagField->isFlagSet(ix, iy, iz, interfaceFlag);
+         const real_t rho = rhoV[c], maxF = maxFV[c], speed = finiteV[c] ? uV[c].length() : real_t(0);
+         const real_t fill = fillField->get(ix, iy, iz), excess = excessField->get(ix, iy, iz), tol = P.fluidSanityFillTolerance;
+         if (finiteV[c] && std::isfinite(rho)) { sRhoMin = std::min(sRhoMin, rho); sRhoMax = std::max(sRhoMax, rho); sFMax = std::max(sFMax, maxF); }
+         if (std::isfinite(fill)) { sFillMin = std::min(sFillMin, fill); sFillMax = std::max(sFillMax, fill); }
+         if (finiteV[c] && std::isfinite(speed) && speed > sUMax) { sUMax = speed; if (P.fluidSanityStatsEveryNSteps > uint_t(0)) statsFastest = describe(ix, iy, iz, rho, maxF, speed); }
+         bool bad = false;
+         if (!finiteV[c] || !std::isfinite(rho) || !std::isfinite(speed) || !std::isfinite(fill) || !std::isfinite(excess)) { ++cat.nonFinite; bad = true; }
+         else
+         {
+            if (P.fluidSanityDensityMin > real_t(0) && rho < P.fluidSanityDensityMin) { ++cat.rhoLow; bad = true; }
+            if (P.fluidSanityDensityMax > real_t(0) && rho > P.fluidSanityDensityMax) { ++cat.rhoHigh; bad = true; }
+            if (P.fluidSanityMaxVelocity > real_t(0) && speed > P.fluidSanityMaxVelocity) { ++cat.velHigh; bad = true; }
+            if (P.fluidSanityMaxPopulation > real_t(0) && maxF > P.fluidSanityMaxPopulation) { ++cat.popHigh; bad = true; }
+            if (tol >= real_t(0) && (isInterface ? (fill < -tol || fill > real_t(1) + tol) : (fill < real_t(1) - tol || fill > real_t(1) + tol))) { ++cat.fillBad; bad = true; }
+            if (P.fluidSanityMaxExcessMass > real_t(0) && std::abs(excess) > P.fluidSanityMaxExcessMass) { ++cat.excess; bad = true; }
+            if (doJumps)
+            {   // largest jump to a checked (liquid/interface) FACE neighbour inside this block (block-boundary faces are skipped: the ghost-layer PDFs are one half-step older than the interior)
+               real_t dU = real_t(0), dRho = real_t(0);
+               static const int nb[6][3] = { { -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 } };
+               for (const auto& d : nb)
+               {
+                  const cell_idx_t jx = ix + d[0], jy = iy + d[1], jz = iz + d[2];
+                  if (jx < 0 || jy < 0 || jz < 0 || jx >= nx || jy >= ny || jz >= nz) continue;
+                  const uint_t n = idx(jx, jy, jz);
+                  if (!isChecked[n] || !finiteV[n]) continue;
+                  dU = std::max(dU, (uV[n] - uV[c]).length()); dRho = std::max(dRho, std::abs(rhoV[n] - rho));
+               }
+               if (P.fluidSanityMaxNeighbourVelocityJump > real_t(0) && dU > P.fluidSanityMaxNeighbourVelocityJump) { ++cat.velJump; bad = true; }
+               if (P.fluidSanityMaxNeighbourDensityJump > real_t(0) && dRho > P.fluidSanityMaxNeighbourDensityJump) { ++cat.rhoJump; bad = true; }
+            }
+         }
+         if (P.fluidSanityCheckTopology && !isInterface)
+         {   // a LIQUID cell must not touch a gas cell (the interface layer is one cell thick over the full D3Q27 stencil)
+            bool touchesGas = false;
+            for (int dz = -1; dz <= 1 && !touchesGas; ++dz) for (int dy = -1; dy <= 1 && !touchesGas; ++dy) for (int dx = -1; dx <= 1 && !touchesGas; ++dx)
+               if ((dx != 0 || dy != 0 || dz != 0) && flagField->isFlagSet(ix + dx, iy + dy, iz + dz, gasFlag)) touchesGas = true;
+            if (touchesGas) { ++cat.topology; bad = true; }
+         }
+         if (!bad) continue;
+         ++violating;
+         if (violating == uint_t(1)) first = describe(ix, iy, iz, rho, maxF, speed);
+         if (std::isfinite(rho) && rho < rhoMin) { rhoMin = rho; lowest = describe(ix, iy, iz, rho, maxF, speed); }
+         if (std::isfinite(speed) && speed > uMax) { uMax = speed; fastest = describe(ix, iy, iz, rho, maxF, speed); }
+         if (maxF > fMax) { fMax = maxF; biggest = describe(ix, iy, iz, rho, maxF, speed); }
+      }
+   }
+   static uint_t rankPrinted = uint_t(0), rankLast = uint_t(0), rootPrinted = uint_t(0), rootLast = uint_t(0);
+   if (violating > uint_t(0) && fluidSanityShouldLog(rankPrinted, rankLast, violating, t, uint_t(400)))
+      WALBERLA_LOG_WARNING("[FLUID-SANITY t=" << t << "] this rank: " << violating << " of " << checked << " checked cells violate the ranges (non-finite " << cat.nonFinite << ", rho<" << P.fluidSanityDensityMin << " " << cat.rhoLow
+         << ", rho>" << P.fluidSanityDensityMax << " " << cat.rhoHigh << ", |u|>" << P.fluidSanityMaxVelocity << " " << cat.velHigh << ", max|f|>" << P.fluidSanityMaxPopulation << " " << cat.popHigh << ", fill " << cat.fillBad
+         << ", |excess|>" << P.fluidSanityMaxExcessMass << " " << cat.excess << ", face-nbr |du|>" << P.fluidSanityMaxNeighbourVelocityJump << " " << cat.velJump << ", face-nbr |drho|>" << P.fluidSanityMaxNeighbourDensityJump << " " << cat.rhoJump
+         << ", liquid touching gas " << cat.topology << ") | FIRST: " << first << " | LOWEST rho: " << lowest << " | FASTEST: " << fastest << " | LARGEST |f|: " << biggest);
+   uint_t g[11] = { violating, cat.nonFinite, cat.rhoLow, cat.rhoHigh, cat.velHigh, cat.popHigh, cat.fillBad, cat.excess, cat.velJump, cat.rhoJump, cat.topology };
+   for (int i = 0; i < 11; ++i) mpi::allReduceInplace(g[i], mpi::SUM);
+   if (g[0] > uint_t(0) && fluidSanityShouldLog(rootPrinted, rootLast, g[0], t, uint_t(2000)))
+      WALBERLA_LOG_WARNING_ON_ROOT("[FLUID-SANITY-SUMMARY t=" << t << "] " << g[0] << " violating cells over all ranks: non-finite " << g[1] << ", rho<" << P.fluidSanityDensityMin << " " << g[2]
+         << ", rho>" << P.fluidSanityDensityMax << " " << g[3] << ", |u|>" << P.fluidSanityMaxVelocity << " " << g[4] << ", max|f|>" << P.fluidSanityMaxPopulation << " " << g[5] << ", fill outside range " << g[6]
+         << ", |excess|>" << P.fluidSanityMaxExcessMass << " " << g[7] << ", face-nbr |du|>" << P.fluidSanityMaxNeighbourVelocityJump << " " << g[8] << ", face-nbr |drho|>" << P.fluidSanityMaxNeighbourDensityJump << " " << g[9]
+         << ", liquid touching gas " << g[10]);
+   if (g[0] > uint_t(0) && P.fluidSanityAbortAbove > uint_t(0) && g[0] > P.fluidSanityAbortAbove)
+      WALBERLA_ABORT("[FLUID-SANITY] aborting at t=" << t << ": " << g[0] << " violating cells > fluidSanityAbortAbove=" << P.fluidSanityAbortAbove);
+   // global extrema time series (independent of violations): lets the growth of max|u| / rho excursions be read off BEFORE a threshold is crossed
+   if (P.fluidSanityStatsEveryNSteps > uint_t(0) && t % P.fluidSanityStatsEveryNSteps == uint_t(0))
+   {
+      uint_t nChecked = checked; mpi::allReduceInplace(nChecked, mpi::SUM);
+      real_t gRhoMin = sRhoMin, gRhoMax = sRhoMax, gU = sUMax, gF = sFMax, gFillMin = sFillMin, gFillMax = sFillMax;
+      mpi::allReduceInplace(gRhoMin, mpi::MIN); mpi::allReduceInplace(gRhoMax, mpi::MAX); mpi::allReduceInplace(gU, mpi::MAX); mpi::allReduceInplace(gF, mpi::MAX);
+      mpi::allReduceInplace(gFillMin, mpi::MIN); mpi::allReduceInplace(gFillMax, mpi::MAX);
+      WALBERLA_LOG_INFO_ON_ROOT("[FLUID-STATS t=" << t << "] checked cells " << nChecked << ", rho [" << gRhoMin << ", " << gRhoMax << "], max|u| " << gU << ", max|f_i| " << gF << ", fill [" << gFillMin << ", " << gFillMax << "]");
+      if (sUMax >= gU && gU > real_t(0)) WALBERLA_LOG_INFO("[FLUID-STATS t=" << t << "] fastest cell: " << statsFastest);
+   }
+   return g[0];
 }
 
 // TEMPORARY DIAGNOSTIC (THESIS_PLAN.md item 1a, R3 equilibrium fresh-run NaN crash) -- checkPdfNaN

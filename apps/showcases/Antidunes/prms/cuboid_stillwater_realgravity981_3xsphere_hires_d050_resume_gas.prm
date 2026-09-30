@@ -1,0 +1,187 @@
+// cuboid_stillwater_realgravity981_3xsphere_hires_d050_resume_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-18] PRODUCTION RESUME-TO-COMPLETION for job 4240983's own crash (quaternion-
+// normalization assertion, step ~91960/100000, preceded by [DRY-LINK] non-finite pdf_old at cell
+// (2,0,10) local from step 91739 -- see THESIS_PLAN.md item 3's 2026-09-15 through 2026-09-18
+// entries for the full root-cause investigation).
+//
+// Extensive diagnosis (single-shot dense-NaN-scan resume, job 4242078, plus a 6x-repeat resume on a
+// second node allocation, job 4243270 -- 7 independent attempts total, all from this exact t=90000
+// checkpoint) found ZERO reproductions of the crash: every attempt ran the full 91000-92500 scan
+// window (540 steps past the original crash point) with zero precursor firings and zero NaN. The
+// checkpoint-resume path was investigated in detail and found to differ from continuous execution in
+// one confirmed way (initFlagsFromFillLevel()'s flag reclassification bypasses the near-boundary
+// bookkeeping that continuous per-step evolution maintains via CellConversionSweep) and checked
+// against a second, already-fixed bug in this same codebase (isDomain()-unset zero-cell-mapping on
+// resume, THESIS_PLAN.md 2026-09-15 entries) that is confirmed NOT the explanation here (that fix is
+// already unconditional in the current SetupStages.h). Net conclusion: no confirmed mechanism for why
+// resume avoids the crash, but 7/7 clean is itself a real (if imperfect) empirical signal, and the
+// root cause remains genuinely unresolved -- this file does NOT claim to have fixed anything.
+//
+// Given that, per explicit request: this resumes the SAME t=90000 checkpoint through to the ORIGINAL
+// production target (timesteps=100000) as a normal completion run, WITHOUT the diagnostic
+// verbosity (no denseNanScanEnabled/precursor thresholds, no extra density/mapped_flag VTK writers) --
+// i.e. byte-for-byte identical to the original production file
+// (cuboid_stillwater_realgravity981_3xsphere_hires_gas.prm) except loadSnapshot=true instead of
+// false. If this crashes again, that is itself informative (a genuine, if elusive, instability); if
+// it completes, this becomes the accepted d050 equilibrium result, with the open root-cause question
+// documented in THESIS_PLAN.md as a known limitation rather than silently forgotten.
+//
+// SAFETY: the t=90000 checkpoint (build/apps/showcases/Antidunes/snapshots/) has been backed up to
+// $HPCVAULT/antidunes-archive/d050_t90000_checkpoint_backup_20260918/ before this run, since
+// storeSnapshot=true here will naturally advance/overwrite the live snapshots/ directory as this run
+// progresses, and that checkpoint has been central to the entire investigation above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 17, 42, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  true;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <119, 168, 150>;
+   wavePeriods        1;
+   liquidHeightFactor 9.9681;
+   floorHeightFactor  0.01;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              100000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;         // keep physical constants valid while U = 0; viscosity=0.000214026 fixed
+   gravityOverride        2.6596472613474883e-05;  // solved for g_SI = 9.81 m/s^2 at this resolution's dx_SI/dt_SI (see header)
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 3;   // scaling-math lever only (useParticleBed false) -- see sphere sibling's header
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // densityRatio 0.5 -> Archimedes equilibrium: 50% submerged.
+      position             < 59.5, 84, 75 >;
+      halfExtents          < 18.59375, 37.1875, 18.59375 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+      initialTiltAngleDeg  5;
+      comOffsetZ           0;
+      pinPosition          false;   // fully free
+      pinRotation          false;   // fully free
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       20000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+      }
+
+      CellBB_filter_0 { min < 0, 84, 0 >;   max < 119, 85, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;    max < 1, 168, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;    max < 119, 168, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

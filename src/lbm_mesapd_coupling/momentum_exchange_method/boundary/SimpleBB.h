@@ -29,6 +29,10 @@
 #include "core/debug/Debug.h"
 #include "core/logging/all.h"
 
+#include <limits>
+#include <sstream>
+#include <string>
+
 #include "field/FlagField.h"
 
 #include "lbm/field/PdfField.h"
@@ -37,6 +41,8 @@
 #include "lbm_mesapd_coupling/utility/ParticleFunctions.h"
 
 #include "mesa_pd/common/ParticleFunctions.h"
+#include "mesa_pd/common/RayParticleIntersection.h"
+#include "mesa_pd/kernel/SingleCast.h"
 #include "mesa_pd/data/IAccessor.h"
 
 #include "core/mpi/MPIManager.h"
@@ -78,7 +84,8 @@ public:
                     ParticleField_T * const particleField, const shared_ptr<ParticleAccessor_T>& ac,
                     const flag_t domain, const StructuredBlockStorage & blockStorage, const IBlock & block,
                     std::function<real_t(const Vector3<real_t>&)> hydrostaticDensityFct = nullptr,
-                    std::function<real_t(const Cell&)> fillLevelFct = nullptr );
+                    std::function<real_t(const Cell&)> fillLevelFct = nullptr,
+                    bool useInterpolatedBounceBack = false );
 
    void pushFlags( std::vector< FlagUID >& uids ) const { uids.push_back( uid_ ); }
 
@@ -128,6 +135,12 @@ private:
    real_t lengthScalingFactor_;
    real_t forceScalingFactor_;
 
+   // [Claude, 2026-09-21] OPTIONAL interpolated bounce-back (default OFF = plain simple bounce-back, unchanged behaviour). true: every link whose FURTHER fluid cell x_ff = x - c_i is a liquid/interface cell
+   // uses the CLI scheme of Ginzburg, d'Humieres & Verhaeghe (2008), Eq. 4.1 / Tables 3-4 (identical to lbm_mesapd_coupling::CurvedLinear) with the exact wall distance delta from a ray-particle
+   // intersection (analytic for spheres, bisection for every other shape, e.g. boxes and cylinders); all other links (no second fluid cell, non-finite PDFs, inconsistent ray) fall back to simple bounce-back.
+   // delta = 1/2 reproduces simple bounce-back exactly (kappa0 = 0, alpha = 2). The force computation below is unchanged (uses the post-treatment pdf_new).
+   bool useInterpolatedBounceBack_;
+
 }; // class SimpleBB
 
 
@@ -136,9 +149,10 @@ inline SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::SimpleBB( co
                                                                               ParticleField_T * const particleField, const shared_ptr<ParticleAccessor_T>& ac,
                                                                               const flag_t domain, const StructuredBlockStorage & blockStorage, const IBlock & block,
                                                                               std::function<real_t(const Vector3<real_t>&)> hydrostaticDensityFct,
-                                                                              std::function<real_t(const Cell&)> fillLevelFct):
+                                                                              std::function<real_t(const Cell&)> fillLevelFct,
+                                                                              bool useInterpolatedBounceBack):
 Boundary<flag_t>( boundaryUID ), uid_( uid ), pdfField_( pdfField ), flagField_( flagField ), particleField_( particleField ), ac_( ac ), domainMask_(domain),
-blockStorage_( blockStorage ), block_( block ), hydrostaticDensityFct_(hydrostaticDensityFct), fillLevelFct_(fillLevelFct)
+blockStorage_( blockStorage ), block_( block ), hydrostaticDensityFct_(hydrostaticDensityFct), fillLevelFct_(fillLevelFct), useInterpolatedBounceBack_(useInterpolatedBounceBack)
 {
    WALBERLA_ASSERT_NOT_NULLPTR( pdfField_ );
    WALBERLA_ASSERT_NOT_NULLPTR( flagField_ );
@@ -202,10 +216,60 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
       return;
    }
 
-   // apply bounce back scheme
-   const real_t delta = real_c( 0.5 );
+   // [Claude, 2026-09-25] PROMOTED from diagnostic-only to an active guard (THESIS_PLAN.md, hopper
+   // pinched-cell investigation): a FINITE but absurd single population (job 4251049: raw hydro force
+   // -4.6e21 on a rod, i.e. one link with |pdf| ~ 2e21; also directly observed jobs 4266507/4266539: a
+   // pinched liquid cell between two rods with net density looking only mildly off, e.g. rho=8.52 or
+   // rho=-1.12, while its INDIVIDUAL populations had already exploded to ~1e10 or ~1e2-1e5 respectively
+   // -- density is a SUM and can hide this entirely) used to pass the finite-check above and get fed
+   // straight into the momentum exchange (forceMEM = pdf_old + pdf_new), directly launching the particle
+   // to an absurd velocity within a few DEM sub-cycles (confirmed: MEM-GARBAGE-LINK immediately preceded
+   // SUBCYCLE-LEFT-RANK/GHOST-VANISHED/cascading deep contacts with neighbouring particles in both jobs).
+   // Since forceMEM reads pdf_old directly and unconditionally -- no averaging or density-weighting
+   // dilutes a single bad component -- skip the link entirely here, exactly like the dry-link (non-
+   // finite) guard above: this cell's fluid-side data cannot be trusted for momentum exchange, so this
+   // link contributes zero force/momentum this step rather than corrupting the particle. PDFs are
+   // O(0.01..0.3) in lattice units in ordinary operation (zero-centred deviation O(1e-3)); 10 is
+   // already comfortably above any physically plausible value and matches this diagnostic's own
+   // pre-existing threshold (in place since 2026-09-20, only now actually acted upon).
+   if( std::abs(pdf_old_raw) > real_c(10) )
+   {
+      static uint_t garbageLinkLogCount = uint_t(0);
+      if( garbageLinkLogCount < uint_t(40) )
+      {
+         ++garbageLinkLogCount;
+         auto flagNames = [&](const cell_idx_t cx, const cell_idx_t cy, const cell_idx_t cz) {
+            std::string out;
+            const auto fl = flagField_->get(cx, cy, cz);
+            for( const char* name : { "liquid", "interface", "gas", "former moving obstacle", "convert to liquid", "convert to gas", "convert to interface for gas neighbors",
+                                      "convert to interface for liquid neighbors", "keep interface", "moving obstacle", "obstacle", "noSlip", "freeSlip", "ubb", "pressure" } ) {
+               const field::FlagUID fuid(name);
+               if( flagField_->flagExists(fuid) && field::isFlagSet(fl, flagField_->getFlag(fuid)) ) { if( !out.empty() ) out += "|"; out += name; }
+            }
+            return out.empty() ? std::string("rawFlag=") + std::to_string(uint_t(fl)) : out;
+         };
+         std::ostringstream pdfs;
+         for( uint_t q = 0; q < Stencil_T::Size; ++q ) pdfs << (q ? "," : "") << pdfField_->get(x, y, z, q);
+         std::ostringstream nb;
+         for( cell_idx_t dz = -1; dz <= 1; ++dz ) for( cell_idx_t dy = -1; dy <= 1; ++dy ) for( cell_idx_t dx = -1; dx <= 1; ++dx )
+            if( dx || dy || dz ) { const cell_idx_t cx = x + dx, cy = y + dy, cz = z + dz;
+               if( pdfField_->xyzSizeWithGhostLayer().contains(cx, cy, cz) ) nb << " (" << dx << "," << dy << "," << dz << "):" << flagNames(cx, cy, cz); }
+         const real_t fillHere = fillLevelFct_ ? fillLevelFct_(Cell(x, y, z)) : std::numeric_limits< real_t >::quiet_NaN();
+         WALBERLA_LOG_WARNING("[MEM-GARBAGE-LINK] particle uid=" << particleField_->get(nx, ny, nz) << " fluid cell block-local (" << x << "," << y << "," << z << ") flags=[" << flagNames(x, y, z)
+            << "] fill=" << fillHere << " density=" << pdfField_->getDensity(x, y, z) << " | obstacle cell (" << nx << "," << ny << "," << nz << ") flags=[" << flagNames(nx, ny, nz)
+            << "] dir=" << uint_t(dir) << " pdf_old(dir)=" << pdf_old_raw << " | all populations of the fluid cell: " << pdfs.str() << " | neighbour flags:" << nb.str()
+            << " -- SKIPPING this link (no momentum exchange contributed) rather than feeding this value into forceMEM.");
+      }
+      // Skip the link entirely, same reasoning/pattern as the dry-link (non-finite) guard above: this
+      // fluid cell's data along this direction cannot be trusted, so contribute no momentum exchange
+      // from it this step instead of launching the particle via a corrupted force.
+      return;
+   }
+
+   // apply bounce back scheme (simple bounce-back by default; optionally overwritten by the interpolated variant below)
+   real_t delta = real_c( 0.5 );
    real_t pdf_new = pdf_old;
-   const real_t alpha = real_c(2);
+   real_t alpha = real_c(2);
 
    // get coordinates of fluid cell center
    Cell nearBoundaryCell(x,y,z);
@@ -247,6 +311,17 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
    // desync itself is caught at its source, with full diagnostic context, instead of manifesting
    // steps later as an unexplained force/velocity blowup.
    if( particleIdx == ac_->getInvalidIdx() ) {
+      // [Claude, 2026-09-27] Per explicit request ("when it aborts due to stale id we still get
+      // the current status so we can see this better"): dump the SAME fluid-cell diagnostic detail
+      // MEM-GARBAGE-LINK reports (full PDF list, density, fill) directly into THIS abort message,
+      // captured at the exact moment of detection -- rather than needing to separately cross-
+      // reference a MEM-GARBAGE-LINK line from a possibly-different cell/step and infer whether
+      // this cell's own fluid data was already corrupted. Answers directly, every time this fires:
+      // was the underlying fluid state already garbage here, or still numerically sane at the
+      // moment the stale ownership was caught?
+      std::ostringstream pdfsAtAbort;
+      for( uint_t q = 0; q < Stencil_T::Size; ++q ) pdfsAtAbort << (q ? "," : "") << pdfField_->get(x, y, z, q);
+      const real_t fillAtAbort = fillLevelFct_ ? fillLevelFct_(Cell(x, y, z)) : std::numeric_limits< real_t >::quiet_NaN();
       WALBERLA_ABORT("[STALE-PARTICLE-IDX] rank=" << mpi::MPIManager::instance()->rank()
          << " cell (" << nx << "," << ny << "," << nz << ") [near-boundary fluid cell ("
          << x << "," << y << "," << z << "), dir=" << dir
@@ -258,7 +333,48 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
             "would leave reduceAndAvgHydroForces() with a partial/inconsistent momentum-exchange "
             "sum for this particle, which has been observed to produce a multi-order-of-magnitude "
             "hydrodynamic force spike and a subsequent invalid-quaternion crash several steps "
-            "later -- aborting here instead, at the actual point of desync.");
+            "later -- aborting here instead, at the actual point of desync."
+         << " | near-boundary fluid cell state AT THIS EXACT MOMENT: fill=" << fillAtAbort
+         << " density=" << pdfField_->getDensity(x, y, z)
+         << " | all populations of the fluid cell: " << pdfsAtAbort.str());
+   }
+
+   // Optional interpolated bounce-back (see the member comment of useInterpolatedBounceBack_): CLI scheme, needs the further fluid cell x_ff = x - c_i (liquid/interface, finite PDFs) and a consistent ray.
+   if( useInterpolatedBounceBack_ )
+   {
+      static uint_t ibbAppliedCount = uint_t(0), ibbFallbackCount = uint_t(0);
+      bool applied = false;
+      const cell_idx_t xff = x - cell_idx_c( stencil::cx[ dir ] );
+      const cell_idx_t yff = y - cell_idx_c( stencil::cy[ dir ] );
+      const cell_idx_t zff = z - cell_idx_c( stencil::cz[ dir ] );
+      if( pdfField_->xyzSizeWithGhostLayer().contains( xff, yff, zff ) && flagField_->isPartOfMaskSet( xff, yff, zff, domainMask_ ) )
+      {
+         const real_t pdf_far = pdfField_->get( xff, yff, zff, Stencil_T::idx[dir] );
+         const real_t pdf_inv = pdfField_->get( x, y, z, Stencil_T::invDirIdx(dir) );
+         if( std::isfinite(pdf_far) && std::isfinite(pdf_inv) )
+         {
+            const real_t tolerance = real_c(1e-4) * lengthScalingFactor_;
+            mesa_pd::kernel::SingleCast singleCast;
+            mesa_pd::RayParticleIntersectionRatioFunctor intersectionRatioFctr;
+            const real_t deltaRay = singleCast( particleIdx, *ac_, intersectionRatioFctr, *ac_, cellCenter, direction, tolerance );
+            if( std::isfinite(deltaRay) && deltaRay >= real_c(0) && deltaRay <= real_c(1) )
+            {
+               delta = deltaRay;
+               const real_t kappa0 = ( real_c(1) - real_c(2) * delta ) / ( real_c(1) + real_c(2) * delta ); // Table 3
+               pdf_new = pdf_old + kappa0 * ( pdf_far - pdf_inv );                                           // Eq. (4.1)
+               alpha   = real_c(4) / ( real_c(1) + real_c(2) * delta );                                      // Table 4
+               applied = true;
+            }
+         }
+      }
+      if( applied ) { ++ibbAppliedCount; } else { ++ibbFallbackCount; }
+      static uint_t ibbLogCount = uint_t(0);
+      if( ibbLogCount < uint_t(6) && ( applied ? ( ibbAppliedCount == uint_t(1) || ibbAppliedCount == uint_t(1000) || ibbAppliedCount == uint_t(100000) ) : ( ibbFallbackCount == uint_t(1) || ibbFallbackCount == uint_t(1000) ) ) )
+      {
+         ++ibbLogCount;
+         WALBERLA_LOG_INFO("[IBB] interpolated bounce-back active on this rank: links so far interpolated=" << ibbAppliedCount << ", fell back to simple bounce-back=" << ibbFallbackCount
+            << " | this link (" << x << "," << y << "," << z << ") dir=" << uint_t(dir) << " " << ( applied ? "delta=" : "fallback (delta=" ) << delta << ( applied ? "" : ")" ) );
+      }
    }
 
    // assumed boundary position

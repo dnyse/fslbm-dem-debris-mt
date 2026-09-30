@@ -157,6 +157,27 @@ with DOIs/URLs, not just propagated from this codebase's own comments:
 directly-verified "Chung, Y.C. & Ooi, J.Y. (2011), Granular Matter 13:643–656" — see
 `DEM_VALIDATION_MATH_REFERENCE.md`'s §3 note.
 
+> **[Claude, 2026-09-30]: wall-impact validation (§1's cylinder-wall Kodam replica and §2's
+> box-wall Fraige/Mack replicas) is now written into the actual thesis**, not just recorded here.
+> New `overleaf/chapters/04_results/contact-validation/wall-impact.tex` (`\label{sec:results-wall-impact}`),
+> wired into that chapter's `main.tex` right after `cylinder-cylinder.tex` and before
+> `large-scale-showcases.tex`. Also closed a real methodology gap found while writing this: the
+> rotational (lever-arm-aware) effective mass that the Kodam story's root-cause fix depends on
+> (`useRotationalEffectiveMass`/`computeRotationalEffectiveMass`) was never described anywhere in
+> the thesis, only the plain translational $m_{ij,\mathrm{eff}}$ — added a new paragraph +
+> equation (`eq:rotational-effective-mass`) to `02_background/dem/contact.tex` right after the
+> existing effective-mass paragraph, citing Baraff (1997) (added to the bib as `baraff_introduction_1997`,
+> `@online`, the `notesd2.pdf` SIGGRAPH course notes per this file's own citation note above). Also
+> added `housner_behavior_1963` and `mack_experimental_2011` to the bib (both were still missing;
+> `cundall_discrete_1979`/`chung_benchmark_2011` from the citation-gaps list below turned out to
+> already have full entries, added at some point after this doc was last touched). Full thesis
+> rebuild (pdflatex + biber + 2×pdflatex) clean: no new undefined references, no new warnings, all
+> citations resolve (`kodam_cylindrical_2010b` [68], `chung_benchmark_2011` [71], `fraige_distinct_2008`
+> [77], `housner_behavior_1963` [78], `mack_experimental_2011` [79], `baraff_introduction_1997` [31]);
+> verified by rendering the new pages (89–91, background p.26) to PNG and reading them back.
+> Remaining citation gaps (Stronge 2000, the Kruggel-Emden/Chung-Ooi ambiguity) are unchanged, not
+> addressed by this pass — see §6 below.
+
 ## Challenges & Future Improvements
 
 - The Kodam-replica intermediate-tilt discrepancy (§1) is now **fully resolved: PASS (32/32)**. Root

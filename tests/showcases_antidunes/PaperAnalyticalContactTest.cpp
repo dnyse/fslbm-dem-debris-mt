@@ -991,7 +991,11 @@ void testCylinderCylinderSpecialContact()
 
    WALBERLA_CHECK(kodam.contact);
    WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "special-contact");
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1811), real_t(1e-3));
+   // [Claude, 2026-09-29] was CHECK(overlap == 0.1811), Guo et al.'s original value measured at P. The
+   // corrected special-contact depth (deepest rim point inside the host, see rimVsFaceOrBand) must now agree
+   // with GJK/EPA (0.6095) and the brute-force MTD arbiter (0.6095) within the fuzz suite's own tolerance.
+   WALBERLA_CHECK_LESS(std::abs(kodam.overlap - (-gjk.penetrationDepth)),
+                       std::max(real_t(0.01), real_t(0.05) * (-gjk.penetrationDepth)));
    WALBERLA_CHECK(gjk.contact);
    // special-contact deliberately reports a purely axial (0,0,+-1) "face-normal-like" normal by
    // construction (see PaperAnalyticalContacts.h's comment on this branch) rather than GJK/EPA's true
@@ -999,6 +1003,9 @@ void testCylinderCylinderSpecialContact()
    // <-0.12,0.11,-0.99> vs kodam's exact <0,0,-1>) -- an approximation, not a bug, so this checks
    // directional agreement (dot product close to 1) rather than exact componentwise equality.
    WALBERLA_CHECK_GREATER(kodam.normal * gjk.normal, real_t(0.95));
+   // [Claude, 2026-09-29] special-contact point: host i's face at z = +1.5, P at depth overlap below it,
+   // so the point must be at z = 1.5 - overlap/2 (same sign fix as face-edge).
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point[2], real_t(1.5) - real_t(0.5) * kodam.overlap, real_t(1e-10));
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (special-contact): kodam overlap=" << kodam.overlap
                               << " normal=" << kodam.normal << " vs GJK/EPA penetrationDepth="
                               << gjk.penetrationDepth << " normal=" << gjk.normal);
@@ -1082,9 +1089,52 @@ void testCylinderCylinderSpecialContactBruteForceMTD()
    const real_t mtd = -bestGap;
    WALBERLA_LOG_INFO_ON_ROOT(
       "Cylinder x Cylinder (special-contact, INDEPENDENT brute-force MTD arbiter): brute-force MTD="
-      << mtd << " (direction=" << bestDir << ") | Kodam/Guo overlap=0.1811 | GJK/EPA overlap~0.610 "
+      << mtd << " (direction=" << bestDir << ") | original Guo overlap=0.1811 (corrected special-contact now ~0.614) | GJK/EPA overlap~0.610 "
       << "-- whichever of the latter two this brute-force value sits closer to is the more likely "
       << "correct one, independent of both implementations");
+}
+
+//! [Claude, 2026-09-29] Sweep of the special-contact configuration (Guo et al. 2012, Fig. 8): probe j tilted about
+//! x by 5..45 degrees, shifted laterally and axially around testCylinderCylinderSpecialContact's geometry. For every
+//! pose the analytical dispatch classifies as "special-contact", the corrected depth (deepest rim point inside
+//! the host) must agree with GJK/EPA within the fuzz suite's tolerance max(0.01, 5 %), and the contact point must
+//! lie at the middle of the overlap along the (axial) normal. Before the correction, Guo's depth-at-P failed this
+//! for most tilted poses.
+void testCylinderCylinderSpecialContactCorrectedSweep()
+{
+   int numSpecial = 0, numAgree = 0;
+   real_t worstAbs = real_t(0);
+   for (int tiltDeg = 5; tiltDeg <= 45; tiltDeg += 5)
+      for (int ix = 0; ix <= 6; ++ix)
+         for (int iz = 0; iz <= 6; ++iz)
+         {
+            CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(3.0) };
+            Rot3          rotJ;
+            rotJ.rotate(Vec3(real_t(1), real_t(0), real_t(0)), math::pi * real_t(tiltDeg) / real_t(180));
+            const real_t x = real_t(0.5) + real_t(0.1) * real_t(ix);
+            const real_t z = real_t(1.55) + real_t(0.05) * real_t(iz);
+            CylinderState cj{ Vec3(x, real_t(0), z), rotJ.getMatrix(), real_t(1.0), real_t(0.6) };
+
+            const ContactResult kodam = cylinderCylinderContact(ci, cj);
+            if (!kodam.contact || std::string(kodam.scenario) != "special-contact") continue;
+            ++numSpecial;
+            const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+            WALBERLA_CHECK(gjk.contact);
+            const real_t ref  = -gjk.penetrationDepth;
+            const real_t diff = std::abs(kodam.overlap - ref);
+            worstAbs = std::max(worstAbs, diff);
+            if (diff <= std::max(real_t(0.01), real_t(0.05) * ref)) ++numAgree;
+            else
+               WALBERLA_LOG_INFO_ON_ROOT("  special-contact sweep mismatch: tilt=" << tiltDeg << " x=" << x << " z=" << z
+                                         << " corrected=" << kodam.overlap << " GJK/EPA=" << ref);
+            // contact point in the middle of the overlap along the axial normal (host face at z = +1.5)
+            WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point[2], real_t(1.5) - real_t(0.5) * kodam.overlap, real_t(1e-9));
+         }
+   WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (special-contact, corrected depth, sweep): " << numSpecial
+                              << " special-contact poses, " << numAgree << " agree with GJK/EPA within max(0.01, 5%), "
+                              << "worst absolute difference=" << worstAbs);
+   WALBERLA_CHECK_GREATER(numSpecial, 0);
+   WALBERLA_CHECK_EQUAL(numAgree, numSpecial);
 }
 
 void testCylinderCylinderSpecialContactNoContact()
@@ -2202,6 +2252,11 @@ void testCylinderCylinderFaceEdgeClean()
                                                                                              // limitation
                                                                                              // case
    WALBERLA_CHECK_GREATER(kodam.normal * gjk.normal, real_t(0.999));
+   // [Claude, 2026-09-29] contact point must lie in the middle of the overlap: host i's face is at
+   // z = +0.5, j's deepest rim point E at z = 0.5 - overlap, so the midpoint is z = 0.5 - overlap/2.
+   // (Before the sign fix in rimVsFaceOrBand the point sat at z = 0.5 - 1.5*overlap, outside j.)
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point[2], real_t(0.5) - real_t(0.5) * kodam.overlap, real_t(1e-10));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point[2], gjk.point[2], real_t(1e-3));
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-edge, clean/negligible-host-curvature): overlap="
                               << kodam.overlap << " (agrees with GJK/EPA to 1e-4, unlike the KNOWN "
                               << "LIMITATION case above -- confirms the limitation is curvature-coupling, "
@@ -5056,6 +5111,7 @@ int main(int argc, char** argv)
    testCylinderCylinderParallelAxesFuzz();
    testCylinderCylinderFaceBandBarelyOverlappingFuzz();
    testCylinderCylinderFaceEdgeClean();
+   testCylinderCylinderSpecialContactCorrectedSweep();
    testCylinderCylinderBandEdgeClean();
    testCylinderCylinderEdgeEdgeGenuine();
 

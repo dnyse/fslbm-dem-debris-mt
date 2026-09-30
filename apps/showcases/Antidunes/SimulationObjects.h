@@ -33,8 +33,10 @@
 #include "DataCols.h"
 #include "PIDController.h"
 
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace walberla {
 namespace antidunes {
@@ -84,11 +86,13 @@ struct SimulationObjects
    // floaterUIDs[fi] = UID of floating sphere fi (matches simParams->floatingSpheres[fi]).
    // floaterBoxUIDs[bi] = UID of floating box bi (matches simParams->floatingBoxes[bi]).
    // floaterCylinderUIDs[ci] = UID of floating cylinder ci (matches simParams->floatingCylinders[ci]).
+   // floaterCapsuleUIDs[pi] = UID of floating capsule pi (matches simParams->floatingCapsules[pi]).
    // All populated by setupParticles via an indexed creation loop + allReduce(SUM) so that every
    // rank holds the correct UID for every floater regardless of which rank owns each particle.
    std::vector< walberla::id_t >                               floaterUIDs;
    std::vector< walberla::id_t >                               floaterBoxUIDs;
    std::vector< walberla::id_t >                               floaterCylinderUIDs;
+   std::vector< walberla::id_t >                               floaterCapsuleUIDs;
 
    // UIDs of floaters currently "dormant" (startInactive, not yet at settlingSteps): excluded from
    // fluid mapping (SetupStages::floaterSelector / BuildTimeloop::movingObstacleSelector) and DEM
@@ -115,6 +119,29 @@ struct SimulationObjects
    shared_ptr< AntidunesBoundaryHandling_T > antidunesBoundaryHandling;
    BlockDataID flagFieldID;
    FlagInfo_T flagInfo;
+
+   // Diagnostic sweep event collector ---------------------------------------------------------------------------------
+   // [Claude, 2026-09-27] Per explicit request ("collect the data and save them into data structures
+   // ... and then logging them in this extra sweep"): a shared, append-only buffer that any
+   // per-sub-cycle diagnostic in ParticleKernels.h can push a lightweight record into (cheap -- one
+   // push_back, no string formatting) INSTEAD of calling WALBERLA_LOG_WARNING directly at the point
+   // of detection. BuildTimeloop.h's addAfterTimeStepDiagnosticSweep (gated by
+   // ModelParameters::diagnosticSweepEnabled, off by default) drains and logs this buffer once per
+   // main step, then clears it -- so all of this session's diagnostic output funnels through one
+   // togglable place instead of being permanently wired inline. Empty / zero-cost whenever
+   // diagnosticSweepEnabled is false, since every push site itself is gated by that same flag.
+   struct DiagnosticEvent
+   {
+      uint_t             mainStep{ uint_t(0) };
+      uint_t             subCycle{ uint_t(0) };
+      std::string        tag;                              // e.g. "VELOCITY-JUMP", "MIGRATION-NAN"
+      walberla::id_t     uid{ 0 };                          // 0 if not tied to a specific floater
+      Vector3< real_t >  worldPos{ real_t(-1) };            // (-1,-1,-1) sentinel if not applicable
+      real_t             value{ real_t(0) };                // e.g. |deltaV|, density -- meaning is tag-specific
+      std::string        detail;                            // free-form extra context for the log line
+   };
+   std::shared_ptr< std::vector< DiagnosticEvent > > diagnosticEvents =
+      std::make_shared< std::vector< DiagnosticEvent > >();
 
    // bubbleModel -----------------------------------------------------------------------------------------------------
    shared_ptr< walberla::free_surface::bubble_model::BubbleModelBase > bubbleModel;

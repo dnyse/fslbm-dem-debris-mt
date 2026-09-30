@@ -1,0 +1,191 @@
+// debug_orphan_clear_repro_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-26] MINIMAL, DETERMINISTIC REPRODUCTION of the small-rod job's (4268750) later
+// crash, per explicit request ("extract these situations and replicate it in a smaller simulation").
+//
+// Job 4268750's STALE-PARTICLE-IDX guard fired at step 22584, abruptly clearing >1000 obstacle
+// cells belonging to rod uid 4755801206503243780 (removing the obstacle flag, resetting PDFs to
+// quiescent equilibrium, fill=1, particleField_ to invalid) in a single sweep. 3 steps later the
+// FIRST NaN appeared inside that same rod's own (tilted) body -- confirmed spatially (THESIS_PLAN.md).
+// The rare part of that scenario was the cross-rank ghost-ownership desync that triggered the guard;
+// the actual instability doesn't need it at all -- it's a property of the abrupt clear itself. This
+// scenario isolates exactly that: ONE settled rod, still water, no second body, no pillars, no flow --
+// then at step debugForceObstacleClearAtStep, ParticleKernels.h's [DEBUG-FORCE-OBSTACLE-CLEAR] hook
+// (SimulationParams.h's own doc comment) deliberately applies the SAME clear-and-reset sequence to
+// this rod's own CURRENT (perfectly valid, non-orphaned) obstacle cells. If DEGENERATE-FILL-
+// RECONSTRUCTION / LOW-RHO / a reynoldsNumber-nan abort appears shortly after, that confirms the
+// mechanism is the abrupt clear itself, independent of any desync.
+//
+// Domain <48,40,60> / cellsPerBlock <16,40,60> = 3 processes, same minimal setup as
+// single_rod_tumble_gas.prm. Rod (radius 3, length 18, matching production) placed already
+// partially submerged and released immediately (settlingSteps 0) with densityRatio 1.0 (neutrally
+// buoyant enough to stay roughly in place rather than falling/tumbling -- this test isolates the
+// abrupt-clear variable, not rod dynamics) so it reaches a genuine, physically-settled fill-level
+// distribution around it before the trigger fires at step 1000 (well past any initial transient).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 16, 40, 60 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 false;
+   snapshotFrequency             0;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <48, 40, 60>;
+   wavePeriods        1;
+   liquidHeightFactor 50;
+   floorHeightFactor  5;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water -- isolates the abrupt-clear side effect itself
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         3000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+   denseNanScanEnabled true;
+   denseNanScanFromStep 0;
+   denseNanScanToStep   3000;
+   populationPrecursorThreshold 10;
+   highVelocityPrecursorThreshold 0.3;
+   densityPrecursorLow  0.5;
+   densityPrecursorHigh 1.5;
+   densityPrecursorLiquidOnly false;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 1.0;
+   dxSIOverride                1.0;
+   densityRatio 1.1;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingCylinders
+{
+   // Released immediately, no tilt, densityRatio 1.0 (neutrally buoyant) -- stays roughly in place so
+   // the fill-level field around it settles into a genuine steady state before the trigger fires,
+   // rather than conflating the abrupt-clear variable with an already-moving/tumbling rod.
+   FloatingCylinder { position < 24, 20, 40 >; radius 3; length 18; axis < 1, 0, 0 >; densityRatio 1.0; settlingSteps 0; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;
+   usePureAnalyticalCylinder     false;
+   useContactFilterOwnerTiebreak true;
+   useCapsuleShapeForCylinders   false;
+
+   useTightTier1                 false;
+   useTightLayer1                true;
+   skipTier1                     false;
+   useRoundedBoxCorners          false;
+   useMultiPointBoxContact       false;
+   useBoxOverlapCap              false;
+   useAxisHysteresis             false;
+   useContactManifold            false;
+   useRotationalEffectiveMass    true;
+   useSpheroBoxContact           false;
+   useSpheroBoxAnalytical        false;
+   useFraigeBoxContactModel      false;
+   useFullVolumeAnalyticBuoyancy false;
+   usePass3Reresolution          false;
+   useAnalyticBoxBuoyancy        false;
+
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+
+   // The variable under test -- see SimulationParams.h's own doc comment for the full derivation.
+   debugForceObstacleClearAtStep 1000;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 500;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       25;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

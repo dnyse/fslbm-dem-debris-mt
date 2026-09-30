@@ -10,7 +10,7 @@
 //
 // EXTREME, PID ENABLED: 36 spheres (3x the small scenario's 12, radius 4, diameter 8 LU -- still
 // LARGER than the unchanged 6 LU pier gap) fed in from X=40-100 at the channel centerline (Y=20),
-// staggered releases (startInactive+settlingSteps ladder, 200-step gap, first release at t=20000 --
+// staggered releases (startInactive+settlingSteps ladder, 250-step gap, first release at t=20000 --
 // same post-spinup timing fix as the small sanity-clog pair, not the original t=5000 the small pair
 // itself used before that fix) across the same 3 density tiers (0.25/0.5/0.75) and Z variation
 // (44/45/46) as the small scenario, simply repeated 3x on the same 12-entry cycle (X-phase period 4 x
@@ -41,33 +41,164 @@
 //     precondition entirely (no release event ever occurs during the congested regime) without
 //     reducing the debris load or widening the spawn zone further.
 //
-// Domain <768, 40, 90>: X DOUBLED from the small scenario's 384 (every X-valued position below --
-// pillars, probes, release zone -- is simply the small scenario's own X doubled, which preserves every
-// relative distance/margin exactly: e.g. pillars at the new domain's exact midpoint (384, same as the
-// small scenario's pillars sitting at ITS domain's exact midpoint 192), so this is a clean geometric
-// scale-up, not a redesign). Y=40 and the pier gap (still 6 LU, still < the unchanged 8 LU sphere
-// diameter) are left UNCHANGED -- only X grows, giving 2x the queueing/pile-up room without touching
-// the "one sphere physically cannot pass" guarantee the small scenario's own geometry relies on.
-// Z=90 unchanged (same low-water convention as the small scenario, see its own header for why).
+// [Claude, 2026-09-16]: the PID-off sibling file (job 4239231, its first ever attempt) hit its OWN
+// [RELEASE-OVERLAP] abort at step 21001 under this same 200-step schedule -- PID-off's flow apparently
+// gives floaters less lateral drift near the spawn zone than PID-on's, so 800 steps of same-column
+// reuse gap (4 positions x 200 steps) wasn't enough clearance there even though it was fine here.
+// Fix applied to BOTH files identically, to keep this pair a genuine controlled comparison (same
+// debris-injection protocol, PID.enabled the only real difference): widened the per-release gap from
+// 200 to 250 steps (last release t=27000 -> t=28750, still safely before the t=30000 congestion
+// onset above). This file's own run never actually hit the overlap failure, but is rerun with the
+// wider spacing anyway so both cases inject identical debris on an identical schedule.
+//
+// [Claude, 2026-09-16]: the 250-step fix above was NOT enough -- THIS file's own job 4239288 failed
+// with the identical [RELEASE-OVERLAP] mechanism at the very FIRST reuse of a spawn column (step
+// 21251, X=60: fresh release at <60,20,46> vs. the first-ever X=60 release from 1000 steps earlier,
+// drifted only to <63.69,21.72,51.56> -- penetration -1.11; the PID-off sibling failed the same way
+// one column over, step 21501). The ~7.35 LU drift-per-800-steps figure the earlier fix extrapolated
+// from was apparently not representative: drift did not scale up with the added margin, so a modest
+// widening of the same fixed-interval schedule was never going to be reliable. Fix applied to BOTH
+// files identically again: widened the per-release gap 3x further, 250 -> 750 steps (same-column
+// reuse gap 1000 -> 3000), pushing the last release from t=28750 to t=46250, and extended `timesteps`
+// by the same +17500 steps (97500 -> 115000) to preserve the post-release settling tail exactly as it
+// was rather than shrinking it. Still the same staggered round-robin release mechanism (4 X-columns x
+// 3 density tiers x 3 Z values), just stretched -- not a redesign of the release geometry itself.
+//
+// [Claude, 2026-09-16]: BOTH of the above 2026-09-16 fixes were timing-only and both failed (one for
+// too little same-column margin, the other -- in the PID-off sibling -- for giving an upstream floater
+// too much time to drift downstream into the NEXT column before it fired: two failure modes pulling
+// in opposite directions on the same knob). Root cause reframed: release Z was 44-46, i.e. AT/just
+// below the water surface (absoluteLiquidHeight = avgParticleDiameter*(liquidHeightFactor+
+// floorHeightFactor) = 8.00194*(2.0+4.1393) = 49.13), so a fresh release sits in the same thin layer
+// where every already-floating sphere ends up riding, regardless of timing. Computed the worst case
+// directly: the most buoyant sphere here (densityRatio=0.25, r=4) has an Archimedes-equilibrium
+// submerged cap depth of ~2.68 (solving the spherical-cap volume fraction), giving CoM~50.42 and a
+// TOP at ~54.42; allowing ~4 LU of transient overshoot above equilibrium (the d025 box equilibrium
+// run this same session overshot its own final value by ~3.15 LU before damping down) puts the
+// realistic worst-case existing-floater top around ~58.4. Fix: raised release Z from 44/45/46 to
+// 70/71/72 (X, densityRatio, settlingSteps all UNCHANGED) -- 11.6-13.6 LU clear of that 58.4 worst
+// case, comfortably above the 8 LU (2*radius) needed for zero overlap regardless of release timing or
+// horizontal drift. This changes the injection condition from "already partially submerged at the
+// surface" to "dropped from just above it" (a ~21-28 LU fall through the gas region under gravity to
+// waterline 49.13) -- arguably more physically realistic for debris entering a channel, and at this
+// gravity a gentle low-Mach entry (fall velocity ~0.017 LU/step at the estimated gravity magnitude,
+// well below the target flow velocity 0.04). The widened timing from the two attempts above is left
+// unchanged as a still-harmless hedge, not because it's still load-bearing for this specific bug.
+//
+// Domain <768, 40, 90 -> 180 as of 2026-09-18, see below>: X DOUBLED from the small scenario's 384
+// (every X-valued position below -- pillars, probes, release zone -- is simply the small scenario's
+// own X doubled, which preserves every relative distance/margin exactly: e.g. pillars at the new
+// domain's exact midpoint (384, same as the small scenario's pillars sitting at ITS domain's exact
+// midpoint 192), so this is a clean geometric scale-up, not a redesign). Y=40 and the pier gap (still
+// 6 LU, still < the unchanged 8 LU sphere diameter) are left UNCHANGED -- only X grows, giving 2x the
+// queueing/pile-up room without touching the "one sphere physically cannot pass" guarantee the small
+// scenario's own geometry relies on.
 // periodicity <1,0,0> (X periodic, Y walled), same as every two-pillar scenario in this project.
 //
-// cellsPerBlock unchanged <64,20,15> -> numBlocks (768/64, 40/20, 90/15) = (12, 2, 6) = 144 ranks
-// (2x the small scenario's 72) -- 2 nodes on the multinode partition, not 1 (see
-// jobs/run_144_clog_measurement_validation_extreme_all.sbatch).
+// [Claude, 2026-09-18]: Z raised 90 -> 180 (doubled). The completed run under the old Z=90 (job
+// 4242919) showed clogUpstreamElevation pinned at EXACTLY 90.0 -- the domain's own top wall
+// (`Border direction T`, NoSlip) -- for ~40% of the run (t>=73900 through the end), never exceeding
+// it by even a rounding error. That's a hard physical ceiling of the SIMULATED BOX, not a converged
+// equilibrium of the real system being modeled: the box was sized for normal operation's ~35 LU of
+// headroom above the ~50-55 baseline free surface, and the extreme clog blew straight through that
+// budget. Doubling Z gives ~125 LU of headroom above the same baseline instead -- see THESIS_PLAN.md,
+// 2026-09-18, for the derivation and the two-rank-count-variant sbatch scripts this produced.
+// BodyBC's own max-Z (below, BoundaryParameters) raised to match -- a pillar must span the full
+// domain height or the top half of its column would be open water.
+//
+// cellsPerBlock <64,20,15> (unchanged) -> numBlocks (768/64, 40/20, 180/15) = (12, 2, 12) = 288 ranks,
+// 4 nodes on the multinode partition -- see jobs/run_288_clog_measurement_validation_extreme_pidon_fresh.sbatch.
+// A coarser cellsPerBlock<64,20,30> variant (144 ranks / 2 nodes, same physical domain, half the Z
+// resolution) exists as clog_measurement_validation_extreme_pidon_2node_gas.prm for when only 2 nodes
+// are available -- see jobs/run_144_clog_measurement_validation_extreme_pidon_fresh_2node.sbatch.
 //
 // Physics (targetMeanVelocityMagnitude, PID gains, Re/Fr/We, avgParticleDiameterOverride/dxSIOverride,
 // densityRatio, liquidHeightFactor, floorHeightFactor) are IDENTICAL to the small scenario -- this is a
 // pure geometry/debris-count scale-up of the same physical setup, not a different flow regime.
 //
-// timesteps 97500 = last release (72500) + a 25000-step interaction/settling tail (a bit more than the
-// small scenario's own ~20000-step tail, since 3x the debris plausibly needs longer to reach whatever
-// final jam state it settles into).
+// timesteps: 115000 (see the 2026-09-16 note above -- this is the original 97500 + the same +17500
+// the last release moved by, so the post-release settling tail is unchanged from before).
 //
-// ClogMeasurement probes: upstream X=280, downstream X=500 -- the small scenario's own X=140/250,
-// doubled (i.e. the same 52/58 LU offset from the pier center, scaled with everything else). Pillar-
-// face probe pair (see EvaluationParameters below) at the same doubled X, Y=11 (unchanged, matching the
-// left CylinderPillar's own unchanged Y center) -- see the small scenario's own header for the Schalko,
-// Follett & Nepf (2023) citation motivating this second pair.
+// [Claude, 2026-09-17]: floater population redesigned per explicit request --
+// (1) densityRatio set {0.25,0.5,0.75} -> {0.5,1.0,1.5}: 1.0 is neutrally buoyant (drifts at whatever
+//     depth it starts, rises/sinks under no net force); 1.5 is DENSER than water and will genuinely
+//     sink to the bed under this project's MEM-only buoyancy convention (gravity applied as full
+//     weight, buoyancy supplied entirely by the hydrodynamic MEM force) -- this is a deliberate,
+//     physically sensible choice, not an error: it models a mixed floating/submerged debris load
+//     (c.f. the Pont Ferroviere case study's own recorded composition of wood + building rubble,
+//     Section~sec:pont-ferroviere-showcase, where rubble is denser than water). The release height
+//     (Z=70-72, see the 2026-09-16 note above) stays safe either way: it was originally sized against
+//     the OLD densityRatio=0.25 tier's own worst-case float height (the most buoyant, hence highest-
+//     riding, tier); the new lightest tier (0.5) floats LOWER than the old 0.25 did, so the existing
+//     margin only gets larger, not smaller.
+// (2) release restructured from one floater at a time to a 2(Y)x5(X)=10-floater simultaneous batch per
+//     release event: Y in {14,26} (was the single centreline Y=20 -- spaced 12 apart, i.e. >2*radius=8,
+//     so the two rows can never overlap each other), X in {40,60,80,100,120} (was {40,60,80,100} -- one
+//     more column, still 20 LU apart, unchanged spacing convention). 10 release events (r=0..9) at
+//     settlingSteps = 20000 + r*3000 give the requested 100 floaters total (10/release).
+//     densityRatio/Z pairing kept 1:1 as before (now 0.5<->Z=70, 1.0<->Z=71, 1.5<->Z=72), cycled over a
+//     FLAT index across all 100 floaters (batch-major, then Y, then X) so each batch mixes all three
+//     tiers rather than one tier per batch -- gives a 34/33/33 split (100 doesn't divide evenly by 3,
+//     so exact equality is impossible) and matches the original scenario's own intent of a heterogeneous
+//     debris mix arriving continuously, not segregated waves of one density at a time.
+// (3) batch-to-batch gap set to 3000 steps, NOT the old single-floater 750-step cadence -- IMPORTANT
+//     distinction: previously a given (X) spawn column only recurred every 4th release (4 columns
+//     cycling), so the true same-spot reuse gap was 4*750=3000 despite the schedule stepping by 750.
+//     Now, because every batch uses ALL 10 (X,Y) grid points at once, EVERY spawn point recurs on
+//     EVERY SINGLE batch -- so the reuse gap equals the batch gap directly, and using the old 750
+//     would reproduce the exact [RELEASE-OVERLAP] crash chased down earlier this session (root-caused
+//     to needing >=3000 steps of same-spot reuse margin). 3000 was applied directly rather than
+//     re-discovering this the hard way. Last release moved from t=46250 to t=47000 (+750); timesteps
+//     extended by the same +750 (115000 -> 115750) to preserve the settling tail exactly as before.
+//
+// [Claude, 2026-09-17]: pillar geometry redesigned per explicit request -- ONE big central pillar
+// instead of two, replacing the old 3-aperture layout (5/6/5 LU gaps either side of a 6-LU centre slit)
+// with a symmetric 2-aperture layout (one slit on each side of a single wide pillar). Domain Y=40
+// unchanged; single CylinderPillar centred at the domain's own Y-midpoint (Y=20), radius 14 (diameter
+// 28 LU) chosen so BOTH remaining slits are 20-14=6 LU wide -- comfortably < the 8 LU sphere diameter,
+// so a sphere still cannot physically pass through either side (same "guaranteed full blockage"
+// property the old 3-gap layout had, just architecturally simpler: 2 symmetric apertures instead of 3
+// uneven ones). X=384/Z=45 (unchanged from the old pillars' own values -- Z is an arbitrary reference
+// point along the pillar's own effectively-infinite vertical axis, not a real bound). Release positions
+// (X=40-120, far upstream of the pillar at X=384) are unaffected by this Y-axis change.
+//
+// ClogMeasurement probes restructured to match: "one probe pair before and after EACH slit" (explicit
+// request), replacing the old gap-centreline pair (Y=20, now INSIDE the new pillar's own solid body)
+// and pillar-face pair (Y=11). Both existing probe-pair slots (upstreamPos/downstreamPos and
+// pillarUpstreamPos/pillarDownstreamPos -- SimulationParams.h supports exactly these two, no more) are
+// repurposed rather than requiring a code change: the first pair now sits at the LEFT slit's own
+// centreline (Y=3, i.e. the midpoint of the [0,6] opening), the second at the RIGHT slit's centreline
+// (Y=37, midpoint of the [34,40] opening). X unchanged (280/500, the same 52/58 LU offset from the
+// pillar centre as before). probeHalfWidthXY=2 gives each probe a +-2 LU window (Y in [1,5] and
+// [35,39] respectively), staying safely inside its own 6-LU slit with a full 1 LU clearance from both
+// the wall and the pillar face on either side. Two independent slit measurements is if anything a
+// BETTER match for \citeauthor{schalko_impact_2023}'s own finding motivating this two-probe design in
+// the first place (real lateral non-uniformity across a partial-width jam) than the old asymmetric
+// gap-centre/pillar-face pairing was.
+// [Claude, 2026-09-17]: user requested 60%/40% pillar/open split instead of the 70/30 above, but
+// exact 60/40 (pillar radius 12, each slit 8 LU) puts the slit EXACTLY equal to the sphere's own
+// diameter (8 LU) -- zero real clearance, not a safe guarantee. Rather than settle for a slightly
+// looser split, made the spheres bigger instead (explicit request): radius 4 -> 5 (diameter 8 -> 10),
+// restoring a real 2 LU margin at the now-8-LU slit while keeping the requested 60/40 split exactly.
+// This bigger sphere ripples into every other size-dependent margin computed above, all re-derived
+// (not just scaled by feel):
+//  - pillar radius 14 -> 12 (60% pillar / 40% open, 8 LU per slit, i.e. 20% each side).
+//  - release Y-row spacing 12 -> 14 (Y in {13,27}, was {14,26}) to keep the same 4 LU clearance
+//    margin over the new 2*radius=10 minimum, rather than letting the margin silently shrink.
+//  - release Z bumped {70,71,72} -> {73,74,75}: recomputed the worst-case existing-floater top for
+//    the new lightest tier (0.5, exactly half-submerged, so by symmetry its centre sits AT the
+//    waterline 49.13) with the new radius 5: top=54.13, +4 LU overshoot buffer=58.13 worst case
+//    (incidentally close to the old 58.4 despite the bigger sphere, since the new lightest tier 0.5
+//    rides lower than the old lightest tier 0.25 did) -- new release Z gives 14.9-16.9 LU clearance
+//    against a 10 LU need, i.e. a LARGER margin than before (4.9-6.9 LU vs the old ~3.6 LU).
+//  - probe Y repositioned to the new slit centrelines: left slit [0,8] -> Y=4; right slit [32,40] ->
+//    Y=36 (both probeHalfWidthXY=2 windows now sit with 2 LU clearance from wall/pillar either way).
+//  - batch reuse GAP 3000 -> 4000: the required drift-to-clear distance scales with sphere diameter
+//    (was 8, now 10, a 25% increase); naive linear scaling of the empirically-validated 3000 gives
+//    3750, rounded up to 4000 for margin rather than cutting it as close as the diameter-8 case was.
+//    Last release moves 47000 -> 56000 (+9000 over 9 gaps); timesteps extended by the same tail
+//    (68750) to 124750; VTK writeFrequency updated to 124750/5=24950 to match.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 
 BlockForestParameters
@@ -75,14 +206,14 @@ BlockForestParameters
    cellsPerBlock                 < 64, 20, 15 >;
    periodicity                   < 1, 0, 0 >;
    loadSnapshot                  false;
-   storeSnapshot                 false;
-   snapshotFrequency             10000;
+   storeSnapshot                 true;
+   snapshotFrequency             5000;
    snapshotBaseFolder            snapshots;
 }
 
 DomainParameters
 {
-   domainSize         <768, 40, 90>;
+   domainSize         <768, 40, 180>;
    wavePeriods        1;
    liquidHeightFactor 2.0;
    floorHeightFactor  4.1393;
@@ -104,7 +235,7 @@ PIDParameters
 PhysicsParameters
 {
    enableWetting     false;
-   timesteps         97500;
+   timesteps         124750;
    Re                3100;
    Fr                1.31;
    We                15.6188;
@@ -131,47 +262,113 @@ ParticleParameters
 
 CylinderPillars
 {
-   CylinderPillar { center < 384, 11, 45 >; radius 6; }
-   CylinderPillar { center < 384, 29, 45 >; radius 6; }
+   // [Claude, 2026-09-17]: single big central pillar replacing the old two -- see file header for the
+   // full geometry derivation (radius 12, i.e. 60% of the Y=40 domain, leaving an 8 LU slit on each
+   // side, both < the 10 LU sphere diameter).
+   CylinderPillar { center < 384, 20, 45 >; radius 12; }
 }
 FloatingSpheres
 {
-   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 20000; startInactive true; }
-   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 20200; startInactive true; }
-   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 20400; startInactive true; }
-   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 20600; startInactive true; }
-   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 20800; startInactive true; }
-   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 21000; startInactive true; }
-   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 21200; startInactive true; }
-   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 21400; startInactive true; }
-   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 21600; startInactive true; }
-   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 21800; startInactive true; }
-   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 22000; startInactive true; }
-   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 22200; startInactive true; }
-   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 22400; startInactive true; }
-   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 22600; startInactive true; }
-   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 22800; startInactive true; }
-   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 23000; startInactive true; }
-   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 23200; startInactive true; }
-   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 23400; startInactive true; }
-   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 23600; startInactive true; }
-   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 23800; startInactive true; }
-   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 24000; startInactive true; }
-   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 24200; startInactive true; }
-   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 24400; startInactive true; }
-   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 24600; startInactive true; }
-   FloatingSphere { position < 40, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 24800; startInactive true; }
-   FloatingSphere { position < 60, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 25000; startInactive true; }
-   FloatingSphere { position < 80, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 25200; startInactive true; }
-   FloatingSphere { position < 100, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 25400; startInactive true; }
-   FloatingSphere { position < 40, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 25600; startInactive true; }
-   FloatingSphere { position < 60, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 25800; startInactive true; }
-   FloatingSphere { position < 80, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 26000; startInactive true; }
-   FloatingSphere { position < 100, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 26200; startInactive true; }
-   FloatingSphere { position < 40, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 26400; startInactive true; }
-   FloatingSphere { position < 60, 20, 44 >; radius 4; densityRatio 0.25; settlingSteps 26600; startInactive true; }
-   FloatingSphere { position < 80, 20, 45 >; radius 4; densityRatio 0.5; settlingSteps 26800; startInactive true; }
-   FloatingSphere { position < 100, 20, 46 >; radius 4; densityRatio 0.75; settlingSteps 27000; startInactive true; }
+   FloatingSphere { position < 40, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 60, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 80, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 100, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 120, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 40, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 60, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 80, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 100, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 120, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 20000; startInactive true; }
+   FloatingSphere { position < 40, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 60, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 80, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 100, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 120, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 40, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 60, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 80, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 100, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 120, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 24000; startInactive true; }
+   FloatingSphere { position < 40, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 60, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 80, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 100, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 120, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 40, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 60, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 80, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 100, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 120, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 28000; startInactive true; }
+   FloatingSphere { position < 40, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 60, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 80, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 100, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 120, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 40, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 60, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 80, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 100, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 120, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 32000; startInactive true; }
+   FloatingSphere { position < 40, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 60, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 80, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 100, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 120, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 40, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 60, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 80, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 100, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 120, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 36000; startInactive true; }
+   FloatingSphere { position < 40, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 60, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 80, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 100, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 120, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 40, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 60, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 80, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 100, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 120, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 40000; startInactive true; }
+   FloatingSphere { position < 40, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 60, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 80, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 100, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 120, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 40, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 60, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 80, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 100, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 120, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 44000; startInactive true; }
+   FloatingSphere { position < 40, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 60, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 80, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 100, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 120, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 40, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 60, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 80, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 100, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 120, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 48000; startInactive true; }
+   FloatingSphere { position < 40, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 60, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 80, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 100, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 120, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 40, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 60, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 80, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 100, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 120, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 52000; startInactive true; }
+   FloatingSphere { position < 40, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 60, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 80, 13, 75 >; radius 5; densityRatio 1.5; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 100, 13, 73 >; radius 5; densityRatio 0.5; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 120, 13, 74 >; radius 5; densityRatio 1.0; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 40, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 60, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 80, 27, 74 >; radius 5; densityRatio 1.0; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 100, 27, 75 >; radius 5; densityRatio 1.5; settlingSteps 56000; startInactive true; }
+   FloatingSphere { position < 120, 27, 73 >; radius 5; densityRatio 0.5; settlingSteps 56000; startInactive true; }
 }
 
 ModelParameters
@@ -197,15 +394,17 @@ EvaluationParameters
 
    ClogMeasurement
    {
-      upstreamPos       < 280, 20, 40 >;
-      downstreamPos      < 500, 20, 40 >;
+      // [Claude, 2026-09-17]: repositioned to the LEFT slit's own centreline (Y=3, midpoint of the
+      // [0,6] opening beside the new single central pillar) -- see file header for the full derivation.
+      upstreamPos       < 280, 4, 40 >;
+      downstreamPos      < 500, 4, 40 >;
       probeHalfWidthXY   2;
 
-      // Second probe pair at the pillar's own Y (=11) instead of the gap centreline (Y=20) -- see the
-      // small clog_measurement_validation_sanity_clog_*_gas.prm's own header for the Schalko, Follett &
-      // Nepf (2023) citation motivating this. Same doubled X as the gap probes above.
-      pillarUpstreamPos    < 280, 11, 40 >;
-      pillarDownstreamPos  < 500, 11, 40 >;
+      // [Claude, 2026-09-17]: repositioned to the RIGHT slit's own centreline (Y=37, midpoint of the
+      // [34,40] opening on the pillar's other side) -- together with the pair above, this gives one
+      // probe pair before and after EACH of the two slits, as explicitly requested. See file header.
+      pillarUpstreamPos    < 280, 36, 40 >;
+      pillarDownstreamPos  < 500, 36, 40 >;
    }
 }
 
@@ -220,6 +419,23 @@ BoundaryParameters
 {
    Border { direction T;  walldistance -1; NoSlip{} }
    Border { direction B;  walldistance -1; NoSlip{} }
+   // [Claude, 2026-09-17]: added BodyBC entries for the CylinderPillars above -- traced every single
+   // usage of simParams->cylinderPillars in this codebase (BuildTimeloop.h's own disabled #if 0 VTK
+   // block; SetupStages.h's bed-generation exclusion check; SetupStages.h's own createCylinder DEM
+   // rigid-body creation) and confirmed NONE of them ever touch the LBM flag field/boundary handling --
+   // CylinderPillars only gives the pillar DEM contact physics (floaters bounce off it), it does NOT by
+   // itself make the fluid see it as solid. The actual fluid-blocking NoSlip classification comes
+   // exclusively from here, via setupBoundaryHandling's initFromConfig(BoundaryParameters) (see that
+   // function's own "CellInterval pillar defined in Antidunes.prm" comment) -- confirmed against
+   // nine_stacked_release_pillar_gas.prm, which declares BOTH CylinderPillars (contact) AND matching
+   // BodyBC (fluid) for its own two pillars; this file previously had only the former.
+   // [Claude, 2026-09-18]: Z-extent raised from 90 to 180 to match domainSize's own doubled headroom
+   // below -- a pillar must span the FULL domain height (floor to ceiling), so a stale max here would
+   // leave the top half of the pillar's column open water with no obstacle, silently breaking the
+   // blockage this whole scenario depends on. See this file's own domainSize comment for why the
+   // ceiling was raised (clogUpstreamElevation pinned at the OLD ceiling, 90, for ~40% of the run --
+   // a genuine domain-height limitation, not a converged physical value; THESIS_PLAN.md, 2026-09-18).
+   BodyBC { shape Cylinder; min < 384, 20, 0 >; max < 384, 20, 180 >; radius 12; NoSlip{} }
 }
 
 MeshOutputParameters
@@ -228,11 +444,17 @@ MeshOutputParameters
    baseFolder     mesh-out;
 }
 
+// [Claude, 2026-09-16]: writeFrequency dropped from disabled (1e10) to timesteps/5 so this run
+// produces sparse VTK dumps (steps 0, 24950, 49900, 74850, 99800 -- FIVE, not six: the main loop
+// is `for (t=0; t!=timesteps; ++t)`, so t never reaches timesteps itself and the true final state
+// is never written; known, not yet fixed) -- fluid_field, sphere, and cylinder_pillar VTK all
+// share this same simParams->vtk.writeFrequency (see BuildTimeloop.h), so one setting gives
+// synchronized fluid+floater+pillar snapshots for thesis figures, cheaply.
 VTK
 {
    fluid_field
    {
-      writeFrequency       10000000000;
+      writeFrequency       24950;
       ghostLayers          0;
       baseFolder           vtk-out;
       samplingResolution   1;
@@ -241,7 +463,18 @@ VTK
       writers
       {
          velocity;
+         mapped_flag;
       }
+
+      // [Claude, 2026-09-17]: without this, gas AND obstacle cells (the pillars) retain
+      // whatever stale PDF-derived velocity/density last happened to be there (never updated by
+      // the solver, since "the PDF values in these cells are not important" -- VtkWriter.h's own
+      // comment), rendering as salt-and-pepper noise across the free-surface/gas region AND
+      // making the pillars indistinguishable from the noisy fluid in ParaView -- found directly
+      // from a screenshot showing exactly this on the completed extreme pidoff/pidon runs
+      // (jobs 4240981/4240982), which never had this line, unlike every other scenario prm in
+      // this project (e.g. nine_stacked_release_pillar_gas.prm).
+      before_functions { gas_cell_zero_setter; }
    }
 
    domain_decomposition

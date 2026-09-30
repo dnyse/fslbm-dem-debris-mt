@@ -284,11 +284,17 @@ class ClogMeasurementEvaluator
                             const Vector3< real_t >& upstreamPos, const Vector3< real_t >& downstreamPos,
                             real_t probeHalfWidthXY, const shared_ptr< Vector3< real_t > >& acceleration,
                             real_t absoluteLiquidHeight, const shared_ptr< DataCols >& dataCols, uint_t frequency,
-                            std::string columnPrefix = "clog")
+                            std::string columnPrefix = "clog", bool measureFlowRate = false,
+                            std::vector< Vector3< real_t > > pillarCenters = {},
+                            std::vector< real_t > pillarRadii = {}, real_t channelWidthY = real_t(0),
+                            bool measureBlockageRatio = false)
       : blocks_(blocks), flagFieldID_(flagFieldID), fillFieldID_(fillFieldID), pdfFieldID_(pdfFieldID),
         upstreamPos_(upstreamPos), downstreamPos_(downstreamPos), probeHalfWidthXY_(probeHalfWidthXY),
         acceleration_(acceleration), absoluteLiquidHeight_(absoluteLiquidHeight), dataCols_(dataCols),
-        frequency_(frequency), executionCounter_(uint_c(0)), columnPrefix_(std::move(columnPrefix))
+        frequency_(frequency), executionCounter_(uint_c(0)), columnPrefix_(std::move(columnPrefix)),
+        measureFlowRate_(measureFlowRate), pillarCenters_(std::move(pillarCenters)),
+        pillarRadii_(std::move(pillarRadii)), channelWidthY_(channelWidthY),
+        measureBlockageRatio_(measureBlockageRatio)
    {}
 
    void operator()()
@@ -348,10 +354,173 @@ class ClogMeasurementEvaluator
       return columnCount > 0 ? sum / real_c(columnCount) : real_t(0);
    }
 
+   // Volumetric flow rate Q = sum over the full y-z cross-section at global cell column x = floor(planeX) of
+   // (fill level * u_x), and the wet cross-section area A = sum of the fill level, both over the FLUID cells
+   // of that plane only, averaged over the (2*floor(probeHalfWidthXY_)+1) neighbouring y-z planes
+   // x-halfW..x+halfW (a single 1-cell plane can fall exactly into the 1-LU slit between two rows of bodies and
+   // then says nothing about the flow; Q is conserved from plane to plane in steady flow, so the average is
+   // the same quantity with less sampling noise). The cell selection is (fill > 0, not a moving-obstacle cell, not a no-slip cell) -- the same cell selection
+   // AverageDataSliceEvaluator uses for its slice velocity. Cells covered by floaters, pillars or walls are
+   // excluded, so a body standing in the plane reduces A (its cross-section) and adds nothing to Q; the flux
+   // through the plane is therefore the fluid flux, independent of what shape the body has, and Q/A is the mean
+   // velocity of the water actually crossing the plane. Interface cells count with their fill level as weight,
+   // gas cells (fill 0) not at all. Velocity is pdfField->getVelocity, as in MeanVelocityComputer.
+   // Lattice units: Q in cells^3 per time step, A in cells^2. Signed: back-flow reduces Q.
+   void flowRateAt(real_t planeX, real_t& flowRate, real_t& wetArea) const
+   {
+      flowRate = real_t(0);
+      wetArea  = real_t(0);
+      const cell_idx_t planeCell = cell_idx_c(std::floor(planeX));
+      const cell_idx_t halfW     = cell_idx_c(std::floor(probeHalfWidthXY_));
+
+      for (auto block = blocks_->begin(); block != blocks_->end(); ++block)
+      {
+         const PdfField_T* const pdfField     = block->getData< const PdfField_T >(pdfFieldID_);
+         const FlagField_T* const flagField   = block->getData< const FlagField_T >(flagFieldID_);
+         const ScalarField_T* const fillField = block->getData< const ScalarField_T >(fillFieldID_);
+
+         const auto solidMO     = flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID);
+         const auto solidNoSlip = flagField->getFlag(AntidunesBoundaryHandling_T::noSlipFlagID);
+
+         // block-local x range of the planes planeCell-halfW .. planeCell+halfW that lie inside this block
+         Cell localLo, localHi;
+         blocks_->transformGlobalToBlockLocalCell(localLo, *block, Cell(planeCell - halfW, cell_idx_t(0), cell_idx_t(0)));
+         blocks_->transformGlobalToBlockLocalCell(localHi, *block, Cell(planeCell + halfW, cell_idx_t(0), cell_idx_t(0)));
+         CellInterval xyz = flagField->xyzSize();
+         const cell_idx_t xLo = std::max(localLo.x(), xyz.xMin());
+         const cell_idx_t xHi = std::min(localHi.x(), xyz.xMax());
+
+         for (cell_idx_t x = xLo; x <= xHi; ++x)
+            for (cell_idx_t z = xyz.zMin(); z <= xyz.zMax(); ++z)
+               for (cell_idx_t y = xyz.yMin(); y <= xyz.yMax(); ++y)
+               {
+                  const Cell cell(x, y, z);
+                  if (flagField->isFlagSet(cell, solidMO) || flagField->isFlagSet(cell, solidNoSlip)) continue;
+
+                  const real_t fill = fillField->get(cell);
+                  if (fill > real_t(0))
+                  {
+                     flowRate += fill * pdfField->getVelocity(cell)[0];
+                     wetArea += fill;
+                  }
+               }
+      }
+
+      const real_t planeCount = real_c(2 * halfW + 1);
+      flowRate /= planeCount;
+      wetArea /= planeCount;
+
+      mpi::reduceInplace(flowRate, mpi::SUM);
+      mpi::reduceInplace(wetArea, mpi::SUM);
+   }
+
+   // Fraction of the REFERENCE (undisturbed) wetted cross-section occupied by the pillar(s) and the
+   // jam of floaters, at the y-z plane through a probe's x (averaged over the same 2w+1 planes as
+   // flowRateAt -- same review motivation: a single plane can fall exactly into a gap between two
+   // floaters and read as unblocked). This is `sec:clog-secondary-metrics`'s "blockage ratio",
+   // finally computed rather than only defined: \parencite{panici_formation_2018} relate afflux to
+   // blockage ratio measured against the UNDISTURBED (reference) flow area, not the locally
+   // backed-up one, which is why the denominator here is the fixed reference cross-section
+   // `channelWidthY_ * absoluteLiquidHeight_`, not a per-step remeasured wetted area -- this makes
+   // the ratio a scenario-describing number comparable across runs, matching the existing text's own
+   // "natural axis for comparing scenarios" framing, rather than a probe-placement-sensitive local
+   // reading that would move every time the water backs up.
+   //
+   // Pillar contribution is obtained ANALYTICALLY from the known, fixed pillar geometry rather than by
+   // scanning flags: each `CylinderPillar` is a vertical prism of circular footprint (radius R, centre
+   // (cx,cy)) spanning the full domain height (see SetupStages.h's `createCylinder` call), so at a
+   // given x its intersection with the channel's valid y-range is a vertical strip whose width is the
+   // circle's y-chord at that x, clipped to [0, channelWidthY_]; its contribution to the wetted area up
+   // to the reference depth is simply that width times the reference depth (constant along z, since
+   // the prism's cross-section does not vary with height). Jam contribution counts moving-obstacle
+   // (floater) cells at or below the same reference depth, EXCLUDING any cell that geometrically falls
+   // inside a pillar's own footprint -- pillars are themselves ordinary (fixed, infinite-mass) mesa_pd
+   // bodies and so may also carry the moving-obstacle flag; this exclusion prevents double-counting a
+   // floater resting directly against a pillar as extra pillar area, and is correct regardless of
+   // whether pillar cells actually carry that flag or not (a purely geometric, not flag-based, test).
+   // Units: cells^2 for the area outputs, dimensionless for the ratio.
+   void blockageAt(real_t planeX, real_t& blockageRatio, real_t& pillarArea, real_t& jamArea) const
+   {
+      const cell_idx_t planeCell  = cell_idx_c(std::floor(planeX));
+      const cell_idx_t halfW      = cell_idx_c(std::floor(probeHalfWidthXY_));
+      const real_t referenceDepth = absoluteLiquidHeight_;
+      const cell_idx_t zRefCell   = cell_idx_c(std::floor(referenceDepth));
+
+      pillarArea = real_t(0);
+      for (size_t p = 0; p < pillarCenters_.size(); ++p)
+      {
+         const real_t dx = planeX - pillarCenters_[p][0];
+         const real_t R  = pillarRadii_[p];
+         if (std::abs(dx) >= R) continue;
+         const real_t chord = std::sqrt(R * R - dx * dx);
+         const real_t cy    = pillarCenters_[p][1];
+         const real_t yLo   = std::max(real_t(0), cy - chord);
+         const real_t yHi   = std::min(channelWidthY_, cy + chord);
+         const real_t width = std::max(real_t(0), yHi - yLo);
+         pillarArea += width * referenceDepth;
+      }
+
+      jamArea = real_t(0);
+      for (auto block = blocks_->begin(); block != blocks_->end(); ++block)
+      {
+         const FlagField_T* const flagField = block->getData< const FlagField_T >(flagFieldID_);
+         const auto solidMO = flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID);
+
+         Cell localLo, localHi;
+         blocks_->transformGlobalToBlockLocalCell(localLo, *block, Cell(planeCell - halfW, cell_idx_t(0), cell_idx_t(0)));
+         blocks_->transformGlobalToBlockLocalCell(localHi, *block, Cell(planeCell + halfW, cell_idx_t(0), cell_idx_t(0)));
+         CellInterval xyz = flagField->xyzSize();
+         const cell_idx_t xLo = std::max(localLo.x(), xyz.xMin());
+         const cell_idx_t xHi = std::min(localHi.x(), xyz.xMax());
+
+         Cell globalCell;
+         for (cell_idx_t x = xLo; x <= xHi; ++x)
+            for (cell_idx_t z = xyz.zMin(); z <= xyz.zMax(); ++z)
+               for (cell_idx_t y = xyz.yMin(); y <= xyz.yMax(); ++y)
+               {
+                  const Cell cell(x, y, z);
+                  if (!flagField->isFlagSet(cell, solidMO)) continue;
+
+                  blocks_->transformBlockLocalToGlobalCell(globalCell, *block, cell);
+                  if (globalCell.z() > zRefCell) continue;
+
+                  bool insidePillar = false;
+                  for (size_t p = 0; p < pillarCenters_.size(); ++p)
+                  {
+                     const real_t ddx = real_c(globalCell.x()) - pillarCenters_[p][0];
+                     const real_t ddy = real_c(globalCell.y()) - pillarCenters_[p][1];
+                     if (ddx * ddx + ddy * ddy < pillarRadii_[p] * pillarRadii_[p]) { insidePillar = true; break; }
+                  }
+                  if (insidePillar) continue;
+
+                  jamArea += real_t(1);
+               }
+      }
+
+      const real_t planeCount = real_c(2 * halfW + 1);
+      jamArea /= planeCount;
+      mpi::reduceInplace(jamArea, mpi::SUM);
+
+      const real_t referenceArea = channelWidthY_ * referenceDepth;
+      blockageRatio = referenceArea > real_t(0) ? (pillarArea + jamArea) / referenceArea : real_t(0);
+   }
+
    void compute()
    {
       upstreamElevation_   = elevationAt(upstreamPos_);
       downstreamElevation_ = elevationAt(downstreamPos_);
+
+      if (measureFlowRate_)
+      {
+         flowRateAt(upstreamPos_[0], upstreamFlowRate_, upstreamWetArea_);
+         flowRateAt(downstreamPos_[0], downstreamFlowRate_, downstreamWetArea_);
+      }
+
+      if (measureBlockageRatio_)
+      {
+         blockageAt(upstreamPos_[0], upstreamBlockageRatio_, upstreamPillarArea_, upstreamJamArea_);
+         blockageAt(downstreamPos_[0], downstreamBlockageRatio_, downstreamPillarArea_, downstreamJamArea_);
+      }
 
       upstreamPressure_   = real_t(0);
       downstreamPressure_ = real_t(0);
@@ -388,6 +557,22 @@ class ClogMeasurementEvaluator
          dataCols_->add(columnPrefix_ + "DownstreamPressure", downstreamPressure_);
          dataCols_->add(columnPrefix_ + "UpstreamExcessPressure", upstreamPressure_ - hydrostaticPressure(upstreamPos_));
          dataCols_->add(columnPrefix_ + "DownstreamExcessPressure", downstreamPressure_ - hydrostaticPressure(downstreamPos_));
+         if (measureFlowRate_)
+         {
+            dataCols_->add(columnPrefix_ + "UpstreamFlowRate", upstreamFlowRate_);
+            dataCols_->add(columnPrefix_ + "DownstreamFlowRate", downstreamFlowRate_);
+            dataCols_->add(columnPrefix_ + "UpstreamWetArea", upstreamWetArea_);
+            dataCols_->add(columnPrefix_ + "DownstreamWetArea", downstreamWetArea_);
+         }
+         if (measureBlockageRatio_)
+         {
+            dataCols_->add(columnPrefix_ + "UpstreamBlockageRatio", upstreamBlockageRatio_);
+            dataCols_->add(columnPrefix_ + "DownstreamBlockageRatio", downstreamBlockageRatio_);
+            dataCols_->add(columnPrefix_ + "UpstreamPillarArea", upstreamPillarArea_);
+            dataCols_->add(columnPrefix_ + "DownstreamPillarArea", downstreamPillarArea_);
+            dataCols_->add(columnPrefix_ + "UpstreamJamArea", upstreamJamArea_);
+            dataCols_->add(columnPrefix_ + "DownstreamJamArea", downstreamJamArea_);
+         }
       }
    }
 
@@ -409,10 +594,31 @@ class ClogMeasurementEvaluator
    real_t upstreamPressure_;
    real_t downstreamPressure_;
 
+   // flow-rate measurement (optional, see flowRateAt): Q and wet area of the y-z plane at each probe's x
+   real_t upstreamFlowRate_   = real_t(0);
+   real_t downstreamFlowRate_ = real_t(0);
+   real_t upstreamWetArea_    = real_t(0);
+   real_t downstreamWetArea_  = real_t(0);
+
    shared_ptr< DataCols > dataCols_;
    uint_t frequency_;
    uint_t executionCounter_;
    std::string columnPrefix_;
+   bool        measureFlowRate_;
+
+   // blockage-ratio measurement (optional, see blockageAt): fixed pillar geometry + channel width,
+   // and the resulting ratio/area outputs at each probe's x
+   std::vector< Vector3< real_t > > pillarCenters_;
+   std::vector< real_t >            pillarRadii_;
+   real_t                           channelWidthY_;
+   bool                             measureBlockageRatio_ = false;
+
+   real_t upstreamBlockageRatio_   = real_t(0);
+   real_t downstreamBlockageRatio_ = real_t(0);
+   real_t upstreamPillarArea_      = real_t(0);
+   real_t downstreamPillarArea_    = real_t(0);
+   real_t upstreamJamArea_         = real_t(0);
+   real_t downstreamJamArea_       = real_t(0);
 };
 
 

@@ -48,6 +48,7 @@
 #include "lbm/free_surface/surface_geometry/Utility.h"
 
 #include "lbm_mesapd_coupling/momentum_exchange_method/MovingParticleMapping.h"
+#include "SealedCellGuard.h"
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/PdfReconstructionManager.h"
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/Reconstructor.h"
 
@@ -64,10 +65,48 @@
 #include "SimulationObjects.h"
 #include "SimulationParams.h"
 
+#include <sstream>
+
 namespace walberla
 {
 namespace antidunes
 {
+
+// [Claude, 2026-09-24] Forward declaration: defined in SetupStages.h, which this project's own
+// Antidunes.cpp includes AFTER BuildTimeloop.h -- needed here for the sweep-by-sweep NaN-tracing
+// probes added to addSweepSurfaceDynamics (THESIS_PLAN.md, step-444 crash investigation).
+void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs, const char* const label, const uint_t t,
+                     const std::vector< Vector3< real_t > >& watchCoords);
+
+// [Claude, 2026-09-27] Same reason as trackWatchCells above: needed for addAfterTimeStepDiagnosticSweep
+// below, defined in SetupStages.h.
+void logFluidBoxHistory(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
+                        const std::string& baseFolder,
+                        const Vector3< real_t >& boxMin, const Vector3< real_t >& boxMax);
+
+// [Claude, 2026-09-28] Same reason as trackWatchCells above: needed for addAfterTimeStepDiagnosticSweep
+// below, defined in SetupStages.h.
+void logDensityColumn(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
+                      const std::string& baseFolder, const real_t columnX, const real_t columnY);
+
+// [Claude, 2026-09-28] fill-integrated water height on a grid of columns, defined in SetupStages.h.
+void logWaterHeights(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t, const std::string& baseFolder,
+                     const uint_t gridX, const uint_t gridY);
+
+// [Claude, 2026-09-24] Same reason as trackWatchCells above: needed for the generic (domain-wide,
+// not-a-fixed-cell) intra-timestep NaN scan added to addSweepSurfaceGeometry/Dynamics below. Unlike
+// trackWatchCells' fixed watch-cell list, this scans EVERY liquid/interface cell at each sweep stage
+// and only logs (with its own 3x3x3 neighbourhood dump, see SetupStages.h) if one is actually
+// non-finite -- built for crashes where the culprit cell isn't already known in advance (e.g. the
+// hopper clogging scenario's own NaN, THESIS_PLAN.md 2026-09-24).
+bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs, const char* const location, const uint_t t,
+                 real_t lowRhoPrecursorThreshold, real_t highVelocityPrecursorThreshold,
+                 real_t populationPrecursorThreshold, real_t densityPrecursorLow,
+                 real_t densityPrecursorHigh, bool densityPrecursorLiquidOnly);
+
+// Forward declaration (defined in SetupStages.h, included after this file) -- narrow, reactive repair
+// for obstacle-flagged cells whose PDFs have gone non-finite/non-positive (THESIS_PLAN.md, 2026-09-25).
+uint_t repairDegenerateObstacleCells(const std::shared_ptr< SimulationObjects >& simObjs, const char* const location, const uint_t t);
 
 using StateSweep = walberla::free_surface::BlockStateDetectorSweep< FlagField_T >;
 
@@ -90,10 +129,19 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       simObjs->fillFieldID, BlockDataID{}, simObjs->curvatureFieldID, simObjs->normalFieldID,
       simObjs->obstacleNormalFieldID,
       simParams->vtk.denseEnabled ? simObjs->currentMainStep : nullptr,
-      simParams->vtk.denseFromStep, simParams->vtk.denseToStep);
+      simParams->vtk.denseFromStep, simParams->vtk.denseToStep,
+      simParams->vtk.snapshotsEnabled ? simObjs->currentMainStep : nullptr,
+      simParams->vtk.snapshotSteps);
    if (simParams->vtk.denseEnabled)
       WALBERLA_LOG_INFO_ON_ROOT("[VTK] fluid_field_dense active for steps ["
          << simParams->vtk.denseFromStep << ", " << simParams->vtk.denseToStep << ")");
+   if (simParams->vtk.snapshotsEnabled)
+   {
+      std::ostringstream steps;
+      for (uint_t s : simParams->vtk.snapshotSteps)
+         steps << s << " ";
+      WALBERLA_LOG_INFO_ON_ROOT("[VTK] fluid_field_snapshots active at steps [ " << steps.str() << "]");
+   }
    // triangle mesh of free surface ----------------------------------------
    // walberla::free_surface::SurfaceMeshWriter< ScalarField_T, FlagField_T >
    //    surfaceMeshWriter(simObjs->blockForest, simObjs->fillFieldID, simObjs->flagFieldID,
@@ -433,6 +481,36 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
 {
    WALBERLA_LOG_INFO_ON_ROOT("addSweepSurfaceGeometry");
 
+   // [Claude, 2026-09-24] Baseline probe: state of the step-444 crash cell BEFORE any sweep in this
+   // timestep's timeloopFSLBM chain runs at all (see the matching probe/lambda in
+   // addSweepSurfaceDynamics for the full rationale).
+   timeloop->add() << Sweep(EmptySweep(), "Empty sweep: probe anchor (surface geometry start)")
+                   << AfterFunction(
+                         [simObjs]() {
+                            const uint_t t = *simObjs->currentMainStep;
+                            if (t < uint_t(425) || t > uint_t(444)) return;
+                            trackWatchCells(simObjs, "PROBE-start-of-FSLBM-timestep", t,
+                                           { Vector3< real_t >(real_t(20.5), real_t(8.5), real_t(25.5)),
+                                             Vector3< real_t >(real_t(20.5), real_t(6.5), real_t(25.5)),
+                                             Vector3< real_t >(real_t(20.5), real_t(5.5), real_t(25.5)),
+                                             Vector3< real_t >(real_t(18.5), real_t(4.5), real_t(26.5)),
+                                             Vector3< real_t >(real_t(18.5), real_t(34.5), real_t(26.5)) });
+                         },
+                         "Probe: start of timeloopFSLBM")
+                   << AfterFunction(
+                         [simParams, simObjs]() {
+                            if (!simParams->physics.denseNanScanEnabled) return;
+                            const uint_t t = *simObjs->currentMainStep;
+                            if (t < simParams->physics.denseNanScanFromStep || t >= simParams->physics.denseNanScanToStep) return;
+                            checkPdfNaN(simObjs, "INTRA-start-of-FSLBM-timestep", t,
+                                       simParams->physics.lowRhoPrecursorThreshold,
+                                       simParams->physics.highVelocityPrecursorThreshold,
+                                       simParams->physics.populationPrecursorThreshold,
+                                       simParams->physics.densityPrecursorLow, simParams->physics.densityPrecursorHigh,
+                                       simParams->physics.densityPrecursorLiquidOnly);
+                         },
+                         "Intra-step NaN scan: start of timeloopFSLBM");
+
    // ObstacleNormalSweep + ObstacleFillLevelSweep — matches the sanctioned FiniteDifferenceMethod pipeline
    // (FiniteDifferenceMethod::addSweeps in src/lbm/free_surface/surface_geometry/CurvatureModel.impl.h).
    // They are required whenever an obstacle touches the free surface (moving particles, walls at the
@@ -513,11 +591,63 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                              const std::unique_ptr< SweepTimeloop >& timeloop)
 {
    WALBERLA_LOG_INFO_ON_ROOT("addSweepSurfaceDynamics");
+
+   // [Claude, 2026-09-24] Sweep-by-sweep NaN-tracing probe for the step-444 crash cell (world
+   // (20.5,8.5,25.5), THESIS_PLAN.md): self-gated to a tight step window so it doesn't flood the log
+   // for the rest of a run. Wired in via AfterFunction after every PDF-touching sweep below to find
+   // EXACTLY which operation first turns this cell's clean rho=1.0 (confirmed at t=442 post-AfterDEM,
+   // right after its OBST->INTF conversion) into the NaN seen by t=443 post-FSLBM.
+   auto probeCrashCell = [simObjs](const char* label) {
+      const uint_t t = *simObjs->currentMainStep;
+      if (t < uint_t(425) || t > uint_t(444)) return;
+      trackWatchCells(simObjs, label, t, { Vector3< real_t >(real_t(20.5), real_t(8.5), real_t(25.5)),
+                                            Vector3< real_t >(real_t(20.5), real_t(6.5), real_t(25.5)),
+                                            Vector3< real_t >(real_t(20.5), real_t(5.5), real_t(25.5)),
+                                            Vector3< real_t >(real_t(18.5), real_t(4.5), real_t(26.5)),
+                                            Vector3< real_t >(real_t(18.5), real_t(34.5), real_t(26.5)) });
+   };
+
+   // [Claude, 2026-09-24] Generic (not a fixed-cell) sweep-by-sweep NaN scan, for crashes where the
+   // culprit cell isn't already known in advance (unlike probeCrashCell above). Scans EVERY liquid/
+   // interface cell in the domain at each PDF-touching sweep stage this timestep and only logs (via
+   // checkPdfNaN's own 3x3x3 neighbourhood dump) when one is actually non-finite -- so a run stays
+   // silent here unless something is genuinely wrong. Reuses PhysicsParameters.denseNanScanEnabled/
+   // From/ToStep (the same window already used by Antidunes.cpp's own two end-of-phase checkPdfNaN
+   // calls) so no new prm key is needed; does NOT abort on finding one (unlike those two calls) so the
+   // full stage-by-stage progression for this timestep can still be observed.
+   auto scanIntraStepNaN = [simParams, simObjs](const char* label) {
+      if (!simParams->physics.denseNanScanEnabled) return;
+      const uint_t t = *simObjs->currentMainStep;
+      if (t < simParams->physics.denseNanScanFromStep || t >= simParams->physics.denseNanScanToStep) return;
+      checkPdfNaN(simObjs, label, t, simParams->physics.lowRhoPrecursorThreshold,
+                 simParams->physics.highVelocityPrecursorThreshold, simParams->physics.populationPrecursorThreshold,
+                 simParams->physics.densityPrecursorLow, simParams->physics.densityPrecursorHigh,
+                 simParams->physics.densityPrecursorLiquidOnly);
+   };
+
+   // [Claude, 2026-09-25] Cube trace for the recurring hopper crash region (world X=267.5, Z~18.5-19.5,
+   // Y in the 15-22 range observed across three independent crashes at this exact rod cluster --
+   // THESIS_PLAN.md). Unlike scanIntraStepNaN above (which only logs when a cell IS already
+   // non-finite), this unconditionally prints the FULL PDF/rho/fill state of every cell in the region,
+   // so the actual (still-finite) values immediately before collide can be inspected directly, not
+   // just a pass/fail isfinite() result.
+   // [Claude, 2026-09-25] DISABLED for the full 60k-step Option-B validation run: the collide-stage
+   // crash mechanism this probe was built to trace is now fully characterised and the fix (the
+   // repairDegenerateObstacleCells guard) is validated (THESIS_PLAN.md) -- this heavy per-step,
+   // ~124-cell, 7-hook-point dump is no longer needed and would flood the log over 60k steps.
+   auto probeHopperCrashRegion = [simObjs](const char* label) { (void)simObjs; (void)label; };
+
    // add standard waLBerla boundary handling
    // only relavant for onlyGasAndBoundary blocks (i.e. not interface, not inflow, not liquid)
    timeloop->add() << Sweep(simObjs->antidunesBoundaryHandling->getBoundarySweep(), "Sweep: boundary handling",
                             Set< SUID >::emptySet(), StateSweep::onlyGasAndBoundary)
-                   << Sweep(EmptySweep(), "Empty sweep: boundary handling", StateSweep::onlyGasAndBoundary);
+                   << Sweep(EmptySweep(), "Empty sweep: boundary handling", StateSweep::onlyGasAndBoundary)
+                   << AfterFunction([probeCrashCell]() { probeCrashCell("PROBE-after-boundarySweep"); },
+                                    "Probe: after boundary handling")
+                   << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-boundarySweep"); },
+                                    "Intra-step NaN scan: after boundary handling")
+                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-boundarySweep"); },
+                                    "Hopper crash region probe: after boundary handling");
 
    // comopute force density field (acceleration applied to fluid and interface cells)
    const ForceDensityCodegenSweep< PdfField_T, FlagField_T, VectorFieldFlattened_T, ScalarField_T >
@@ -527,7 +657,13 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                             StateSweep::onlyGasAndBoundary)
                    << Sweep(EmptySweep(), "Empty sweep: force weighting", StateSweep::onlyGasAndBoundary)
                    << AfterFunction(Communication_T(simObjs->blockForest, simObjs->forceDensityFieldID),
-                                    "Communication: after force weighting sweep");
+                                    "Communication: after force weighting sweep")
+                   << AfterFunction([probeCrashCell]() { probeCrashCell("PROBE-after-forceDensitySweep"); },
+                                    "Probe: after force weighting")
+                   << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-forceDensitySweep"); },
+                                    "Intra-step NaN scan: after force weighting")
+                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-forceDensitySweep"); },
+                                    "Hopper crash region probe: after force weighting");
 
    // sweep for
    // - reconstruction of PDFs in interface cells
@@ -543,7 +679,7 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
          simObjs->flagFieldID, simObjs->pdfFieldID, simObjs->normalFieldID, simObjs->curvatureFieldID,
          simObjs->flagInfo, simObjs->bubbleModel.get(), simParams->model.pdfReconstructionModel,
          simParams->model.useSimpleMassExchange, simParams->model.cellConversionThreshold,
-         simParams->model.cellConversionForceThreshold);
+         simParams->model.cellConversionForceThreshold, simParams->model.seedStreamPdfCloneOnFirstUse);
 
    // sweep acts only on blocks with at least one interface cell (due to StateSweep::fullFreeSurface)
    timeloop->add()
@@ -558,7 +694,13 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
       << AfterFunction(blockforest::UpdateSecondGhostLayer< ScalarField_T >(simObjs->blockForest, simObjs->fillFieldID),
                        "Second ghost layer update: after StreamReconstructAdvect sweep (fill level field)")
       << AfterFunction(blockforest::UpdateSecondGhostLayer< FlagField_T >(simObjs->blockForest, simObjs->flagFieldID),
-                       "Second ghost layer update: after StreamReconstructAdvect sweep (flag field)");
+                       "Second ghost layer update: after StreamReconstructAdvect sweep (flag field)")
+      << AfterFunction([probeCrashCell]() { probeCrashCell("PROBE-after-streamReconstructAdvect"); },
+                       "Probe: after StreamReconstructAdvect")
+      << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-streamReconstructAdvect"); },
+                       "Intra-step NaN scan: after StreamReconstructAdvect")
+      << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-streamReconstructAdvect"); },
+                       "Hopper crash region probe: after StreamReconstructAdvect");
 
    // Generated sweeps
    auto lbmSweepGenerated = typename LatticeModel_T::Sweep(simObjs->pdfFieldID);
@@ -576,13 +718,46 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
       typename LatticeModel_T::Sweep sweep_;
    };
 
-   // Collision for fullFreeSurface (because stream was done above) + StreamCollide for onlyLBM blocks
-   timeloop->add() << Sweep(CollideSweep(lbmSweepGenerated), "Sweep: collision (generated)",
+   // [Claude, 2026-09-27] Per explicit request ("rerun and print those values out and how they
+   // came to be"): empirically checks whether the plain generated collision kernel (used for
+   // fullFreeSurface blocks -- see comment above) actually runs on OBSTACLE-flagged cells too, or
+   // skips them. MovingParticleMapping.h (checked directly) never touches a cell's own PDF storage
+   // after it becomes obstacle -- it only extracts momentum ONCE at the moment of covering and
+   // leaves the array frozen from then on. If collide() is unconditional (no per-cell flag check),
+   // an obstacle cell's own stored PDFs would still get iterated by the SAME nonlinear collision
+   // formula every step using whatever (frozen/self-referential) data is already there -- a
+   // plausible source of the growing oscillation traced at (608.5,18.5,30.5)/(609.5,18.5,30.5)
+   // while both were still OBST-flagged. This logs their density immediately BEFORE and AFTER this
+   // exact collide() call, every step, to settle it directly instead of inferring from the
+   // generated-kernel source.
+   static const std::vector< Vector3< real_t > > collideProbeCells = {
+      Vector3< real_t >(real_t(608.5), real_t(18.5), real_t(30.5)),
+      Vector3< real_t >(real_t(609.5), real_t(18.5), real_t(30.5))
+   };
+
+   timeloop->add() << BeforeFunction(
+                         [simObjs]() { trackWatchCells(simObjs, "COLLIDE-BEFORE", *simObjs->currentMainStep, collideProbeCells); },
+                         "Probe: before collide (generated)")
+                   << Sweep(CollideSweep(lbmSweepGenerated), "Sweep: collision (generated)",
                             StateSweep::fullFreeSurface)
                    << Sweep(lbmSweepGenerated, "Sweep: streamCollide (generated)", StateSweep::onlyLBM)
                    << Sweep(EmptySweep(), "Empty sweep: streamCollide (generated)")
+                   << AfterFunction(
+                         [simObjs]() { trackWatchCells(simObjs, "COLLIDE-AFTER", *simObjs->currentMainStep, collideProbeCells); },
+                         "Probe: after collide (generated)")
                    << AfterFunction(PdfCommunication_T(simObjs->blockForest, simObjs->pdfFieldID),
-                                    "Communication: after streamCollide (generated)");
+                                    "Communication: after streamCollide (generated)")
+                   << AfterFunction([probeCrashCell]() { probeCrashCell("PROBE-after-collide"); },
+                                    "Probe: after collide")
+                   << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-collide"); },
+                                    "Intra-step NaN scan: after collide")
+                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-collide"); },
+                                    "Hopper crash region probe: after collide")
+                   << AfterFunction([simObjs, simParams]() {
+                         if (!simParams->model.repairDegenerateObstaclePdfs) return; // Option B: prm-controlled, default off
+                         const uint_t t = *simObjs->currentMainStep;
+                         repairDegenerateObstacleCells(simObjs, "after-collide", t);
+                      }, "Repair: degenerate obstacle-cell PDFs after collide");
 
    // convert cells
    // - according to the flags from StreamReconstructAdvectSweep (interface -> gas/liquid)
@@ -603,7 +778,13 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                     "Communication: after cell conversion sweep (flag field)")
                    << AfterFunction(
                          blockforest::UpdateSecondGhostLayer< FlagField_T >(simObjs->blockForest, simObjs->flagFieldID),
-                         "Second ghost layer update: after cell conversion sweep (flag field)");
+                         "Second ghost layer update: after cell conversion sweep (flag field)")
+                   << AfterFunction([probeCrashCell]() { probeCrashCell("PROBE-after-cellConversion"); },
+                                    "Probe: after cell conversion")
+                   << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-cellConversion"); },
+                                    "Intra-step NaN scan: after cell conversion")
+                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-cellConversion"); },
+                                    "Hopper crash region probe: after cell conversion");
 
    // reinitialize PDFs, i.e., refill cells that were converted from gas to interface
    // - when the flag "convertedFromGasToInterface" has been set (by CellConversionSweep)
@@ -613,7 +794,13 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
    timeloop->add() << Sweep(equilibriumRefillingSweep, "Sweep: EquilibriumRefilling", StateSweep::fullFreeSurface)
                    << Sweep(EmptySweep(), "Empty sweep: EquilibriumRefilling")
                    << AfterFunction(PdfCommunication_T(simObjs->blockForest, simObjs->pdfFieldID),
-                                    "Communication: after EquilibriumRefilling sweep");
+                                    "Communication: after EquilibriumRefilling sweep")
+                   << AfterFunction([probeCrashCell]() { probeCrashCell("PROBE-after-equilibriumRefilling"); },
+                                    "Probe: after EquilibriumRefilling")
+                   << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-equilibriumRefilling"); },
+                                    "Intra-step NaN scan: after EquilibriumRefilling")
+                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-equilibriumRefilling"); },
+                                    "Hopper crash region probe: after EquilibriumRefilling");
 
    const walberla::free_surface::ExcessMassDistributionModel excessMassModel(
       simParams->model.excessMassDistributionModel);
@@ -638,7 +825,13 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                             "Second ghost layer update: after excess mass distribution sweep (fill level field)")
                       // update bubble model, i.e., perform registered bubble merges/splits; bubble merges/splits are
                       // already detected and registered by CellConversionSweep
-                      << AfterFunction([&simObjs]() { simObjs->bubbleModel->update(); }, "Sweep: bubble model update");
+                      << AfterFunction([&simObjs]() { simObjs->bubbleModel->update(); }, "Sweep: bubble model update")
+                      << AfterFunction([probeCrashCell]() { probeCrashCell("PROBE-after-excessMassEvenly"); },
+                                       "Probe: after excess mass distribution (evenly)")
+                      << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-excessMassEvenly"); },
+                                       "Hopper crash region probe: after excess mass distribution (evenly)")
+                      << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-excessMassEvenly"); },
+                                       "Intra-step NaN scan: after excess mass distribution (evenly)");
    }
    else
    {
@@ -728,16 +921,72 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
       return dormantUIDs->count(ac.getUid(particleIdx)) == 0;
    };
 
+   // [Claude, 2026-09-27] Per explicit request ("add the instrumentation to find out why"): traces
+   // the SAME two watch cells (608.5,18.5,30.5)/(609.5,18.5,30.5) around MovingParticleMapping and
+   // PdfReconstructionManager -- the ONLY two mechanisms in this whole timeloopAfterDEM phase that
+   // can touch a cell's PDFs, and neither is covered by the obstacle-PDF freeze (that only brackets
+   // the EARLIER timeloopFSLBM phase's stream+collide sweeps). This is where the residual monotonic
+   // drift found with the freeze active (job 4271276/4271299) most likely originates.
+   static const std::vector< Vector3< real_t > > couplingProbeCells = {
+      Vector3< real_t >(real_t(608.5), real_t(18.5), real_t(30.5)),
+      Vector3< real_t >(real_t(609.5), real_t(18.5), real_t(30.5))
+   };
+
+   // [Claude, 2026-09-27] Per THESIS_PLAN.md's "ownership handoff" origin finding + fix: fired by
+   // MovingParticleMapping (see its own doc comment) exactly once, right before a GENUINE cross-
+   // particle obstacle-ownership handoff is committed -- resets the handed-off cell's PDF to rest
+   // equilibrium (rho=1, u=0), breaking the silent-inheritance-of-stale-history chain the origin
+   // finding traced (a growing checkerboard oscillation began in the exact same step as an
+   // ownership handoff between two recurring rods, jobs 4271684/4271714). Manual D3Q27 weight
+   // assignment (NOT the generic lbm::Equilibrium<>::set()/PdfField::setToEquilibrium() API,
+   // matching this codebase's own established convention -- SetupStages.h's
+   // repairDegenerateObstacleCells): that generic API reads a static LatticeModel_T::w[] weight
+   // table whose specialization is apparently not safe to call from the generic
+   // MovingParticleMapping.h file for this generated Cumulant model in the real multi-file
+   // production link -- confirmed by direct bisection (jobs 4271763/4271773 segfaulted with it;
+   // job 4271777, identical otherwise, got the ordinary STALE-PARTICLE-IDX abort instead).
+   auto onOwnershipHandoff = [simParams, simObjs](IBlock& block, cell_idx_t x, cell_idx_t y, cell_idx_t z,
+                                        walberla::id_t formerUid, walberla::id_t newUid) {
+      if (!simParams->model.useOwnershipHandoffPdfReset) return; // prm toggle off: original pre-fix behaviour (silent inheritance)
+      // [Claude, 2026-09-27] Real root cause of three segfaulted cluster attempts (jobs 4271763/
+      // 4271773/4271821), found via bracketing logs (job 4271830): MovingParticleMapping.h now
+      // guards the call site itself with pdfField->isInInnerPart() before ever invoking this
+      // callback (flagField and pdfField have different ghost-layer counts in the real Antidunes
+      // setup -- see that file's own comment) -- so by the time we get here, (x,y,z) is always safe
+      // to write.
+      auto* pdfField = block.getData< PdfField_T >(simObjs->pdfFieldID);
+      pdfField->get(x, y, z, uint_t(0)) = real_t(8.0 / 27.0);
+      for (uint_t q = uint_t(1); q <= uint_t(6); ++q) pdfField->get(x, y, z, q) = real_t(2.0 / 27.0);
+      for (uint_t q = uint_t(7); q <= uint_t(18); ++q) pdfField->get(x, y, z, q) = real_t(1.0 / 54.0);
+      for (uint_t q = uint_t(19); q <= uint_t(26); ++q) pdfField->get(x, y, z, q) = real_t(1.0 / 216.0);
+
+      static uint_t handoffLogCount = uint_t(0);
+      ++handoffLogCount;
+      if (handoffLogCount <= uint_t(50) || (handoffLogCount % uint_t(500) == uint_t(0)))
+      {
+         WALBERLA_LOG_WARNING("[OWNERSHIP-HANDOFF-RESET] (#" << handoffLogCount << ") t="
+            << *simObjs->currentMainStep << " block-local=(" << x << "," << y << "," << z
+            << ") ownership handed off uid=" << formerUid << " -> uid=" << newUid
+            << " -- PDF reset to rest equilibrium (rho=1, u=0)");
+      }
+   };
+
    // sweep for mapping particles into the LBM cells
    const bool strictlyConserveMomentum = false;
-   timeloop->add() << Sweep(
+   timeloop->add() << BeforeFunction(
+      [simObjs]() { trackWatchCells(simObjs, "BEFORE-MAPPING", *simObjs->currentMainStep, couplingProbeCells); },
+      "Probe: before MovingParticleMapping")
+   << Sweep(
       lbm_mesapd_coupling::makeMovingParticleMapping< PdfField_T, AntidunesBoundaryHandling_T::BoundaryHandling_T >(
          simObjs->blockForest, simObjs->pdfFieldID, simObjs->antidunesBoundaryHandling->getHandlingID(),
          simObjs->particleFieldID, simObjs->particleAccessor, AntidunesBoundaryHandling_T::movingObstacleFlagID,
          FormerMO_Flag,
          movingObstacleSelector, // all spheres + floating boxes (not fixed pillars)
-         strictlyConserveMomentum),
-      "Sweep (coupling): MovingParticleMapping");
+         strictlyConserveMomentum, simParams->model.mappingTieOffset, onOwnershipHandoff),
+      "Sweep (coupling): MovingParticleMapping")
+   << AfterFunction(
+      [simObjs]() { trackWatchCells(simObjs, "AFTER-MAPPING", *simObjs->currentMainStep, couplingProbeCells); },
+      "Probe: after MovingParticleMapping, before PdfReconstructionManager");
 
    // sweep for restoring PDFs in cells previously occupied by particles
    //
@@ -806,8 +1055,14 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    const uint_t convLogFreq = simParams->evaluation.evaluationFrequency;
 
    timeloop->add()
+      << BeforeFunction(
+            [simObjs]() { trackWatchCells(simObjs, "BEFORE-RECONSTRUCTION", *simObjs->currentMainStep, couplingProbeCells); },
+            "Probe: before PdfReconstructionManager")
       << Sweep(makeSharedSweep(bognerReconstructionManager),
                "Sweep (coupling): PDF Reconstruction (moving particles) [Bogner2way+EquilibriumReconstructor]")
+      << AfterFunction(
+            [simObjs]() { trackWatchCells(simObjs, "AFTER-RECONSTRUCTION", *simObjs->currentMainStep, couplingProbeCells); },
+            "Probe: after PdfReconstructionManager, before its own communication")
       << AfterFunction(
             [bognerReconstructionManager, convLogFreq, step = uint_t(0)]() mutable {
                ++step;
@@ -820,7 +1075,33 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
             "Communication (coupling): after PDF reconstruction (flagField + particleField)") // unsure if necessary but
                                                                                               // added for consistency
       << AfterFunction(PdfCommunication_T(simObjs->blockForest, simObjs->pdfFieldID),
-                       "Communication (coupling): after PDF reconstruction (pdfField)");
+                       "Communication (coupling): after PDF reconstruction (pdfField)")
+      << AfterFunction(
+            [simObjs]() { trackWatchCells(simObjs, "AFTER-RECONSTRUCTION-COMM", *simObjs->currentMainStep, couplingProbeCells); },
+            "Probe: after PdfReconstructionManager's own communication");
+
+   // experimental: close sub-cell fluid channels between touching bodies (ModelParameters.closeSealedCellsMinNeighbours,
+   // 0 = off; see SealedCellGuard.h). CORRECTNESS FIX (2026-09-22): moved to run AFTER PdfReconstructionManager (was
+   // before it) and its own communication above, so every cell this sweep ever closes has ALREADY been resolved to a
+   // fully consistent liquid/gas/interface state this step (either freshly reconstructed just now, or unchanged from a
+   // previous step) -- there is no longer a 'formerObstacle, still sealed -> slam back to obstacle, skipping
+   // reconstruction entirely' path, which left that cell's PDF/fill/excess-mass state permanently stale and was traced
+   // (job 4253834, THESIS_PLAN.md 2026-09-22) to [MEM-GARBAGE-LINK]/NaN failures on a real rod hopper. Its own
+   // communication follows so neighbouring ranks see the same closures before the next step's mapping/reconstruction.
+   if (simParams->model.closeSealedCellsMinNeighbours > uint_c(0))
+   {
+      WALBERLA_LOG_WARNING_ON_ROOT("[SealedCellGuard] ACTIVE: fluid cells with >= "
+                                   << simParams->model.closeSealedCellsMinNeighbours
+                                   << " of 26 obstacle neighbours are turned into obstacle cells every step (post-reconstruction)");
+      timeloop->add() << Sweep(
+         CloseSealedCellsSweep< AntidunesBoundaryHandling_T::BoundaryHandling_T >(
+            simObjs->antidunesBoundaryHandling->getHandlingID(), simObjs->particleFieldID,
+            AntidunesBoundaryHandling_T::movingObstacleFlagID, AntidunesBoundaryHandling_T::noSlipFlagID,
+            walberla::free_surface::flagIDs::gasFlagID, simParams->model.closeSealedCellsMinNeighbours),
+         "Sweep (coupling): CloseSealedCells")
+      << AfterFunction(Communication_T(simObjs->blockForest, simObjs->flagFieldID, simObjs->particleFieldID),
+                       "Communication (coupling): after CloseSealedCells (flagField + particleField)");
+   }
 }
 
 void addAfterTimeStepPerformanceLogger(const std::shared_ptr< const SimulationParams >& simParams,
@@ -859,7 +1140,7 @@ void addAfterTimeStepDataEvaluators(const std::shared_ptr< const SimulationParam
    AverageDataSliceEvaluator< AntidunesBoundaryHandling_T, PdfField_T, FlagField_T, ScalarField_T >
       averageDataSliceEvaluator(simObjs->blockForest, simObjs->flagFieldID, simObjs->fillFieldID, simObjs->pdfFieldID,
                                 simParams->evaluation.baseFolderName, simObjs->dataCols,
-                                simParams->evaluation.evaluationFrequency);
+                                simParams->evaluation.dataSliceFrequency);
    timeloop->addFuncAfterTimeStep(averageDataSliceEvaluator, "Evaluator: AverageDataSlice");
 
    // total mass evaluator --------------------------------------------------------------------------------------
@@ -886,12 +1167,26 @@ void addAfterTimeStepDataEvaluators(const std::shared_ptr< const SimulationParam
    // existing prm's timeloop is completely unaffected.
    if (simParams->evaluation.clogMeasurementEnabled)
    {
+      // Blockage-ratio inputs (review.md item 4): pillar geometry, read once here rather than inside
+      // the evaluator itself, so ClogMeasurementEvaluator stays decoupled from SimulationParams.h's
+      // CylinderPillarParams type.
+      std::vector< Vector3< real_t > > pillarCenters;
+      std::vector< real_t >            pillarRadii;
+      for (const auto& pillar : simParams->cylinderPillars)
+      {
+         pillarCenters.push_back(pillar.center);
+         pillarRadii.push_back(pillar.radius);
+      }
+      const real_t channelWidthY = real_c(simParams->domain.domainSize[1]);
+
       ClogMeasurementEvaluator< AntidunesBoundaryHandling_T, PdfField_T, FlagField_T, ScalarField_T >
          clogMeasurementEvaluator(simObjs->blockForest, simObjs->flagFieldID, simObjs->fillFieldID, simObjs->pdfFieldID,
                                   simParams->evaluation.clogUpstreamPos, simParams->evaluation.clogDownstreamPos,
                                   simParams->evaluation.clogProbeHalfWidthXY, simObjs->acceleration,
                                   simParams->computed.absoluteLiquidHeight, simObjs->dataCols,
-                                  simParams->evaluation.evaluationFrequency);
+                                  simParams->evaluation.evaluationFrequency, "clog",
+                                  simParams->evaluation.clogFlowRateEnabled, pillarCenters, pillarRadii,
+                                  channelWidthY, simParams->evaluation.clogBlockageRatioEnabled);
       timeloop->addFuncAfterTimeStep(clogMeasurementEvaluator, "Evaluator: ClogMeasurement");
    }
 
@@ -929,9 +1224,189 @@ void addAfterTimeStepForcingAdjuster(const std::shared_ptr< const SimulationPara
    // using the computed mean velocity, adjust the acceleration (in X dir) such that the target mean velocity is
    // maintained
    ForcingAdjuster forcingAdjuster(simObjs->meanVelocity, simObjs->acceleration, simObjs->pidController,
-                                   simParams->evaluation.evaluationFrequency, simParams->pid.enabled);
+                                   simParams->evaluation.evaluationFrequency, simParams->pid.enabled,
+                                   simObjs->beginTimeStep, simParams->pid.switchOffStep,
+                                   simParams->pid.switchOffAveragingWindow);
 
    timeloop->addFuncAfterTimeStep(forcingAdjuster, "Evaluator: ForcingAdjuster");
+}
+
+// [Claude, 2026-09-27] Per explicit request ("introduce a toggleable sweep after every lbm timestep
+// that does some diagnostics when activated... check for other diagnostic we could move to this
+// additional sweep"): a single, off-by-default sweep (ModelParameters::diagnosticSweepEnabled) that
+// runs once per MAIN step, on timeloopEval so every LBM/DEM/force computation for that step has
+// already settled. When enabled it does three things:
+//   1. Drains and logs SimulationObjects::diagnosticEvents -- the shared buffer that several
+//      per-sub-cycle checks in ParticleKernels.h (VELOCITY-JUMP, MIGRATION-NAN so far) push a
+//      lightweight record into INSTEAD of calling WALBERLA_LOG_WARNING directly at the point of
+//      detection (per the refined request: "collect the data... then log them in this extra sweep"
+//      rather than have each check independently re-scan/format/print). This is the central,
+//      single place their output actually gets formatted and printed.
+//   2. Runs the existing checkPdfNaN (SetupStages.h) once, domain-wide, over every liquid/interface
+//      cell, flagging any cell whose density falls outside [densityPrecursorLow, densityPrecursorHigh]
+//      -- reuses that function and its existing PhysicsParameters thresholds entirely rather than
+//      duplicating a second density scan; the diagnosticSweep* window is independent of
+//      denseNanScanEnabled's own window, so this can run even when that separate, older toggle is off.
+//   3. Logs every LOCAL floater's position, quaternion, and force/torque (both raw contact and
+//      hydrodynamic) in one line each -- the same fields FloaterHistoryLogger::logState already
+//      writes to CSV, but here as a lightweight, always-current WALBERLA_LOG_INFO snapshot without
+//      needing logFloaterHistory's own per-sub-cycle file-writing machinery turned on.
+//
+// NOT moved here (reviewed, left alone deliberately): GHOST-VANISHED and the guard's own clear
+// logic (ParticleKernels.h) -- these need genuine SUB-CYCLE resolution (the whole point is catching
+// a mid-step ghost drop before the next once-per-step mapping refresh) and are mid-investigation
+// right now (job 4270904's hang); SUBCYCLE-LEFT-RANK, PRE-REDUCE, NAN-LINK, STRONG-CONTACT-FORCE,
+// TOTAL-FORCE-THRESHOLD -- also genuinely sub-cycle-timed detectors (each compares state across, or
+// within, individual DEM sub-cycles), so collapsing them to a once-per-step sweep would lose exactly
+// the timing resolution they exist for. RAW-HYDRO (checked once per main step already, right after
+// reduceAndAvgHydroForces) is the best remaining candidate to convert next if this pattern proves
+// useful -- not done yet, left as pure review per the request.
+void addAfterTimeStepDiagnosticSweep(const std::shared_ptr< const SimulationParams >& simParams,
+                                     const std::shared_ptr< SimulationObjects >& simObjs,
+                                     const std::unique_ptr< SweepTimeloop >& timeloop)
+{
+   if (!simParams->model.diagnosticSweepEnabled) return; // not even registered when off -- zero cost
+   WALBERLA_LOG_INFO_ON_ROOT("addAfterTimeStepDiagnosticSweep");
+
+   auto diagnosticSweep = [simParams, simObjs]() {
+      const uint_t t = *simObjs->currentMainStep;
+      if (t < simParams->model.diagnosticSweepFromStep) return;
+      if (simParams->model.diagnosticSweepToStep != uint_t(0) && t >= simParams->model.diagnosticSweepToStep) return;
+
+      // (1) Drain + log this step's collected per-sub-cycle diagnostic events, then clear for next step.
+      auto& events = *simObjs->diagnosticEvents;
+      for (const auto& ev : events)
+      {
+         WALBERLA_LOG_WARNING("[DIAG-SWEEP][" << ev.tag << "] rank=" << mpi::MPIManager::instance()->rank()
+            << " step=" << ev.mainStep << " subCycle=" << ev.subCycle << " uid=" << ev.uid
+            << " pos=" << ev.worldPos << " value=" << ev.value << " -- " << ev.detail);
+      }
+      events.clear();
+
+      // (2) Domain-wide density scan -- reuses checkPdfNaN entirely, same thresholds as denseNanScan.
+      checkPdfNaN(simObjs, "DIAG-SWEEP-DENSITY", t, real_t(0), real_t(0), real_t(0),
+                 simParams->physics.densityPrecursorLow, simParams->physics.densityPrecursorHigh,
+                 simParams->physics.densityPrecursorLiquidOnly);
+
+      // (3) Per-floater position/quaternion/force/torque snapshot.
+      simObjs->particleStorage->forEachParticle(false,
+         [](size_t idx, auto& ac) {
+            using namespace mesa_pd::data::particle_flags;
+            if (isSet(ac.getFlags(idx), GHOST)) return false;
+            const uint_t pt = ac.getType(idx);
+            return pt == uint_t(1) || pt == uint_t(3) || pt == uint_t(4); // sphere/box/cylinder floaters
+         },
+         *simObjs->particleAccessor,
+         [t](size_t idx, auto& ac) {
+            const auto& quat = ac.getRotation(idx).getQuaternion();
+            WALBERLA_LOG_INFO("[DIAG-SWEEP-FLOATER] rank=" << mpi::MPIManager::instance()->rank()
+               << " step=" << t << " uid=" << ac.getUid(idx)
+               << " pos=" << ac.getPosition(idx) << " quat=(" << quat[0] << "," << quat[1] << ","
+               << quat[2] << "," << quat[3] << ")"
+               << " force=" << ac.getForce(idx) << " torque=" << ac.getTorque(idx)
+               << " hydroForce=" << ac.getHydrodynamicForce(idx)
+               << " hydroTorque=" << ac.getHydrodynamicTorque(idx));
+         },
+         *simObjs->particleAccessor);
+
+      // (4) [Claude, 2026-09-27] Per explicit request ("add to our additional sweep at the end this
+      // cell and surrounding... rerun and analyze"): a ZERO-THRESHOLD, every-step trace of world cell
+      // (608.5,18.5,30.5) -- the [MEM-GARBAGE-LINK] collapse cell shared by jobs 4271068/4271079/
+      // 4271124, all at step 22011, 1 step before the STALE-PARTICLE-IDX abort -- plus its full D3Q27
+      // neighbourhood (27 cells total). Unlike every existing check (MEM-GARBAGE-LINK's |PDF|>10,
+      // checkPdfNaN's density window/NaN), this logs EVERY one of these 27 cells' density/fill/PDFs
+      // EVERY step regardless of value, via the existing trackWatchCells (SetupStages.h) -- so it
+      // can see a sub-threshold drift building up across steps 22001-22010 that every current
+      // threshold-gated check would stay silent on. Reuses trackWatchCells entirely, no new scanning
+      // code. Cheap: only the 1-2 ranks that actually own one of these 27 cells produce any output.
+      {
+         static const std::vector< Vector3< real_t > > memGarbageLinkCube = [] {
+            std::vector< Vector3< real_t > > cells;
+            const Vector3< real_t > centre(real_t(608.5), real_t(18.5), real_t(30.5));
+            for (real_t dz = real_t(-1); dz <= real_t(1); dz += real_t(1))
+               for (real_t dy = real_t(-1); dy <= real_t(1); dy += real_t(1))
+                  for (real_t dx = real_t(-1); dx <= real_t(1); dx += real_t(1))
+                     cells.emplace_back(centre[0] + dx, centre[1] + dy, centre[2] + dz);
+            return cells;
+         }();
+         trackWatchCells(simObjs, "MEM-GARBAGE-LINK-CUBE", t, memGarbageLinkCube);
+      }
+
+      // [Claude, 2026-09-27] Per explicit request ("check the other crash instance too"): the SAME
+      // trace, centred on job 4271048's own [MEM-GARBAGE-LINK] collapse cell (world (603.5,22.5,25.5),
+      // rank 114, step 22263, 1 step before its own STALE-PARTICLE-IDX abort at step 22264) -- a
+      // DIFFERENT desync instance than the 22012 one above (different rank, different cell, 9 orders
+      // of magnitude more severe, ~250 steps later), used to check whether the "squeezed between two
+      // different floaters' obstacle surfaces" pattern found at the 22012 cell also holds here, or is
+      // specific to that one location.
+      {
+         static const std::vector< Vector3< real_t > > crash4271048Cube = [] {
+            std::vector< Vector3< real_t > > cells;
+            const Vector3< real_t > centre(real_t(603.5), real_t(22.5), real_t(25.5));
+            for (real_t dz = real_t(-1); dz <= real_t(1); dz += real_t(1))
+               for (real_t dy = real_t(-1); dy <= real_t(1); dy += real_t(1))
+                  for (real_t dx = real_t(-1); dx <= real_t(1); dx += real_t(1))
+                     cells.emplace_back(centre[0] + dx, centre[1] + dy, centre[2] + dz);
+            return cells;
+         }();
+         trackWatchCells(simObjs, "CRASH-4271048-CUBE", t, crash4271048Cube);
+      }
+
+      // [Claude, 2026-09-27] Per explicit request ("create a box around all the cylinders in the
+      // crash area, log out their values and see the crash evolution"): the FULL spatial+temporal
+      // evolution of every OBSTACLE/INTERFACE cell in a fixed box, once per main step, within its own
+      // independent step window -- see logFluidBoxHistory's own doc comment (SimulationParams.h).
+      if (simParams->model.logFluidBoxHistory &&
+          t >= simParams->model.logFluidBoxHistoryStartStep &&
+          (simParams->model.logFluidBoxHistoryEndStep == uint_t(0) || t <= simParams->model.logFluidBoxHistoryEndStep))
+      {
+         logFluidBoxHistory(simObjs, t, simParams->model.fluidBoxHistoryBaseFolder,
+                            simParams->model.fluidBoxMin, simParams->model.fluidBoxMax);
+      }
+   };
+
+   timeloop->addFuncAfterTimeStep(diagnosticSweep, "Diagnostic: toggleable density+floater sweep");
+}
+
+// [Claude, 2026-09-28] Deliberately INDEPENDENT of addAfterTimeStepDiagnosticSweep/
+// diagnosticSweepEnabled above (which gates unrelated crash-investigation diagnostics -- draining
+// diagnosticEvents, the domain-wide NaN scan, per-floater force/torque snapshots -- all noise for a
+// clean still-water buoyancy validation run) so logDensityColumn can be used on its own, e.g. to
+// investigate the sphere/cylinder/cuboid equilibrium position bias, without pulling in any of that.
+void addDensityColumnLoggingSweep(const std::shared_ptr< const SimulationParams >& simParams,
+                                  const std::shared_ptr< SimulationObjects >& simObjs,
+                                  const std::unique_ptr< SweepTimeloop >& timeloop)
+{
+   if (!simParams->model.logDensityColumn) return; // not even registered when off -- zero cost
+
+   auto densityColumnSweep = [simParams, simObjs]() {
+      const uint_t t = *simObjs->currentMainStep;
+      if (t < simParams->model.logDensityColumnStartStep) return;
+      if (simParams->model.logDensityColumnEndStep != uint_t(0) && t > simParams->model.logDensityColumnEndStep) return;
+
+      logDensityColumn(simObjs, t, simParams->model.densityColumnBaseFolder,
+                       simParams->model.densityColumnX, simParams->model.densityColumnY);
+   };
+
+   timeloop->addFuncAfterTimeStep(densityColumnSweep, "Diagnostic: far-field density column log");
+}
+
+// [Claude, 2026-09-28] logWaterHeight: independent of every other diagnostic switch, over the whole run.
+void addWaterHeightLoggingSweep(const std::shared_ptr< const SimulationParams >& simParams,
+                                const std::shared_ptr< SimulationObjects >& simObjs,
+                                const std::unique_ptr< SweepTimeloop >& timeloop)
+{
+   if (!simParams->model.logWaterHeight) return; // not even registered when off -- zero cost
+
+   auto waterHeightSweep = [simParams, simObjs]() {
+      const uint_t t = *simObjs->currentMainStep;
+      const uint_t every = simParams->model.waterHeightEveryNSteps == uint_t(0) ? uint_t(1) : simParams->model.waterHeightEveryNSteps;
+      if (t % every != uint_t(0)) return;
+      logWaterHeights(simObjs, t, simParams->model.waterHeightBaseFolder, simParams->model.waterHeightGridX,
+                      simParams->model.waterHeightGridY);
+   };
+
+   timeloop->addFuncAfterTimeStep(waterHeightSweep, "Diagnostic: multi-column water height log");
 }
 
 } // namespace antidunes

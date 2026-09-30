@@ -643,6 +643,62 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       if (simParams->floatingCylinders[ci].startInactive)
          simObjs->dormantFloaterUIDs->insert(simObjs->floaterCylinderUIDs[ci]);
 
+   // Floating capsules ("pill" shape, type 5) — same indexed-UID pattern as the other floater types.
+   // mesa_pd::data::Capsule's axis is its BODY z-axis (same convention as Cylinder), so the alignment
+   // construction below is identical to the cylinder block above. interactionRadius = length/2 EXACTLY
+   // (not an approximation): a capsule's farthest point from its own centre, over its WHOLE surface, is
+   // always at the tip of a hemispherical cap along the axis (see Capsule::support()'s own derivation),
+   // so the circumscribed sphere radius is simply half the full end-to-end length, no sqrt needed.
+   // [Claude, 2026-09-23] NEW SHAPE: no closed-form contact algorithm anywhere in the project for this
+   // shape (deliberately, for now) -- every capsule pair goes through GJK/EPA via GeneralContactDetection
+   // automatically (see SolidCylinderContactDetection's own comment on why unlisted pairs fall through).
+   simObjs->floaterCapsuleUIDs.assign(simParams->floatingCapsules.size(), walberla::id_t(0));
+   for (size_t pi = 0; pi < simParams->floatingCapsules.size(); ++pi)
+   {
+      const auto& fpp = simParams->floatingCapsules[pi];
+      const mesa_pd::Vec3 pos(fpp.position[0], fpp.position[1], fpp.position[2]);
+      const real_t circumR = real_t(0.5) * fpp.length;
+
+      mesa_pd::Rot3 rot;
+      const mesa_pd::Vec3 ez(real_t(0), real_t(0), real_t(1));
+      const real_t cosA = ez * fpp.axis;
+      if (cosA < real_t(1) - real_t(1e-10))
+      {
+         const mesa_pd::Vec3 rotAxis = (cosA > real_t(-1) + real_t(1e-10))
+                                          ? (ez % fpp.axis).getNormalized()
+                                          : mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+         rot.rotate(rotAxis, std::acos(std::clamp(cosA, real_t(-1), real_t(1))));
+      }
+      if (std::abs(fpp.initialTiltAngleDeg) > real_t(1e-10))
+         rot.rotate(mesa_pd::Vec3(real_t(0), real_t(1), real_t(0)), fpp.initialTiltAngleDeg * math::pi / real_t(180));
+
+      if (simObjs->mesapdDomain->isContainedInProcessSubdomain(
+            uint_c(mpi::MPIManager::instance()->rank()), pos))
+      {
+         auto p = simObjs->particleStorage->create(false);
+         p->setPosition(pos);
+         p->setBaseShape(std::make_shared< mesa_pd::data::Capsule >(fpp.radius, fpp.length));
+         p->getBaseShapeRef()->updateMassAndInertia(fpp.densityRatio);
+         p->setOwner(mpi::MPIManager::instance()->rank());
+         p->setType(5);
+         p->setInteractionRadius(circumR);
+         p->setRotation(rot);
+         if (fpp.settlingSteps > 0 && !fpp.pinPosition)
+            mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
+         simObjs->floaterCapsuleUIDs[pi] = p->getUid();
+      }
+      WALBERLA_LOG_INFO_ON_ROOT("Created floating capsule: radius=" << fpp.radius
+         << " length=" << fpp.length << " axis=" << fpp.axis
+         << " densityRatio=" << fpp.densityRatio << " position=" << pos
+         << " settlingSteps=" << fpp.settlingSteps
+         << " initialTiltAngleDeg=" << fpp.initialTiltAngleDeg
+         << " pinPosition=" << (fpp.pinPosition ? "true" : "false"));
+   }
+   mpi::allReduceInplace(simObjs->floaterCapsuleUIDs, mpi::SUM);
+   for (size_t pi = 0; pi < simParams->floatingCapsules.size(); ++pi)
+      if (simParams->floatingCapsules[pi].startInactive)
+         simObjs->dormantFloaterUIDs->insert(simObjs->floaterCapsuleUIDs[pi]);
+
    // choose particle sync algorithm -----------------------------------------------------
    // blockSyncExtension must be >= the largest floater extent so that SyncNextNeighbors
    // ghost-copies each floater to every block its body physically overlaps.
@@ -663,6 +719,8 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
                                        real_t(0.25) * fcp.length * fcp.length);
       blockSyncExtension = std::max(blockSyncExtension, circumR);
    }
+   for (const auto& fpp : simParams->floatingCapsules)
+      blockSyncExtension = std::max(blockSyncExtension, real_t(0.5) * fpp.length);
    WALBERLA_LOG_INFO_ON_ROOT("blockSyncExtension = " << blockSyncExtension);
    // maxParticleDiameter determines which sync algorithm is safe (SyncNextNeighbors vs
    // SyncGhostOwners). Use 2×circumscribed radius for each floater type so that particles
@@ -683,6 +741,8 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
                                        real_t(0.25) * fcp.length * fcp.length);
       maxParticleDiameter = std::max(maxParticleDiameter, circumR * real_c(2));
    }
+   for (const auto& fpp : simParams->floatingCapsules)
+      maxParticleDiameter = std::max(maxParticleDiameter, fpp.length);
 
    if (maxParticleDiameter < real_c(2) * real_c(simParams->blockForest.cellsPerBlock.min()) - blockSyncExtension) {
       WALBERLA_LOG_INFO_ON_ROOT("Using SyncNextNeighbors for particles");
@@ -744,7 +804,8 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
       simObjs->blockForest, simObjs->pdfFieldID, simObjs->fillFieldID, simObjs->particleFieldID,
       simObjs->particleAccessor,
       hydrostaticFtor,
-      simParams->model.useFillWeighting);
+      simParams->model.useFillWeighting,
+      simParams->model.useInterpolatedBounceBack);
 
    // initialize BCs from config (NoSlip top/bottom, CellInterval pillar defined in Antidunes.prm)
    simObjs->antidunesBoundaryHandling->initFromConfig(simParams->cfgPtr->getOneBlock("BoundaryParameters"));
@@ -770,7 +831,8 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
 void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simParams, const std::shared_ptr< SimulationObjects >& simObjs)
 {
    WALBERLA_LOG_INFO_ON_ROOT("mapParticlesOntoCells");
-   // Select all floaters: type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder.
+   // Select all floaters: type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder,
+   // type 5 = floating capsule ("pill" shape).
    // Fixed obstacles (pillars, walls) are mapped separately as static NoSlip/FreeSlip. Dormant
    // (startInactive, not yet at settlingSteps) floaters are excluded too -- they are not "in the
    // simulation" yet, so must not claim fluid cells (this is what lets several floaters share the
@@ -780,7 +842,7 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
    auto floaterSelector = [dormantUIDs](const size_t particleIdx, const auto& ac)
    {
       const uint_t t = ac.getType(particleIdx);
-      if (t != uint_t(1) && t != uint_t(3) && t != uint_t(4)) return false;
+      if (t != uint_t(1) && t != uint_t(3) && t != uint_t(4) && t != uint_t(5)) return false;
       return dormantUIDs->count(ac.getUid(particleIdx)) == 0;
    };
 
@@ -796,7 +858,8 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
    else {
       // same as above but it also stores the UID of the particle in particleFieldID (but no hydro forces are computed here)
       lbm_mesapd_coupling::MovingParticleMappingKernel< AntidunesBoundaryHandling_T::BoundaryHandling_T >
-         kernel(simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simObjs->particleFieldID);
+         kernel(simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simObjs->particleFieldID,
+                simParams->model.mappingTieOffset);
       simObjs->particleStorage->forEachParticle(false, floaterSelector, *simObjs->particleAccessor,
                                              kernel, *simObjs->particleAccessor,
                                              AntidunesBoundaryHandling_T::movingObstacleFlagID);

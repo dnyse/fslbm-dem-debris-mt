@@ -1,0 +1,181 @@
+// cuboid_stillwater_realgravity981_3xsphere_hires_d050_resume_floaterlog_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-18] ROTATION-ANGLE LOGGING RERUN, per explicit request ("combine the two runs
+// and create the timestep vs rotation angle graph to see if it got settled in the correct stable
+// angle of 45 degrees"). Same t=90000 checkpoint and same resume-to-completion setup as
+// cuboid_stillwater_realgravity981_3xsphere_hires_d050_resume_gas.prm (job 4244926, COMPLETED
+// cleanly to t=100000, exit 0 -- see that file's own header for the full crash/root-cause history).
+//
+// IMPORTANT GAP FOUND while trying to actually build the requested graph: neither the completed
+// production run (job 4244926) nor the original crashed run (job 4240983, whose own eval/vtk-out
+// was inadvertently wiped by the diagnostic jobs' own cleanup steps that ran on the same checkout
+// afterward, before anyone archived it) has any usable rotation data. `antidunes.sqlite` has no
+// orientation column at all, and floaterBox VTK output (which does carry a rotation matrix) never
+// fired during the resume -- `writeFrequency=20000` never aligns with any step in [90000,99999], and
+// the main loop's own `t != timesteps` bound means t=100000 itself is never reached either. This
+// rerun adds `ModelParameters.logFloaterHistory=true` (per-substep quaternion CSV, see
+// ParticleKernels.h's own logState()) specifically to get real per-timestep orientation data for at
+// least the tail of the run -- cheap and safe here (a single floater, 10000 steps, nowhere near the
+// many-floater/long-run scale that motivated logFloaterHistoryStartStep/EndStep's own existence).
+// storeSnapshot set to false (unlike the production resume) since this is a read-only diagnostic
+// rerun of an already-completed result, not meant to produce a new checkpoint.
+//
+// This does NOT recover the original run's own t=0-90000 rotation history (genuinely lost, see
+// above) -- it only gives the t=90000-100000 tail, which is what actually answers "did it settle at
+// 45 degrees and stay there," since the box has already had 90000 steps to reach whatever its
+// long-term behaviour is by this point.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 17, 42, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  true;
+   storeSnapshot                 false;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <119, 168, 150>;
+   wavePeriods        1;
+   liquidHeightFactor 9.9681;
+   floorHeightFactor  0.01;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0;       // still water — no flow forcing
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting          false;
+   timesteps              100000;
+   Re                     3100;
+   Fr                     1.31;
+   We                     15.6188;
+   useHardcodedUnits      true;         // keep physical constants valid while U = 0; viscosity=0.000214026 fixed
+   gravityOverride        2.6596472613474883e-05;  // solved for g_SI = 9.81 m/s^2 at this resolution's dx_SI/dt_SI (see header)
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 3;   // scaling-math lever only (useParticleBed false) -- see sphere sibling's header
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.97;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+FloatingBoxes
+{
+   FloatingBox
+   {
+      // densityRatio 0.5 -> Archimedes equilibrium: 50% submerged.
+      position             < 59.5, 84, 75 >;
+      halfExtents          < 18.59375, 37.1875, 18.59375 >;
+      densityRatio         0.5;
+      settlingSteps        0;
+      initialTiltAngleDeg  5;
+      comOffsetZ           0;
+      pinPosition          false;   // fully free
+      pinRotation          false;   // fully free
+   }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy             true;
+   logFloaterHistory              true;  // see this file's own header note -- rotation-angle logging
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 10000;
+   evaluationFrequency     500;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       20000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+      }
+
+      CellBB_filter_0 { min < 0, 84, 0 >;   max < 119, 85, 150 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;    max < 1, 168, 150 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;    max < 119, 168, 150 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

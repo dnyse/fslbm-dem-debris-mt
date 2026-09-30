@@ -1,0 +1,189 @@
+// clog_measurement_validation_noclog_reference_extreme_pidoff_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-09-17] PID-OFF twin of clog_measurement_validation_noclog_reference_extreme_gas.prm,
+// byte-identical except PIDParameters.enabled=false. Needed because the extreme with-debris family has
+// TWO flow-forcing regimes (clog_measurement_validation_extreme_pidon/pidoff_gas.prm), and the
+// pre-release flow-spinup transient that confounds the elevation-difference metric (see the PID-on
+// reference's own header) is plausibly shaped differently under constant-forcing vs. PID-controlled
+// driving -- so each with-debris case needs its OWN matching no-debris reference, not one shared
+// reference used for both. Everything else (domain, pillars, probes, timesteps=115000, sparse VTK)
+// is identical to the PID-on reference; see that file's own header for the full derivation and for the
+// FIVE-not-six-VTK-dump caveat, which applies here unchanged.
+//
+// [Claude, 2026-09-18] accelerationXOverride set to the PID-controller's OWN converged actuatingVariable
+// from the completed, BodyBC-fixed no-clog reference PID-ON run (job 4242918, eval/antidunes.sqlite,
+// t>118465 tail window: mean=7.801745e-07, std=1.570243e-08, meanVelocity_x locked at 0.040000+-1.6e-5).
+// Without this override, setupSimState's default plain-channel formula (3*U*viscosity/liquidHeight^2)
+// evaluates to only 9.675064e-08 here -- ~8x (706%) too low, since it assumes an unobstructed channel
+// and has no knowledge of the two-pillar BodyBC's own real hydraulic drag. The two OLDER completed runs
+// this override supersedes (jobs 4240981 extreme-pidoff, 4240982 extreme-pidon-fresh, both 2026-09-17)
+// predate the BodyBC fix entirely -- their pillars never blocked the fluid at all, so the plain-channel
+// formula was incidentally correct for THAT (bugged) geometry -- and have been deleted as invalid for
+// the current, correctly-blocking setup. See THESIS_PLAN.md, 2026-09-18 entry, for the full derivation.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 20, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 false;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <768, 40, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.04;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+   enabled                     false;
+   accelerationXOverride       7.801745e-07;  // see file header, 2026-09-18 note
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         115000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+   // no gravityOverride -- dynamically computed, see file header
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;   // never opened -- see avgParticleDiameterOverride below
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8.001943372119138;
+   dxSIOverride                0.000362694127490625;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar { center < 384, 11, 45 >; radius 6; }
+   CylinderPillar { center < 384, 29, 45 >; radius 6; }
+}
+
+ModelParameters
+{
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+
+   ClogMeasurement
+   {
+      upstreamPos       < 280, 20, 40 >;
+      downstreamPos      < 500, 20, 40 >;
+      probeHalfWidthXY   2;
+
+      // Second probe pair at the pillar's own Y (=11) instead of the gap centreline (Y=20) -- see the
+      // small clog_measurement_validation_sanity_clog_*_gas.prm's own header for the Schalko, Follett &
+      // Nepf (2023) citation motivating this. Same doubled X as the gap probes above.
+      pillarUpstreamPos    < 280, 11, 40 >;
+      pillarDownstreamPos  < 500, 11, 40 >;
+   }
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   // [Claude, 2026-09-17]: added BodyBC entries for the CylinderPillars above -- traced every single
+   // usage of simParams->cylinderPillars in this codebase (BuildTimeloop.h's own disabled #if 0 VTK
+   // block; SetupStages.h's bed-generation exclusion check; SetupStages.h's own createCylinder DEM
+   // rigid-body creation) and confirmed NONE of them ever touch the LBM flag field/boundary handling --
+   // CylinderPillars only gives the pillar DEM contact physics (floaters bounce off it), it does NOT by
+   // itself make the fluid see it as solid. The actual fluid-blocking NoSlip classification comes
+   // exclusively from here, via setupBoundaryHandling's initFromConfig(BoundaryParameters) (see that
+   // function's own "CellInterval pillar defined in Antidunes.prm" comment) -- confirmed against
+   // nine_stacked_release_pillar_gas.prm, which declares BOTH CylinderPillars (contact) AND matching
+   // BodyBC (fluid) for its own two pillars; this file previously had only the former.
+   BodyBC { shape Cylinder; min < 384, 11, 0 >; max < 384, 11, 90 >; radius 6; NoSlip{} }
+   BodyBC { shape Cylinder; min < 384, 29, 0 >; max < 384, 29, 90 >; radius 6; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       23000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+      }
+
+      // [Claude, 2026-09-17]: without this, gas AND obstacle cells (the pillars) retain
+      // whatever stale PDF-derived velocity/density last happened to be there (never updated by
+      // the solver, since "the PDF values in these cells are not important" -- VtkWriter.h's own
+      // comment), rendering as salt-and-pepper noise across the free-surface/gas region AND
+      // making the pillars indistinguishable from the noisy fluid in ParaView -- found directly
+      // from a screenshot showing exactly this on the completed extreme pidoff/pidon runs
+      // (jobs 4240981/4240982), which never had this line, unlike every other scenario prm in
+      // this project (e.g. nine_stacked_release_pillar_gas.prm).
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}
