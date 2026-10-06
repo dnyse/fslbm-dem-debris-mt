@@ -1201,6 +1201,103 @@ void testCylinderCylindricalBoundaryContainmentNoContact()
    WALBERLA_CHECK(!scd(0, 1, cylShape, tubeShape, ac));
 }
 
+// [Claude, 2026-10-03] VERTICAL round container (DropTest ContainerCylinders, Utility.h createContainerCylinder): a
+// containment tube with its axis along z, radius 25.3 (Kodam et al. 2010b: 50.6 mm container), Kodam's cylinders
+// (radius 4, length 5.3). Three orientation classes that occur in a packing: a disc lying flat (axis PARALLEL to the
+// tube axis), a disc standing upright (axis exactly PERPENDICULAR to the tube axis -- the degenerate-quartic case noted
+// above), and a generic tilt. Expected overlaps are derived by hand (flat, upright) or checked against a dense sampling
+// of the rim (all cases).
+real_t containerSampledOverlap(const Vec3& pos, const mesa_pd::Rot3& rot, real_t rc, real_t hh, real_t R)
+{
+   // farthest radial distance (from the z axis through the origin) over a dense sampling of both rims
+   const mesa_pd::Vec3 a = rot.getMatrix() * Vec3(0, 0, 1);
+   mesa_pd::Vec3       u, v;
+   paper_analytical::detail::perpendicularBasis(a, u, v);
+   real_t best = 0;
+   for (const real_t sgn : { real_t(-1), real_t(1) })
+      for (int k = 0; k < 200000; ++k)
+      {
+         const real_t th = real_t(2) * math::pi * real_t(k) / real_t(200000);
+         const Vec3   p  = pos + sgn * hh * a + rc * (std::cos(th) * u + std::sin(th) * v);
+         best            = std::max(best, std::sqrt(p[0] * p[0] + p[1] * p[1]));
+      }
+   return best - R;
+}
+
+void checkVerticalContainer(const char* name, const Vec3& pos, const mesa_pd::Rot3& rot, real_t expectedOverlap)
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+   auto cyl = ps->create();
+   cyl->setPosition(pos);
+   cyl->setRotation(rot);
+   cyl->setInteractionRadius(std::sqrt(real_t(4) * real_t(4) + real_t(2.65) * real_t(2.65)));
+   auto tube = ps->create();
+   tube->setPosition(Vec3(0, 0, 0));
+   const mesa_pd::data::Cylinder      cylShape(real_t(4), real_t(5.3));
+   mesa_pd::data::CylindricalBoundary tubeShape(real_t(25.3), Vec3(0, 0, 1));
+   tubeShape.setContainment(true);
+   SolidCylinderContactDetection scd;
+   const bool   hit     = scd(0, 1, cylShape, tubeShape, ac);
+   const real_t sampled = containerSampledOverlap(pos, rot, real_t(4), real_t(2.65), real_t(25.3));
+   WALBERLA_LOG_INFO_ON_ROOT("[vertical container] " << name << ": contact=" << hit << " overlap="
+                             << (hit ? -scd.getPenetrationDepth() : real_t(0)) << " expected=" << expectedOverlap
+                             << " sampled=" << sampled);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sampled, expectedOverlap, real_t(1e-6), name);
+   if (expectedOverlap <= real_t(0))
+   {
+      WALBERLA_CHECK(!hit, name);
+      return;
+   }
+   WALBERLA_CHECK(hit, name);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(-scd.getPenetrationDepth(), expectedOverlap, real_t(1e-6), name);
+   const auto& cp = scd.getContactPoint();
+   const auto& n  = scd.getContactNormal();
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::sqrt(cp[0] * cp[0] + cp[1] * cp[1]), real_t(25.3) + expectedOverlap,
+                                      real_t(1e-6), name);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(n[2], real_t(0), real_t(1e-9), name); // horizontal
+   WALBERLA_CHECK_LESS(n * Vec3(cp[0], cp[1], 0), real_t(0), name);       // inward
+}
+
+void testCylinderVerticalContainer()
+{
+   const real_t R = real_t(25.3), rc = real_t(4), hh = real_t(2.65), ov = real_t(0.05);
+   // flat disc (axis || z), centre at distance R - rc + ov from the axis along x and along a diagonal
+   checkVerticalContainer("flat, offset +x", Vec3(R - rc + ov, 0, 10), mesa_pd::Rot3(), ov);
+   checkVerticalContainer("flat, offset diagonal", Vec3((R - rc + ov) / std::sqrt(real_t(2)), (R - rc + ov) / std::sqrt(real_t(2)), 10),
+                          mesa_pd::Rot3(), ov);
+   checkVerticalContainer("flat, inside", Vec3(R - rc - real_t(0.5), 0, 10), mesa_pd::Rot3(), real_t(-0.5));
+   // upright disc, axis exactly along y (perpendicular to the tube axis), centre on the x axis: its farthest points
+   // are the two rim points at (x0 + rc, +-hh): radial distance sqrt((x0 + rc)^2 + hh^2)
+   {
+      const real_t x0 = std::sqrt((R + ov) * (R + ov) - hh * hh) - rc;
+      checkVerticalContainer("upright, axis y, centre on x", Vec3(x0, 0, 10),
+                             mesa_pd::Rot3(Vec3(1, 0, 0), math::pi * real_t(0.5)), ov);
+   }
+   // upright disc, axis exactly along x, centre on the x axis: farthest point is the rim face at x0 + hh, the whole
+   // flat face reaches radial distance sqrt((x0 + hh)^2 + rc^2) at its top/bottom... in plan view the face is a
+   // segment from (x0 + hh, -rc) to (x0 + hh, rc): farthest radial sqrt((x0 + hh)^2 + rc^2)
+   {
+      const real_t x0 = std::sqrt((R + ov) * (R + ov) - rc * rc) - hh;
+      checkVerticalContainer("upright, axis x, centre on x", Vec3(x0, 0, 10),
+                             mesa_pd::Rot3(Vec3(0, 1, 0), math::pi * real_t(0.5)), ov);
+   }
+   // generic tilts: the centre is moved outward along a fixed direction until the sampled overlap is ov (bisection)
+   for (const real_t angle : { real_t(0.3), real_t(1.1), real_t(2.2) })
+   {
+      const mesa_pd::Rot3 rot(Vec3(real_t(0.3), real_t(-0.7), real_t(0.2)).getNormalized(), angle);
+      const Vec3          dir = Vec3(real_t(0.89), real_t(0.46), 0).getNormalized();
+      real_t              lo = 0, hi = R;
+      for (int it = 0; it < 60; ++it)
+      {
+         const real_t m = real_t(0.5) * (lo + hi);
+         (containerSampledOverlap(dir * m + Vec3(0, 0, 10), rot, rc, hh, R) < ov ? lo : hi) = m;
+      }
+      const Vec3 pos = dir * lo + Vec3(0, 0, 10);
+      checkVerticalContainer("generic tilt", pos, rot, containerSampledOverlap(pos, rot, rc, hh, R));
+   }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Secondary contact points (arch/tunnel containment, Box/Cylinder floaters only -- Sphere is
 // inherently single-point). The farthest-point search's top-2 tracking exposes a SECOND
@@ -1578,6 +1675,111 @@ void testCylinderSkinHalfSpaceAndPillar()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scdPSw.getPenetrationDepth(), real_t(-0.2), real_t(1e-6));
 }
 
+// ---------------------------------------------------------------------------------------------
+// [Claude, 2026-10-03] boxContactSkin (ModelParameters): every floating box is inflated by m (each half-extent + m) for
+// contact detection, so the gap to another inflated box shrinks by 2m and to a plane or a solid pillar by m; normals are
+// unchanged. Checked on the SAT path (useAnalyticalContactDetection true, as in the hopper prms) and on GJK/EPA.
+// ---------------------------------------------------------------------------------------------
+void testBoxSkin()
+{
+   const mesa_pd::data::Box boxShape(Vec3(real_t(2), real_t(2), real_t(2)));
+
+   // Box x Box: axis-aligned, centres 2.3 apart along x -> face gap 0.3.
+   for (bool analytic : { true, false })
+   {
+      auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+      mesa_pd::data::ParticleAccessor ac(ps);
+      auto b0 = ps->create();
+      b0->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+      b0->setRotation(mesa_pd::Rot3());
+      auto b1 = ps->create();
+      b1->setPosition(Vec3(real_t(2.3), real_t(0), real_t(0)));
+      b1->setRotation(mesa_pd::Rot3());
+
+      SolidCylinderContactDetection scd0;
+      scd0.useAnalyticalContactDetection = analytic;
+      WALBERLA_CHECK(!scd0(0, 1, boxShape, boxShape, ac));
+
+      // skin 0.25: inflated gap 0.3 - 0.5 = -0.2; point in the middle of the inflated overlap, x = (1.25 + 1.05) / 2
+      SolidCylinderContactDetection scd;
+      scd.useAnalyticalContactDetection = analytic;
+      scd.boxContactSkin                = real_t(0.25);
+      WALBERLA_CHECK(scd(0, 1, boxShape, boxShape, ac));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), real_t(-0.2), real_t(1e-6));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(scd.getContactNormal()[0]), real_t(1), real_t(1e-6));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactPoint()[0], real_t(1.15), real_t(1e-3));
+      WALBERLA_CHECK_FLOAT_EQUAL(scd.boxContactSkin, real_t(0.25)); // restored after the recursive call
+
+      // skin 0.1: inflated gap 0.1 > 0 -> separated
+      SolidCylinderContactDetection scdSmall;
+      scdSmall.useAnalyticalContactDetection = analytic;
+      scdSmall.boxContactSkin                = real_t(0.1);
+      WALBERLA_CHECK(!scdSmall(0, 1, boxShape, boxShape, ac));
+
+      // rotated pair: the skin gives exactly the result of the inflated shapes without skin
+      b1->setPosition(Vec3(real_t(2.2), real_t(0.4), real_t(-0.3)));
+      b1->setRotation(mesa_pd::Rot3(Vec3(real_t(0.3), real_t(-0.5), real_t(0.8)).getNormalized(), real_t(0.6)));
+      const mesa_pd::data::Box inflated(Vec3(real_t(2.5), real_t(2.5), real_t(2.5)));
+      SolidCylinderContactDetection scdRot;
+      scdRot.useAnalyticalContactDetection = analytic;
+      scdRot.boxContactSkin                = real_t(0.25);
+      SolidCylinderContactDetection scdInfl;
+      scdInfl.useAnalyticalContactDetection = analytic;
+      const bool hitRot  = scdRot(0, 1, boxShape, boxShape, ac);
+      const bool hitInfl = scdInfl(0, 1, inflated, inflated, ac);
+      WALBERLA_CHECK_EQUAL(hitRot, hitInfl);
+      WALBERLA_CHECK(hitRot);
+      WALBERLA_CHECK_FLOAT_EQUAL(scdRot.getPenetrationDepth(), scdInfl.getPenetrationDepth());
+      WALBERLA_CHECK_FLOAT_EQUAL(scdRot.getContactNormal(), scdInfl.getContactNormal());
+   }
+
+   // Box x wall: box (half-extent 1) with its bottom face 0.3 above the plane z = 0; skin 0.5 -> depth -0.2, normal +z.
+   {
+      auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+      mesa_pd::data::ParticleAccessor ac(ps);
+      auto bx = ps->create();
+      bx->setPosition(Vec3(real_t(0), real_t(0), real_t(1.3)));
+      bx->setRotation(mesa_pd::Rot3());
+      auto wall = ps->create();
+      wall->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+      const mesa_pd::data::HalfSpace wallShape(Vec3(real_t(0), real_t(0), real_t(1)));
+      SolidCylinderContactDetection scd0;
+      WALBERLA_CHECK(!scd0(0, 1, boxShape, wallShape, ac));
+      SolidCylinderContactDetection scd;
+      scd.boxContactSkin = real_t(0.5);
+      WALBERLA_CHECK(scd(0, 1, boxShape, wallShape, ac));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), real_t(-0.2), real_t(1e-6));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(1)), real_t(1e-6));
+      SolidCylinderContactDetection scdSw;
+      scdSw.boxContactSkin = real_t(0.5);
+      WALBERLA_CHECK(scdSw(1, 0, wallShape, boxShape, ac));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scdSw.getPenetrationDepth(), real_t(-0.2), real_t(1e-6));
+   }
+
+   // Box x solid pillar: box (half-extent 1) centred at x = 2.3 next to a pillar of radius 1 along z -> gap 0.3.
+   {
+      auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+      mesa_pd::data::ParticleAccessor ac(ps);
+      auto bx = ps->create();
+      bx->setPosition(Vec3(real_t(2.3), real_t(0), real_t(0)));
+      bx->setRotation(mesa_pd::Rot3());
+      auto pillar = ps->create();
+      pillar->setPosition(Vec3(real_t(0), real_t(0), real_t(0)));
+      const mesa_pd::data::CylindricalBoundary pillarShape(real_t(1), Vec3(real_t(0), real_t(0), real_t(1)));
+      SolidCylinderContactDetection scd0;
+      WALBERLA_CHECK(!scd0(0, 1, boxShape, pillarShape, ac));
+      SolidCylinderContactDetection scd;
+      scd.boxContactSkin = real_t(0.5);
+      WALBERLA_CHECK(scd(0, 1, boxShape, pillarShape, ac));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), real_t(-0.2), real_t(1e-6));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(scd.getContactNormal()[0]), real_t(1), real_t(1e-6));
+      SolidCylinderContactDetection scdSw;
+      scdSw.boxContactSkin = real_t(0.5);
+      WALBERLA_CHECK(scdSw(1, 0, pillarShape, boxShape, ac));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scdSw.getPenetrationDepth(), real_t(-0.2), real_t(1e-6));
+   }
+}
+
 } // namespace antidunes
 } // namespace walberla
 
@@ -1620,6 +1822,7 @@ int main(int argc, char** argv)
    testCylinderHalfSpaceNoContact();
    testCylinderSkinCylinderCylinder();
    testCylinderSkinHalfSpaceAndPillar();
+   testBoxSkin(); // [Claude, 2026-10-03]
    testSphereCylindricalBoundaryContainmentContact();
    testSphereCylindricalBoundaryContainmentNoContact();
    testSphereCylindricalBoundaryContainmentAxialBounds();
@@ -1629,6 +1832,7 @@ int main(int argc, char** argv)
    testBoxCylindricalBoundaryContainmentNoContact();
    testBoxCylindricalBoundaryContainmentRadialPreGate();
    testCylinderCylindricalBoundaryContainmentContact();
+   testCylinderVerticalContainer(); // [Claude, 2026-10-03]
    testCylinderCylindricalBoundaryContainmentNoContact();
    testBoxCylindricalBoundaryContainmentDualCornerContact();
    testBoxCylindricalBoundaryContainmentSingleCornerNoSecondary();

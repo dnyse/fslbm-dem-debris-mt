@@ -101,6 +101,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <mesa_pd/data/DataTypes.h>
 
 #include <core/math/Constants.h>
@@ -190,6 +191,393 @@ inline void closestPointsBetweenSegments(const Vec3& p1, const Vec3& q1, const V
 
    outC1 = p1 + d1 * s;
    outC2 = p2 + d2 * t;
+}
+
+// [Claude, 2026-10-01] Contact point of two overlapping boxes for a given contact normal and penetration depth.
+// boxBoxSAT used to place the point on the line between the centres ("midpoint between the extreme points along the
+// winning axis"), which for elongated, rotated boxes can lie several units from the actual contact and outside both
+// bodies; the force then acts with a wrong lever arm, the contact does net work, and elastic collisions gained up to
+// 98x their kinetic energy (DEMValidation cuboidPairEnergyFuzz; launched cuboids in the randomised drop tests,
+// THESIS_PLAN.md 2026-10-01). The point is now taken from the touching features:
+//  1. Contact patch of each box towards the other along the normal: the body-frame bounding box of the part of the box
+//     within `depth` of its deepest point (see supportFeature) -- a vertex for a just-touching corner, growing
+//     continuously into an edge strip or a whole face.
+//  2. The two features are projected onto the plane perpendicular to the normal and intersected (point, segment, or
+//     convex polygon); the contact point is the centroid of the intersection, placed at mid-depth between the two
+//     features along the normal. Edge-edge -> crossing point; face-face -> centre of the common area; vertex-face ->
+//     the vertex. If the projections do not intersect (round-off at a feature boundary), the closest pair of points of
+//     the two features is used instead. The patches are bounding boxes and slightly larger than the penetrating parts,
+//     so the point is finally pulled into the intersection by alternating projection (pullIntoBoxIntersection).
+//  [Claude, 2026-10-02] Step 3 is now closed form (placeOnNormalLine): the line through the in-plane point along the
+//     normal is clipped against the slabs of both boxes (clipLineToBox) and the point is the midpoint of the common
+//     interval; this moves the point only along the normal, the force's line of action, so the torque is unchanged.
+//     Where the line misses the intersection (wedge-shaped overlaps), the point is first moved in-plane to the nearest
+//     point of the intersection's projection (boxIntersectionVertices: edges of each box clipped by the other). The
+//     alternating projection converges only linearly; in the thin wedges of a settled pile (overlaps ~1e-5) it needed up
+//     to its 2000-iteration cap, and in a 16-rank replay of the random_cuboids drop-test pile (4284396, step 70000) it
+//     took 70-77 % of the busy ranks' time. It remains only as a last resort against round-off.
+namespace box_contact_point
+{
+struct P2
+{
+   real_t x, y;
+};
+inline real_t cross2(const P2& a, const P2& b, const P2& c) { return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x); }
+
+// convex hull (counter-clockwise) of up to 4 points; collinear/duplicate points removed
+inline std::vector< P2 > hull(std::vector< P2 > pts, real_t eps)
+{
+   std::sort(pts.begin(), pts.end(), [](const P2& a, const P2& b) { return a.x < b.x || (!(b.x < a.x) && a.y < b.y); });
+   std::vector< P2 > h;
+   for (int pass = 0; pass < 2; ++pass)
+   {
+      const size_t start = h.size();
+      for (const auto& p : pts)
+      {
+         while (h.size() >= start + 2 && cross2(h[h.size() - 2], h[h.size() - 1], p) <= eps) h.pop_back();
+         h.push_back(p);
+      }
+      h.pop_back();
+      std::reverse(pts.begin(), pts.end());
+   }
+   if (h.empty() && !pts.empty()) h.push_back(pts[0]);
+   return h;
+}
+
+// Sutherland-Hodgman: clip polygon `subj` (any size, may be degenerate) by convex CCW polygon `clip` (>= 3 vertices)
+inline std::vector< P2 > clipPolygon(const std::vector< P2 >& subj, const std::vector< P2 >& clip, real_t eps)
+{
+   std::vector< P2 > out = subj;
+   for (size_t e = 0; e < clip.size() && !out.empty(); ++e)
+   {
+      const P2 a = clip[e], b = clip[(e + 1) % clip.size()];
+      std::vector< P2 > in;
+      in.swap(out);
+      for (size_t i = 0; i < in.size(); ++i)
+      {
+         const P2     cur = in[i], prv = in[(i + in.size() - 1) % in.size()];
+         const real_t dc = cross2(a, b, cur), dp = cross2(a, b, prv);
+         const bool   cin = dc >= -eps, pin = dp >= -eps;
+         if (cin)
+         {
+            if (!pin && in.size() > 1) out.push_back(P2{ prv.x + (cur.x - prv.x) * dp / (dp - dc), prv.y + (cur.y - prv.y) * dp / (dp - dc) });
+            out.push_back(cur);
+         }
+         else if (pin && in.size() > 1)
+            out.push_back(P2{ prv.x + (cur.x - prv.x) * dp / (dp - dc), prv.y + (cur.y - prv.y) * dp / (dp - dc) });
+      }
+   }
+   return out;
+}
+
+// centroid of a convex polygon (area-weighted), of a segment (midpoint), or of a point
+inline P2 centroid(const std::vector< P2 >& poly, real_t eps)
+{
+   real_t a = 0, cx = 0, cy = 0;
+   for (size_t i = 0; i < poly.size(); ++i)
+   {
+      const P2&    p = poly[i];
+      const P2&    q = poly[(i + 1) % poly.size()];
+      const real_t c = p.x * q.y - q.x * p.y;
+      a += c;
+      cx += (p.x + q.x) * c;
+      cy += (p.y + q.y) * c;
+   }
+   if (std::abs(a) > eps)
+      return P2{ cx / (real_t(3) * a), cy / (real_t(3) * a) };
+   // degenerate (segment or point): midpoint of the extreme points along the longest direction
+   P2 lo = poly[0], hi = poly[0];
+   real_t best = -1;
+   for (const auto& p : poly)
+      for (const auto& q : poly)
+      {
+         const real_t d = (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y);
+         if (d > best) { best = d; lo = p; hi = q; }
+      }
+   return P2{ real_t(0.5) * (lo.x + hi.x), real_t(0.5) * (lo.y + hi.y) };
+}
+
+// [Claude, 2026-10-01, revised] contact patch of a box in direction d (unit): the bounding box (in the body frame) of the
+// part of the box that lies within `depth` of its deepest point along d -- along axis i it reaches from the deepest end
+// over L_i = min(2 h_i, f depth / |d.a_i|), f = kPatchDepthFraction. Grows continuously from a vertex (depth -> 0) via an edge strip to a whole
+// face; the earlier yes/no classification (axis free if 2 h_i |d.a_i| <= depth) made the point jump by up to half an
+// edge where the classification switched (testBoxBoxContactPointContinuity). Returns the 8 corners of the patch.
+// Patch depth fraction: the patch is the part within kPatchDepthFraction * depth of the deepest point. A single-point
+// force k * depth conserves energy only if it acts where the depth is measured (the deepest point, as for GJK/EPA); a
+// patch over the full depth moved the point by up to depth / (2 |d.a_i|) along nearly parallel features and lost up to
+// 3 % in single elastic collisions (cuboidPairEnergyFuzz, 200 collisions). A small fraction keeps the point at the
+// deepest feature unless the features are parallel to within ~ this fraction of the depth, and still varies continuously.
+constexpr real_t kPatchDepthFraction = real_t(0.1);
+inline std::vector< Vec3 > supportFeature(const Vec3& pos, const Vec3 axes[3], const Vec3& half, const Vec3& d, real_t depth)
+{
+   depth *= kPatchDepthFraction;
+   std::vector< Vec3 > pts{ pos };
+   for (uint_t i = 0; i < 3; ++i)
+   {
+      const real_t c    = d * axes[i];
+      const real_t sgn  = (c >= real_t(0)) ? real_t(1) : real_t(-1);
+      const real_t len  = (std::abs(c) * real_t(2) * half[i] <= depth) ? real_t(2) * half[i] : depth / std::abs(c);
+      const real_t hi   = sgn * half[i], lo = sgn * (half[i] - len);
+      std::vector< Vec3 > next;
+      for (const auto& p : pts)
+      {
+         next.push_back(p + hi * axes[i]);
+         if (len > real_t(0)) next.push_back(p + lo * axes[i]);
+      }
+      pts.swap(next);
+   }
+   return pts;
+}
+} // namespace box_contact_point
+
+//! [Claude, 2026-10-02] iteration statistics of pullIntoBoxIntersection (profiling; per thread-unsafe process counter)
+struct BoxPointIterationStats
+{
+   uint64_t calls = 0, iterations = 0, maxIterations = 0, capped = 0;
+   uint64_t lineClipHits = 0;   // [Claude, 2026-10-02] the line through the planned point hit the intersection
+   uint64_t polytopeShifts = 0; // missed; moved in-plane onto the projected intersection polytope, then hit
+   uint64_t projectionFallbacks = 0; // neither: alternating projection as the last resort
+   void record(uint64_t n) { ++calls; iterations += n; maxIterations = std::max(maxIterations, n); if (n >= 2000) ++capped; }
+};
+inline BoxPointIterationStats& boxPointIterationStats()
+{
+   static BoxPointIterationStats st;
+   return st;
+}
+
+//! [Claude, 2026-10-01] moves a point into the intersection of two boxes by alternating projection (clamping in each
+//! body frame); continuous in the point and the configuration, and exact once the point is inside both
+inline Vec3 pullIntoBoxIntersection(Vec3 x, const Vec3& posA, const Vec3 axesA[3], const Vec3& halfA, const Vec3& posB,
+                                    const Vec3 axesB[3], const Vec3& halfB)
+{
+   auto clampInto = [](const Vec3& p, const Vec3& c, const Vec3 ax[3], const Vec3& h) {
+      Vec3 r = c;
+      for (uint_t i = 0; i < 3; ++i) r += std::clamp((p - c) * ax[i], -h[i], h[i]) * ax[i];
+      return r;
+   };
+   for (int it = 0; it < 2000; ++it) // converges linearly; slowly only for thin wedge-shaped intersections
+   {
+      const Vec3 y = clampInto(clampInto(x, posA, axesA, halfA), posB, axesB, halfB);
+      if ((y - x).sqrLength() < real_t(1e-28))
+      {
+         boxPointIterationStats().record(it + 1);
+         return y;
+      }
+      x = y;
+   }
+   boxPointIterationStats().record(2000);
+   return x;
+}
+
+//! [Claude, 2026-10-02] clips the line x0 + t*dir against a box (slab test per body axis); narrows [tLo, tHi], which
+//! is empty (tLo > tHi) afterwards if the line misses the box
+inline void clipLineToBox(const Vec3& x0, const Vec3& dir, const Vec3& pos, const Vec3 axes[3], const Vec3& half,
+                          real_t& tLo, real_t& tHi)
+{
+   const Vec3 rel = x0 - pos;
+   for (uint_t i = 0; i < 3; ++i)
+   {
+      const real_t s = rel * axes[i], d = dir * axes[i];
+      if (std::abs(d) < real_t(1e-14))
+      {
+         if (std::abs(s) > half[i]) { tLo = real_t(1); tHi = real_t(0); return; }
+         continue;
+      }
+      real_t t0 = (-half[i] - s) / d, t1 = (half[i] - s) / d;
+      if (t0 > t1) std::swap(t0, t1);
+      tLo = std::max(tLo, t0);
+      tHi = std::min(tHi, t1);
+   }
+}
+
+//! [Claude, 2026-10-02] vertices of the intersection polytope of two boxes: the parts of every edge of one box that lie
+//! inside the other (clipLineToBox on the segment), for both boxes. These are all vertex-in-box points and all
+//! edge-face crossings, i.e. every vertex of the intersection (plus points on its edges, which do not change its hull).
+inline void boxIntersectionVertices(const Vec3& posA, const Vec3 axesA[3], const Vec3& halfA, const Vec3& posB,
+                                    const Vec3 axesB[3], const Vec3& halfB, std::vector< Vec3 >& out)
+{
+   auto clipEdges = [&](const Vec3& pos, const Vec3 axes[3], const Vec3& half, const Vec3& oPos, const Vec3 oAxes[3],
+                        const Vec3& oHalf) {
+      for (uint_t i = 0; i < 3; ++i)
+      {
+         const uint_t j = (i + 1) % 3, k = (i + 2) % 3;
+         const Vec3   d = real_t(2) * half[i] * axes[i];
+         for (int sj = -1; sj <= 1; sj += 2)
+            for (int sk = -1; sk <= 1; sk += 2)
+            {
+               const Vec3 p0 = pos - half[i] * axes[i] + real_t(sj) * half[j] * axes[j] + real_t(sk) * half[k] * axes[k];
+               real_t     tLo = 0, tHi = 1;
+               clipLineToBox(p0, d, oPos, oAxes, oHalf, tLo, tHi);
+               if (tLo <= tHi)
+               {
+                  out.push_back(p0 + tLo * d);
+                  out.push_back(p0 + tHi * d);
+               }
+            }
+      }
+   };
+   clipEdges(posA, axesA, halfA, posB, axesB, halfB);
+   clipEdges(posB, axesB, halfB, posA, axesA, halfA);
+}
+
+//! [Claude, 2026-10-02] point of the intersection of both boxes on the line through x0 along `normal`: midpoint of the
+//! common interval of the two line-box clips. If the line misses the intersection, x0 is first moved perpendicular to
+//! the normal to the closest point of the intersection's projection onto the contact plane (the convex hull of the
+//! projected intersection vertices); the move is continuous across the hit/miss boundary, and as it is perpendicular to
+//! the normal it changes only the lever arm, by the least amount that puts the point on the body overlap. The
+//! alternating projection is the last resort if even that line misses (round-off).
+inline Vec3 placeOnNormalLine(const Vec3& x0, const Vec3& normal, const Vec3& posA, const Vec3 axesA[3], const Vec3& halfA,
+                              const Vec3& posB, const Vec3 axesB[3], const Vec3& halfB, bool legacyProjection = false)
+{
+   if (legacyProjection) return pullIntoBoxIntersection(x0, posA, axesA, halfA, posB, axesB, halfB);
+   auto onLine = [&](const Vec3& x, Vec3& result) {
+      real_t tLo = -std::numeric_limits< real_t >::max(), tHi = std::numeric_limits< real_t >::max();
+      clipLineToBox(x, normal, posA, axesA, halfA, tLo, tHi);
+      if (tLo <= tHi) clipLineToBox(x, normal, posB, axesB, halfB, tLo, tHi);
+      if (tLo > tHi) return false;
+      result = x + (real_t(0.5) * (tLo + tHi)) * normal;
+      return true;
+   };
+   Vec3 result;
+   if (onLine(x0, result))
+   {
+      ++boxPointIterationStats().lineClipHits;
+      return result;
+   }
+   using namespace box_contact_point;
+   std::vector< Vec3 > verts;
+   boxIntersectionVertices(posA, axesA, halfA, posB, axesB, halfB, verts);
+   if (!verts.empty())
+   {
+      Vec3 u = normal % Vec3(real_t(1), real_t(0), real_t(0));
+      if (u.length() < real_t(0.5)) u = normal % Vec3(real_t(0), real_t(1), real_t(0));
+      u /= u.length();
+      const Vec3   v     = normal % u;
+      const real_t scale = std::max(halfA.max(), halfB.max());
+      std::vector< P2 > pts;
+      for (const auto& p : verts) pts.push_back(P2{ p * u, p * v });
+      const auto poly = hull(pts, real_t(1e-12) * scale * scale);
+      const P2   q{ x0 * u, x0 * v };
+      // closest point of the (convex) polygon to q; q itself lies outside, otherwise the line would have hit
+      P2     best = poly[0];
+      real_t bestD = std::numeric_limits< real_t >::max();
+      for (size_t i = 0; i < poly.size(); ++i)
+      {
+         const P2     a = poly[i], b = poly[(i + 1) % poly.size()];
+         const real_t ex = b.x - a.x, ey = b.y - a.y, L2 = ex * ex + ey * ey;
+         const real_t t  = L2 > real_t(0) ? std::clamp(((q.x - a.x) * ex + (q.y - a.y) * ey) / L2, real_t(0), real_t(1)) : real_t(0);
+         const P2     c{ a.x + t * ex, a.y + t * ey };
+         const real_t d = (c.x - q.x) * (c.x - q.x) + (c.y - q.y) * (c.y - q.y);
+         if (d < bestD) { bestD = d; best = c; }
+      }
+      // the closest point lies on the boundary of the projection, where the line touches the intersection only at its
+      // rim; a step of 1e-9 scale towards the polygon's vertex mean keeps it inside against round-off
+      P2 mean{ 0, 0 };
+      for (const auto& p : poly) { mean.x += p.x; mean.y += p.y; }
+      mean.x /= real_t(poly.size());
+      mean.y /= real_t(poly.size());
+      const real_t mx = mean.x - best.x, my = mean.y - best.y, ml = std::sqrt(mx * mx + my * my);
+      if (ml > real_t(0))
+      {
+         const real_t step = std::min(ml, real_t(1e-9) * scale);
+         best.x += step * mx / ml;
+         best.y += step * my / ml;
+      }
+      if (onLine(x0 + (best.x - q.x) * u + (best.y - q.y) * v, result))
+      {
+         ++boxPointIterationStats().polytopeShifts;
+         return result;
+      }
+   }
+   ++boxPointIterationStats().projectionFallbacks;
+   return pullIntoBoxIntersection(x0, posA, axesA, halfA, posB, axesB, halfB);
+}
+
+//! normal points from B towards A (boxBoxSAT convention); overlap > 0
+//! legacyProjection: the 2026-10-01 point (alternating projection only), kept for the comparison in
+//! PaperAnalyticalContactTest.cpp; boxBoxSAT never sets it
+inline Vec3 boxBoxContactPoint(const Vec3& posA, const Vec3 axesA[3], const Vec3& halfA, const Vec3& posB,
+                               const Vec3 axesB[3], const Vec3& halfB, const Vec3& normal, real_t overlap,
+                               bool legacyProjection = false)
+{
+   using namespace box_contact_point;
+   const real_t depth = std::max(overlap, real_t(0));
+   // A's deepest feature points towards B (-normal), B's towards A (+normal)
+   const auto fA = supportFeature(posA, axesA, halfA, -normal, depth);
+   const auto fB = supportFeature(posB, axesB, halfB, normal, depth);
+   // in-plane basis
+   Vec3 u = normal % Vec3(real_t(1), real_t(0), real_t(0));
+   if (u.length() < real_t(0.5)) u = normal % Vec3(real_t(0), real_t(1), real_t(0));
+   u /= u.length();
+   const Vec3 v = normal % u;
+   const real_t scale = std::max(halfA.max(), halfB.max());
+   const real_t eps   = real_t(1e-12) * scale * scale;
+   auto proj = [&](const std::vector< Vec3 >& f) {
+      std::vector< P2 > r;
+      for (const auto& p : f) r.push_back(P2{ p * u, p * v });
+      return hull(r, eps);
+   };
+   const auto hA = proj(fA), hB = proj(fB);
+   std::vector< P2 > inter;
+   if (hA.size() >= 3) inter = clipPolygon(hB, hA, real_t(1e-9) * scale);
+   else if (hB.size() >= 3) inter = clipPolygon(hA, hB, real_t(1e-9) * scale);
+   else if (hA.size() == 1) inter = hA;
+   else if (hB.size() == 1) inter = hB;
+   else
+   {
+      // segment vs segment: crossing point if not parallel, else the overlap of the two collinear intervals
+      const P2 a0 = hA[0], a1 = hA[1], b0 = hB[0], b1 = hB[1];
+      const real_t rx = a1.x - a0.x, ry = a1.y - a0.y, sx = b1.x - b0.x, sy = b1.y - b0.y;
+      const real_t den = rx * sy - ry * sx;
+      if (std::abs(den) > real_t(1e-9) * (rx * rx + ry * ry + sx * sx + sy * sy))
+      {
+         const real_t t = ((b0.x - a0.x) * sy - (b0.y - a0.y) * sx) / den;
+         const real_t w = ((b0.x - a0.x) * ry - (b0.y - a0.y) * rx) / den;
+         if (t >= real_t(-1e-9) && t <= real_t(1) + real_t(1e-9) && w >= real_t(-1e-9) && w <= real_t(1) + real_t(1e-9))
+            inter.push_back(P2{ a0.x + t * rx, a0.y + t * ry });
+      }
+      else
+      {
+         const real_t L2 = rx * rx + ry * ry;
+         if (L2 > eps)
+         {
+            auto par = [&](const P2& p) { return ((p.x - a0.x) * rx + (p.y - a0.y) * ry) / L2; };
+            const real_t lo = std::max(real_t(0), std::min(par(b0), par(b1)));
+            const real_t hi = std::min(real_t(1), std::max(par(b0), par(b1)));
+            if (lo <= hi + real_t(1e-9))
+            {
+               const real_t m = real_t(0.5) * (lo + hi);
+               inter.push_back(P2{ a0.x + m * rx, a0.y + m * ry });
+            }
+         }
+      }
+   }
+   // mid-depth level along the normal between the two features
+   // mid-depth between the deepest points of the two boxes along the normal (continuous in the configuration)
+   real_t levelA = std::numeric_limits< real_t >::max(), levelB = -std::numeric_limits< real_t >::max();
+   for (const auto& p : fA) levelA = std::min(levelA, p * normal);
+   for (const auto& p : fB) levelB = std::max(levelB, p * normal);
+   const real_t level  = real_t(0.5) * (levelA + levelB);
+   if (!inter.empty())
+   {
+      const P2 c = centroid(inter, eps);
+      return placeOnNormalLine(c.x * u + c.y * v + level * normal, normal, posA, axesA, halfA, posB, axesB, halfB,
+                               legacyProjection);
+   }
+   // fallback: closest points between the two features (as segments / points)
+   Vec3 best = real_t(0.5) * (fA[0] + fB[0]);
+   real_t bestD = std::numeric_limits< real_t >::max();
+   for (size_t i = 0; i < fA.size(); ++i)
+      for (size_t k = 0; k < fB.size(); ++k)
+      {
+         Vec3 cA, cB;
+         closestPointsBetweenSegments(fA[i], fA[(i + 1) % fA.size()], fB[k], fB[(k + 1) % fB.size()], cA, cB);
+         const Vec3 dAB = cA - cB;
+         const real_t dperp = (dAB - (dAB * normal) * normal).sqrLength();
+         if (dperp < bestD) { bestD = dperp; best = real_t(0.5) * (cA + cB); }
+      }
+   return placeOnNormalLine(best - (best * normal) * normal + level * normal, normal, posA, axesA, halfA, posB, axesB,
+                            halfB, legacyProjection);
 }
 } // namespace detail
 
@@ -347,7 +735,12 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
    // Supplementary contact point (NOT from the paper, see class-level comment): midpoint between
    // the two boxes' extreme points along the winning axis. Only the component along `bestAxis` is
    // geometrically well-defined for a flush face-face/edge-edge configuration.
-   result.point = real_t(0.5) * (posA + posB) + real_t(0.5) * sign * (bestRa - bestRb) * bestAxis;
+   // [Claude, 2026-10-01] point from the touching features (detail::boxBoxContactPoint), no longer on the line between
+   // the centres (former: 0.5 (posA + posB) + 0.5 sign (ra - rb) axis); see that function's comment.
+   // ANTIDUNES_SAT_FORMER_POINT (env, any value): the former point, for before/after comparisons in the validation runs only
+   static const bool formerPoint = std::getenv("ANTIDUNES_SAT_FORMER_POINT") != nullptr;
+   result.point = formerPoint ? Vec3(real_t(0.5) * (posA + posB) + real_t(0.5) * sign * (bestRa - bestRb) * bestAxis)
+                              : detail::boxBoxContactPoint(posA, axesA, halfA, posB, axesB, halfB, normal, best.gap);
 
    if (useRoundedCorners && edgeIA >= 0)
    {
@@ -2938,8 +3331,18 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
                result.overlap  = (ci.radius + cj.radius) - d;              // eq. 64
                const Vec3 Pi = ci.pos + liW * eI;
                const Vec3 Pj = cj.pos + ljW * eJ;
-               result.point    = real_t(0.5) * (Pi + Pj);                  // eq. 65
                const Vec3 diff = Pj - Pi;
+               // [Claude, 2026-09-30] contact point: Kodam et al.'s eq. 65 takes the midpoint of the two closest AXIS
+               // points P*, Q*, which lies in the overlap only for equal radii (it is off by |R_i - R_j|/2 along the
+               // normal otherwise -- found by the contact-point check in PaperAnalyticalContactTest.cpp: 171 of 183
+               // band-band-skewed points outside the intersection for unequal radii). The midpoint of the two SURFACE
+               // points, P* + R_i u and Q* - R_j u with u = (Q* - P*)/|Q* - P*|, is used instead; identical to eq. 65 for
+               // R_i = R_j.
+               {
+                  const real_t dl = diff.length();
+                  const Vec3   u  = (dl > real_t(1e-10)) ? diff / dl : -rHatN;
+                  result.point    = real_t(0.5) * (Pi + Pj) + (real_t(0.5) * (ci.radius - cj.radius)) * u;
+               }
                result.normal   = (diff.length() > real_t(1e-10)) ? -diff.getNormalized() : rHatN; // eq. 66, i<-j flipped to match this codebase's idx2->idx1 convention
                result.scenario = "band-band-skewed";
                return result;
@@ -3400,17 +3803,97 @@ inline bool cylindersSeparatedConvexCheck(const CylinderState& ci, const Cylinde
 }
 } // namespace detail
 
+namespace detail
+{
+//! Contact point of a refined contact with direction L (from ci towards cj) and overlap D: the midpoint of the overlap
+//! along L, S_j(-L) + D/2 L = S_i(L) - D/2 L, taken from the body whose support point is unique (see the comment in
+//! refineCylinderContact); `fallback` if neither is unique (flat on flat).
+//! Closest point of the solid cylinder c to p (identity if p is inside): clamp the axial and radial coordinates.
+inline Vec3 projectIntoCylinder(const CylinderState& c, const Vec3& p)
+{
+   const Vec3   a  = c.axis();
+   const Vec3   d  = p - c.pos;
+   real_t       z  = d * a;
+   Vec3         rv = d - z * a;
+   const real_t r  = rv.length();
+   z               = std::clamp(z, -real_t(0.5) * c.length, real_t(0.5) * c.length);
+   if (r > c.radius) rv *= c.radius / r;
+   return c.pos + z * a + rv;
+}
+
+//! Moves p into the intersection of the two cylinders by alternating projection (converges for two convex bodies that
+//! overlap); used because at minima on a kink of D the two support points are not exactly aligned along L and the
+//! midpoint of the overlap can lie slightly outside one body.
+inline Vec3 pullIntoIntersection(const CylinderState& ci, const CylinderState& cj, Vec3 p, int iterations = 8)
+{
+   for (int k = 0; k < iterations; ++k)
+   {
+      const Vec3 q = projectIntoCylinder(cj, projectIntoCylinder(ci, p));
+      if ((q - p).sqrLength() < real_t(1e-24)) break;
+      p = q;
+   }
+   return p;
+}
+
+inline Vec3 refinedContactPointRaw(const CylinderState& ci, const CylinderState& cj, const Vec3& L, real_t D, const Vec3& fallback)
+{
+   auto degenerate = [&](const CylinderState& c, const Vec3& dir) {
+      const real_t d = dir * c.axis();
+      return std::abs(d) < real_t(1e-6) || (dir - d * c.axis()).length() < real_t(1e-6);
+   };
+   const bool di = degenerate(ci, L), dj = degenerate(cj, -L);
+   const Vec3 si = cylinderSupportPoint(ci, L), sj = cylinderSupportPoint(cj, -L);
+   if (di && !dj) return sj + (real_t(0.5) * D) * L;
+   if (dj && !di) return si - (real_t(0.5) * D) * L;
+   if (di && dj) return fallback;
+   return real_t(0.5) * (si + sj);
+}
+inline Vec3 refinedContactPoint(const CylinderState& ci, const CylinderState& cj, const Vec3& L, real_t D, const Vec3& fallback)
+{
+   return pullIntoIntersection(ci, cj, refinedContactPointRaw(ci, cj, L, D, fallback));
+}
+
+} // namespace detail
+
+//! [Claude, 2026-10-01] Which exit refineCylinderContact took, for profiling (ParticleKernels ContactStats::cylRefine*):
+//! exact scenario passed through, closed form confirmed by the fast path, closed-form contact re-descended (contact or
+//! separated), pair without a scenario decided separated or in contact. `fastReject` says why the fast path failed;
+//! `kinks` / `convex` whether the kink search / the convex check ran.
+enum class RefinePath : int { Exact = 0, FastAccepted, ContactDescended, ContactDescendedSeparated, NoScenarioSeparated,
+                              NoScenarioContact, Count };
+enum class FastReject : int { None = 0, DepthMismatch, NotLocallyOptimal, SmallerElsewhere, Count };
+struct RefineTrace
+{
+   RefinePath path       = RefinePath::Exact;
+   FastReject fastReject = FastReject::None;
+   bool       kinks      = false;
+   bool       convex     = false;
+   real_t     fastD0     = real_t(-1); // overlap along the closed-form normal (fast path only)
+   real_t     fastQ      = real_t(-1); // the fast path's short descent minimum (when it ran)
+};
+
 //! Refined cylinder-cylinder contact (see the block comment above). `raw` is the closed-form result for (ci, cj).
 //! Exact scenarios pass through unchanged; inexact scenarios are refined from their own normal (plus the standard
 //! seeds); "no scenario" pairs are decided by the descent (separation proven if D < 0 is found).
-inline ContactResult refineCylinderContact(const CylinderState& ci, const CylinderState& cj, const ContactResult& raw)
+inline ContactResult refineCylinderContact(const CylinderState& ci, const CylinderState& cj, const ContactResult& raw,
+                                           RefineTrace* trace = nullptr)
 {
+   RefineTrace tr;
+   const auto  done = [&](const ContactResult& res, RefinePath path) {
+      tr.path = path;
+      if (trace) *trace = tr;
+      return res;
+   };
    const std::string sc(raw.scenario);
    if (raw.contact && (sc == "face-face" || sc == "band-band-parallel" || sc == "band-band-skewed" || sc == "face-band"))
-      return raw;
+      return done(raw, RefinePath::Exact);
 
    Vec3 seeds[6];
    int  n = 0;
+   // [Claude, 2026-10-01] relative tolerance of the fast path (see below), and the short descent's minimum, which the full
+   // refinement keeps as a candidate when the fast path rejects
+   const real_t           kFastRelTol = real_t(1e-3);
+   detail::OverlapMinimum fastQ{ std::numeric_limits< real_t >::max(), Vec3(real_t(0)), 0 };
    if (raw.contact)
    {
       // fast path: if the closed-form normal already satisfies the optimality condition (no tangential component of the
@@ -3418,7 +3901,10 @@ inline ContactResult refineCylinderContact(const CylinderState& ci, const Cylind
       const Vec3   L0    = -raw.normal; // raw.normal points towards ci; L points towards cj
       const real_t scale = ci.radius + cj.radius + real_t(0.5) * (ci.length + cj.length);
       const real_t D0    = detail::cylinderProjectionOverlap(ci, cj, L0);
-      if (std::abs(D0 - raw.overlap) < real_t(1e-6) * scale)
+      tr.fastD0          = D0;
+      // [Claude, 2026-10-01] relative tolerance (was 1e-6 * scale): the face-edge closed form differs from D along its own
+      // normal by a median of 0.13 % in a dense packing, which sent these contacts to the full refinement for nothing
+      if (std::abs(D0 - raw.overlap) < std::max(real_t(1e-6) * scale, kFastRelTol * D0))
       {
          // local optimality test by direct comparison (the minima of the inexact scenarios often lie ON a kink of D,
          // where the gradient does not vanish): no direction tilted by a small angle may give a smaller overlap
@@ -3444,9 +3930,27 @@ inline ContactResult refineCylinderContact(const CylinderState& ci, const Cylind
             Vec3 std5[5];
             detail::cylinderSeedDirections(ci, cj, std5);
             const detail::OverlapMinimum q = detail::minimiseCylinderProjectionOverlap(ci, cj, std5, 1, false, 20, real_t(1e-7));
-            if (q.value >= D0 - real_t(1e-9) * scale) return raw;
+            tr.fastQ                       = q.value;
+            fastQ                          = q;
+            // [Claude, 2026-10-01] tolerance relative to the depth (was 1e-9 * scale alone): in a dense packing (DropTest
+            // Kodam packing, ANTIDUNES_REFINE_DUMP), the short descent improved on 60 % of the face-edge results, by a
+            // median of 3e-4 D0 and by less than 1e-2 D0 in 99 % of them; each such rejection cost the full refinement,
+            // ~5x the fast path. An improvement below 1 % of the depth is accepted, with the smaller of the two overlaps as
+            // the depth -- 5x below the 5 % at which the validation counts a depth as wrong.
+            if (q.value >= D0 - std::max(real_t(1e-9) * scale, kFastRelTol * D0))
+            {
+               ContactResult accepted = raw;
+               accepted.overlap       = std::min(D0, q.value);
+               accepted.point         = detail::refinedContactPoint(ci, cj, L0, accepted.overlap, raw.point);
+               return done(accepted, RefinePath::FastAccepted);
+            }
+            tr.fastReject = FastReject::SmallerElsewhere;
          }
+         else
+            tr.fastReject = FastReject::NotLocallyOptimal;
       }
+      else
+         tr.fastReject = FastReject::DepthMismatch;
       // otherwise descend from the closed-form normal and the closest-axis-points direction only
       Vec3 std5[5];
       detail::cylinderSeedDirections(ci, cj, std5);
@@ -3457,8 +3961,10 @@ inline ContactResult refineCylinderContact(const CylinderState& ci, const Cylind
       n += detail::cylinderSeedDirections(ci, cj, seeds + n);
 
    detail::OverlapMinimum m = detail::minimiseCylinderProjectionOverlap(ci, cj, seeds, n, !raw.contact, 40, real_t(1e-9));
-   ContactResult r;
-   if (m.value <= real_t(0)) return r; // separated (or exactly touching)
+   if (fastQ.value < m.value) m = fastQ; // every D(L) bounds the depth from above: keep the smallest one found
+   ContactResult    r;
+   const RefinePath sepPath = raw.contact ? RefinePath::ContactDescendedSeparated : RefinePath::NoScenarioSeparated;
+   if (m.value <= real_t(0)) return done(r, sepPath); // separated (or exactly touching)
    // the non-smooth candidates (band circles, end-face normals), where the descent stalls: searched when the descent
    // ended with a remaining tangential gradient (it stopped on a kink, not at a smooth minimum) and always for pairs
    // without a scenario
@@ -3467,46 +3973,32 @@ inline ContactResult refineCylinderContact(const CylinderState& ci, const Cylind
    const bool   stalled = (gm - (gm * m.direction) * m.direction).length() > real_t(1e-7) * lenScale;
    if (!raw.contact || stalled)
    {
+      tr.kinks                       = true;
       const detail::OverlapMinimum k = detail::minimiseOverlapOnKinks(ci, cj);
       if (k.value < m.value) m = k;
-      if (m.value <= real_t(0)) return r;
+      if (m.value <= real_t(0)) return done(r, sepPath);
    }
    // no scenario and a positive local minimum: run the convex (global) check, which either proves separation or finds a
    // smaller overlap than the local minimum; in the latter case polish it with the descent from the new direction
    if (!raw.contact)
    {
+      tr.convex                      = true;
       const detail::OverlapMinimum c = detail::cylindersConvexOverlapCheck(ci, cj, m.direction, m.value);
-      if (c.value <= real_t(0)) return r;
+      if (c.value <= real_t(0)) return done(r, sepPath);
       if (c.value < m.value)
       {
          const detail::OverlapMinimum p = detail::minimiseCylinderProjectionOverlap(ci, cj, &c.direction, 1, true);
          m = (p.value < c.value) ? p : c;
-         if (m.value <= real_t(0)) return r;
+         if (m.value <= real_t(0)) return done(r, sepPath);
       }
    }
    r.contact  = true;
    r.overlap  = m.value;
    r.normal   = -m.direction;
-   // Contact point: the overlap along L spans [S_j(-L).L, S_i(L).L]; its midpoint is S_j(-L) + D/2 L = S_i(L) - D/2 L. The
-   // support point of a cylinder is not unique when L is (numerically) its axis (a whole end face) or perpendicular to it
-   // (a whole band line); cylinderSupportPoint then returns the face centre / band middle, which can lie far from the
-   // actual touching region and would give a wrong torque. So the point is taken from the body whose support point is
-   // unique; if neither is (flat on flat), the closed-form point is kept when there is one.
-   {
-      const Vec3   L  = m.direction;
-      auto degenerate = [&](const CylinderState& c, const Vec3& dir) {
-         const real_t d = dir * c.axis();
-         return std::abs(d) < real_t(1e-6) || (dir - d * c.axis()).length() < real_t(1e-6);
-      };
-      const bool   di = degenerate(ci, L), dj = degenerate(cj, -L);
-      const Vec3   si = detail::cylinderSupportPoint(ci, L), sj = detail::cylinderSupportPoint(cj, -L);
-      if (di && !dj) r.point = sj + (real_t(0.5) * m.value) * L;
-      else if (dj && !di) r.point = si - (real_t(0.5) * m.value) * L;
-      else if (di && dj && raw.contact) r.point = raw.point;
-      else r.point = real_t(0.5) * (si + sj);
-   }
+   // Contact point: midpoint of the overlap along L from the body with the unique support point (detail::refinedContactPoint)
+   r.point = detail::refinedContactPoint(ci, cj, m.direction, m.value, raw.contact ? raw.point : r.point);
    r.scenario = raw.contact ? raw.scenario : "refined-no-scenario";
-   return r;
+   return done(r, raw.contact ? RefinePath::ContactDescended : RefinePath::NoScenarioContact);
 }
 
 //! Closed form followed by the refinement -- the complete detection without any GJK/EPA call.

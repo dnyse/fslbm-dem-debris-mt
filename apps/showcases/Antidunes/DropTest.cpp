@@ -236,6 +236,36 @@ int main(int argc, char** argv)
       writeFloaterCylinderVtk = vtk::writeFiles(cylinderFloaterVTKOutput);
    }
 
+   // [Claude, 2026-10-01] Sphere floaters (type 1) -- mirrors BuildTimeloop.h's own "floater" VTK block (radius from
+   // the interaction radius), so that mixed-shape drop tests also render their spheres.
+   std::function< void() > writeFloaterSphereVtk = []() {};
+   if (!simParams->floatingSpheres.empty())
+   {
+      struct SelectFloaterDensityRatio
+      {
+         using return_type = real_t;
+         return_type operator()(const mesa_pd::data::Particle& p) const
+         {
+            const auto& shape = p.getBaseShape();
+            if (!shape || shape->getVolume() < real_t(1e-12)) return real_t(0);
+            return shape->getMass() / shape->getVolume();
+         }
+      };
+      auto sphereFloaterData = make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
+      sphereFloaterData->addOutput< mesa_pd::data::SelectParticleInteractionRadius >("radius");
+      sphereFloaterData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
+      sphereFloaterData->addOutput< SelectFloaterDensityRatio >("densityRatio");
+      sphereFloaterData->addOutput< mesa_pd::data::SelectParticleUid >("uid");
+      sphereFloaterData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
+         using namespace walberla::mesa_pd::data::particle_flags;
+         return pIt->getType() == uint_t(1) && !isSet(pIt->getFlags(), GHOST);
+      });
+      auto sphereFloaterVTKOutput = vtk::createVTKOutput_PointData(
+         sphereFloaterData, "floater", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
+         std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
+      writeFloaterSphereVtk = vtk::writeFiles(sphereFloaterVTKOutput);
+   }
+
    // Capsule ("pill") floaters (type 5) -- [Claude, 2026-09-23] NEW SHAPE, same treatment as the
    // cylinder block above, EXCEPT the glyph: ParaView's Tensor Glyph filter has no native capsule
    // source, so this renders each capsule as a same-radius/same-length CYLINDER glyph -- a visual
@@ -322,6 +352,7 @@ int main(int argc, char** argv)
 
       writeFloaterBoxVtk();
       writeFloaterCylinderVtk();
+      writeFloaterSphereVtk();
       writeFloaterCapsuleVtk();
       const auto tAfterVtk = std::chrono::steady_clock::now();
 

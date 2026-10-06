@@ -73,6 +73,13 @@ class CurvatureSweepFiniteDifferences
 
    void operator()(IBlock* const block);
 
+   // [Claude, 2026-10-02] Antidunes prm ModelParameters.guardCurvatureInputs (default false = unchanged upstream code).
+   // true: a neighbour that is neither liquid/interface/gas nor obstacle is skipped (upstream falls through and uses an
+   // UNINITIALISED neighborNormal -- Vector3() = default -- although its own comment says such directions are not
+   // considered); a neighbour whose normal is not finite is skipped; if no direction remains, curvature = 0. Each such
+   // event is logged (throttled) with cell, neighbour flag and neighbour normal. For valid inputs the result is identical.
+   void setGuardInvalidNeighbours(bool on) { guardInvalidNeighbours_ = on; }
+
    /********************************************************************************************************************
     * Returns an adjusted interface normal according to the wetting model from the dissertation of S. Bogner, 2017
     * (section 4.4.2.1).
@@ -116,6 +123,7 @@ class CurvatureSweepFiniteDifferences
    FlagUID interfaceFlagID_;
    Set< FlagUID > liquidInterfaceGasFlagIDSet_;
    Set< FlagUID > obstacleFlagIDSet_;
+   bool guardInvalidNeighbours_ = false; // see setGuardInvalidNeighbours
 }; // class CurvatureSweepFiniteDifferences
 
 /***********************************************************************************************************************

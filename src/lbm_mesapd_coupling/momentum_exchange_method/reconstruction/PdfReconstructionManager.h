@@ -186,6 +186,58 @@ inline bool isPass3Candidate(BognerNeighbourhoodState state, bool hasGas, bool h
    return hasUnknown;
 }
 
+//**************************************************************************************************************************************
+/*!\brief [Claude, 2026-10-01] Fill level (volume fraction) seeded into a freshly uncovered cell that became INTERFACE.
+ *
+ * getNeighbourFlag(dx, dy, dz) / getNeighbourFill(dx, dy, dz) return flag and fill of the D3Q27 neighbour at that offset
+ * (the centre is never queried); a neighbour outside the field should be reported with flag 0 (no evidence).
+ *
+ * allResolvedNeighbours == false (legacy, Bogner & Ruede 2013 Sec. 5.2 as implemented so far): mean fill of the
+ *   INTERFACE neighbours; 0.5 if there is none.
+ * allResolvedNeighbours == true (prm ModelParameters.seedFillFromAllNeighbours): mean volume fraction of every
+ *   resolved neighbour -- gas 0, liquid 1, interface its fill; currently covered (obstacle) and still-unclassified
+ *   (formerObstacle) neighbours are excluded; 0.5 only if no neighbour is resolved at all.
+ *   Why: the legacy rule ignores real gas and liquid evidence. A cell that became interface only because a
+ *   same-pass neighbour was still unclassified (branch C: liquid + unknown, branch A': gas + unknown) usually has no
+ *   interface neighbour and was seeded 0.5 -- a half-empty cell inside the water (C) or half a cell of water in the
+ *   air (A'); the hopper runs seeded ~1300 C cells per 100 steps. With all evidence, C seeds ~1, A' ~0, and a real
+ *   surface cell (D) the local liquid fraction. Only the fill changes, never the cell state, so the liquid/gas
+ *   separation invariant is unaffected.
+ *
+ * fallbackOut is set when no evidence was found and 0.5 was used.
+ */
+//**************************************************************************************************************************************
+template< typename Flag_T, typename NeighbourFlagGetter, typename NeighbourFillGetter >
+inline real_t seedInterfaceFillFromNeighbourhood(NeighbourFlagGetter getNeighbourFlag, NeighbourFillGetter getNeighbourFill,
+                                                 Flag_T liquid, Flag_T gas, Flag_T interface, Flag_T formerObstacle,
+                                                 Flag_T obstacle, bool allResolvedNeighbours, bool& fallbackOut)
+{
+   real_t sum = real_t(0);
+   uint_t cnt = uint_t(0);
+   for (int dz = -1; dz <= 1; ++dz)
+      for (int dy = -1; dy <= 1; ++dy)
+         for (int dx = -1; dx <= 1; ++dx)
+         {
+            if (dx == 0 && dy == 0 && dz == 0) continue;
+            const Flag_T nf = getNeighbourFlag(dx, dy, dz);
+            if (isFlagSet(nf, obstacle) || isFlagSet(nf, formerObstacle)) continue;
+            if (isFlagSet(nf, interface))
+            {
+               sum += getNeighbourFill(dx, dy, dz);
+               ++cnt;
+            }
+            else if (allResolvedNeighbours && isFlagSet(nf, liquid))
+            {
+               sum += real_t(1);
+               ++cnt;
+            }
+            else if (allResolvedNeighbours && isFlagSet(nf, gas))
+               ++cnt; // contributes 0
+         }
+   fallbackOut = (cnt == uint_t(0));
+   return fallbackOut ? real_t(0.5) : std::clamp(sum / real_c(cnt), real_t(0), real_t(1));
+}
+
 // ScalarField_T (defaulted to void) is the fill-level field type, used only by the Bogner
 // state-selection path to seed the volume fraction φ of freshly converted cells
 // (Bogner & Rüde 2013, §5.2). For the non-Bogner path it stays void and all fill code is
@@ -253,6 +305,9 @@ class PdfReconstructionManager
 
    void inline operator()(IBlock* const block);
 
+   //! [Claude, 2026-10-01] prm ModelParameters.seedFillFromAllNeighbours (see seedInterfaceFillFromNeighbourhood)
+   void setSeedFillFromAllNeighbours(bool on) { seedFillFromAllNeighbours_ = on; }
+
    // Diagnostic: MPI-reduce (to root), log, and reset the FormerMO→state conversion counters
    // accumulated since the last call. One line per call → invoke periodically (e.g. once per
    // evaluationFrequency steps via an AfterFunction). Counts INNER cells only, so the totals are
@@ -292,6 +347,19 @@ class PdfReconstructionManager
             << " | hist[#unknownNbr:count]=" << histStr.str());
       }
 
+      // [Claude, 2026-10-01] seeding bookkeeping (see seededInterfaceCells_)
+      {
+         std::vector< uint_t > sc = { seededInterfaceCells_, seededInterfaceFallback_ };
+         real_t                sv = seededInterfaceFillSum_;
+         walberla::mpi::reduceInplace(sc, walberla::mpi::SUM);
+         walberla::mpi::reduceInplace(sv, walberla::mpi::SUM);
+         WALBERLA_LOG_INFO_ON_ROOT("[FORMERMO-SEED t=" << t << "] interface cells seeded since last report: " << sc[0]
+                                   << " (0.5 fallback, no evidence: " << sc[1] << ") | seeded liquid volume (sum of fill) "
+                                   << sv << " cells | rule: "
+                                   << (seedFillFromAllNeighbours_ ? "all resolved neighbours" : "interface neighbours"));
+         seededInterfaceCells_ = seededInterfaceFallback_ = uint_t(0);
+         seededInterfaceFillSum_ = real_t(0);
+      }
       convGas_ = convLiquid_ = convIntfUnknown_ = convIntfUnknownGas_ = convIntfSurface_ = convIntfUnresolved_ = uint_t(0);
       formerMoTotal_ = formerMoWithUnknownNbr_ = unknownNbrSum_ = unknownNbrMax_ = uint_t(0);
       unknownNbrHist_.fill(uint_t(0));
@@ -318,29 +386,36 @@ class PdfReconstructionManager
          // converted at the OUTERMOST ghost layer has a D3Q27 neighbour one cell beyond flagField's/
          // fillField's allocated (ghost-inclusive) extent. Confirmed with AddressSanitizer:
          // heap-buffer-overflow READ at this exact loop (job 4063969, 1000-sphere v6 scenario).
-         const auto ghostBounds = flagField->xyzSizeWithGhostLayer();
-         real_t sum = real_t(0);
-         uint_t cnt = uint_t(0);
-         for (int dz = -1; dz <= 1; ++dz)
-            for (int dy = -1; dy <= 1; ++dy)
-               for (int dx = -1; dx <= 1; ++dx)
-               {
-                  if (dx == 0 && dy == 0 && dz == 0) continue;
-                  const cell_idx_t nx = x + cell_idx_c(dx);
-                  const cell_idx_t ny = y + cell_idx_c(dy);
-                  const cell_idx_t nz = z + cell_idx_c(dz);
-                  if (nx < ghostBounds.xMin() || nx > ghostBounds.xMax() ||
-                      ny < ghostBounds.yMin() || ny > ghostBounds.yMax() ||
-                      nz < ghostBounds.zMin() || nz > ghostBounds.zMax())
-                     continue; // neighbour outside the allocated field -- no evidence, skip (same
-                               // conservative stance as getBoundedNeighbourFlag's out-of-bounds case)
-                  if (isFlagSet(flagField->get(nx, ny, nz), interfaceFlag))
-                  {
-                     sum += fillField->get(nx, ny, nz);
-                     ++cnt;
-                  }
-               }
-         seededFill = (cnt > uint_t(0)) ? sum / real_c(cnt) : real_t(0.5);
+         // [Claude, 2026-10-01] the averaging itself moved to seedInterfaceFillFromNeighbourhood (pure, unit-tested);
+         // an out-of-range neighbour is reported with flag 0 (no evidence), as before.
+         const auto   ghostBounds = flagField->xyzSizeWithGhostLayer();
+         auto inRange = [&](int dx, int dy, int dz) {
+            const cell_idx_t nx = x + cell_idx_c(dx), ny = y + cell_idx_c(dy), nz = z + cell_idx_c(dz);
+            return !(nx < ghostBounds.xMin() || nx > ghostBounds.xMax() || ny < ghostBounds.yMin() ||
+                     ny > ghostBounds.yMax() || nz < ghostBounds.zMin() || nz > ghostBounds.zMax());
+         };
+         const flag_t formerObstacleFlag =
+            flagField->flagExists(formerObstacle_) ? flagField->getFlag(formerObstacle_) : flag_t(0);
+         const flag_t obstacleFlag =
+            flagField->flagExists(movingObstacleFlagUID_) ? flagField->getFlag(movingObstacleFlagUID_) : flag_t(0);
+         bool fallback = false;
+         seededFill    = seedInterfaceFillFromNeighbourhood< flag_t >(
+            [&](int dx, int dy, int dz) {
+               return inRange(dx, dy, dz) ? flagField->get(x + cell_idx_c(dx), y + cell_idx_c(dy), z + cell_idx_c(dz))
+                                             : flag_t(0);
+            },
+            [&](int dx, int dy, int dz) {
+               return fillField->get(x + cell_idx_c(dx), y + cell_idx_c(dy), z + cell_idx_c(dz));
+            },
+            liquidFlag, gasFlag, interfaceFlag, formerObstacleFlag, obstacleFlag, seedFillFromAllNeighbours_, fallback);
+         const uint_t cnt = fallback ? uint_t(0) : uint_t(1);
+         if (x >= 0 && y >= 0 && z >= 0 && x < cell_idx_c(flagField->xSize()) && y < cell_idx_c(flagField->ySize()) &&
+             z < cell_idx_c(flagField->zSize()))
+         {
+            ++seededInterfaceCells_;
+            if (fallback) ++seededInterfaceFallback_;
+            seededInterfaceFillSum_ += seededFill;
+         }
 
          // [Claude, 2026-09-24] FALLBACK-ISOLATED-INTERFACE: cnt==0 means this newly-converted
          // interface cell found NO real interface neighbour to average its fill from -- it is being
@@ -361,7 +436,8 @@ class PdfReconstructionManager
                   << (aabb.xMin() + (real_c(x) + real_t(0.5)) * cdx) << ","
                   << (aabb.yMin() + (real_c(y) + real_t(0.5)) * cdx) << ","
                   << (aabb.zMin() + (real_c(z) + real_t(0.5)) * cdx) << ") seeded fill=0.5 with ZERO real "
-                     "interface neighbours -- a fragile, uninformed reconstruction that has been traced to a "
+                  << (seedFillFromAllNeighbours_ ? "resolved (liquid/gas/interface)" : "interface")
+                  << " neighbours -- a fragile, uninformed reconstruction that has been traced to a "
                      "real cumulant-collision NaN one step later; worth watching if this cell crashes soon.");
             }
          }
@@ -409,6 +485,12 @@ class PdfReconstructionManager
    // of same-pass ambiguity (see isPass3Candidate) and resolve them directly. Off by default -> identical
    // to the plain Pass-2-only fallback behaviour.
    const bool usePass3Reresolution_ = false;
+   bool       seedFillFromAllNeighbours_ = false; // see setSeedFillFromAllNeighbours
+   // [Claude, 2026-10-01] seeding bookkeeping (inner cells, since the last logAndResetConversionCounts): interface cells
+   // seeded, how many of them fell back to 0.5, and the sum of their seeded fill (= liquid volume created, in cells)
+   mutable uint_t seededInterfaceCells_    = uint_t(0);
+   mutable uint_t seededInterfaceFallback_ = uint_t(0);
+   mutable real_t seededInterfaceFillSum_  = real_t(0);
 
    // FormerMO → state conversion counters, one per branch of bognerTargetFlag (see the table in
    // contact_ring_crash_analysis.md §5.3). Accumulated over inner cells across blocks; flushed by

@@ -127,6 +127,14 @@ int main(int argc, char** argv)
    // Set liquid/interface/gas cells in flagField (must be called after all solid cells are set)
    // ----------------------------------------------------------------------------------------------------------------------------------
    simObjs->antidunesBoundaryHandling->initFlagsFromFillLevel();
+   checkOuterGhostLayerFlags(simObjs, "after initFlagsFromFillLevel"); // [Claude, 2026-10-03] see BuildTimeloop.h
+   if (simParams->model.wallOuterGhostLayer) // [Claude, 2026-10-03] see SimulationParams.h
+   {
+      uint_t n = wallOuterGhostLayer(simObjs);
+      mpi::reduceInplace(n, mpi::SUM);
+      WALBERLA_LOG_INFO_ON_ROOT("[WALL-OUTER-GHOST-LAYER] " << n << " outer ghost-layer cells behind walls set to wall");
+      checkOuterGhostLayerFlags(simObjs, "after wallOuterGhostLayer");
+   }
 
    // Init forceDensity (requires valid fill + pdf + flag fields and acceleration)
    // ----------------------------------------------------------------------------------------------------------------------------------

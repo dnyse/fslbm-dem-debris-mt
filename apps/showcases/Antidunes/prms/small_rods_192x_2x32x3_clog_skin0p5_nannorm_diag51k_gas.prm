@@ -1,0 +1,493 @@
+// [Claude, 2026-10-03] FULL-LENGTH NaN-NORMAL DIAGNOSTIC: small_rods_192x_2x32x3_clog_skin0p5_nannorm_diag_gas.prm with
+// timesteps 12000 -> 51000. The 12000-step run 4284737 found no NaN normal, while the curvature guard keeps catching
+// NaN neighbour normals in the full-length runs (4284594: ~995000 events from step 8676; capped run 4292481: 3238 log
+// lines), all in the cell layer next to the side wall y = 0. guardCurvatureInputs and diagnoseNaNNormals stay on.
+// [Claude, 2026-10-02] NAN-NORMAL ROOT-CAUSE DIAGNOSIS: diagnoseNaNNormals true added on top of
+// run 4284594's own prm (guardCurvatureInputs true, confirmed fix: full 51000 steps clean, 684
+// [CURVATURE-GUARD] hits, all "non-finite neighbour normal", all at the Y=0 wall (Y=0.5-1.5),
+// X~410-448, first at step 8676 -- ~995000 NaN neighbour normals total, the guard only stops them
+// spreading). This run adds the new full-field-scan diagnostic (small slowdown) to find WHERE in
+// the pipeline those NaNs first originate: [NAN-NORMAL]/[NAN-SMOOTHFILL]/[NAN-OBSTACLENORMAL],
+// whichever fires first, plus [NAN-NORMAL-SUMMARY] counts per 1000 steps. Per explicit request
+// ("find the root cause of the NaN surface normals next to the side walls"). timesteps cut from
+// 51000 to 12000 (first NaN was at step ~8676, no need to run the full length) to save time --
+// the diagnostic itself costs a full field scan every step, so this still isn't free.
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-10-02] CURVATURE-GUARD TEST: guardCurvatureInputs true added (new prm switch, off by default -- skips a curvature neighbour that is neither liquid/interface/gas/obstacle or whose normal isn't finite, sets curvature 0 if nothing usable is left, logs each case as [CURVATURE-GUARD]). Verified a true no-op on valid inputs elsewhere (box_pair_repro_gas.prm: 5828 force/position lines identical on/off, guard never fires). VTK switched to the discrete snapshot schedule 500/1000/2000/4000/8000/16000/32000/49000 (fluid_field_snapshots, same mechanism as the production hopper reruns) instead of the uniform every-10000-steps cadence. Also adds denseNanScanEnabled for steps 8900-9100, bracketing this run's own actual crash step (9069, job 4284164).
+// ─────────────────────────────────────────────────────────────────────────────
+// small_rods_192x_2x32x3_clog_skin0p5_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// [Claude, 2026-10-01] DOUBLING-IN-X continues after the clean 48-rod skin test (job 4282396:
+// full 51000 steps, exit 0, zero crash markers -- confirmed by direct log inspection, same result
+// as the 24-rod test 4282267). Per explicit request ("we know the 48 cylinder works, then on two
+// new freed directory run the 96 and the 192 version with the skin activated"), this is the next
+// doubling step: 32 rows in X instead of 8 -- 2(Y) x 32(X) x 3(Z) = 192 rods --
+// same geometry/densities/contact-mode/cylinderContactSkin 0.5/sealed-cell-guard-off as 4282267
+// and 4282396, extended upstream at the SAME WIDENED 8 LU pitch: 364 (front, unchanged) down to
+// 116 (32 rows total). No fixes besides the skin (Option A/B, SimpleBB.h
+// guard all OFF), matching every other scenario in this series. VTK writeFrequency 10000,
+// timesteps 51000 (same as every prior scenario in this series).
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 64, 20, 30 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             5000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <768, 40, 180>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.04;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+   enabled                     true;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         51000;  // [Claude, 2026-10-03] full length: the 12000-step run 4284737 saw no NaN normal
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits false;
+   denseNanScanEnabled           true;   // [Claude, 2026-10-02] pinpoint the first NaN near this run's own crash step
+   denseNanScanFromStep          8900;
+   denseNanScanToStep            9100;
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   avgParticleDiameterOverride 8.001943372119138;
+   dxSIOverride                0.000362694127490625;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.5;
+   numSubCycles 10;
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+CylinderPillars
+{
+   CylinderPillar { center < 384, 0, 45 >; radius 12; }
+   CylinderPillar { center < 384, 40, 45 >; radius 12; }
+}
+
+FloatingCylinders
+{
+   // Row 1 (X=364, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 364, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 364, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 364, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 364, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 364, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 364, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 2 (X=356, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 356, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 356, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 356, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 356, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 356, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 356, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 3 (X=348, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 348, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 348, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 348, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 348, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 348, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 348, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 4 (X=340, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 340, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 340, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 340, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 340, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 340, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 340, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 5 (X=332, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 332, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 332, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 332, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 332, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 332, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 332, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 6 (X=324, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 324, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 324, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 324, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 324, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 324, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 324, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 7 (X=316, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 316, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 316, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 316, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 316, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 316, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 316, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 8 (X=308, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 308, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 308, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 308, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 308, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 308, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 308, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 9 (X=300, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 300, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 300, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 300, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 300, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 300, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 300, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 10 (X=292, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 292, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 292, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 292, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 292, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 292, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 292, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 11 (X=284, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 284, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 284, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 284, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 284, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 284, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 284, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 12 (X=276, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 276, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 276, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 276, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 276, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 276, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 276, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 13 (X=268, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 268, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 268, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 268, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 268, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 268, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 268, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 14 (X=260, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 260, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 260, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 260, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 260, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 260, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 260, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 15 (X=252, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 252, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 252, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 252, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 252, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 252, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 252, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 16 (X=244, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 244, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 244, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 244, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 244, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 244, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 244, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 17 (X=236, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 236, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 236, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 236, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 236, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 236, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 236, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 18 (X=228, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 228, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 228, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 228, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 228, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 228, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 228, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 19 (X=220, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 220, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 220, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 220, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 220, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 220, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 220, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 20 (X=212, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 212, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 212, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 212, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 212, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 212, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 212, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 21 (X=204, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 204, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 204, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 204, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 204, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 204, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 204, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 22 (X=196, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 196, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 196, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 196, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 196, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 196, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 196, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 23 (X=188, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 188, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 188, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 188, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 188, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 188, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 188, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 24 (X=180, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 180, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 180, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 180, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 180, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 180, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 180, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 25 (X=172, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 172, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 172, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 172, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 172, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 172, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 172, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 26 (X=164, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 164, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 164, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 164, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 164, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 164, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 164, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 27 (X=156, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 156, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 156, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 156, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 156, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 156, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 156, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 28 (X=148, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 148, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 148, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 148, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 148, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 148, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 148, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 29 (X=140, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 140, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 140, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 140, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 140, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 140, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 140, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 30 (X=132, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 132, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 132, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 132, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 132, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 132, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 132, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 31 (X=124, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 124, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 124, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 124, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 124, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 124, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 124, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+
+   // Row 32 (X=116, 8 LU pitch) -- both Y columns, deep/mid/shallow.
+   FloatingCylinder { position < 116, 10, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 116, 10, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 116, 10, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+   FloatingCylinder { position < 116, 30, 10 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1.2; settlingSteps 500; }
+   FloatingCylinder { position < 116, 30, 25 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 1; settlingSteps 500; }
+   FloatingCylinder { position < 116, 30, 45 >; radius 3; length 18; axis < 0, 1, 0 >; densityRatio 0.5; settlingSteps 500; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;
+   usePureAnalyticalCylinder     false;
+   useContactFilterOwnerTiebreak true;
+   useCapsuleShapeForCylinders   false;
+   cylinderContactSkin           0.5;   // [Claude, 2026-10-01] rod contact skin in LU (cd1b991b), same as the clean 4282267 (24-rod) run. Sealed-cell guard stays OFF (not set below).
+   guardCurvatureInputs          true;   // [Claude, 2026-10-02] off by default; see file header
+   diagnoseNaNNormals            true;   // [Claude, 2026-10-02] new full-field-scan diagnostic; see file header
+
+   useTightTier1                 false;
+   useTightLayer1                true;
+   skipTier1                     false;
+   useRoundedBoxCorners          false;
+   useMultiPointBoxContact       false;
+   useBoxOverlapCap              false;
+   useAxisHysteresis             false;
+   useContactManifold            false;
+   useRotationalEffectiveMass    true;
+   useSpheroBoxContact           false;
+   useSpheroBoxAnalytical        false;
+   useFraigeBoxContactModel      false;
+   useFullVolumeAnalyticBuoyancy false;
+   usePass3Reresolution          false;
+   useAnalyticBoxBuoyancy        false;
+
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   useFillWeighting              true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     100;
+   baseFolderName          eval;
+
+   ClogMeasurement
+   {
+      upstreamPos       < 336, 20, 40 >;
+      downstreamPos     < 432, 20, 40 >;
+      probeHalfWidthXY  2;
+
+      pillarUpstreamPos    < 336, 6, 40 >;
+      pillarDownstreamPos  < 432, 6, 40 >;
+   }
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   BodyBC { shape Cylinder; min < 384, 0, 0 >;  max < 384, 0, 180 >;  radius 12; NoSlip{} }
+   BodyBC { shape Cylinder; min < 384, 40, 0 >; max < 384, 40, 180 >; radius 12; NoSlip{} }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+// fluid cropped near the pillars and all eight rows (X 250..500, Z 0..100); the rods are unfiltered.
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       0;             // superseded by fluid_field_snapshots below (discrete steps, not uniform)
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 100, 0, 0 >;  max < 500, 40, 100 >; }   // [Claude, 2026-10-01] widened from 250 to cover all 32 rows down to X=116
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   fluid_field_snapshots
+   {
+      writeFrequency       1;   // unused by the gating logic itself, required by vtk::initializeVTKOutput
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+      steps "500,1000,2000,4000,8000,16000,32000,49000";
+
+      writers
+      {
+         velocity;
+         mapped_flag;
+      }
+
+      CellBB_filter_0 { min < 100, 0, 0 >;  max < 500, 40, 100 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

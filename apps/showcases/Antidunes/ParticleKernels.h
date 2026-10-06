@@ -62,6 +62,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <numeric>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -292,12 +294,23 @@ public:
    //   penetrationDepth < 0  → penetrating (contact active)
    //   contactNormal = hs.getNormal() (points into the domain, away from the wall)
    //   contactPoint on the wall surface (deepest box corner projected onto the plane)
+   // boxContactSkin wrapper (see ModelParameters::boxContactSkin): detect with the inflated box
+   // (each half-extent + m), mirroring cylinderContactSkin's own Cylinder x HalfSpace wrapper above.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Box& bx,
                    const mesa_pd::data::HalfSpace& hs,
                    Accessor& ac)
    {
+      if (boxContactSkin > real_t(0))
+      {
+         const real_t m = boxContactSkin;
+         const mesa_pd::data::Box inflated(bx.getEdgeLength() + mesa_pd::Vec3(real_t(2) * m));
+         boxContactSkin = real_t(0);
+         const bool hit = operator()(idx1, idx2, inflated, hs, ac);
+         boxContactSkin = m;
+         return hit;
+      }
       getIdx1() = idx1;
       getIdx2() = idx2;
 
@@ -392,11 +405,26 @@ public:
    //   penetrationDepth = radial_dist - cylinder_radius  (< 0 → penetrating)
    //   contactNormal points radially outward from the cylinder axis toward the box (world frame)
    //   contactPoint = closest point on the box surface, world frame
+   // boxContactSkin wrapper (see ModelParameters::boxContactSkin): detect with the inflated box
+   // (each half-extent + m); containment mode (arch/tunnel scenarios) is left unchanged, mirroring
+   // cylinderContactSkin's own Cylinder x CylindricalBoundary wrapper above.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Box& bx,
                    const mesa_pd::data::CylindricalBoundary& cb,
                    Accessor& ac)
+   {
+      const real_t m = boxContactSkin;
+      if (m <= real_t(0) || cb.isContainment()) return boxPillarCore(idx1, idx2, bx, cb, ac);
+      const mesa_pd::data::Box inflated(bx.getEdgeLength() + mesa_pd::Vec3(real_t(2) * m));
+      return boxPillarCore(idx1, idx2, inflated, cb, ac);
+   }
+
+   template< typename Accessor >
+   bool boxPillarCore(const size_t idx1, const size_t idx2,
+                      const mesa_pd::data::Box& bx,
+                      const mesa_pd::data::CylindricalBoundary& cb,
+                      Accessor& ac)
    {
       getIdx1() = idx1;
       getIdx2() = idx2;
@@ -833,6 +861,39 @@ public:
          return true;
       }
 
+      // [Claude, 2026-10-01] refineCylinderContacts: the solid pillar is represented locally by a finite cylinder of the
+      // pillar radius, centred on the projection of the rod centre onto the pillar axis and long enough that its end
+      // faces never matter, and resolved by the validated refined cylinder-cylinder detection. The legacy path below
+      // (3 alternating projections onto the axis line) missed 115 of about 1150 contacts and underestimated depths by
+      // up to 0.1 against the independent reference (thesis Section 5.2, scripts/contact-validation/obstacle_reference.py).
+      if (refineCylinderContacts)
+      {
+         const mesa_pd::Vec3 ap      = cb.getAxis().getNormalizedIfNotZero();
+         const mesa_pd::Vec3 foot    = cylCenter + ((c - cylCenter) * ap) * ap;
+         // half-length: any overlap along the pillar axis is then >= halfLen > the largest possible radial depth
+         // (R_p + R), so the finite end faces never give the minimum
+         const real_t        halfLen = real_t(2) * (rc + hh + cb.getRadius());
+         mesa_pd::Vec3 e1 = ap % mesa_pd::Vec3(real_t(1), real_t(0), real_t(0));
+         if (e1.length() < real_t(0.5)) e1 = ap % mesa_pd::Vec3(real_t(0), real_t(1), real_t(0));
+         e1 = e1.getNormalized();
+         const mesa_pd::Vec3 e2 = ap % e1;
+         const mesa_pd::Mat3 Rp(e1[0], e2[0], ap[0], e1[1], e2[1], ap[1], e1[2], e2[2], ap[2]); // columns e1, e2, axis
+         const paper_analytical::CylinderState rodS{ c, R, rc, real_t(2) * hh };
+         const paper_analytical::CylinderState pilS{ foot, Rp, cb.getRadius(), real_t(2) * halfLen };
+         const auto res = paper_analytical::cylinderCylinderContactRefined(rodS, pilS);
+         if (!res.contact) return false;
+         real_t penetrationDepth = -res.overlap;
+         const real_t maxOverlap = real_t(1.0); // same envelop safety clamp as the legacy path below
+         const bool envelopClamped = penetrationDepth < -maxOverlap;
+         if (envelopClamped) penetrationDepth = -maxOverlap;
+         getPenetrationDepth() = penetrationDepth;
+         getContactNormal()    = res.normal; // points towards the first argument, the rod: pillar -> log, as below
+         getContactPoint()     = res.point;
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            envelopClamped ? "pillar exterior (Cylinder, refined, ENVELOP-clamped)" : "pillar exterior (Cylinder, refined)");
+         return true;
+      }
+
       // Pillar axis as a LINE in the log body frame.
       mesa_pd::Vec3 d  = Rt * cb.getAxis();
       const real_t  dl = d.length();
@@ -1025,6 +1086,22 @@ public:
                    const mesa_pd::data::Box& bx2,
                    Accessor& ac)
    {
+      // boxContactSkin (see ModelParameters): both boxes are replaced by inflated boxes (each
+      // half-extent + m) and resolved by the unchanged dispatch below (SAT, sphero, or GJK/EPA
+      // fallback, whichever this call would otherwise have taken) -- mirrors cylinderContactSkin's
+      // own Cylinder x Cylinder wrapper. The skin is cleared during the recursive call so the
+      // inflation is applied exactly once.
+      if (boxContactSkin > real_t(0))
+      {
+         const real_t m = boxContactSkin;
+         const mesa_pd::data::Box inflated1(bx1.getEdgeLength() + mesa_pd::Vec3(real_t(2) * m));
+         const mesa_pd::data::Box inflated2(bx2.getEdgeLength() + mesa_pd::Vec3(real_t(2) * m));
+         boxContactSkin = real_t(0);
+         const bool hit = operator()(idx1, idx2, inflated1, inflated2, ac);
+         boxContactSkin = m;
+         return hit;
+      }
+
       if (!useAnalyticalContactDetection)
       {
          recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
@@ -1398,7 +1475,64 @@ public:
       // No GJK/EPA call at all; GJK/EPA remains the verification reference in PaperAnalyticalContactTest.cpp.
       if (refineCylinderContacts)
       {
-         result = paper_analytical::refineCylinderContact(ci, cj, result);
+         static const bool shadowTiming = std::getenv("ANTIDUNES_REFINE_SHADOW_TIMING") != nullptr;
+         if (shadowTiming)
+         {
+            // outputs written by the shadow GJK/EPA call are overwritten below before any contact is returned
+            const auto s0 = std::chrono::steady_clock::now();
+            const auto rawAgain = paper_analytical::cylinderCylinderContact(ci, cj);
+            const auto s1 = std::chrono::steady_clock::now();
+            if (paper_analytical::cylinderCylinderResultIsUncertain(ci, cj, rawAgain, useTightTier1, skipTier1))
+            {
+               ++contactStats.shadowFallbackCalls;
+               (void) GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
+            }
+            const auto s2 = std::chrono::steady_clock::now();
+            contactStats.shadowClosedFormSeconds += std::chrono::duration< double >(s1 - s0).count();
+            contactStats.shadowFallbackSeconds += std::chrono::duration< double >(s2 - s1).count();
+         }
+         paper_analytical::RefineTrace trace;
+         const std::string rawScenario = result.contact ? std::string(result.scenario) : std::string();
+         const real_t      rawOverlap  = result.overlap;
+         const auto        t0          = std::chrono::steady_clock::now();
+         result = paper_analytical::refineCylinderContact(ci, cj, result, &trace);
+         const double dt = std::chrono::duration< double >(std::chrono::steady_clock::now() - t0).count();
+         ++contactStats.cylRefinePath[int(trace.path)];
+         contactStats.cylRefinePathSeconds[int(trace.path)] += dt;
+         ++contactStats.cylRefineFastReject[int(trace.fastReject)];
+         contactStats.cylRefineKinks += trace.kinks ? 1 : 0;
+         contactStats.cylRefineConvex += trace.convex ? 1 : 0;
+         if (trace.path == paper_analytical::RefinePath::ContactDescended ||
+             trace.path == paper_analytical::RefinePath::ContactDescendedSeparated)
+         {
+            // [Claude, 2026-10-01] profiling dump (ANTIDUNES_REFINE_DUMP=<prefix>): the re-descended pairs, every 499th, at most 20000
+            // per rank, to <prefix>_rank<r>.csv, for offline analysis of the fast-path rejections
+            static const char*   dumpPrefix = std::getenv("ANTIDUNES_REFINE_DUMP");
+            static std::ofstream dump;
+            static uint_t        dumped = 0, seen = 0;
+            if (dumpPrefix && dumped < uint_t(20000) && (seen++ % uint_t(499)) == uint_t(0))
+            {
+               if (!dump.is_open())
+               {
+                  dump.open(std::string(dumpPrefix) + "_rank" + std::to_string(mpi::MPIManager::instance()->rank()) + ".csv");
+                  dump << "scenario,raw_overlap,ref_overlap,ref_contact,fast_reject,kinks,us,fast_d0,fast_q,"
+                          "pix,piy,piz,aix,aiy,aiz,Ri,Li,pjx,pjy,pjz,ajx,ajy,ajz,Rj,Lj\n";
+                  dump.precision(17);
+               }
+               const mesa_pd::Vec3 ai = ci.axis(), aj = cj.axis();
+               dump << rawScenario << "," << rawOverlap << "," << result.overlap << "," << int(result.contact) << ","
+                    << int(trace.fastReject) << "," << int(trace.kinks) << "," << 1e6 * dt << "," << trace.fastD0 << ","
+                    << trace.fastQ << "," << ci.pos[0] << ","
+                    << ci.pos[1] << "," << ci.pos[2] << "," << ai[0] << "," << ai[1] << "," << ai[2] << "," << ci.radius
+                    << "," << ci.length << "," << cj.pos[0] << "," << cj.pos[1] << "," << cj.pos[2] << "," << aj[0] << ","
+                    << aj[1] << "," << aj[2] << "," << cj.radius << "," << cj.length << "\n";
+               ++dumped;
+            }
+            static const char* names[8] = { "face-face", "band-band-parallel", "face-band", "band-band-skewed",
+                                            "face-edge", "special-contact", "band-edge", "edge-edge" };
+            for (int k = 0; k < 8; ++k)
+               if (rawScenario == names[k]) ++contactStats.cylRefineDescendedScenario[k];
+         }
          if (!result.contact)
          {
             ++contactStats.cylRefinedSeparated;
@@ -1610,6 +1744,19 @@ public:
       // separated (no GJK/EPA call in either case, see paper_analytical::refineCylinderContact).
       uint64_t cylRefinedContact   = 0;
       uint64_t cylRefinedSeparated = 0;
+      // [Claude, 2026-10-01] profiling of refineCylinderContact: pairs and wall time per exit (paper_analytical::RefinePath),
+      // why the fast path rejected a closed-form contact (FastReject), how often the kink search / convex check ran, and
+      // the closed-form scenario of the contacts that had to be re-descended (index as in shadow mode, 0..7).
+      static constexpr int kRefinePaths = int(paper_analytical::RefinePath::Count);
+      uint64_t cylRefinePath[kRefinePaths]        = {};
+      double   cylRefinePathSeconds[kRefinePaths] = {};
+      uint64_t cylRefineFastReject[int(paper_analytical::FastReject::Count)] = {};
+      uint64_t cylRefineKinks = 0, cylRefineConvex = 0;
+      uint64_t cylRefineDescendedScenario[8] = {};
+      // [Claude, 2026-10-01] shadow timing (ANTIDUNES_REFINE_SHADOW_TIMING set, refined mode only): on the same pairs, the
+      // time of the closed form and of the GJK/EPA fallback that the closed form with fallback would have called
+      uint64_t shadowFallbackCalls = 0;
+      double   shadowClosedFormSeconds = 0, shadowFallbackSeconds = 0;
 
       void bumpCylScenario(const char* scenario)
       {
@@ -1850,6 +1997,11 @@ public:
    real_t spheroBoxRadius     = real_t(0.05);
    // See ModelParameters::cylinderContactSkin's own doc comment (SimulationParams.h). 0 = off.
    real_t cylinderContactSkin = real_t(0);
+   // See ModelParameters::boxContactSkin's own doc comment (SimulationParams.h). 0 = off. Box
+   // analog of cylinderContactSkin, mutable for the same reason (toggled off/back-on around the
+   // recursive inflated-shape call -- see the Box x Box/Box x HalfSpace/Box x CylindricalBoundary
+   // overloads above).
+   real_t boxContactSkin = real_t(0);
    // See ModelParameters::useSpheroBoxAnalytical's own doc comment (SimulationParams.h). Only
    // meaningful when useSpheroBoxContact is true -- selects the closed-form Eberly algorithm
    // (paper_analytical::boxBoxSpheroAnalytical) instead of the default GJK/EPA-with-margin path.
@@ -2305,8 +2457,8 @@ public:
          // See pairContactInputState_'s own doc comment: this rank's full local view of both particles'
          // pose/velocity at the moment it fed the ContactFilter decision, if this rank computed this
          // pair's contact at all this cycle.
-         if (const std::string* state = lookupContactInputState(a, b))
-            result += " || input state: " + *state;
+         if (const ContactInputState* state = lookupContactInputState(a, b))
+            result += " || input state: " + state->format();
          return result;
       };
    }
@@ -2331,6 +2483,8 @@ public:
    // Shadow mode (ModelParameters.shadowAnalyticCylinderLog): see SolidCylinderContactDetection::shadowCompare.
    // See ModelParameters::cylinderContactSkin (SimulationParams.h).
    void setCylinderContactSkin(real_t skin) { acd_.cylinderContactSkin = skin; }
+   // See ModelParameters::boxContactSkin (SimulationParams.h).
+   void setBoxContactSkin(real_t skin) { acd_.boxContactSkin = skin; }
    void setRefineCylinderContacts(bool on) { acd_.refineCylinderContacts = on; }
    void setUsePureAnalyticalCylinder(bool on) { acd_.usePureAnalyticalCylinder = on; }
 
@@ -2402,32 +2556,25 @@ public:
       if (double_cast_(idx1, idx2, ac, acd_, ac))
       {
          // Capture this rank's full local input state for the ContactFilter decision about to be made,
-         // keyed by uid pair -- see pairContactInputState_'s own doc comment for why. Cheap (a handful
-         // of vector reads + a string build) and only ever surfaced later if a [ContactHistory DUPLICATE]
-         // actually fires for this exact pair, via contactHistoryDuplicateDiagnosticHook below.
+         // keyed by uid pair -- see pairContactInputState_'s own doc comment for why. Only ever surfaced
+         // later if a [ContactHistory DUPLICATE] actually fires for this exact pair, via
+         // contactHistoryDuplicateDiagnosticHook below.
+         // [Claude, 2026-10-02] stores the raw values; the text is built only on lookup. Formatting it here,
+         // for every contact in every sub-cycle, took ~38 % of the busy ranks' time in the settled cuboid
+         // pile (eu-stack profile of the random_cuboids replay, step 70000 of 4284396).
          {
             const auto i1 = acd_.getIdx1();
             const auto i2 = acd_.getIdx2();
-            std::ostringstream oss;
-            oss << "rank=" << walberla::mpi::MPIManager::instance()->rank()
-                << " | idx1: uid=" << ac.getUid(i1)
-                << " owner=" << ac.getOwner(i1)
-                << " ghost=" << (mesa_pd::data::particle_flags::isSet(ac.getFlags(i1), mesa_pd::data::particle_flags::GHOST) ? "yes" : "no")
-                << " pos=" << ac.getPosition(i1)
-                << " rot(quat)=" << ac.getRotation(i1).getQuaternion()
-                << " vel=" << ac.getLinearVelocity(i1)
-                << " angVel=" << ac.getAngularVelocity(i1)
-                << " | idx2: uid=" << ac.getUid(i2)
-                << " owner=" << ac.getOwner(i2)
-                << " ghost=" << (mesa_pd::data::particle_flags::isSet(ac.getFlags(i2), mesa_pd::data::particle_flags::GHOST) ? "yes" : "no")
-                << " pos=" << ac.getPosition(i2)
-                << " rot(quat)=" << ac.getRotation(i2).getQuaternion()
-                << " vel=" << ac.getLinearVelocity(i2)
-                << " angVel=" << ac.getAngularVelocity(i2)
-                << " | computed contactPoint=" << acd_.getContactPoint()
-                << " normal=" << acd_.getContactNormal()
-                << " penetration=" << acd_.getPenetrationDepth();
-            recordContactInputState(ac.getUid(i1), ac.getUid(i2), oss.str());
+            auto side = [&](size_t i) {
+               return ContactInputSide{ ac.getUid(i), ac.getOwner(i),
+                                        mesa_pd::data::particle_flags::isSet(ac.getFlags(i), mesa_pd::data::particle_flags::GHOST),
+                                        ac.getPosition(i), ac.getRotation(i).getQuaternion(), ac.getLinearVelocity(i),
+                                        ac.getAngularVelocity(i) };
+            };
+            recordContactInputState(ac.getUid(i1), ac.getUid(i2),
+                                    ContactInputState{ walberla::mpi::MPIManager::instance()->rank(), side(i1), side(i2),
+                                                       acd_.getContactPoint(), acd_.getContactNormal(),
+                                                       acd_.getPenetrationDepth() });
          }
          if (contact_filter_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), *domain_))
          {
@@ -2865,6 +3012,55 @@ public:
                }
             }
 
+            // [Claude, 2026-10-01] [LAUNCH-TRACE] (env ANTIDUNES_LAUNCH_TRACE_UID=<uid>, ANTIDUNES_LAUNCH_TRACE_FROM=<step>,
+            // ANTIDUNES_LAUNCH_TRACE_TO=<step>): every contact of one floater in a step window, with both bodies' full state
+            // (position, rotation matrix, linear and angular velocity, shape type), the contact geometry and this contact's
+            // force/torque, to locate the contact that injects energy in the randomised cuboid drop tests (floaters
+            // launched from the pile at ~0.3 LU/step). Unthrottled inside the window; inert unless the variable is set.
+            {
+               static const uint64_t traceUid  = std::getenv("ANTIDUNES_LAUNCH_TRACE_UID")
+                                                    ? std::strtoull(std::getenv("ANTIDUNES_LAUNCH_TRACE_UID"), nullptr, 10) : 0;
+               static const uint64_t traceFrom = std::getenv("ANTIDUNES_LAUNCH_TRACE_FROM")
+                                                    ? std::strtoull(std::getenv("ANTIDUNES_LAUNCH_TRACE_FROM"), nullptr, 10) : 0;
+               static const uint64_t traceTo   = std::getenv("ANTIDUNES_LAUNCH_TRACE_TO")
+                                                    ? std::strtoull(std::getenv("ANTIDUNES_LAUNCH_TRACE_TO"), nullptr, 10) : 0;
+               // speed trigger (ANTIDUNES_LAUNCH_SPEED=<LU/step>): trace every contact of a floater faster than this, at
+               // most 4000 lines per rank -- for runs that do not reproduce a specific launch exactly
+               static const double traceSpeed = std::getenv("ANTIDUNES_LAUNCH_SPEED")
+                                                   ? std::strtod(std::getenv("ANTIDUNES_LAUNCH_SPEED"), nullptr) : 0.0;
+               static uint_t       speedLines = 0;
+               const uint64_t uA = uint64_t(ac.getUid(acd_.getIdx1())), uB = uint64_t(ac.getUid(acd_.getIdx2()));
+               const bool byUid = traceUid != 0 && (uA == traceUid || uB == traceUid) && uint64_t(mainStep_) >= traceFrom &&
+                                  uint64_t(mainStep_) <= traceTo;
+               const bool bySpeed = traceSpeed > 0.0 && speedLines < uint_t(4000) &&
+                                    (double(ac.getLinearVelocity(acd_.getIdx1()).length()) > traceSpeed ||
+                                     double(ac.getLinearVelocity(acd_.getIdx2()).length()) > traceSpeed);
+               if (bySpeed) ++speedLines;
+               if (byUid || bySpeed)
+               {
+                  auto st = [&](size_t i) {
+                     std::ostringstream o;
+                     o.precision(9);
+                     const auto  sh = ac.getBaseShape(i);
+                     const auto  R  = ac.getRotation(i).getMatrix();
+                     o << "uid=" << ac.getUid(i) << " shape=" << (sh ? int(sh->getShapeType()) : -1)
+                       << (isSet(ac.getFlags(i), mesa_pd::data::particle_flags::GHOST) ? " ghost" : " local")
+                       << " pos=" << ac.getPosition(i) << " v=" << ac.getLinearVelocity(i) << " w=" << ac.getAngularVelocity(i)
+                       << " R=[" << R(0, 0) << "," << R(0, 1) << "," << R(0, 2) << ";" << R(1, 0) << "," << R(1, 1) << ","
+                       << R(1, 2) << ";" << R(2, 0) << "," << R(2, 1) << "," << R(2, 2) << "]";
+                     return o.str();
+                  };
+                  std::ostringstream o;
+                  o.precision(9);
+                  o << "[LAUNCH-TRACE] step=" << mainStep_ << " sub=" << subCycle_ << " depth=" << acd_.getPenetrationDepth()
+                    << " n=" << acd_.getContactNormal() << " cp=" << acd_.getContactPoint()
+                    << " F_A=" << (ac.getForceRef(acd_.getIdx1()) - forceBeforeA)
+                    << " T_A=" << (ac.getTorqueRef(acd_.getIdx1()) - torqueBeforeA) << " | A: " << st(acd_.getIdx1())
+                    << " | B: " << st(acd_.getIdx2());
+                  WALBERLA_LOG_INFO(o.str());
+               }
+            }
+
             const bool doLog = historyLogger_ && historyLogger_->enabled();
 
             if (doLog)
@@ -2963,20 +3159,51 @@ private:
    // something else. Wired into contactHistoryDuplicateDiagnosticHook below (same call site as the
    // existing detection-path lookup) so a future reproduction of this crash prints both ranks' full input
    // state side by side.
-   void recordContactInputState(walberla::id_t uidA, walberla::id_t uidB, std::string state)
+   // [Claude, 2026-10-02] raw values instead of a preformatted string (see the call site); format() gives the same text
+   struct ContactInputSide
+   {
+      walberla::id_t                uid;
+      int                           owner;
+      bool                          ghost;
+      mesa_pd::Vec3                 pos;
+      math::Quaternion< real_t >    quat;
+      mesa_pd::Vec3                 vel, angVel;
+   };
+   struct ContactInputState
+   {
+      int              rank;
+      ContactInputSide s1, s2;
+      mesa_pd::Vec3    point, normal;
+      real_t           penetration;
+      std::string format() const
+      {
+         std::ostringstream oss;
+         oss << "rank=" << rank;
+         int k = 1;
+         for (const auto* s : { &s1, &s2 })
+         {
+            oss << " | idx" << k++ << ": uid=" << s->uid << " owner=" << s->owner << " ghost=" << (s->ghost ? "yes" : "no")
+                << " pos=" << s->pos << " rot(quat)=" << s->quat << " vel=" << s->vel << " angVel=" << s->angVel;
+         }
+         oss << " | computed contactPoint=" << point << " normal=" << normal << " penetration=" << penetration;
+         return oss.str();
+      }
+   };
+
+   void recordContactInputState(walberla::id_t uidA, walberla::id_t uidB, const ContactInputState& state)
    {
       const auto key = uidA < uidB ? std::make_pair(uidA, uidB) : std::make_pair(uidB, uidA);
-      pairContactInputState_[key] = std::move(state);
+      pairContactInputState_[key] = state;
    }
 
-   const std::string* lookupContactInputState(walberla::id_t uidA, walberla::id_t uidB) const
+   const ContactInputState* lookupContactInputState(walberla::id_t uidA, walberla::id_t uidB) const
    {
       const auto key = uidA < uidB ? std::make_pair(uidA, uidB) : std::make_pair(uidB, uidA);
       const auto it = pairContactInputState_.find(key);
       return it == pairContactInputState_.end() ? nullptr : &it->second;
    }
 
-   std::map< std::pair< walberla::id_t, walberla::id_t >, std::string > pairContactInputState_;
+   std::map< std::pair< walberla::id_t, walberla::id_t >, ContactInputState > pairContactInputState_;
 
    // See setLogContactAnomalies()'s own doc comment above for what these three gate/feed.
    bool   logContactAnomalies_     = false;
@@ -3413,11 +3640,13 @@ public:
    AddExternalForces(const std::shared_ptr< mesa_pd::domain::BlockForestDomain >& domain,
       const std::shared_ptr< Vector3< real_t > >& acceleration,
       real_t particleDensityRatio,
-      bool useMemOnlyBuoyancy = true)
+      bool useMemOnlyBuoyancy = true,
+      bool driveFloatersByMass = false)
       : domain_(domain)
       , acceleration_(acceleration)
       , particleDensityRatio_(particleDensityRatio)
       , useMemOnlyBuoyancy_(useMemOnlyBuoyancy)
+      , driveFloatersByMass_(driveFloatersByMass)
       , submergedVolumes_(nullptr)
       , buoyancyCenterOffset_(nullptr)
    {}
@@ -3480,9 +3709,12 @@ public:
       //      alone supplies buoyant support (Bogner & Rude 2013 -- no separate geometric channel).
       //      otherwise → gravity minus the analytic buoyancy term (vSub × g, fluid density = 1),
       //      Antidunes' extended split (opt-in, pre-existing pre-default-flip behaviour).
+      // driveFloatersByMass_ → floaters are pushed with their own mass in X/Y (rho * vFull = m_p;
+      //         slope reading of the body force) instead of the fluid-density full-volume term.
+      const real_t driveVol = (isFloater && driveFloatersByMass_) ? rho * vFull : vFull;
       Vector3< real_t > bodyForce(
-         vFull * (*acceleration_)[0],
-         vFull * (*acceleration_)[1],
+         driveVol * (*acceleration_)[0],
+         driveVol * (*acceleration_)[1],
          (useMemOnlyBuoyancy_ ? (rho * vFull) : (rho * vFull - vSub)) * (*acceleration_)[2]);
 
       auto hydro_force  = ac.getHydrodynamicForce(idx);
@@ -3726,6 +3958,8 @@ private:
    // false → gravity minus the analytic vSub*g buoyancy term, plus the vSub-derived righting torque
    //         (Antidunes' extended, non-thesis split; the pre-existing behaviour before the default flip).
    bool                                                     useMemOnlyBuoyancy_;
+   // true → floater X/Y drive is m_p * a_xy instead of vFull * a_xy (see SimulationParams driveFloatersByMass).
+   bool                                                     driveFloatersByMass_;
    const std::unordered_map< walberla::id_t, real_t >*     submergedVolumes_;
    const std::unordered_map< walberla::id_t, real_t >*     phantomForceZ_ = nullptr; // Option A vertical MEM correction; null = disabled
    const std::unordered_map< walberla::id_t, Vector3< real_t > >* buoyancyCenterOffset_;
@@ -4022,7 +4256,12 @@ public:
       , normalFieldID_(simObjs->normalFieldID)
       , pdfFieldID_(simObjs->pdfFieldID)
       , particleFieldID_(simObjs->particleFieldID)
-      , boundaryHandlingID_(simObjs->antidunesBoundaryHandling->getHandlingID())
+      // [Claude, 2026-10-01] guarded: the fluid-free DropTest never creates a boundary handling (DropTest.cpp), and this
+      // unconditional dereference made every DropTest run segfault in this constructor since 67d5961d; the ID is only
+      // used by the fluid-coupling functions, which DropTest never calls
+      , boundaryHandlingID_(simObjs->antidunesBoundaryHandling ? simObjs->antidunesBoundaryHandling->getHandlingID()
+                                                               : BlockDataID())
+      , hasFluid_(simObjs->antidunesBoundaryHandling != nullptr)
       , debugForceObstacleClearAtStep_(simParams->model.debugForceObstacleClearAtStep)
       , diagnosticSweepEnabled_(simParams->model.diagnosticSweepEnabled)
       , diagnosticEvents_(simObjs->diagnosticEvents)
@@ -4064,7 +4303,8 @@ public:
          simObjs->mesapdDomain,
          simObjs->acceleration,
          simParams->particle.densityRatio,
-         simParams->model.useMemOnlyBuoyancy)
+         simParams->model.useMemOnlyBuoyancy,
+         simParams->model.driveFloatersByMass)
       , useLubricationCorrection(simParams->particle.useLubricationCorrection)
       , evalFrequency_(simParams->evaluation.evaluationFrequency)
       , stepCounter_(simObjs->beginTimeStep) // absolute (resume-safe): a checkpoint resume must NOT restart the step numbering at 0 -- logs/floater-history steps must match the original run's ([STALE-PARTICLE-IDX] etc.)
@@ -4113,6 +4353,11 @@ public:
          WALBERLA_LOG_INFO_ON_ROOT("cylinderContactSkin = " << simParams->model.cylinderContactSkin
                                    << " LU (rod-rod contact below a surface gap of " << real_t(2) * simParams->model.cylinderContactSkin
                                    << ", rod-wall/pillar below " << simParams->model.cylinderContactSkin << ")");
+      computeContacts.setBoxContactSkin(simParams->model.boxContactSkin);
+      if (simParams->model.boxContactSkin > real_t(0))
+         WALBERLA_LOG_INFO_ON_ROOT("boxContactSkin = " << simParams->model.boxContactSkin
+                                   << " LU (box-box contact below a surface gap of " << real_t(2) * simParams->model.boxContactSkin
+                                   << ", box-wall/pillar below " << simParams->model.boxContactSkin << ")");
       computeContacts.setFreshlyActivatedUIDs(freshlyActivatedFloaterUIDs_);
       computeContacts.setShadowAnalytic(simParams->model.shadowAnalyticCylinderLog, simParams->model.shadowAnalyticStartStep, simParams->model.shadowAnalyticEndStep);
       simParams_shadowEnabled_ = simParams->model.shadowAnalyticCylinderLog;
@@ -4201,6 +4446,10 @@ public:
                   "body force is gravity-only, no vSub/righting-torque computation at all)"
                 : "SPLIT (gravity minus analytic vSub*g, plus vSub-derived righting torque; "
                   "Antidunes' extended, opt-in, pre-default-flip model)"));
+      WALBERLA_LOG_INFO_ON_ROOT("[FloaterForces] floater streamwise drive: "
+         << (simParams->model.driveFloatersByMass
+                ? "BY MASS (F_xy = rho_p * V * a_xy = m_p * a_xy)"
+                : "FLUID FULL VOLUME (default; F_xy = V * a_xy)"));
 
       // Combined box + cylinder "clip floater" list: both shapes share the plane-fit + clip V_sub
       // pipeline in computeSubmergedVolumesBox(); a cylinder is described by halfExtents = (r, r, L/2)
@@ -4300,6 +4549,22 @@ public:
       mpi::allReduceInplace(cylCapsuleRejected, mpi::SUM);
       mpi::allReduceInplace(cylRefinedContact, mpi::SUM);
       mpi::allReduceInplace(cylRefinedSeparated, mpi::SUM);
+      constexpr int nP = SolidCylinderContactDetection::ContactDetectionStats::kRefinePaths;
+      std::vector< uint64_t > rp(s.cylRefinePath, s.cylRefinePath + nP);
+      std::vector< double >   rt(s.cylRefinePathSeconds, s.cylRefinePathSeconds + nP);
+      std::vector< uint64_t > rf(std::begin(s.cylRefineFastReject), std::end(s.cylRefineFastReject));
+      std::vector< uint64_t > rs(std::begin(s.cylRefineDescendedScenario), std::end(s.cylRefineDescendedScenario));
+      uint64_t rk = s.cylRefineKinks, rc = s.cylRefineConvex, sfc = s.shadowFallbackCalls;
+      double   scf = s.shadowClosedFormSeconds, sfb = s.shadowFallbackSeconds;
+      mpi::allReduceInplace(sfc, mpi::SUM);
+      mpi::allReduceInplace(scf, mpi::SUM);
+      mpi::allReduceInplace(sfb, mpi::SUM);
+      mpi::allReduceInplace(rp, mpi::SUM);
+      mpi::allReduceInplace(rt, mpi::SUM);
+      mpi::allReduceInplace(rf, mpi::SUM);
+      mpi::allReduceInplace(rs, mpi::SUM);
+      mpi::allReduceInplace(rk, mpi::SUM);
+      mpi::allReduceInplace(rc, mpi::SUM);
 
       // cylPureSpecialContactTrusted is a SUB-metric of cylAnalyticalTrusted below (that path also
       // calls bumpCylScenario, so it's already folded into face-face/band-band-skewed/etc.) --
@@ -4343,6 +4608,26 @@ public:
          << " | refined (no GJK/EPA): contact=" << cylRefinedContact << " separated=" << cylRefinedSeparated
          << " | cylinder-cylinder grand total=" << cylTotal
          << " fallback-rate=" << fallbackRatePercent << "%");
+
+      if (std::accumulate(rp.begin(), rp.end(), uint64_t(0)) > uint64_t(0))
+      {
+         static const char* pathNames[nP] = { "exact", "fast-accepted", "contact-descended", "contact-descended-separated",
+                                              "no-scenario-separated", "no-scenario-contact" };
+         std::ostringstream os;
+         for (int k = 0; k < nP; ++k)
+            os << " " << pathNames[k] << "=" << rp[size_t(k)] << " (" << rt[size_t(k)] << " s, "
+               << (rp[size_t(k)] ? 1e6 * rt[size_t(k)] / double(rp[size_t(k)]) : 0.0) << " us)";
+         os << " | fast-path rejects: depth-mismatch=" << rf[1] << " not-locally-optimal=" << rf[2]
+            << " smaller-elsewhere=" << rf[3] << " | kink search=" << rk << " convex check=" << rc
+            << " | re-descended contacts by closed-form scenario: face-face=" << rs[0] << " band-band-parallel=" << rs[1]
+            << " face-band=" << rs[2] << " band-band-skewed=" << rs[3] << " face-edge=" << rs[4]
+            << " special-contact=" << rs[5] << " band-edge=" << rs[6] << " edge-edge=" << rs[7];
+         if (scf > 0.0)
+            os << " | shadow: closed form " << scf << " s, fallback GJK/EPA " << sfb << " s (" << sfc << " calls), refinement "
+               << std::accumulate(rt.begin(), rt.end(), 0.0) << " s";
+         WALBERLA_LOG_INFO_ON_ROOT("[RefineProfile]" << (stepLabel.empty() ? "" : " step=" + stepLabel)
+                                   << " (time summed over ranks)" << os.str());
+      }
 
       if (g_rodCaps.any())
       {
@@ -4587,7 +4872,7 @@ public:
                   uint_t clearedCount       = uint_t(0);
                   for (auto blockIt = blockForest_->begin(); blockIt != blockForest_->end(); ++blockIt)
                   {
-                     auto* pf = blockIt->getData< lbm_mesapd_coupling::ParticleField_T >(particleFieldID_);
+                     auto* pf = hasFluid_ ? blockIt->getData< lbm_mesapd_coupling::ParticleField_T >(particleFieldID_) : nullptr;
                      if (pf == nullptr) continue;
                      auto* boundaryHandling =
                         blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(boundaryHandlingID_);
@@ -4654,7 +4939,7 @@ public:
                           blockIt != blockForest_->end() && earlyCorruptionLogCount < uint_t(60); ++blockIt)
                      {
                         const auto* pf =
-                           blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(particleFieldID_);
+                           hasFluid_ ? blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(particleFieldID_) : nullptr;
                         if (pf == nullptr) continue;
                         const auto* pdfField = blockIt->getData< const PdfField_T >(pdfFieldID_);
                         auto* boundaryHandling =
@@ -4902,7 +5187,7 @@ public:
                   bool foundFirstOrphan = false;
                   for (auto blockIt = blockForest_->begin(); blockIt != blockForest_->end(); ++blockIt)
                   {
-                     auto* pf = blockIt->getData< lbm_mesapd_coupling::ParticleField_T >(particleFieldID_);
+                     auto* pf = hasFluid_ ? blockIt->getData< lbm_mesapd_coupling::ParticleField_T >(particleFieldID_) : nullptr;
                      if (pf == nullptr) continue;
                      auto* boundaryHandling =
                         blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(boundaryHandlingID_);
@@ -6191,6 +6476,9 @@ private:
    BlockDataID                                        pdfFieldID_;
    BlockDataID                                        particleFieldID_;
    BlockDataID                                        boundaryHandlingID_;
+   // [Claude, 2026-10-01] false in the fluid-free DropTest (no boundary handling, no particle field): the fluid-side
+   // diagnostic sweeps in doDEMSubCycles are skipped then (their block-data lookups abort on the invalid IDs)
+   bool                                               hasFluid_;
    uint_t                                              debugForceObstacleClearAtStep_;
    // See SimulationObjects::DiagnosticEvent's own doc comment -- shared buffer that per-sub-cycle
    // checks below push a lightweight record into (when diagnosticSweepEnabled_) instead of logging

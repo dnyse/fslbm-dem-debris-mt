@@ -240,6 +240,28 @@ inline auto createCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Ve
    return p0;
 }
 
+// [Claude, 2026-10-03] Vertical round container (DropTest, SimulationParams.h ContainerCylinderParams): a
+// CylindricalBoundary in CONTAINMENT mode with its axis along z, no axial bounds and no half clip, so bodies are kept
+// inside radius `radius` around (center.x, center.y) at every height. Same flags as createArchTunnel below; the
+// containment contact overloads (ParticleKernels.h, SolidCylinderContactDetection) use the shape's own axis.
+inline auto createContainerCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center, real_t radius)
+{
+   auto p0 = ps.create(true);
+   p0->setPosition(center);
+   auto shape = std::make_shared< mesa_pd::data::CylindricalBoundary >(radius, mesa_pd::Vec3(0, 0, 1));
+   shape->setContainment(true);
+   p0->setBaseShape(shape);
+   p0->getBaseShapeRef()->updateMassAndInertia(real_t(1));
+   p0->setOwner(walberla::mpi::MPIManager::instance()->rank());
+   p0->setType(2);
+   p0->setInteractionRadius(std::numeric_limits< real_t >::infinity());
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::INFINITE);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::GLOBAL);
+   mesa_pd::data::particle_flags::set(p0->getFlagsRef(), mesa_pd::data::particle_flags::NON_COMMUNICATING);
+   return p0;
+}
+
 // Arch tunnel as a REAL mesa_pd body (ModelParams.useArchTunnelAsMesaPDObject -- see that flag's own
 // doc comment): a CylindricalBoundary in CONTAINMENT mode (SolidCylinderContactDetection's new
 // containment overloads, ParticleKernels.h), axially bounded to the tunnel's own [xMin,xMax] span and

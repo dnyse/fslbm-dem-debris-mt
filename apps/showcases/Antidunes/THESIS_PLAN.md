@@ -2691,6 +2691,159 @@ Depends on item 3 (measurement setup) being in place first.
 >   hopper's free arching. Contact model: analytic Kodam+Guo hybrid cylinder contacts + owner-rank tiebreak, all experimental fixes explicitly off. Job scripts prepared, NOT submitted (all checkouts busy):
 >   `jobs/run_144_hopper_clog_cyl_frontblock_pidon_2node.sbatch` and `jobs/run_144_hopper_clog_pidon_2node_frontblock.sbatch` (sphere front-block), 144 ranks / 2 nodes / 6 h each, with the leftover-rescue + always-archive logic.
 
+> **[Claude, 2026-10-02] MEASUREMENT PLAN for the clogging scenarios (centred pillar + hopper). Proposal for review,
+> nothing submitted.** Builds on: the centred-pillar validation matrix (4242918/4245061/4245629/4245630/4248458,
+> flow-rate reruns 4257768/4260083/4260382), the small-rods hopper series (24/48/96/192 rods, skin 0.5; 192 with
+> curvature guard = 4284594) and the 406-rod hopper 4284723.
+>
+> **What the existing runs already show (the plan is built on these):**
+> - **PID on + complete jam is unphysical in the periodic channel.** The controller holds the mean velocity, so the
+>   water volume piles up behind the jam and the leak becomes a jet. 406-rod hopper 4284723: upstream level ~90-120
+>   (clean 49), fluid at the ceiling (z=180) from step ~24000, downstream drained to 2-7 LU at 0.10-0.16 LU/step
+>   (Ma ~0.28); a rod pushed off the top of the jam fell into that jet and the run blew up at step 27338.
+> - **Fixed force is stable and gives a clean signal:** centred pillar PID off (4260083): discharge 29 -> 3, wet
+>   area unchanged ("flow stalls"); PID frozen inside the jam (4248458): the jam holds and tightens.
+> - **Debris count switches the hopper between intermittent and permanent jamming:** 192 rods (4284594, PID on):
+>   downstream level dropped to 12-14 around steps 25-30k, then recovered to ~40, transport rate never zero
+>   (0.03-0.05) -> transient jams; 406 rods (4284723): complete jam by ~15000.
+> - **Sphere hopper (1015 spheres, gap/d = 2.67, 4247229/4248723):** no persistent arch.
+> - **Measurement gaps:** in the front-block hopper the upstream probes (x=336) sit inside the debris block; no plane
+>   through the pillar axis for BR. [Corrected 2026-10-03: `acceleration_x` in 4284594 is NOT broken -- only 16 of 509
+>   rows are 0 (steps 1500-2800 and 5100-5200, the controller at its lower clamp after a velocity overshoot); median
+>   1.97e-6 over steps 3k-20k, 9.4e-7 after 20k, max 3.31e-6. My first query had sampled exactly those steps.]
+> - **Time scale:** bulk velocity ~0.013 LU/step (the 0.04 target is scaled, see the flow-rate artifact), so one
+>   flow-through of the 768-LU channel is ~59000 steps; a 50000-step run gives each floater at most one approach.
+>
+> **1. Forcing protocol (both layouts).**
+> - Spin-up with PID on and all debris dormant until the mean velocity has converged (clean channel: ~15-20k steps).
+> - Freeze the force at release (`PIDParameters.switchOffStep` = release step, `switchOffAveragingWindow` 5000): the
+>   main regime is a **fixed hydraulic gradient** (= the flow forcing of a natural reach), the same for every debris
+>   configuration of a layout because it is the clean channel's own converged force.
+> - Secondary, only where the jam resistance is the question: **capped PID** (`maxActuatingVariable` = k x clean
+>   force, e.g. k = 3; today 1e-3 = ~1300x the clean ~7.5e-7, effectively uncapped). It holds the discharge until the
+>   jam needs more than k x the clean force, then behaves like a fixed force -- no ceiling flooding, no jet. Gives
+>   F_jam up to the cap.
+> - Plain PID on is dropped as a regime (keep the existing centred-pillar PID-on runs as the documented failure mode).
+> - Optional saving: one spin-up per layout with `storeSnapshot`, every scenario restarts from it (same initial
+>   flow for all). Needs a check that dormant floaters survive a checkpoint and release correctly after restart.
+>
+> **2. Measured quantities (per run).**
+> - Primary under fixed force: discharge ratio Q/Q_ref at the upstream and downstream planes (eq:clog-flowrate) and
+>   its time series; time to clog t_c = first time Q/Q_ref stays below 0.5 for >= 5000 steps (threshold to be fixed
+>   on the reference runs before looking at the debris runs).
+> - Water levels: Delta zeta = zeta_up - zeta_down, afflux against the reference at the same probe, p_excess.
+> - Blockage ratio BR at a **new plane through the pillar axis** (x = 384); BR at the probe planes as now.
+> - Debris: **effective blockage fraction** P_e = floaters held within one log length upstream of the pillar plane
+>   at the end of the run / floaters released (De Cicco et al. 2020, "effective blockage probability"), plus the
+>   cumulative number of gap passages (centre crossings of x = 384, per direction). Both offline from the particle
+>   VTK (positions every 500-1000 steps, cheap) -- no new in-code evaluator needed.
+> - F_jam only in the capped-PID runs.
+>
+> **3. Probe placement fixes.**
+> - Hopper: release the debris further upstream (block or waves in x ~ 100-250 instead of against the pillars), so
+>   the upstream probe pair at x = 336 lies in clean water before the floaters arrive; downstream pair at x = 432.
+> - Both layouts: keep the second probe pair at the lateral position of the pillar (gap vs. pillar lateral structure,
+>   Schalko et al. 2023).
+>
+> **4. Scenario matrix.**
+> - **Centred pillar (single pillar, deterministic blockage; method validation):**
+>   - C0 clean reference and C1 100 spheres: reuse the existing fixed-force runs (4245061, 4260083) -- they already
+>     follow protocol 1 (force fixed at the clean converged value from t = 0).
+>   - C2 (optional) cylinders r 3, L 18 at the same pillar. NOT deterministic: rod diameter 6 < slit 8, so a rod
+>     aligned with the flow passes and only a crosswise rod spanning pillar-to-wall blocks; a bridge between the two
+>     layouts (rotation-limited blocking).
+> - **Hopper (two wall pillars, gap 16; stochastic jamming):**
+>   - H0 clean reference with pillars (fixed force; also the Q_ref and afflux baseline).
+>   - H1 debris count: 48, 96, 192, 406 rods (gap 16, L 18) -- jam probability vs. supply (Q_log/Q in De Cicco's
+>     terms); already bracketed by the PID-on runs (192 transient, 406 permanent).
+>   - H2 log length vs. gap: pillar radius 14/12/10/8 -> gap 12/16/20/24 -> L/gap = 1.5/1.125/0.9/0.75 at a fixed
+>     count (192); L/w is the second variable of De Cicco's P = f(Q_log/Q, L_log/w_p, Fr, C_pier).
+>   - H3 release mode: one block (congested) vs. waves of a few rods (uncongested), De Cicco's two transport
+>     mechanisms.
+>   - H4 ensembles: 3-5 seeds (jittered positions/orientations) for the configurations that end up in the thesis;
+>     De Cicco repeated each flume test 5x (uncongested) and 10x (semi-congested) for statistically relevant P.
+>   - H5 shape (later): cuboids (SAT contact now fast enough, see 2026-10-02 speed entry) and spheres (1015, gap/d
+>     2.67, no arch so far) at one H1 point.
+> - Out of scope here, stays a limitation: subcritical Froude number (flume studies 0.1-0.6, ours 1.31).
+>
+> **5. Order and cost.** One hopper run at 144 ranks: ~2.2 h per 50k steps with 406 rods (4284723: 27k steps in
+> 69 min); runs should cover >= 1 flow-through (~60k steps). Tier 1 (thesis minimum): protocol + H0 + H1 at 192 and
+> 406 (fixed force) + reprocessing the centred-pillar runs with the new metrics. Tier 2: H4 with 3 seeds for those two
+> + H2 at three gaps. Tier 3: H3, H5, C2, capped PID.
+>
+> **6. Prerequisites.** Plane at the pillar axis for BR; release zone
+> moved upstream in `gen_hopper_clog_cyl_prm.py` / small-rods generator; seed option for jittered ensembles;
+> robustness switches on for every run (`guardCurvatureInputs`, `cylinderContactSkin 0.5`); NaN-normal root cause
+> still open (diagnostic rerun pending). Thesis text: Sec. "Flow-Forcing Regimes" says every scenario runs with both
+> regimes -- update once the protocol is decided.
+
+> **[Claude, 2026-10-03] PLAN: open channel with inflow/outflow instead of the periodic channel (feasibility check
+> done in the code, nothing implemented).** Motivation: in the periodic channel the backed-up water can only come from
+> downstream (fixed volume), so neither PID nor fixed force reproduces a flood, where the catchment imposes the
+> discharge and a jam raises the water upstream (Schalko et al. 2018; flumes: pump + tailgate weir).
+>
+> **What exists (checked):**
+> - `src/lbm/free_surface`: `UBB_Inflow` (velocity inlet that also creates interface cells towards gas:
+>   `FindInterfaceCellConversion.h`, `CellConversionSweep.h`), `PressureOutflow` (`SimplePressureWithFreeSurface`,
+>   uniform density) and `Outlet` (zero-gradient `lbm::Outlet<4,3>`); mass exchange with inflow/outflow cells is in
+>   `AdvectMass.h`. All three are compiled into `AntidunesBoundaryHandling` and settable from the prm through the
+>   registered `CellInterval` / `Border` / `BodyBC` initialisers.
+> - Fixed driving force without PID: `PIDParameters.accelerationXOverride` (SetupStages.h `setupSimState`).
+>
+> **Why it is not plug-and-play (found in the code):**
+> 1. **Auto walls override the faces:** `SetupStages.h:877` adds NoSlip on W/E whenever x is non-periodic, after
+>    `initFromConfig` -- it would land on the inflow/outflow cells (two boundary flags in one cell). Needs a change
+>    (skip cells that already carry a boundary flag, or a prm switch).
+> 2. **Never used in a free-surface app:** no waLBerla FreeSurface showcase uses inflow/outflow; the only user is the
+>    unit test `tests/lbm/free_surface/dynamics/InflowTest.cpp` (interface creation next to inflow cells). Antidunes'
+>    own free-surface changes (Bogner passes, sealed-cell guard, curvature guard, MEM reconstruction) have never run next
+>    to these boundaries.
+> 3. **The inlet must stop at the water line:** a `UBB_Inflow` over the whole W face would create water up to the
+>    ceiling; it has to be a `CellInterval` at x = -1 for z below the inflow depth, NoSlip above.
+> 4. **`PressureOutflow` imposes ONE density over the face**, not a hydrostatic profile -> not usable as a free-surface
+>    outlet over the full depth; `Outlet` (zero gradient) is the candidate.
+> 5. **Froude number decides the downstream condition:** at Fr = 1.31 (current) the flow is supercritical, so it is
+>    controlled from upstream: inflow depth + velocity, free outlet, and a jam produces a hydraulic jump that travels
+>    upstream. A subcritical flow (flume studies Fr 0.1-0.6) needs a downstream control -- a weir (BodyBC block near the
+>    outlet, the flume tailgate) -- and a new parametrisation (U, h, Re, We).
+> 6. **DEM side is new:** without x periodicity there are no x planes (`SetupStages.h` creates only z and y planes),
+>    floaters must not recirculate: an inlet plane, release in waves, and REMOVAL of floaters before the outlet. Removal
+>    must also clear their MEM obstacle cells (the stale-index class of failure, cf. STALE-PARTICLE-IDX in 4284723) --
+>    the riskiest new code.
+> 7. **Headroom:** the velocity inlet acts as a pump (keeps Q whatever the downstream level), so a tight jam raises the
+>    upstream level until the head pushes Q through. The centred-pillar and hopper jams needed 9-20x the clean force,
+>    i.e. ~90-200 LU of head at ~10 LU per a_ref, more than the 131 LU above the water in Z = 180: tight jams will reach
+>    the ceiling ("overtopping") -> stop criterion on the upstream level, or a taller domain.
+>
+> **Stages:**
+> - **S0 code (~0.5-1 day):** auto-wall fix (1); inlet/outlet prm blocks (3, 4); PID off + `accelerationXOverride` =
+>   a_ref as the bed slope; inlet DEM plane.
+> - **S1 clean channel, no debris (~1 day incl. local runs):** small domain locally, then 768 x 40 x 180. Pass if:
+>   Q_in = Q_out within ~1 % (flow-rate planes near inlet, mid, outlet), liquid mass steady, depth profile steady, no
+>   NaN / curvature-guard events at the inlet corner (inflow next to gas) or the outlet. Decide Fr here (5).
+> - **S2 debris (~2-3 days):** release waves near the inlet, removal zone before the outlet with MEM cleanup (6); test
+>   with drop-in spheres, no pillars.
+> - **S3 jam test:** centred pillar, 100 spheres (deterministic): expect afflux with the downstream depth unchanged --
+>   the flume picture; stop at the level limit (7).
+> - **S4 hopper** (H1/H2 of the measurement plan) in the open channel.
+> - Go/no-go after S1: if the inlet/outlet are not stable within ~2 days, stay with the periodic channel + capped PID.
+
+> **[Claude, 2026-10-03] Capped-PID results and next runs.**
+> - Clean hopper 4292482: a_ref = 5.31e-7, Q_ref 23.6-24.0, level difference across the pillars 11.3 (slices) / 9.6
+>   (probes). The cap 2.65e-6 used so far is therefore k = 5.0, not 3.4.
+> - 192 rods capped 4292481: cap only at the jam peaks (5 intervals before 22400), transient jam, Q back near Q_ref,
+>   completed 100000. 406 rods capped 4292534: cap the whole run (= fixed force 5 a_ref), permanent jam, Q ~1.7, level
+>   drop 37.1 across the pillars (mass-corrected afflux +16.9 / -8.9), max fluid z 84, completed 100000 (uncapped
+>   4284723 crashed at 27344).
+> - Upstream probes at x = 336 sit inside the front block (406: probe 41.7 vs slice level 66): new slice evaluation
+>   `overleaf/scripts/clogging/afflux_profile.py` (level = sum fill/(1-svf), windows clear of the pillar, afflux vs a
+>   clean run, mass-corrected afflux).
+> - WATER LOSS: liquid mass -12.3 % (192 capped) / -2.9 % (406 capped) / 0 % (clean) over 100000 steps; it grows while
+>   debris moves (192: ~1 %/10000 steps throughout; 406: stops at -2.8 % once the jam froze) -> loss where moving bodies
+>   uncover cells. Test A: `small_rods_192x_..._cappid_seedfill_gas.prm` = 4292481 + seedFillFromAllNeighbours true.
+> - Layout B: `small_rods_192x_..._upstream_cappid45_seedfill_gas.prm`: block moved 64 LU upstream (rows 52..300), cap
+>   k = 4.5 (2.40e-6, freeboard 0.5 h0 with the hopper's a_ref), seed fill on.
+
 ### Challenges & Future Improvements
 - Per 2a/2b's supervisor-agreed decision to not pursue further cuboid/cylinder contact fixes, these
   scenarios (once they involve cuboids/cylinders, not spheres alone) may surface the same known
@@ -5226,3 +5379,537 @@ tested conditions), not a failure of the study.
 > **Known limitation:** nearly parallel rods can yield a second minimum with the normal far off (reference pair 2031:
 > depth +3.8 %, normal 54 deg; GJK/EPA is 27 deg off there).
 > **Next:** a hopper production run with `useAnalyticalContactDetection true` and `refineCylinderContacts true`.
+
+> **[Claude, 2026-09-30] CONTACT-POINT CHECK and band-band-skewed point fix.** `testRefinedCylinderContactVsGjk` now
+> checks every reported point: it must lie inside the intersection of the two cylinders (`cylinderSignedDistance`) and
+> not deeper than the penetration depth.
+> - GJK/EPA: 0 of 1698 points outside.
+> - The closed-form band-band-skewed point (Kodam eq. 65: midpoint of the AXIS points) was outside for 171 of 183
+>   contacts with unequal radii. It is now the midpoint of the SURFACE points, identical for equal radii, so the rod
+>   runs so far are unaffected.
+> - Refined detection: the point is pulled into the intersection by alternating projection (`pullIntoIntersection`),
+>   giving 0 outside (asserted).
+> - Energy fuzz over 40 collisions: refined now equals GJK/EPA (mean 1.73e-4 vs 1.72e-4, max 4.96e-4).
+> - The ContactDetection, CylinderNearParallelSkewed, ClosedFormJump and ClosedFormRange tests still pass.
+
+> **[Claude, 2026-10-01] ROD-PILLAR / ROD-WALL VALIDATION and refined pillar path.** `testIndependentReferenceDumpObstacles`
+> (3000 pairs each, seed 86420) is checked against exact references (thesis `scripts/contact-validation/obstacle_reference.py`).
+> - The legacy `cylinderPillarCore` (3 alternating projections onto the axis line) misses 58 of 1002 contacts, with
+>   depth errors up to 0.20 and normals up to 89 deg off.
+> - The new refined branch (`refineCylinderContacts true`: a local finite pillar cylinder of half-length
+>   2(rc+hh+Rp), resolved by `cylinderCylinderContactRefined`) is exact to 6e-13. Wall contacts are exact in both paths.
+> - **All GJK-mode rod runs so far used the legacy pillar path.**
+> - DropTest fixes: `boundaryHandlingID_` is guarded against a null `antidunesBoundaryHandling`; `hasFluid_` skips the
+>   fluid-field lookups in runs without fluid.
+
+> **[Claude, 2026-10-01] PARTICLE-SYNC SELECTION BUG (SyncNextNeighbors with oversized ghosts) -- fixed in `SetupStages.h` and `SetupStages_drop_test.h`.**
+> - **Symptom:** the 250-floater mixed drop test (`prms/DropTest_250_mixed_gas.prm`, 36 ranks, blocks 16x10x30) aborted
+>   at step 8549 with "Received invalid notification type" (`ParseMessage.h:273`) in Fritz job 4282283. It reproduces
+>   locally at the same step.
+> - **Debugging:** in a `WALBERLA_BUFFER_DEBUG` build with assertions (`build-bufdebug`), every value before the failing
+>   read has the right type, so the sender put something unexpected into the buffer.
+> - **Cause:** rank 0 (y 0-10) sent to rank 12 (y 20-30), which is not its neighbour.
+>   - Each floater is ghosted to all blocks within circumR + blockSyncExtension = 12.5 > 10, the block width in y.
+>   - A floater can therefore be ghosted on both y-neighbours at once. After it migrates, its new owner sends to the
+>     far rank, whose buffer lacks the leading dummy byte, so everything after it is misread.
+> - **Why the selection missed it:** it tested `diameter < 2*minBlock - extension` (12.5 < 13.7).
+> - **Fix:** SyncNextNeighbors is now used only if, in addition, reach = circumR + extension <= block width along every
+>   direction with >= 3 blocks; otherwise SyncGhostOwners.
+>   - The old 36-rank mixed prm now selects SyncGhostOwners and runs past step 9000 locally.
+>   - Selection is unchanged for the Kodam packing, the 24-rank mixed prm and the hopper layouts (12x2x6 blocks): only
+>     the 36-rank 250-floater drop tests switch.
+>   - The rounded-cuboid ("spherosimplex") drop-test aborts (jobs 4227798, 4226400) showed the same error with the same
+>     block layout and were most likely this bug, not the contact model.
+> - **Reruns:**
+>   - The mixed prm now uses blocks 16x15x30 (24 ranks): Fritz job 4282306.
+>   - Cylinders (4282281, 1727 s) and cuboids (4282282, 1240 s) completed on the old layout without hitting it.
+
+> **[Claude, 2026-10-01] 250-FLOATER DROP TESTS: first reruns were towers; randomised, wood-like reruns queued.**
+> - **Reruns 4282281 (cylinders), 4282282 (cuboids), 4282306 (mixed):**
+>   - All completed with every floater accounted for. Analysis: thesis repo `scripts/contact-validation/droptest_check.py`.
+>   - The axis-aligned floaters, released at ten fixed points, fell straight down and stacked into ten towers of 25. Only
+>     the mixed case piled up. The 2026-09-23 runs used the same prms, so they were towers too.
+>   - Cuboid kinetic energy rises again at the end (7e-4 -> 2e-2): spurious energy at flat contacts.
+>   - Impact overlaps reached 0.5, because the collision time 4 x avgParticleDiameter = 32 steps is soft for thin
+>     floaters.
+> - **New prms:** `prms/gen_droptest_250_random.py` -> `DropTest_250_random_{cylinders,cuboids,mixed}_gas.prm`.
+>   - Random orientations (uniform), 4 release points per wave with +-0.75 jitter, 103000 steps.
+>   - Collision time 1 LBM step (20 sub-steps; Rettinger 2023: >= 10).
+>   - Restitution 0.25 and friction 0.3 (driftwood DEM of Watanabe et al. 2023).
+>   - Blocks 16x15x30, 24 ranks.
+> - **Code:** new `FloatingBoxParams::initialTiltAxis` (default Y, so existing prms are unchanged).
+> - **Fritz:** build 4283596, runs 4283597 / 4283598 / 4283599 (3 h each) in `~/mt-dennys-mirror2`.
+
+> **[Claude, 2026-10-01] ROOT CAUSE OF THE CUBOID LAUNCHES: the SAT contact point (`paper_analytical::boxBoxSAT`).**
+> - **Symptom:** randomised cuboid and mixed drop tests (Fritz 4283598 / 4283599, wood-like contact with collision time
+>   1 LBM step) aborted with [RELEASE-OVERLAP]. Cuboids are launched from the pile at up to 0.59 LU/step (free-fall
+>   impact 0.08). Reproduced locally (abort at step 31499).
+> - **Trace:** new [LAUNCH-TRACE] in `ParticleKernels.h`, env `ANTIDUNES_LAUNCH_SPEED` or `ANTIDUNES_LAUNCH_TRACE_UID/FROM/TO`.
+>   - Cuboid 8369, wedged in a corner, keeps a 0.16 overlap with 7447 and pushes it with ~13 per sub-step.
+>   - 7447 spins (0.08 rad/step), its tip sweeping into 8369, and accelerates; so does 7445 in the chain (0.11 -> 0.57
+>     in 3 steps).
+>   - The reported contact point (1.90, 3.84, 3.90) is 4.3 LU from the centroid of the true overlap (2.54, 0.59, 1.17)
+>     and lies outside both cuboids.
+> - **Cause:** boxBoxSAT puts the point on the line between the centres ("midpoint between the extreme points along the
+>   winning axis"). Depth and normal are correct; the torque is not, and the contact does net positive work.
+> - **Energy test:** new DEMValidation `cuboidPairEnergyFuzz` (40 oblique elastic collisions of 12x2x3 cuboids; mean / max
+>   energy error):
+>   - GJK/EPA: 0.02 % / 0.08 %, 0 of 34 over the 2 % tolerance.
+>   - SAT: 373 % / x98, 30 of 34 over.
+>   - multipoint: 45 % / x5.9, 19 over.
+>   - Fraige flag: identical to SAT, so apparently not active in this engine (unchecked).
+> - **Scope:** this is the likely common cause of the "rocking"/energy-gain cuboid problems and the "flying floaters".
+>   It is invisible in axis-aligned towers, where the line between the centres runs through the contact.
+
+> **[Claude, 2026-10-01] FormerMO interface fill seeding: new prm toggle `ModelParameters.seedFillFromAllNeighbours`
+> (default false = legacy).**
+> - **Legacy rule:** an uncovered cell that becomes INTERFACE gets the mean fill of its INTERFACE neighbours, or 0.5 if
+>   it has none.
+>   - Cells that are interface only because a same-pass neighbour is still unclassified usually have no interface
+>     neighbour, so they get 0.5:
+>     - branch C, liquid + unknown: ~1200-1400 per 100 steps in the cylinder hopper (job 4283776), a half-empty cell
+>       inside the water;
+>     - branch A', gas + unknown: ~40-115 per 100 steps, half a cell of water in the air.
+>   - The isolated fallback fired ~45000 times on one rank.
+> - **New rule:** the mean volume fraction of ALL resolved neighbours (gas 0, liquid 1, interface fill), excluding
+>   obstacle and unclassified cells, so C seeds ~1 and A' seeds ~0.
+>   - Only the fill changes, never the cell state, so liquid/gas separation is unaffected.
+>   - (Changing the classification itself -- A' -> gas -- was considered and rejected: ghost-layer copies are
+>     classified independently per block, so it could put liquid next to gas across a block boundary.)
+> - **Code:**
+>   - `PdfReconstructionManager.h`: pure function `seedInterfaceFillFromNeighbourhood`, setter
+>     `setSeedFillFromAllNeighbours`, new log line `[FORMERMO-SEED t=...]` (interface cells seeded, 0.5 fallbacks,
+>     seeded liquid volume) next to `[FORMERMO-CONVERT]`.
+>   - Wired in `BuildTimeloop.h`; prm in `SimulationParams.h`.
+> - **Tests:** 6 new cases in `BognerStateClassificationTest.cpp`, all passing; the legacy values are unchanged.
+> - **Open:** an A/B coupled run (fluid mass, FORMERMO-SEED counts, hopper stability).
+
+> **[Claude, 2026-10-02] Randomised drop tests, round 2.**
+> - **Round 1:**
+>   - 4283913 (cuboids) and 4283914 (mixed) timed out at 3 h: cuboids at step 60006, mixed at 93370; no errors, no
+>     release overlaps, so the SAT contact-point fix held at full scale.
+>   - DropTest writes no particle checkpoint, so the runs could not be resumed.
+> - **Profile:**
+>   - Process time was ~75 % particle-sync waiting: the pile lay in the bottom block layer only (blocks 16x15x30),
+>     so 4 of 24 processes did all contact work.
+>   - Cuboid contact cost per step was 6x cylinders at step 50000 (442 vs 72 ms DEM).
+>   - The new box contact point itself is cheap (~0.4 us/pair; flat contacts converge in 1 projection round;
+>     `benchmarkBoxBoxContactPoint`).
+> - **Changes:** `gen_droptest_250_random.py` -> blocks 16x15x15 (48 processes), waves every 1200 steps,
+>   timesteps 84400. All three cases were regenerated and rerun for comparability.
+> - **Fritz** (`~/mt-dennys-mirror2`): build 4284395, then cuboids 4284396 (6 h), mixed 4284397 (3 h), cylinders 4284398
+>   (3 h), all 48 tasks.
+
+> **[Claude, 2026-10-02] Curvature input guard: new prm `ModelParameters.guardCurvatureInputs` (default false =
+> unchanged upstream code).**
+> - **Trigger:** run 4284164 (192 rods, `~/mt-dennys-mirror`) broke down at step 9046. The first logged cells
+>   ([DEGENERATE-FILL-RECONSTRUCTION]) were healthy interface cells (fill 0.994, rho 1.003-1.006, finite normal,
+>   0/26 obstacle neighbours) with curvature=nan -> rhoGas=nan -> newRho=nan, at local x = 0 and x = 63 on both sides
+>   of the block boundary x = 448, one cell from the side wall.
+> - **Upstream bug** (`CurvatureSweepFiniteDifferences`, also in upstream waLBerla a20d44b3): for a neighbour that is
+>   neither liquid/interface/gas nor obstacle, the loop does not skip the direction, as its comment says it should, but
+>   uses an UNINITIALISED `Vector3 neighborNormal` (default ctor = default).
+> - **Not established:** which case caused the NaN here (that path, or a NaN neighbour normal from the ghost layer).
+> - **Guard (on):**
+>   - skips neighbours in no flag group and neighbours with a non-finite normal;
+>   - sets curvature = 0 if no direction remains;
+>   - logs each case as [CURVATURE-GUARD] (cell, world position, direction, neighbour flag, neighbour normal, own
+>     normal), throttled to the first 20 per kind, then every 5000th.
+> - **Code:** `CurvatureSweep.h` (`setGuardInvalidNeighbours`), `CurvatureSweep.impl.h`, `SimulationParams.h`,
+>   `BuildTimeloop.h`.
+> - **Check:** `prms/box_pair_repro_gas.prm`, 3000 steps (repro case, aborts at 1457 with STALE-PARTICLE-IDX in both):
+>   all 5828 [BoxForces]/[BoxTorque] lines identical off vs on, 0 [CURVATURE-GUARD] events.
+
+> **[Claude, 2026-10-02] Curvature-guard result and NaN-normal diagnostic.**
+> - **Run 4284594** (192 rods, guardCurvatureInputs on): COMPLETED 51000 steps; without the guard it broke down at
+>   ~9046 (4284164). All [CURVATURE-GUARD] events (~995000, steps 8676-50742) were "non-finite neighbour normal"; the
+>   uninitialised-memory branch never triggered.
+>   - The NaN-normal neighbours are all in the cell layer next to the side wall (world y = 0), z ~ 22-30.
+>   - Their flags: liquid 293, interface 248, gas 143 (bit 17 also set on the first two, not decoded).
+>   - So the guard is a firewall; the root cause is NaN normals in wall-adjacent cells.
+> - **New prm `ModelParameters.diagnoseNaNNormals`** (default false; `BuildTimeloop.h`, `diagnoseNaNNormals`):
+>   - Runs after the normal sweep and its ghost exchange, scanning inner cells + ghost layer 1.
+>   - Logs [NAN-NORMAL] / [NAN-SMOOTHFILL] / [NAN-OBSTACLENORMAL] with the inputs: own flags, fill, smoothFill, normal;
+>     each obstacle neighbour's smoothFill and obstacle normal; neighbours with non-finite smoothFill; L/I/G/obstacle
+>     neighbour counts.
+>   - Throttled to the first 30 per kind and rank, then every 20000th; a global count [NAN-NORMAL-SUMMARY] every 1000
+>     steps.
+>   - Local check (`box_pair_repro`, 1200 steps): no false positives, summaries 0/0/0.
+
+> **[Claude, 2026-10-02] Cuboid drop test speed: contact-point projection and per-contact string formatting.**
+> - **Symptom:** random_cuboids 4284396 timed out (6 h, step 75084 of 84400); DEM step time grew to ~680 ms. A local
+>   16-rank replay of the step-70000 pile (state rebuilt from VTK) reproduced 530-670 ms per step.
+> - **Profile (eu-stack sampling):** 4 of 16 ranks hold the pile; they spent 70-77 % in
+>   `detail::pullIntoBoxIntersection` (alternating projection of the SAT contact point, converges linearly, slow in the
+>   thin wedge-shaped overlaps of resting contacts); the other ranks waited in the particle sync.
+> - **Fix 1 (`PaperAnalyticalContacts.h`, no switch):** `placeOnNormalLine` -- the point is the midpoint of the line
+>   along the normal clipped by both boxes (`clipLineToBox`); moves the point only along the force's line of action,
+>   so the torque is unchanged. If the line misses, the point is first moved in-plane onto the projected intersection
+>   polytope (`boxIntersectionVertices`: edges of each box clipped by the other). The projection is only a counted last
+>   resort.
+> - **Fix 2 (`ParticleKernels.h`, `ComputeContacts`):** the [ContactHistory DUPLICATE] diagnostic formatted every
+>   contact's full state into a string in every sub-cycle (~38 % of the busy ranks' time after fix 1); it now stores
+>   the raw values and formats only on lookup (same text).
+> - **Checks:**
+>   - `PaperAnalyticalContactTest`: new `testClipLineToBox` (hand cases), `testBoxBoxContactPointRestingContacts` (4000
+>     arbitrarily rotated 12x2x3 pairs, overlaps 1e-7..1e-2: 0 points outside; 3971 line hits, 29 polytope shifts, 0
+>     fallbacks); `evaluateBoxPairsDump` (env `ANTIDUNES_BOX_PAIRS_EVAL`) on the 362 contacts of the pile: 1.07 us vs
+>     2.50 us per point, 0 outside (projection: 5), 0 fallbacks. Existing hand cases, fuzz (0 of 3317 outside) and
+>     continuity unchanged.
+>   - Pile dumps from VTK must be re-orthonormalised: the ASCII rotations are orthonormal only to ~1e-6, which moves
+>     the surfaces by ~6e-6, a fifth of the overlaps (gave 111 spurious "outside" points before).
+>   - `cuboidPairEnergyFuzz` (200 collisions): sat mean |KE ratio - 1| 0.029 %, max 0.65 % (unchanged); PASS.
+>   - Replay (16 ranks, 400 steps): 46-61 ms per step (was 530-670), no errors.
+>   - Unrelated failures in the suite: ForcingAdjuster (link error, `trackWatchCells`/`checkPdfNaN` signatures) and
+>     Job4255679SealedCell; neither includes the contact code.
+
+> - **[Claude, 2026-10-03] Side-wall NaN normals: `wallOuterGhostLayer` verified on the cluster (job 4293137).**
+>   Same scenario as 4292672 (192 rods, 2x32x3, skin 0.5, `diagnoseNaNNormals`, 51000 steps) with
+>   `wallOuterGhostLayer true`. Start: 393536 of 411264 outer ghost-layer cells behind non-periodic borders flagged
+>   liquid/interface/gas after `initFlagsFromFillLevel`, 0 after the switch (390272 set to wall); `[GHOST2-FLUID t=...]`
+>   0 at all 51 checks up to step 50000. `[NAN-NORMAL-SUMMARY]`: 0 / 0 / 0 at every summary (4292672 without the
+>   switch: first NaN normal at step 7895 in the cells next to the side wall, 529127 cell events in total). Liquid mass
+>   change over the run -4.5 % (4292672: -6.2 %; the moving-floater mass exchange, Sec. "Mass Conservation at Moving
+>   Floaters", is unchanged by this). Recurring "Skipping column avgParticleVelocity ... -nan" warnings (509) are the
+>   known BedloadTransportEvaluator division by the zero sphere-bed count (sphere-only audit, 2026-09-21), present in
+>   4292672 as well. Open: switch it on in the production prms or make it the default (default still false).
+>   Archive: vault `antidunes-small-rods-192x-2x32x3-nannorm-diag-51k-wallghost_4293137_20261003_165118`; the Slurm .out
+>   (1.1 GB) is still only in `~/mt-dennys/apps/showcases/Antidunes/sbatch-output/output/`.
+
+> - **[Claude, 2026-10-03] Stress-test follow-ups of 4292534 (406-rod hopper, capped PID; author: "a good stress test as
+>   we know it holds").** Generator `gen_hopper_stress_prms.py`, base
+>   `prms/hopper_clog_cyl_frontblock_pidon_2node_skin0p5_curvguard_cappid_gas.prm`; common changes: settlingSteps 2000 ->
+>   500, VTK snapshot step 0 added, `wallOuterGhostLayer true`.
+>   - Cuboids: `prms/hopper_clog_box_frontblock_skin0p5_cappid_sat_gas.prm`, job script
+>     `jobs/run_144_hopper_clog_box_frontblock_skin0p5_cappid_sat.sbatch`: 406 boxes 6x18x6 (same footprint as the
+>     rods, convention of gen_hopper_clog_box_prm.py), boxContactSkin 0.5, Box x Box through boxBoxSAT with the
+>     closed-form contact point (2026-10-02), all legacy box options off. The previous 406-box skin run 4283777 (old
+>     contact point, uncapped PID) crashed at step 7288: one box launched to ~21 LU/step with overlaps up to 61 % of
+>     the interaction radius.
+>   - Cylinders with the block at the start of the domain: `prms/hopper_clog_cyl_startblock_skin0p5_cappid_gas.prm`,
+>     `jobs/run_144_hopper_clog_cyl_startblock_skin0p5_cappid.sbatch`: block shifted by -136 (x 8..232), everything
+>     else as 4292534. Risk: in layout B (4292663) the density-1.2 rods slid along the floor into the pillar-floor
+>     corner and crashed the run at step 18384; kept here on purpose (same test).
+>   - Synced to all three checkouts (sources identical to the local tree, md5 checked).
+>   - [Claude, 2026-10-03, later] Measurement changes applied IN PLACE on Fritz to the pending jobs 4293494 (cuboids,
+>     ~/mt-dennys-mirror) and 4293495 (start block, ~/mt-dennys-mirror2) and to all other copies, other agent's
+>     150000-step bump kept: probe points z 40 -> 20 (4292534: downstream pressure cell in air from step 16000, frozen at
+>     -5.32e-4), VTK snapshots 120000 and 149000 added (list ended at 99000), ClogMeasurement.blockageRatioEnabled true
+>     (first cluster use; blockageAt reviewed: all ranks call it and the reduce, planes outside a rank are skipped).
+>     Local prms = job copies; gen_hopper_stress_prms.py reproduces them (header line aside).
+>   - Analysis: overleaf/scripts/clogging/afflux_profile.py now also gives the blockage ratio (floater cells below h0 /
+>     h0) and the jam load F_hyd + a_x V_p against a_x (M_liq + V_p) (--vp). 4292534: blockage 0.46 in x 330..360,
+>     jam load ratio 1.04 over the last 10000 steps. Thesis: new subsubsection "Load on the Jam" (sec:clog-jam-load,
+>     eq:clog-jam-load) and the probe height in sec:clog-pressure.
+>   - Note: the centred-pillar prm (clog_measurement_validation_extreme_cappid_2node_flowrate_gas.prm) still has its
+>     probes at z = 40; check its downstream level before trusting its downstream pressure.
+
+> - **[Claude, 2026-10-03] Flow parameters of the clogging channels corrected (thesis).** The PID target 0.04 is the
+>   velocity sum over all liquid cells / (liquidHeight Lx Ly) with liquidHeight = 2 D_ref = 16 (Forcing.h
+>   MeanVelocityComputer, BuildTimeloop.h); the clogging prms have no bed (useParticleBed false), water depth
+>   6.14 D_ref = 49.1. True mean velocity 0.013 (measured Q/A 0.011-0.014 clean hopper 4292482, 0.013 centred 4292673),
+>   Fr = 0.24 (not 1.31), Re = 3100, We = 5.1. Corrected in obstruction-and-signature.tex (table + caption) and
+>   validation.tex (limitations), both with a "double-check with the final runs" TODO.
+> - **[Claude, 2026-10-03] Backwater against porous-jam models** (overleaf/scripts/clogging/jam_backwater_models.py:
+>   Follett et al. 2020 in the Froude form of Poppema & Wuethrich 2024, Schalko et al. 2018 Eq. 9 via Poppema &
+>   Wuethrich; jam geometry from slices + floater VTK). 4292534 at 99000 (avg 89000-99000): L_A 254, H_j 60.8, phi 0.32,
+>   Fr4 0.035, simulated H1/H4 2.16 vs Follett 1.02-1.06 (C_D 0.6-1.8) and Schalko 1.14. Inverse: C_D = 61 needed
+>   (24 at step 32000); a C_D 1.2 jam would pass Q 13.6 at the simulated depths (simulated 1.9). Pore Re_s 18. =>
+>   the simulated jam is far tighter than log-drag models predict; most likely the ~1-cell gaps (contact skin) are not
+>   resolved. Needs the fixed-jam permeability check at 2x resolution before leakage/backwater are interpreted.
+> - **[Claude, 2026-10-03] First mixed-floater hopper trial queued: job 4293831** (~/mt-dennys, 144 ranks, 6 h,
+>   150000 steps). `prms/hopper_clog_mixed_startblock_skin0p5_cappid_gas.prm` from `gen_hopper_stress_prms.py
+>   --mixed-only`: start-block layout (x 8..232) of the stress test, rows from the front cycling cylinder / box / sphere
+>   -> 140 cylinders (R 3, L 18), 140 boxes (6 x 18 x 6), 315 spheres (R 3, 5 across at y = 4..36 as in the
+>   1015-sphere hopper), densities by layer 1.2 / 1.0 / 0.5; cylinder + box skin 0.5 (mixed pairs have no skin in the
+>   code); release 500, VTK at 0 ... 149000, wallOuterGhostLayer, probes z 20, blockage ratio, cap 2.65e-6. Min AABB
+>   clearance 1.52 (wall/floor 1.0). Local DEM-only release check (DropTest, 8 ranks, 1500 steps): 595 floaters created,
+>   no RELEASE-OVERLAP/abort/NaN; only sphere-sphere DEM-WATCH (<= 6.3 % overlap) when sphere columns land on each
+>   other in the dry fall. Risk as in 4293495: density-1.2 bodies sliding into the pillar-floor corner (layout B crash).
+> - **[Claude, 2026-10-03] jam_backwater_models.py extended** with the drag correlations of Ballio et al. 2024
+>   (downstream reference, C_D = 1.5(1 + 4.1 Fr^4 + 2.8 BR^2), Fr 0.06-0.49, BR 0.07-0.51) and Pagliara et al. 2026
+>   (upstream reference, C_D = 2.57 Fr^-0.7 BR^0.2 dH_u^0.3 Pr^-0.2, Fr 0.12-0.57, BR 0.03-0.63), with the simulated C_D
+>   from the jam load, and the jam size of Panici & de Almeida 2018 (Fr_L, W/L, H/L, L_A/L). 4292534: both correlations
+>   far outside their range (BR 1.9 / Fr 0.01), simulated C_D 1.5e3 (downstream) / 9e3 (upstream) because the load of
+>   the nearly tight jam is hydrostatic, not velocity drag; Panici: Fr_L 0.40 (clean velocity), W/L 2.2, H/L 3.4,
+>   L_A/L 14 vs single-pier critical 1.5-3, 0.1-0.5, ~0.5. Meaningful for partial blockages (centred pillar, jams formed by
+>   transport). Thesis citations fixed the same day: Panici 2018 does not relate afflux to blockage ratio (related work,
+>   probe-and-forcing), bib first name Davide -> Diego; ballio_drag_2024 and pagliara_hydrodynamic_2026 added.
+
+> - **[Claude, 2026-10-04] Results: 4293494 (406 boxes, front block), 4293495 (406 rods, start block), 4293831 (mixed,
+>   start block)** all COMPLETED 150000 steps (4h39-4h53), no NaN-SCAN abort / NaN normal / STALE; GHOST2 0 with the
+>   wall fix. Archives: vault antidunes-hopper-clog-{box-frontblock-skin0p5-cappid-sat_4293494_20261004_034018,
+>   cyl-startblock-skin0p5-cappid_4293495_20261004_034150, mixed-startblock-skin0p5-cappid_4293831_20261004_035438};
+>   eval (+ vtk-out, copying) in ~/University/Thesis/animations/{4293494_hopper_406boxes_cappid_sat,
+>   4293495_hopper_406rods_startblock, 4293831_hopper_mixed_startblock}_20261004.
+>   - Force at the cap (5 a_ref) from step 100 in ALL runs, also while the start blocks drift (U/U_ref 0.9-1.0 at
+>     2-16k): the capped PID acts as a fixed force from the start in these layouts.
+>   - Last 10k steps: boxes front dh 22 (window 330-360 inside the jam), Q/Q_ref 0.046, mass -0.9 %, zmax 64.5; rods
+>     start: jam forms 16-32k by transport, dh 29.5, Q 0.11, mass -6.0 %, zmax 86; mixed: dh 23.9, Q 0.16, mass -5.2 %,
+>     zmax 74 (rods front 4292534 for reference: dh 37.1, Q 0.07, mass -2.9 %, zmax 84).
+>   - **Evaluator bug for boxes:** totalHydroForce_x (Evaluators.h, sums OldHydrodynamicForce = the RAW, un-averaged
+>     MEM force of the step) gives 0.33-2.26 at steps 149000-149900 for the boxes, while the [BoxForces] logs (the
+>     time-averaged force the DEM uses) sum to a steady 3.08-3.13 over all 406 boxes; for the rods both agree (3.349 vs
+>     3.353 at 99900). Consistent with a strong step-to-step (odd-even) oscillation of the raw MEM force on boxes.
+>     With the logged forces the box jam carries 0.95 of the total drive (evaluator: 0.22). Fix to do (output only):
+>     sum the averaged force, or average OldHydrodynamicForce over two steps. The mixed run is affected as well.
+>   - **Backwater models on all runs** (jam_backwater_models.py, now reading all floater kinds; last 10k steps):
+>     simulated H1/H4 vs Follett (C_D 1.2) / Schalko: rods front 2.16 vs 1.04/1.14 (C_D needed 61); boxes front 1.64 vs
+>     1.02/1.10 (C_D needed 55); rods start 1.96 vs 1.12/1.26 (C_D needed 13.6); mixed start 1.76 vs 1.14/1.27 (C_D
+>     needed 8.6). Jam phi 0.32 / 0.43 / 0.35 / 0.29, L_A 254 / 247 / 359 / 293, pore Re_s 18 / 10 / 27 / 49. Jams formed
+>     by transport are 5-7x less over-resistant than the pre-placed blocks but still far tighter than log-drag models.
+> - **[Claude, 2026-10-04] Drifting cuboids queued** ("Hopper Jam Drifting Cuboids", author's request):
+>   `prms/hopper_clog_box_startblock_skin0p5_cappid_gas.prm` (gen_hopper_stress_prms.py --box-startblock-only) =
+>   4293495 with every rod replaced by a box 6 x 18 x 6 + boxContactSkin 0.5 (diff checked: nothing else differs);
+>   job script jobs/run_144_hopper_clog_box_startblock_skin0p5_cappid.sbatch (6 h), ~/mt-dennys. NB: totalHydroForce_x
+>   is unreliable for boxes (evaluator bug above); use the [BoxForces] logs for the jam load.
+> - **[Claude, 2026-10-04] Drifting spheres queued** (author: "same upstream setup for all three floater shapes"):
+>   `prms/hopper_clog_sph_startblock_skin0p5_cappid_gas.prm` (gen_hopper_stress_prms.py --sphere-startblock-only) =
+>   4293495 with each rod position replaced by 5 spheres R 3 across (y 4..36, grid of the 1015-sphere hopper): 1015
+>   spheres, 290 / 435 / 290 at density 0.5 / 1.0 / 1.2; no sphere skin (lubrication acts sphere-sphere). Job script
+>   jobs/run_144_hopper_clog_sph_startblock_skin0p5_cappid.sbatch (6 h), ~/mt-dennys-mirror. Together with 4293495
+>   (rods) and the drifting cuboids this gives the three shapes from the same upstream block.
+> - **[Claude, 2026-10-04] Skin control queued** (author: "verify that the skin is really the saviour"):
+>   `prms/hopper_clog_cyl_startblock_noskin_cappid_gas.prm` (gen_hopper_stress_prms.py --cyl-startblock-noskin-only) =
+>   4293495 with cylinderContactSkin 0, diff = that line only; same simulation sources as 4293495 (md5).
+>   jobs/run_144_hopper_clog_cyl_startblock_noskin_cappid.sbatch (6 h), ~/mt-dennys-mirror2. Compare with 4293495:
+>   crash (step, NaN-SCAN/STALE/SEALED markers), DEM-WATCH deep contacts, min rod-rod gaps, density extremes in the
+>   jam, mass change, jam geometry and leakage.
+>   - **Result 4297667 (no skin): FAILED after 6:38 at step ~2900** (4293495 with skin: 150000 steps clean). First
+>     non-finite PDF at step 2863, rank 138, interface cell (61,3,27) = world (765.5, 23.5, 27.5): mid-depth at the
+>     rear of the rod block across the periodic seam (rods at x 0.3-8 at step 2800). Sequence: CURVATURE-GUARD "no
+>     usable direction" from 2857, interface cell under water, DEGENERATE-FILL-RECONSTRUCTION, LOW-RHO rho = nan, NaN
+>     spreads, abort in WriteData.h:148 (NaN mean velocity). No DEM-WATCH deep contact, no STALE-PARTICLE: the fluid
+>     in the gaps between tightly packed rods collapses -- the pinched/sealed-cell mechanism the skin targets.
+>     Archive: vault antidunes-hopper-clog-cyl-startblock-noskin-cappid_4297667_20261004_164216.
+> - **[Claude, 2026-10-04] Centred pillar with the current settings queued**: `prms/clog_centred_pillar_cappid_current_gas.prm`
+>   (gen_hopper_stress_prms.py --centred-only) = 4292673 (100 spheres, staggered release 20000..56000, cap 2.65e-6 =
+>   same driving force as all hopper runs) + 150000 steps, wallOuterGhostLayer, probes z 40 -> 20, blockageRatioEnabled,
+>   VTK at fixed snapshot steps from 0 (fluid_field periodic output off). Diff checked. Job script
+>   jobs/run_144_clog_centred_pillar_cappid_current.sbatch (6 h), ~/mt-dennys-mirror2.
+
+> - **[Claude, 2026-10-04] LEVEL FORMULA CORRECTED (REV1-E-007, found by the verification agent of part E).** The fill
+>   slice adds 1 for every floater AND no-slip cell (Evaluators.h AverageDataSliceEvaluator l. 96-100), as does the solid
+>   fraction slice; the liquid is fill - svf. afflux_profile.py used fill/(1 - svf) (clipped at 1), which counted
+>   floaters above the water as liquid: upstream levels in the jams were 5-15 LU too high. Now h = sum (fill - svf)/(1 -
+>   svf); thesis eq. clog-level-profile and text corrected. Corrected level differences (highest upstream level minus
+>   downstream window, last 10k): rods pre-placed 32.3 (peak 53.8 @ 9500; before 37.1, above the head limit 34.9!),
+>   boxes pre-placed 24.9 (peak 50.8), rods drifting 26.4 (peak 52.4 @ 23000), mixed 27.2 (peak 49.5), clean 12.7.
+>   The fixed window x 330-360 lies inside the jams (15-23 LU). jam_backwater_models.py now takes H1 just upstream of
+>   the jam (periodic window). Backwater: simulated H1/H4 1.52-1.63 (1.5-1.8 over the jam-extent threshold) vs
+>   Follett 1.02-1.14 / Schalko 1.10-1.27; C_D needed 26-33 / 43-48 (pre-placed rods / boxes), 6-17 / 6.5-10 (drifting
+>   rods / mixed), was 13-61. The artifact pages (Hopper Jam ...) still show the old levels and need a rebuild.
+
+> - **[Claude, 2026-10-04] Artifact pages rebuilt with the corrected levels** (Hopper Jam Rods 4292534, Cuboids 4293494,
+>   Drifting Rods 4293495, Mixed 4293831; overleaf/scripts/clogging/jam_report, text_*.json and template.html updated).
+>   Note for the results text: the highest upstream level lies INSIDE the jam in all four runs (x ~ 320 / 214 / 247 /
+>   305, smooth hump, not a spike): the water keeps rising into the back part of the jam and falls through its front
+>   part. The fixed window x 330-360 gives 22.9 / 15.4 / 19.4 / 18.5 LU at the end; peak window differences 50.7 / 40.7
+>   / 44.3 / 39.9 LU. The leak correlation Q vs window-dh of 4292534 drops from 0.71 to 0.48.
+
+> - **[Claude, 2026-10-04] 4297652 (406 cuboids drifting) and 4297655 (1015 spheres drifting) analysed** (local copies
+>   animations/4297652_hopper_406boxes_startblock_20261004, 4297655_hopper_spheres_startblock_20261004; pages "Hopper Jam
+>   Drifting Cuboids 4297652" https://claude.ai/artifact/QLwkhLt9NvKsQsvx2JpmZX and "Hopper Spheres 4297655"
+>   https://claude.ai/artifact/UJ8FZv26fkBzcYEKFbTi7o).
+>   - Cuboids: jam locks up along the WHOLE upstream reach (x 6-372, phi 0.37), not at the gap; 12 passed (6 light,
+>     6 neutral) by 24k; leak 8.8 % (48k-150k, corr 0.94); level: highest 56.8 @ x~170 (inside the jam), dH to the
+>     downstream window 21.1 (peak 35.0 @ 8100), fixed windows only 6.3 (window in the densest part); H1/H4 1.43 vs
+>     Follett 1.02-1.07 / Schalko 1.15, C_D needed 14 (pre-placed cuboids 48); jam load from [BoxForces] log 1.00 +- 0.01
+>     (evaluator column -1.3..1.8, wrong); mass -3.7 %; force at the cap all run.
+>   - Spheres: NO lasting jam. Force at the cap 9 % of the steps, cycles of ~8k steps between cap and below (U 0.83-1.13
+>     U_ref) until 32 200, afterwards below the cap, ~2.2 a_ref to hold the target; by 32k 285/290 light, 291/435
+>     neutral, 4/290 heavy passed (later counts ambiguous: snapshots 20-30k apart vs circulation at flow speed); loose
+>     cluster of 104 spheres at the pillars (phi 0.11); spheres carry 0.31 of the drive; mass -11.7 % (-9.7 % by 30k),
+>     the largest of all runs. Backwater models not applicable (Fr4 0.53, clean pillars alone give ~1.25).
+>   - For a later VTK request: circulating floaters need floater snapshots every <= ~5k steps for passing counts.
+
+> - **[Claude, 2026-10-05] Three runs queued** (author: "We have two open spots ... what would be the next runs?" ->
+>   "Now it's three"), all generated by gen_hopper_stress_prms.py from the 4293495 setup, code identical to 4293495
+>   (last C++ change 2026-10-03 15:25, before its start; md5 of all three checkouts = local), one checkout each:
+>   - 4298712 (~/mt-dennys) HALF CAP `prms/hopper_clog_cyl_startblock_skin0p5_cap2p5_gas.prm` (--cyl-startblock-cap2p5-only):
+>     maxActuatingVariable 1.325e-6 = 2.5 a_ref (head limit 17.5 LU); the only differing line vs 4293495. Purpose: second
+>     force level on the same jam type -> separates jam resistance (leakage vs level difference) from the cap.
+>   - 4298713 (mirror) REALISATION 2 `prms/hopper_clog_cyl_startblock_skin0p5_cappid_rep2_gas.prm` (--cyl-startblock-rep2-only):
+>     every rod jittered uniformly in [-0.25, 0.25] LU in x and z (seed 1; min rod-rod gap 1.07, floor 0.755). Purpose:
+>     scatter of passing count, time to jam, leakage (all runs so far single realisations).
+>   - 4298714 (mirror2) SPHERES R 4 `prms/hopper_clog_sph4_startblock_cappid_gas.prm` (--sphere4-startblock-only): 600
+>     spheres R 4 (25 rows x 4 across x 6 layers, x 9..225, densities 1.2/1.2/1.0/1.0/0.5/0.5 by layer, volume 1.61e5),
+>     gap / diameter = 2 (R 3 run 4297655: 2.7, no jam). VTK every 2-4k steps up to 40k (26 frames) for passing counts.
+>   Job scripts jobs/run_144_hopper_clog_{cyl_startblock_skin0p5_cap2p5,cyl_startblock_skin0p5_cappid_rep2,sph4_startblock_cappid}.sbatch, 6 h.
+
+> - **[Claude, 2026-10-05] 4297864 (centred pillar, current settings) analysed** (local: animations/4297864_centred_pillar_current_20261004;
+>   page "Centred Pillar 4297864" https://claude.ai/artifact/4SGz1PSJqPicMLVVsVNzYe; clean reference 4257768: a_ref
+>   7.74e-7, Q_ref 25.5, window difference 16.7 LU vs 10.6 for the hopper's half-pillars). Release 20k-56k; level
+>   difference near clean until ~44k, peak 51.2 @ 62 500, end 32.6 LU (highest upstream level -> downstream window;
+>   fixed windows 31.4), head limit 34.9; force at the cap continuously from 52 100 (spin-up transient 5 900-6 300);
+>   U -> 0 at 73 600, recovers to 0.23 U_ref; Q 21 % of clean (80k-150k), no leakage law (corr -0.08); 0 spheres passed
+>   (R 5 vs 8 LU side gaps); spheres carry ~0.5 of the drive, the pillar the rest; layering light 62 / neutral 16.7 /
+>   heavy 6.3 LU mean height; mass +0.64 %. REPRODUCES 4292673 (old settings): 32.0 LU, peak 50.1, Q 25 %, mass +0.61 %.
+>   Porous-jam models and drag correlations not applicable (partial pile, clean pillar ratio 1.43, BR/Fr outside ranges).
+>   Blockage-ratio columns ~0 (probe planes do not cut the pile).
+> - Early check of 4298712-4298714 at 7 min: all running, no RELEASE-OVERLAP, no abort.
+
+> - **[Claude, 2026-10-05] 4298712 / 4298713 / 4298714 analysed** (local animations/4298712_hopper_406rods_startblock_cap2p5_20261005,
+>   4298713_hopper_406rods_startblock_rep2_20261005, 4298714_hopper_spheresR4_startblock_20261005; pages
+>   Rep 2 https://claude.ai/artifact/F6xb4Q5nWw7gjXAqfZQMGt, Half Cap https://claude.ai/artifact/DyBUpjviihfo3FCHXzj4Ht,
+>   Spheres R4 https://claude.ai/artifact/3vciHDLxtboJtUSKU2ZRBE).
+>   - REALISATION 2 vs 4293495: passed 13 vs 16, jam by ~20k vs ~24k, level difference 28.6 vs 26.4 LU (peak 54.6 vs 52.4),
+>     leakage 8.0 vs 12.3 %, load 0.89 vs 0.92, mass -6.5 vs -6.0 %, C_D needed 20 vs 6.1 (C_D ~ 1/q^2 amplifies the
+>     leakage scatter). Level difference and timing reproduce within ~10 % / ~3k steps; leakage scatters ~ +-25 %.
+>   - HALF CAP: jams the same way, later; level difference 15.9 LU (limit 17.5), leakage 5.8 %; leakage per LU of head
+>     0.36 %/LU between the full-cap realisations 0.47 / 0.28 -> leakage ~ proportional to head (Darcy-like) within the
+>     scatter; the level difference of a frozen jam is set by the force (76-91 % of the head limit in all three).
+>   - SPHERES R 4: no lasting jam (cap 42-65 % of steps to 20k, then episodes to the end, ~3 a_ref); 353/600 passed by
+>     40k, heavy 2/200; mass -18.8 % and still falling (largest of all runs). Spheres do not jam the gap at 2 diameters.
+>   - Wording fix on the 4293495 / 4293831 pages and in hopper.tex: with the corrected levels the early "negative level
+>     difference" is a start-up dip to -7.7 LU at steps 1 200-2 800, identical in all start-block runs (surge of the force
+>     at the cap), not the drifting block.
+
+> - **[Claude, 2026-10-05] Next runs PREPARED, not submitted** (Fritz /home/hpc rejected all writes at 13:15, "No space
+>   left on device" with 13 T free and 52/100 G quota used -- cluster-side; woody and vault writable; author: "just prepare
+>   everything and then I will sync the files"). All from gen_hopper_stress_prms.py, base 4293495 (drifting rods):
+>   - `prms/hopper_clog_cyl_startblock_skin0p5_cap1p5_gas.prm` (--cyl-startblock-cap1p5-only), jobs/run_144_hopper_clog_cyl_startblock_skin0p5_cap1p5.sbatch:
+>     cap 7.95e-7 = 1.5 a_ref (head limit 10.5 LU); only maxActuatingVariable differs. Third force level (2.5: 4298712, 5: 4293495/4298713).
+>   - `prms/hopper_clog_giantrods100_startblock_cappid_gas.prm` (--giant-rods-startblock-only), jobs/run_144_hopper_clog_giantrods100_startblock_cappid.sbatch:
+>     100 rods R 6, L 36 (author: "100 large rods upstream" -> giant rods of 4268255), axis y at y 20, 4 layers z 7.5/21/34.5/48
+>     (densities 1.2/1.0/1.0/0.5), 25 rows pitch 13.5, front row x 222.75 (~143 LU upstream), rear rows WRAPPED through the
+>     periodic boundary (rows at 6.75 ... 761.25, none straddles x = 0) -> ANALYSIS: unwrap start x > 396 by -768 before
+>     counting passages. Gaps 1.5 (rod-rod), 2 (wall), 1.5 (floor). Volume 4.07e5 (406 rods: 2.07e5). A giant rod CAN pass
+>     the 16 LU gap upright (diameter 12; 4268255's 6th rod tumbled through), so this is a real sieving test.
+>   - `prms/twopillar_clog_cyl812_startblock_cappid_gas.prm` + `prms/twopillar_clean_reference_gas.prm` (--two-pillars-only),
+>     jobs/run_288_twopillar_clog_cyl812_startblock_cappid.sbatch (4 nodes, 288 ranks, 8 h) and jobs/run_288_twopillar_clean_reference.sbatch
+>     (4 nodes, 3 h, 40000 steps, no floaters): channel 768 x 80 x 180 (cellsPerBlock unchanged, 12 x 4 x 6 blocks), pillars
+>     R 5 at (384, 25) and (384, 55) -> three 20 LU slots (rod 18, 19 with skin), 812 rods (4293495 block mirrored to y + 40),
+>     probes centre pair y 40 (middle slot), pillar pair y 25; cap 2.65e-6 absolute (head limit 34.9 LU as the hopper; its
+>     multiple of the new a_ref follows from the clean reference). Diff vs base checked: domain, pillars (DEM + BodyBC),
+>     probes, VTK filters, floaters (+ timesteps for the clean run) only.
+
+> - **[Claude, 2026-10-05] Submitted after the /home/hpc outage** (author: "fritz is fixed sync and submit the jobs"):
+>   sync + mirror rsync, md5 of the 8 new files and Antidunes.cpp / ParticleKernels.h / BuildTimeloop.h identical in all
+>   three checkouts and local (code unchanged since 4293495). Jobs: 4300945 cap 1.5 a_ref (~/mt-dennys), 4300946 two-pillar
+>   clean reference (~/mt-dennys, afterany:4300945), 4300947 100 giant rods (mirror), 4300948 two pillars 812 rods (mirror2,
+>   4 nodes). Vault staging copy of the files from the outage: /home/vault/iwia/iwia148h/staging_20261005 (can be deleted).
+
+> - **[Claude, 2026-10-05] 4300947 (100 giant rods) FAILED at step ~33400: "reynoldsNumber is nan!" (WriteData.h:148).**
+>   Until 33300 physically normal (force at the cap, U 0.1 U_ref, jam, mass steady). First NaN at step 33360, rank 2,
+>   interface cell local (17,6,0) = world (17.5, 6.5, 60.5), fillOld 0 -> fillNew NaN ([DEGENERATE-FILL-RECONSTRUCTION]),
+>   then [LOW-RHO] / [CURVATURE-GUARD] in the neighbourhood x 17-22, y 6-10, z 59-61. No giant rod near the surface there
+>   (nearest: heavy rods on the floor at z 6.5). Local z index 0 = BLOCK (RANK) BOUNDARY z = 60 (cellsPerBlock z 30), where
+>   the backed-up surface had settled (maxFluidPos_z = 60 constant). Hypothesis: free-surface cell on a rank boundary
+>   (ghost exchange of fill/normals) -- NOT confirmed in the code. Test: rerun 4301070 (mirror) with cellsPerBlock
+>   <64, 20, 36> (120 ranks, block boundaries 36/72/108/144), --giant-rods-startblock-z36-only, otherwise identical.
+>   Archive of 4300947: antidunes-hopper-clog-giantrods100-startblock-cappid_4300947_20261005_161504 (eval to 33300,
+>   VTK to 32000, snapshots).
+> - Home quota was at 95.9/100 G soft: the 87 logs of finished jobs (14.5 G) moved from the three sbatch-output folders
+>   to /home/vault/iwia/iwia148h/antidunes-archive/logs/<checkout>/ (author: "yes move the logs"); home now 69.8 G.
+
+> - **[Claude, 2026-10-05] 100 GIANT RODS DROPPED (author: "let's drop it").** Rerun 4301070 (36-cell blocks, 120 ranks)
+>   crashed EARLIER, at step 29631, by a different mechanism: [STALE-PARTICLE-IDX] (SimpleBB.h:325) on ranks 40/45 -- near-
+>   boundary fluid cells around world (300, 22, 3.5) still flagged as owned by giant rod uid 5044031582654955521, which no
+>   longer exists on the rank (particle-ownership / mapping desync); just before, [CURVATURE-GUARD] hits for interface
+>   cells at z ~ 3.5 (air on the floor under the jam). No LOW-RHO / DEGENERATE-FILL this time, so the z = 60 rank-boundary
+>   hypothesis of 4300947 is neither confirmed nor ruled out. Common factor: rods of L 36 span 36 of the 40 LU width
+>   (wall gap 2), a few rods across seal the channel -> strong drawdown, floor air pockets, violent rearrangement.
+>   Not pursued further; the STALE-PARTICLE-IDX desync stays a known open issue for very dense / channel-spanning debris.
+>   Archives: 4300947 (..._4300947_20261005_161504), 4301070 (vault antidunes-archive, ..._4301070_*).
+
+> - **[Claude, 2026-10-05] 4300945 (cap 1.5 a_ref), 4300946 (two-pillar clean), 4300948 (two pillars, 812 rods) -- first analysis**
+>   (local animations/4300945_hopper_406rods_startblock_cap1p5_20261005, 4300946_twopillar_clean_reference_20261005,
+>   4300948_twopillar_812rods_startblock_20261005; all three exit 0, no NaN / STALE markers).
+>   - CAP 1.5 a_ref: the block STILL JAMS (U -> 0 by ~32k), load 0.94, leakage 4.7 % (48k-150k), level difference 8.3 LU
+>     at the end (head limit 10.5, ratio 0.80), jam-phase peak ~16 LU at ~32k (the 26 LU at 3.9k is the drifting block
+>     pushing water ahead of itself, highest level at x 14-131), mass -2.3 %.
+>   - LEAKAGE vs HEAD over the four rod runs (dH, leak): (26.4, 12.3), (28.6, 8.0), (15.9, 5.8), (8.3, 4.7) ->
+>     Q ~ dH^0.63 (0.43-0.88 leaving one run out). CORRECTION of the 4298712 note "about proportional (Darcy-like)":
+>     the exponent is closer to 0.5 than to 1, i.e. inertia-dominated (Forchheimer) seepage, consistent with pore
+>     Reynolds numbers 18-27 from jam_backwater_models.py. The Half Cap page text still says "proportional" -> fix.
+>   - TWO-PILLAR CLEAN REFERENCE NOT CONVERGED: starts above the target (U 0.0436), force 0 for the first 15k steps,
+>     then bang-bang between 0 and the cap (0 in 93 % of the samples); last-10k "a_ref" 1.67e-7 with sd/mean 2.9 is NOT a
+>     usable reference (the hopper clean run is steady after ~20k). Needs a longer run (>= 100k steps) for a_ref / Q_ref.
+>     Clean levels are fine (flat, window difference 1.4 LU).
+>   - TWO PILLARS, 812 RODS: NO LASTING JAM. Rods pass the three 20 LU slots: 77 by 16k, 252 by 32k (light 151/232,
+>     neutral 92/348, heavy 9/232), ~400 by 99k (later counts ambiguous: circulation vs 17 snapshots). Temporary partial
+>     blockage 20k-64k (Q 0.33-0.48 of the clean value, median rod speed ~1e-3), then the pile flushes (Q ~0.9 from 100k).
+>     Force at the cap 96 % of the steps. Mass -20.8 % (largest of all runs) -> downstream level 16 LU; levels not
+>     comparable. Backwater models not applicable.
+
+> - **[Claude, 2026-10-06] Clogging results: structure agreed with the author.** Single (centred) pillar -> hopper with the
+>   different shapes -> double (two-)pillar layout as the final case; ALL with the start block at the beginning of the
+>   domain; water loss only in the limitations; everything dimensionless (dh/h0, Q/Q_ref, a/a_ref).
+> - Long clean two-pillar reference queued: 4304946 (~/mt-dennys), prms/twopillar_clean_reference_150k_gas.prm
+>   (--two-pillars-clean-long-only): 4300946 with 150000 steps and fluid VTK at 0 / 149000 only; 4 nodes, 4:30 h.
+> - Centred pillar as START BLOCK queued: 4304948 (mirror), prms/clog_centred_pillar_startblock_cappid_gas.prm
+>   (--centred-startblock-only; author: "100 spheres R 5 as a block"): 4297864 with the 100 spheres (34 x 0.5, 33 x 1.0,
+>   33 x 1.5) as a block at x 8..144.5 (11 rows x 3 across x 3 density layers + 1), released together at step 500; VTK at
+>   the hopper steps. Pre-placed blocks 4292534 / 4293494 are LEFT OUT of the results (author).
+
+> - **[Claude, 2026-10-06] DATA-COLLECTION REVIEW (author: "really thorough review ... is the math and implementation correct")
+>   + first draft of the clogging results (overleaf chapters/04_results/clogging/*, methodology chapters/03_implementation/clogging/*).**
+>   Correct (code + data): level profile h = sum (fill - svf)/(1 - svf) (no svf > 0.95 cell outside the pillars; walls are not
+>   in the slices; liquid volume from the slices x 1.0044 = totalFluidMass, expected mean hydrostatic density 1.0043); discharge
+>   Q (flowRateAt) continuous up/down within 2-3 % in clean and jammed runs; elevation probe (skipped solid cells lower it,
+>   documented; probes at integer x -> half-cell offset, negligible); pressure probe (half-cell z offset, 2.9e-5, negligible,
+>   unused); blockageAt (pillar term at the plane only, jam term averaged; ~0 in the probe planes of the centred runs, not used);
+>   PID: controls |sum u| / (2 D_ref Lx Ly) = mean discharge per nominal section (vector length; logged meanVelocity_x);
+>   jam load formula consistent with the code (body force V_full a_x on floaters).
+>   Issues: (1) totalHydroForce_x = raw (un-averaged) MEM force -> wrong for cuboids (use [BoxForces]); output fix not applied.
+>   (2) AddExternalForces applies the streamwise drive to the FULL floater volume, also the emerged part (light half-emerged
+>   floaters get 2x; ~2 % of the total drive in the 406-rod runs) -> limitation (sec:results-floater-drive), code unchanged.
+>   (3) AverageDataSliceEvaluator resets maxFluidZPos_ inside the block loop (only last block per rank) -- harmless with one
+>   block per rank (all clog prms), column unused. (4) Methodology defined dh with fixed windows; the reported dh is the
+>   highest upstream level (x < 372) minus the window 400-432 -> eq. clog-level-difference added. (5) Jam extent of
+>   jam_backwater_models.py with --col-min 2 included the thin floor layer of heavy floaters (rods: 359 LU instead of the main
+>   body 140 LU) -> thesis uses --col-min 10 --gap 15 (animations/<run>/jam_backwater_models_main.json): H1/H4 sim 1.12-1.82 vs
+>   Follett (C_D 1.2) 1.005-1.12, C_D needed 11-43, Q_sim/Q_model 0.17-0.33. (6) Schalko 2018 backwater formula: source not in
+>   the knowledge base (only via Poppema 2024) -> not used. Bib entries added: follett_momentum_2020, marin_clogging_2025.
+>   Figures: overleaf/scripts/clogging/results_figures.py -> figures/clogging/*.pdf, numbers -> results_numbers.json; time
+>   t* = t U0/zeta_0 (3770 steps). Pending in the text (TODO): centred start block 4304948, two-pillar reference 4304946,
+>   ParaView screenshots (placeholders). Half Cap page wording corrected (Q ~ dh^0.64).
+
+> - **[Claude, 2026-10-06] 4304948 (centred pillar, start block) and 4304946 (two-pillar clean, 150k) analysed and put into
+>   the thesis** (local: animations/4304948_centred_pillar_startblock_20261006, 4304946_twopillar_clean_reference_150k_20261006,
+>   eval + full vtk-out; vault antidunes-archive/..._4304948_20261006_025420, ..._4304946_20261006_023250).
+>   - 4304946: PID converges only after ~80 000 steps (a = 0 until 19 000, then pulses); a_ref (last 10k) 9.50e-8 (interval
+>     means 80-150k 0.95-1.02e-7), = 0.18 of the hopper a_ref -> the 812-rod run 4300948 was driven at k = 27.9 (not 5);
+>     Q_ref 50.54 (cv 0.8 %), U_ref 0.0400, dh clean 0.049 zeta_0, mass 0.0 %. 4300948 with this reference: leakage 0.82,
+>     U end 0.82, Q 0.36-0.52 between t* 5 and 17, 0.85-0.96 from t* 21.
+>   - 4304948: light spheres reach the pillar at t* 2-3; force ~a_ref until t* 4, cap first at t* 5.9, continuously from 7.5
+>     (81 % of the samples); dh peak 1.057 at t* 10.2, end 0.686 (96 % of 0.711); U minimum 0.12 (never 0), end 0.32; leakage
+>     0.325; load 0.495; no sphere passed; mass -0.46 %. Heavy spheres (33) never leave the floor near the start (x < 200),
+>     22 of 33 neutral stay upstream, all light ones at the pillar (same composition in the staggered run 4297864, which gave
+>     dh 0.662, Q 0.211, load 0.472).
+>   - results_figures.py: centred = 4304948 (4297864 kept for comparison), two-pillar reference = 4304946 (hopper a_ref override
+>     removed), force panel symlog for k > 10. Thesis updated: clogging/main.tex (run table), reference.tex, centred.tex
+>     (rewritten), twopillar.tex, methodology (k = 28 for two pillars), scale-consistency (ranges 60-96 %, 5-32 %), conclusion
+>     (a third), limitations (centred mass < 1 %).
+
+> - **[Claude, 2026-10-06] Hopper clean reference, 150 000 steps, SUBMITTED: job 4305662 (~/mt-dennys, 144 ranks, 4:30 h).**
+>   Sanity check of all clogging runs (author: "are they all feasible?") found the old reference 4292482 (30 000 steps, older
+>   settings) not settled: discharge 21-27 in 5000-step windows (+-12 %), force +-10 %, so all hopper Q/Q_ref and k = 5 carry
+>   ~10 % uncertainty. New prm prms/hopper_clean_reference_150k_gas.prm (gen_hopper_stress_prms.py --hopper-clean-long-only) =
+>   4293495 without floaters, fluid VTK at 0 / 149000 only (diff checked: only those two changes); job script
+>   jobs/run_144_hopper_clean_reference_150k.sbatch. Code md5 identical local / Fritz. After it finishes: replace 4292482 by it
+>   in overleaf/scripts/clogging/results_figures.py (RUNS, refs), recompute, update the hopper numbers in Sec. 5.3.
+>   Other sanity results (all feasible): thrust/drive 0.84-1.05 in all frozen jams (cuboids 0.71); Mach <= 0.14; NaN only in
+>   the single-cell pressure probes when covered by a floater; light-rod pile at the pillars up to z ~ 79 is a continuous stack;
+>   two-pillar run: 2 rods up to 0.63 LU into the floor and 1 rod 0.9 LU into a side wall (k = 28 overload); heavy spheres
+>   form a touching cluster by t* 4 (rolling blocked by friction) and sit in near-stagnant water.
+
+> - **[Claude, 2026-10-06] Hopper clean reference 4305662 (150 000 steps) analysed and put into the thesis.** Local:
+>   animations/4305662_hopper_clean_reference_150k_20261006 (eval + vtk-out); vault antidunes-archive/..._4305662_20261006_141122.
+>   Settles after ~40 000 steps (a = 0 in 72 % of the samples before 20 000, then std/mean 0.22 -> 0.02); last 10k: a_ref
+>   5.989e-7 (+13 % vs 5.30e-7 of 4292482), Q_ref 25.51 (+8 % vs 23.63), U_ref 0.0400, clean dh 0.289 zeta_0 (was 0.233), mass 0.
+>   Consequences: true caps k = 4.42 / 2.21 / 1.33 (nominal 5 / 2.5 / 1.5); leakages x 0.926: rods 0.114 / 0.074, k 2.2 0.053,
+>   k 1.3 0.043, cuboids 0.082, mixed 0.159, spheres 1.009 / 1.003; leak exponent unchanged 0.64 (prefactor 0.127); head limits
+>   (absolute) unchanged. Thesis updated (run table, reference / hopper / shapes / twopillar / literature, methodology table and
+>   forcing text, scale-consistency 4-32 %), figures regenerated; briefing artifact QRKrjwpk7D4aqmvm8C6jiC updated.
+
+> - **[Claude, 2026-10-06] Fix B (floater streamwise drive by mass), toggle `driveFloatersByMass` (ModelParameters, default
+>   false = unchanged).** Author: "implement fix B make it toggleable run the 400 cylindar startblock hopper case and turn fix b on".
+>   AddExternalForces: with the flag on, floaters (types 1/3/4) get F_xy = rho_p * V * a_xy = m_p * a_xy instead of V * a_xy
+>   (slope / tilted-gravity reading of the body force, Schwarzmeier et al. 2023); z and non-floaters unchanged. Root log line
+>   "[FloaterForces] floater streamwise drive: ...". Built locally (build-release, Antidunes target).
+>   prm: `gen_hopper_stress_prms.py --cyl-startblock-drivebymass-only` -> prms/hopper_clog_cyl_startblock_skin0p5_cappid_drivebymass_gas.prm
+>   (= the 4293495 prm plus the one flag line, diff checked). Job jobs/run_144_hopper_clog_cyl_startblock_skin0p5_cappid_drivebymass.sbatch,
+>   **SUBMITTED: job 4310128 (~/mt-dennys, 144 ranks, 5 h).** Expected change of the total streamwise drive on the rods: light
+>   rods -2.0 %, heavy +0.8 %, net about -1.2 %. For the load ratio of this run use sum(m_p) * a_x, not sum(V) * a_x.

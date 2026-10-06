@@ -365,6 +365,21 @@ struct CylinderPillarParams {
    }
 };
 
+// [Claude, 2026-10-03] A vertical round container (DropTest only): a CylindricalBoundary in containment mode with its
+// axis along z through `center` (only x, y used), infinite in z -- the bodies stay inside radius `radius`. Added to
+// reproduce the round container of Kodam et al. (2010b, Sec. 3.3: 50.6 mm inner diameter) instead of an area-matched
+// square box. Optional prm block: ContainerCylinders { ContainerCylinder { center < x, y, z >; radius r; } }
+struct ContainerCylinderParams {
+   Vector3< real_t > center;
+   real_t            radius;
+
+   ContainerCylinderParams(const config::Config::BlockHandle& b)
+   {
+      center = b.getParameter< Vector3< real_t > >("center");
+      radius = b.getParameter< real_t >           ("radius");
+   }
+};
+
 // An arch's tunnel opening: a finite hollow-cylinder interior a floater can pass through, bounded to
 // the arch's own axial (X) span so it never affects anything outside that span. Unlike CylindricalBoundary
 // (infinite along its axis, used for solid pillars), this is not a mesa_pd body at all -- it's consumed
@@ -571,6 +586,19 @@ inline std::vector< CylinderPillarParams > parseCylinderPillars(const shared_ptr
    return result;
 }
 
+inline std::vector< ContainerCylinderParams > parseContainerCylinders(const shared_ptr< config::Config >& cfg)
+{
+   std::vector< ContainerCylinderParams > result;
+   config::Config::Blocks containers;
+   cfg->getBlocks("ContainerCylinders", containers, 0, 1);
+   if (containers.empty()) return result;
+   config::Config::Blocks blocks;
+   containers[0].getBlocks("ContainerCylinder", blocks, 0, 10);
+   for (const auto& b : blocks)
+      result.emplace_back(b);
+   return result;
+}
+
 inline std::vector< ArchTunnelParams > parseArchTunnels(const shared_ptr< config::Config >& cfg)
 {
    std::vector< ArchTunnelParams > result;
@@ -603,6 +631,9 @@ struct FloatingBoxParams {
    real_t            densityRatio;
    uint_t            settlingSteps;      // same semantics as FloatingSphereParams::settlingSteps
    real_t            initialTiltAngleDeg; // initial rotation about the Y-axis (degrees); 0 = upright
+   // [Claude, 2026-10-01] axis of the initial rotation (default world Y, i.e. unchanged for existing prms); with a random
+   // axis and angle a box can be released in an arbitrary orientation (randomised drop tests).
+   Vector3< real_t > initialTiltAxis;
    real_t            comOffsetZ;          // signed body-frame z-offset of the centre of mass from the
                                           // geometric centroid (LU). Negative = COM BELOW centroid →
                                           // pendulum righting torque (raises GM, prevents tumbling).
@@ -644,6 +675,7 @@ struct FloatingBoxParams {
       pinAxes              = b.getParameter< Vector3< real_t > >("pinAxes", Vector3< real_t >(real_t(1)));
       pinRotation          = b.getParameter< bool >             ("pinRotation", false);
       pinRotationAxes      = b.getParameter< Vector3< real_t > >("pinRotationAxes", Vector3< real_t >(real_t(1)));
+      initialTiltAxis      = b.getParameter< Vector3< real_t > >("initialTiltAxis", Vector3< real_t >(real_t(0), real_t(1), real_t(0)));
       startInactive        = b.getParameter< bool >             ("startInactive", false);
       if (startInactive && settlingSteps == uint_t(0))
          WALBERLA_LOG_WARNING("FloatingBox startInactive=true but settlingSteps=0 -- this floater will "
@@ -844,6 +876,16 @@ struct ModelParams {
    //         non-thesis split; the pre-existing behaviour before this flag defaulted to true).
    bool        useMemOnlyBuoyancy;
 
+   // Streamwise/lateral drive of FLOATERS (types 1/3/4) in AddExternalForces. The periodic channel is
+   // driven by a body force a_x, a_y; the MEM sees no streamwise pressure gradient, so the particle
+   // needs this explicit term.
+   // false → (DEFAULT) unchanged: F_xy = vFull * a_xy (fluid density 1 times full volume; the
+   //         original Antidunes term, derived for fully submerged sediment).
+   // true  → F_xy = rho_p * vFull * a_xy = m_p * a_xy ("tilted gravity" / slope reading of the body
+   //         force, Schwarzmeier et al. 2023): every body is pushed with its own mass, independent
+   //         of how much of it is submerged. Non-floaters are not affected.
+   bool        driveFloatersByMass;
+
    // Only consulted when useMemOnlyBuoyancy=false (computeSubmergedVolumes()/computeSubmergedVolumesBox()
    // are only ever called from that branch, doDEMSubCycles) -- meaningless and never read otherwise.
    // true  → force vSub = vFull (and buoyancyCenterOffset_ = 0, no righting lever) for every floater
@@ -871,6 +913,37 @@ struct ModelParams {
    //         neighbourhood. A cheap, purely local second sweep -- no flood fill, no block-wide scan.
    // false → plain Pass-2-only fallback (default; every such cell stays interface, as before).
    bool        usePass3Reresolution;
+
+   // [Claude, 2026-10-01] true  -> a freshly uncovered cell that becomes INTERFACE gets the mean volume fraction of ALL its
+   //         resolved neighbours (gas 0, liquid 1, interface its fill) as fill level (PdfReconstructionManager.h,
+   //         seedInterfaceFillFromNeighbourhood). false -> legacy: mean fill of the INTERFACE neighbours only, 0.5 if there
+   //         is none (default). The legacy rule seeds 0.5 into cells that are interface only because a same-pass
+   //         neighbour was still unclassified -- half-empty cells inside the water (branch C, ~1300 per 100 steps in the
+   //         hopper runs) or half a cell of water in the air (A'). Changes only the fill, never the cell state.
+   bool        seedFillFromAllNeighbours;
+
+   // [Claude, 2026-10-02] true -> finite-difference curvature (CurvatureSweepFiniteDifferences) skips neighbour directions
+   //         whose flag is in no group (upstream reads an UNINITIALISED neighbour normal there) or whose normal is not
+   //         finite, sets curvature 0 if no direction remains, and logs each case as [CURVATURE-GUARD] (cell, neighbour
+   //         flag, neighbour normal). false -> unchanged upstream code (default). Identical results for valid inputs.
+   //         Motivation: run 4284164 (192 rods) broke down at step 9046 with curvature=nan in healthy interface cells
+   //         (fill 0.994, rho 1.005, finite normal, no obstacle neighbour) on both sides of the block boundary x = 448.
+   bool        guardCurvatureInputs;
+   // [Claude, 2026-10-03] true -> after the flag initialisation, the outer ghost layer (layer 2) beyond every non-periodic
+   //         domain border becomes wall as well (same NoSlip/FreeSlip flag as the layer-1 wall cell next to it, fill 1),
+   //         i.e. the wall is two cells thick. false -> unchanged (default). Reason: a Border wall with walldistance -1
+   //         occupies only layer 1; layer 2 behind it is set to liquid|interface by fillWithDomain(nrOfGhostLayers)
+   //         (mapParticlesOntoCells), never reset (initFlagsFromFillLevels: interior only) and never communicated, and
+   //         ObstacleFillLevelSweep (ghost layer 1 included) averages its fill into the wall cells' smoothed fill
+   //         ([GHOST2-FLUID] check, BuildTimeloop.h: 11520 of 12000 such cells flagged fluid in a small side-wall case).
+   //         The NaN normals of the hopper runs start in the smoothed fill of exactly these side-wall cells (job 4292672).
+   bool        wallOuterGhostLayer;
+
+   // [Claude, 2026-10-02] true -> after the normal sweep, scan for non-finite interface normals, smoothed fill levels and
+   //         obstacle normals and log [NAN-NORMAL] / [NAN-SMOOTHFILL] / [NAN-OBSTACLENORMAL] with the inputs of the normal
+   //         computation, plus a global count every 1000 steps (BuildTimeloop.h, diagnoseNaNNormals). Diagnostic only, no
+   //         effect on the simulation; a full field scan per step. Default false.
+   bool        diagnoseNaNNormals;
 
    // true  → floating-box submerged volume & centre of buoyancy computed ANALYTICALLY by clipping the
    //         oriented box against the fitted free-surface plane (exact 6-tetrahedron OBB∩half-space
@@ -1205,9 +1278,14 @@ struct ModelParams {
    // 2m (face-face, band-band), and between a rod and a wall plane or a pillar when it drops below m. At the rims the
    // sharp inflated edge reaches up to (sqrt 2 - 1) m further than a rounded (Minkowski) skin would. Purpose: keep at least one resolved fluid
    // cell between touching rods, whose line contacts otherwise seal sub-cell liquid channels (THESIS_PLAN.md,
-   // 2026-09-21 rod-bundle test: sealed channel cells collapse in density). This is the "effective diameter /
-   // minimum fluid gap" remedy of the resolved LBM-DEM literature (Rettinger 2023, p. 7, citing Boutt et al. 2007;
-   // Glowinski et al. 2001 use a short-range repulsion for the same purpose). The fluid mapping (MEM) is NOT
+   // 2026-09-21 rod-bundle test: sealed channel cells collapse in density). [Claude, 2026-10-01, checked against the
+   // PDFs in cld_kbase] This is the "effective diameter" remedy of Boutt et al. (2007, JGR 112 B10209, Sec. 2.3,
+   // Fig. 1): in their 2-D LBM-DEM, densely packed discs leave no connected flow path, so the fluid sees a smaller
+   // "hydraulic" diameter (multiplier 0.8) than the mechanical contact diameter -- the same separation of contact
+   // size and fluid size, applied there by shrinking the fluid body instead of enlarging the contact body. Rettinger
+   // (2023, p. 7) cites it for this purpose and notes that it lowers the predictive power. Related but with a
+   // different aim: Glowinski et al. (2001, J. Comput. Phys. 169, Sec. 5) add a short-range repulsion between bodies
+   // within a range of about one mesh spacing to prevent them from overlapping. The fluid mapping (MEM) is NOT
    // dilated. Implementation (ParticleKernels.h, SolidCylinderContactDetection): the Cylinder x Cylinder,
    // Cylinder x HalfSpace, and Cylinder x CylindricalBoundary (solid pillar) overloads call themselves once with the
    // inflated shapes, so the unchanged, validated detection (closed forms, GJK/EPA fallback) is used. A GJK/EPA
@@ -1217,6 +1295,20 @@ struct ModelParams {
    // circumscribing radius of the inflated cylinder, sqrt((R+m)^2 + (h+m)^2) <= sqrt(R^2+h^2) + sqrt(2) m.
    // Not applied to Cylinder x Sphere / Cylinder x Box (no such pairs in the rod scenarios).
    real_t      cylinderContactSkin;
+
+   // [Claude, 2026-10-01] boxContactSkin (DEFAULT 0 = off): box analog of cylinderContactSkin above
+   // -- same purpose, same mechanism, same formula, just for axis-aligned-at-rest FloatingBox
+   // floaters (type 3) instead of cylinders. Every floating box is replaced, for contact detection
+   // only, by an inflated box with each half-extent + m: the DEM contact force starts when the
+   // SURFACE GAP between two boxes drops below 2m (face-face), and between a box and a wall plane or
+   // a pillar when it drops below m. Implementation (ParticleKernels.h, SolidCylinderContactDetection):
+   // the Box x Box, Box x HalfSpace, and Box x CylindricalBoundary (solid pillar) overloads call
+   // themselves/a shared core once with the inflated box(es), so the unchanged, validated detection
+   // (SAT, sphero-box, or GJK/EPA fallback, whichever this call would otherwise have taken) is used.
+   // The box interaction radius (cheap reject, ghost sync range) is enlarged by 2m (SetupStages.h),
+   // the same simple safe over-approximation used for cylinderContactSkin's own circumR. Not applied
+   // to Box x Sphere / Box x Cylinder (no such pairs in the box-hopper scenarios this was built for).
+   real_t      boxContactSkin;
 
    // Only meaningful when useSpheroBoxContact is true -- selects WHICH algorithm computes the
    // spherosimplex (point,normal,overlap) triplet:
@@ -1541,9 +1633,14 @@ struct ModelParams {
       , mappingTieOffset          { b.getParameter< real_t >    ("mappingTieOffset", real_c(0)) }
       , useBognerThreePhaseMEM      { b.getParameter< bool >       ("useBognerThreePhaseMEM", true) }
       , useMemOnlyBuoyancy          { b.getParameter< bool >       ("useMemOnlyBuoyancy", true) }
+      , driveFloatersByMass         { b.getParameter< bool >       ("driveFloatersByMass", false) }
       , useFullVolumeAnalyticBuoyancy { b.getParameter< bool >     ("useFullVolumeAnalyticBuoyancy", false) }
       , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
       , usePass3Reresolution        { b.getParameter< bool >       ("usePass3Reresolution", false) }
+      , seedFillFromAllNeighbours   { b.getParameter< bool >       ("seedFillFromAllNeighbours", false) }
+      , guardCurvatureInputs        { b.getParameter< bool >       ("guardCurvatureInputs", false) }
+      , wallOuterGhostLayer         { b.getParameter< bool >       ("wallOuterGhostLayer", false) }
+      , diagnoseNaNNormals          { b.getParameter< bool >       ("diagnoseNaNNormals", false) }
       , useAnalyticBoxBuoyancy      { b.getParameter< bool >       ("useAnalyticBoxBuoyancy", false) }
       , usePhantomForceCorrection   { b.getParameter< bool >       ("usePhantomForceCorrection", false) }
       , useDynamicReferenceHeight   { b.getParameter< bool >       ("useDynamicReferenceHeight", false) }
@@ -1581,6 +1678,7 @@ struct ModelParams {
       , useSpheroBoxContact         { b.getParameter< bool >       ("useSpheroBoxContact", false) }
       , spheroBoxRadius             { b.getParameter< real_t >     ("spheroBoxRadius", real_t(0.05)) }
       , cylinderContactSkin         { b.getParameter< real_t >     ("cylinderContactSkin", real_t(0)) }
+      , boxContactSkin               { b.getParameter< real_t >     ("boxContactSkin", real_t(0)) }
       , useSpheroBoxAnalytical      { b.getParameter< bool >       ("useSpheroBoxAnalytical", false) }
       , useFraigeBoxContactModel    { b.getParameter< bool >       ("useFraigeBoxContactModel", false) }
       , logFloaterHistory           { b.getParameter< bool >       ("logFloaterHistory", false) }
@@ -1988,6 +2086,7 @@ struct SimulationParams {
    ParticleParams                       particle;
    std::vector< PillarParams >          pillars;
    std::vector< CylinderPillarParams >  cylinderPillars;
+   std::vector< ContainerCylinderParams > containerCylinders; // [Claude, 2026-10-03] DropTest round container
    std::vector< ArchTunnelParams >      archTunnels;
    std::vector< FloatingSphereParams >  floatingSpheres;
    std::vector< FloatingBoxParams >     floatingBoxes;
@@ -2017,6 +2116,7 @@ struct SimulationParams {
       , particle     { cfg->getOneBlock("ParticleParameters") }
       , pillars          { parsePillars(cfg) }
       , cylinderPillars  { parseCylinderPillars(cfg) }
+      , containerCylinders { parseContainerCylinders(cfg) }
       , archTunnels      { parseArchTunnels(cfg) }
       , floatingSpheres  { parseFloatingSpheres(cfg) }
       , floatingBoxes    { parseFloatingBoxes(cfg) }

@@ -362,6 +362,102 @@ void testCubeTwoRoundUnresolvedIsland()
    WALBERLA_CHECK(!hasUnknown);
 }
 
+// ---------------------------------------------------------------------------------------------
+// [Claude, 2026-10-01] seedInterfaceFillFromNeighbourhood (PdfReconstructionManager.h): fill level seeded into a freshly
+// uncovered cell that became INTERFACE. Legacy rule: mean fill of the interface neighbours, 0.5 if none. New rule
+// (prm seedFillFromAllNeighbours): mean volume fraction of all resolved neighbours (gas 0, liquid 1, interface fill),
+// excluding obstacle and still-unclassified (formerObstacle) cells.
+// ---------------------------------------------------------------------------------------------
+using FillCube = std::array< std::array< std::array< real_t, 3 >, 3 >, 3 >;
+
+FillCube uniformFill(real_t v)
+{
+   FillCube c;
+   for (auto& plane : c)
+      for (auto& row : plane)
+         row.fill(v);
+   return c;
+}
+
+real_t seedCube(const Cube& flags, const FillCube& fills, bool allNeighbours, bool& fallback)
+{
+   auto idx = [](int d) { return static_cast< size_t >(d) + size_t(1); };
+   return seedInterfaceFillFromNeighbourhood< MockFlag >(
+      [&](int dx, int dy, int dz) { return flags[idx(dz)][idx(dy)][idx(dx)]; },
+      [&](int dx, int dy, int dz) { return fills[idx(dz)][idx(dy)][idx(dx)]; }, LIQUID, GAS, INTERFACE, FORMER_OBSTACLE,
+      OBSTACLE, allNeighbours, fallback);
+}
+
+void checkSeed(const char* name, const Cube& flags, const FillCube& fills, real_t expectLegacy, bool expectLegacyFallback,
+               real_t expectNew, bool expectNewFallback)
+{
+   bool         fbL = false, fbN = false;
+   const real_t l = seedCube(flags, fills, false, fbL);
+   const real_t n = seedCube(flags, fills, true, fbN);
+   WALBERLA_LOG_INFO_ON_ROOT("[seed] " << name << ": legacy " << l << (fbL ? " (fallback)" : "") << ", all-neighbours " << n
+                                       << (fbN ? " (fallback)" : ""));
+   WALBERLA_CHECK_FLOAT_EQUAL(l, expectLegacy, name);
+   WALBERLA_CHECK_EQUAL(fbL, expectLegacyFallback, name);
+   WALBERLA_CHECK_FLOAT_EQUAL(n, expectNew, name);
+   WALBERLA_CHECK_EQUAL(fbN, expectNewFallback, name);
+}
+
+void testSeedBulkLiquidWithUnknownNeighbour()
+{
+   // branch C: liquid all around, one still-unclassified neighbour -> interface; legacy seeds a half-empty cell
+   Cube c = uniformCube(LIQUID);
+   c[1][1][2] = FORMER_OBSTACLE;
+   checkSeed("bulk liquid + unknown (C)", c, uniformFill(real_t(1)), real_t(0.5), true, real_t(1), false);
+}
+
+void testSeedAirWithUnknownNeighbour()
+{
+   // branch A': gas all around, one unclassified neighbour -> interface; legacy seeds half a cell of water in the air
+   Cube c = uniformCube(GAS);
+   c[1][1][0] = FORMER_OBSTACLE;
+   checkSeed("air + unknown (A')", c, uniformFill(real_t(0)), real_t(0.5), true, real_t(0), false);
+}
+
+void testSeedSurfaceLiquidBelowGasAbove()
+{
+   // branch D without interface neighbours: lower plane liquid, upper plane gas, middle plane obstacle (a floater edge)
+   Cube c = uniformCube(OBSTACLE);
+   for (auto& row : c[0]) row.fill(LIQUID);
+   for (auto& row : c[2]) row.fill(GAS);
+   checkSeed("surface, liquid below / gas above", c, uniformFill(real_t(0)), real_t(0.5), true, real_t(0.5), false);
+}
+
+void testSeedWithInterfaceNeighbours()
+{
+   // 9 liquid (below), 9 interface with fill 0.4 (middle plane, 8 + centre ignored), 9 gas (above)
+   Cube     c = uniformCube(INTERFACE);
+   FillCube f = uniformFill(real_t(0.4));
+   for (auto& row : c[0]) row.fill(LIQUID);
+   for (auto& row : c[2]) row.fill(GAS);
+   // legacy: mean of the 8 interface neighbours = 0.4; new: (9*1 + 8*0.4 + 9*0) / 26
+   checkSeed("surface with interface neighbours", c, f, real_t(0.4), false,
+             (real_t(9) + real_t(8) * real_t(0.4)) / real_t(26), false);
+}
+
+void testSeedNoResolvedNeighbour()
+{
+   // only obstacle and unclassified neighbours: no evidence either way -> 0.5 in both rules
+   Cube c = uniformCube(OBSTACLE);
+   c[0][0][0] = FORMER_OBSTACLE;
+   checkSeed("no resolved neighbour", c, uniformFill(real_t(0.7)), real_t(0.5), true, real_t(0.5), true);
+}
+
+void testSeedIgnoresStaleFillOfExcludedCells()
+{
+   // obstacle and unclassified cells must not contribute even if a stale fill value is stored there
+   Cube     c = uniformCube(OBSTACLE);
+   FillCube f = uniformFill(real_t(0.9));
+   c[0][1][1] = LIQUID;
+   c[2][1][1] = GAS;
+   c[1][0][1] = FORMER_OBSTACLE;
+   checkSeed("excluded cells with stale fill", c, f, real_t(0.5), true, real_t(0.5), false);
+}
+
 } // namespace lbm_mesapd_coupling
 } // namespace walberla
 
@@ -394,6 +490,13 @@ int main(int argc, char** argv)
    testCubeTwoRoundLiquidPromotion();
    testCubeTwoRoundGasPromotion();
    testCubeTwoRoundUnresolvedIsland();
+
+   testSeedBulkLiquidWithUnknownNeighbour();
+   testSeedAirWithUnknownNeighbour();
+   testSeedSurfaceLiquidBelowGasAbove();
+   testSeedWithInterfaceNeighbours();
+   testSeedNoResolvedNeighbour();
+   testSeedIgnoresStaleFillOfExcludedCells();
 
    return EXIT_SUCCESS;
 }

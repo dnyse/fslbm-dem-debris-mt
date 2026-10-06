@@ -122,6 +122,22 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
 {
    WALBERLA_LOG_INFO_ON_ROOT("addBeforeTimeStepVTKOutput");
 
+   // [Claude, 2026-10-01] Lets the particle/floater/pillar point-data VTK writers below ALSO follow
+   // VTKParams::snapshotSteps (the same discrete step list fluid_field_snapshots already uses, see
+   // its own doc comment in SimulationParams.h), instead of inventing a second mechanism. Each
+   // writer still obeys its own writeFrequency as before; this only ADDS a forced write on every
+   // listed step via VTKOutput::forceWriteNextStep() (see vtk/VTKOutput.cpp: writeFrequency_==0
+   // disables the periodic cadence entirely but forceWriteNextStep() still fires -- the same "0 +
+   // explicit steps" pattern fluid_field_snapshots already relies on). A no-op, byte-for-byte the
+   // same as plain vtk::writeFiles(output), whenever snapshotsEnabled is false (every existing prm).
+   auto addSnapshotAwareVTKWrite = [simObjs, enabled = simParams->vtk.snapshotsEnabled,
+                                     steps = simParams->vtk.snapshotSteps](const std::shared_ptr< vtk::VTKOutput >& output) {
+      return [output, simObjs, enabled, steps]() {
+         if (enabled && steps.count(*simObjs->currentMainStep)) output->forceWriteNextStep();
+         vtk::writeFiles(output)();
+      };
+   };
+
    // LBM/freeSurface fields -----------------------------------------------
    walberla::free_surface::addVTKOutput< LatticeModel_T, AntidunesBoundaryHandling_T, PdfField_T, FlagField_T,
                                          ScalarField_T, VectorField_T >(
@@ -188,7 +204,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
    auto particleVTKOutput = vtk::createVTKOutput_PointData(
       particlePointData, "particles", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
       std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
-   timeloop->addFuncBeforeTimeStep(vtk::writeFiles(particleVTKOutput), "VTK: sphere data");
+   timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(particleVTKOutput), "VTK: sphere data");
 
    // floating spheres (type 1) -------------------------------------------
    if (!simParams->floatingSpheres.empty())
@@ -209,7 +225,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       auto floaterVTKOutput = vtk::createVTKOutput_PointData(floaterPointData, "floater", simParams->vtk.writeFrequency,
                                                              simParams->vtk.baseFolder, std::string("simulation_step"),
                                                              false, false, true, false, simObjs->beginTimeStep);
-      timeloop->addFuncBeforeTimeStep(vtk::writeFiles(floaterVTKOutput), "VTK: floater data");
+      timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(floaterVTKOutput), "VTK: floater data");
    }
 
    // floating boxes (type 3) ---------------------------------------------
@@ -303,7 +319,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       auto boxFloaterVTKOutput = vtk::createVTKOutput_PointData(
          boxFloaterData, "floaterBox", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
          std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
-      timeloop->addFuncBeforeTimeStep(vtk::writeFiles(boxFloaterVTKOutput), "VTK: floating box data");
+      timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(boxFloaterVTKOutput), "VTK: floating box data");
    }
 
    // floating cylinders / logs (type 4) -----------------------------------
@@ -401,7 +417,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       auto cylinderFloaterVTKOutput = vtk::createVTKOutput_PointData(
          cylinderFloaterData, "floaterCylinder", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
          std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
-      timeloop->addFuncBeforeTimeStep(vtk::writeFiles(cylinderFloaterVTKOutput), "VTK: floating cylinder data");
+      timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(cylinderFloaterVTKOutput), "VTK: floating cylinder data");
    }
 
    // Box pillar VTK and Cylinder pillar VTK (below) are disabled -- redundant with mapped_flag's
@@ -432,7 +448,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       auto boxVTKOutput = vtk::createVTKOutput_PointData(boxPointData, "pillar", simParams->vtk.writeFrequency,
                                                          simParams->vtk.baseFolder, std::string("simulation_step"),
                                                          false, false, true, false, simObjs->beginTimeStep);
-      timeloop->addFuncBeforeTimeStep(vtk::writeFiles(boxVTKOutput), "VTK: pillar data");
+      timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(boxVTKOutput), "VTK: pillar data");
    }
 
    // Cylinder pillar VTK — one point per pillar at the axis centre with a glyphScale attribute.
@@ -470,9 +486,206 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       auto cylinderVTKOutput = vtk::createVTKOutput_PointData(
          cylinderPointData, "cylinder_pillar", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
          std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
-      timeloop->addFuncBeforeTimeStep(vtk::writeFiles(cylinderVTKOutput), "VTK: cylinder pillar data");
+      timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(cylinderVTKOutput), "VTK: cylinder pillar data");
    }
 #endif
+}
+
+// [Claude, 2026-10-02] prm ModelParameters.diagnoseNaNNormals: after the normal sweep (and its ghost-layer exchange), scans
+// inner cells + first ghost layer for non-finite values in the interface normal field, the smoothed fill level, and the
+// obstacle normal field, and logs [NAN-NORMAL] / [NAN-SMOOTHFILL] / [NAN-OBSTACLENORMAL] with the inputs of the normal
+// computation (own flags, fill, smoothed fill; per obstacle neighbour its smoothed fill and obstacle normal; neighbours
+// with non-finite smoothed fill; counts of liquid/interface/gas neighbours). Throttled per kind and rank (first 30, then
+// every 20000th); a global count per kind is logged every 1000 steps. Motivation: run 4284594 (curvature guard on)
+// skipped ~995000 NaN neighbour normals, all in the cell layer next to the side wall (y = 0), z ~ 22-30.
+// [Claude, 2026-10-03] Check of the OUTER ghost layer (layer 2) beyond non-periodic domain borders. A Border wall with
+// walldistance -1 occupies only ghost layer 1 in the wall-normal direction; layer 2 behind it is set to the domain flag
+// (liquid | interface) by fillWithDomain(nrOfGhostLayers) in mapParticlesOntoCells, is not reset by
+// initFlagsFromFillLevels (interior only), and is never communicated at a non-periodic border. ObstacleFillLevelSweep
+// (includes ghost layer 1) then treats these cells as fluid neighbours of the wall cells. Logs [GHOST2-FLUID label]:
+// global number of layer-2 border cells carrying liquid/interface/gas flags, of those with a non-finite fill, and the
+// fill range of the flagged ones.
+inline void checkOuterGhostLayerFlags(const std::shared_ptr< SimulationObjects >& simObjs, const std::string& label)
+{
+   uint_t nCells = 0, nFluid = 0, nNonFinite = 0;
+   real_t fMin = std::numeric_limits< real_t >::max(), fMax = -std::numeric_limits< real_t >::max();
+   const auto& bf     = *simObjs->blockForest;
+   const auto& domain = bf.getDomain();
+   const bool  periodic[3] = { bf.isXPeriodic(), bf.isYPeriodic(), bf.isZPeriodic() };
+   for (auto blockIt = bf.begin(); blockIt != bf.end(); ++blockIt)
+   {
+      const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      if (flagField->nrOfGhostLayers() < uint_t(2) || fillField->nrOfGhostLayers() < uint_t(2)) continue;
+      const auto fluidMask = flag_t(flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID) |
+                                    flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID) |
+                                    flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID));
+      const auto& aabb = blockIt->getAABB();
+      const cell_idx_t size[3] = { cell_idx_c(flagField->xSize()), cell_idx_c(flagField->ySize()), cell_idx_c(flagField->zSize()) };
+      for (uint_t d = 0; d < 3; ++d)
+      {
+         if (periodic[d]) continue;
+         for (int side = 0; side < 2; ++side)
+         {
+            const bool atBorder = side == 0 ? realIsEqual(aabb.min()[d], domain.min()[d]) : realIsEqual(aabb.max()[d], domain.max()[d]);
+            if (!atBorder) continue;
+            const cell_idx_t layer = side == 0 ? cell_idx_c(-2) : size[d] + cell_idx_c(1);
+            CellInterval ci(-2, -2, -2, size[0] + 1, size[1] + 1, size[2] + 1);
+            ci.min()[d] = layer;
+            ci.max()[d] = layer;
+            for (auto c = ci.begin(); c != ci.end(); ++c)
+            {
+               ++nCells;
+               if ((flagField->get(*c) & fluidMask) == flag_t(0)) continue;
+               ++nFluid;
+               const real_t f = fillField->get(*c);
+               if (!std::isfinite(f)) { ++nNonFinite; continue; }
+               fMin = std::min(fMin, f);
+               fMax = std::max(fMax, f);
+            }
+         }
+      }
+   }
+   std::vector< uint_t > c{ nCells, nFluid, nNonFinite };
+   mpi::reduceInplace(c, mpi::SUM);
+   mpi::reduceInplace(fMin, mpi::MIN);
+   mpi::reduceInplace(fMax, mpi::MAX);
+   WALBERLA_LOG_INFO_ON_ROOT("[GHOST2-FLUID " << label << "] outer ghost layer beyond non-periodic borders: " << c[0]
+                             << " cells, " << c[1] << " with liquid/interface/gas flags, " << c[2]
+                             << " of those with non-finite fill; fill range of the flagged ones ["
+                             << (c[1] > c[2] ? fMin : real_t(0)) << ", " << (c[1] > c[2] ? fMax : real_t(0)) << "]");
+}
+
+// [Claude, 2026-10-03] ModelParameters.wallOuterGhostLayer (see SimulationParams.h): makes the outer ghost layer beyond
+// every non-periodic domain border a wall, copying the NoSlip/FreeSlip flag of the layer-1 cell between it and the
+// domain, with fill 1 as initFillLevelsInBoundaries sets for walls. Other boundary types in layer 1 (inflow, pressure,
+// outlet) are left alone. Must run after initFlagsFromFillLevel. Returns the number of cells changed on this rank.
+inline uint_t wallOuterGhostLayer(const std::shared_ptr< SimulationObjects >& simObjs)
+{
+   uint_t changed = 0;
+   const auto& bf     = *simObjs->blockForest;
+   const auto& domain = bf.getDomain();
+   const bool  periodic[3] = { bf.isXPeriodic(), bf.isYPeriodic(), bf.isZPeriodic() };
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      auto* handling = blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(
+         simObjs->antidunesBoundaryHandling->getHandlingID());
+      auto* flagField = handling->getFlagField();
+      auto* fillField = blockIt->getData< ScalarField_T >(simObjs->fillFieldID);
+      if (flagField->nrOfGhostLayers() < uint_t(2) || fillField->nrOfGhostLayers() < uint_t(2)) continue;
+      const flag_t noSlip   = flagField->getFlag(AntidunesBoundaryHandling_T::noSlipFlagID);
+      const flag_t freeSlip = flagField->getFlag(AntidunesBoundaryHandling_T::freeSlipFlagID);
+      const auto&  aabb     = blockIt->getAABB();
+      const cell_idx_t size[3] = { cell_idx_c(flagField->xSize()), cell_idx_c(flagField->ySize()), cell_idx_c(flagField->zSize()) };
+      for (uint_t d = 0; d < 3; ++d)
+      {
+         if (periodic[d]) continue;
+         for (int side = 0; side < 2; ++side)
+         {
+            const bool atBorder = side == 0 ? realIsEqual(aabb.min()[d], domain.min()[d]) : realIsEqual(aabb.max()[d], domain.max()[d]);
+            if (!atBorder) continue;
+            const cell_idx_t outer = side == 0 ? cell_idx_c(-2) : size[d] + cell_idx_c(1);
+            const cell_idx_t inner = side == 0 ? cell_idx_c(-1) : size[d];
+            CellInterval ci(-2, -2, -2, size[0] + 1, size[1] + 1, size[2] + 1);
+            ci.min()[d] = outer;
+            ci.max()[d] = outer;
+            for (auto c = ci.begin(); c != ci.end(); ++c)
+            {
+               Cell w = *c;
+               w[d]   = inner;
+               const flag_t wf = flagField->get(w);
+               const flag_t f  = (wf & noSlip) ? noSlip : ((wf & freeSlip) ? freeSlip : flag_t(0));
+               if (f == flag_t(0) || (flagField->get(*c) & f)) continue;
+               handling->forceBoundary(f, c->x(), c->y(), c->z());
+               fillField->get(*c) = real_c(1);
+               ++changed;
+            }
+         }
+      }
+   }
+   return changed;
+}
+
+inline void diagnoseNaNNormals(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t)
+{
+   static uint_t logged[3]  = { 0, 0, 0 };
+   static uint_t counted[3] = { 0, 0, 0 };
+   static const char* names[3] = { "NAN-NORMAL", "NAN-SMOOTHFILL", "NAN-OBSTACLENORMAL" };
+   auto finite3 = [](const Vector3< real_t >& v) { return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]); };
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto* flagField   = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField   = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      const auto* smoothField = blockIt->getData< const ScalarField_T >(simObjs->smoothFillFieldID);
+      const auto* normalField = blockIt->getData< const VectorField_T >(simObjs->normalFieldID);
+      const auto* obstNField  = blockIt->getData< const VectorField_T >(simObjs->obstacleNormalFieldID);
+      const auto  liquid      = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto  interface   = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const auto  gas         = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
+      const auto  obstacle    = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
+      const auto& aabb        = blockIt->getAABB();
+      const real_t dx         = aabb.xSize() / real_c(flagField->xSize());
+      const cell_idx_t X = cell_idx_c(flagField->xSize()), Y = cell_idx_c(flagField->ySize()), Z = cell_idx_c(flagField->zSize());
+      for (cell_idx_t z = -1; z <= Z; ++z)
+         for (cell_idx_t y = -1; y <= Y; ++y)
+            for (cell_idx_t x = -1; x <= X; ++x)
+            {
+               const auto f      = flagField->get(x, y, z);
+               const bool isObst = (f & obstacle) != 0;
+               const bool ghost  = (x < 0 || y < 0 || z < 0 || x >= X || y >= Y || z >= Z);
+               int        kind   = -1;
+               if (!isObst && (f & (liquid | interface | gas)) && !finite3(normalField->get(x, y, z))) kind = 0;
+               else if (!std::isfinite(smoothField->get(x, y, z))) kind = 1;
+               else if (isObst && !finite3(obstNField->get(x, y, z))) kind = 2;
+               if (kind < 0) continue;
+               if (!ghost) ++counted[kind];
+               const uint_t k = ++logged[kind];
+               if (!(k <= uint_t(30) || k % uint_t(20000) == uint_t(0))) continue;
+               std::ostringstream o;
+               o << "[" << names[kind] << " t=" << t << "] (#" << k << ") cell (" << x << "," << y << "," << z << ")"
+                 << (ghost ? " [ghost]" : "") << " world~(" << aabb.xMin() + (real_c(x) + real_t(0.5)) * dx << ","
+                 << aabb.yMin() + (real_c(y) + real_t(0.5)) * dx << "," << aabb.zMin() + (real_c(z) + real_t(0.5)) * dx
+                 << ") flags=" << uint64_t(f) << ((f & interface) ? " I" : "") << ((f & liquid) ? " L" : "")
+                 << ((f & gas) ? " G" : "") << (isObst ? " OBST" : "") << " fill=" << fillField->get(x, y, z)
+                 << " smoothFill=" << smoothField->get(x, y, z) << " normal=" << normalField->get(x, y, z)
+                 << " obstacleNormal=" << obstNField->get(x, y, z);
+               int nL = 0, nI = 0, nG = 0, nO = 0;
+               std::ostringstream obs, bad;
+               for (int dz = -1; dz <= 1; ++dz)
+                  for (int dy = -1; dy <= 1; ++dy)
+                     for (int ddx = -1; ddx <= 1; ++ddx)
+                     {
+                        if (!dz && !dy && !ddx) continue;
+                        const cell_idx_t nx = x + ddx, ny = y + dy, nz = z + dz;
+                        if (nx < -1 || ny < -1 || nz < -1 || nx > X || ny > Y || nz > Z) continue; // outside ghost layer 1
+                        const auto nf = flagField->get(nx, ny, nz);
+                        if (nf & obstacle)
+                        {
+                           ++nO;
+                           obs << " (" << ddx << "," << dy << "," << dz << "):sf=" << smoothField->get(nx, ny, nz)
+                               << ",on=" << obstNField->get(nx, ny, nz);
+                        }
+                        else if (nf & liquid) ++nL;
+                        else if (nf & interface) ++nI;
+                        else if (nf & gas) ++nG;
+                        if (!std::isfinite(smoothField->get(nx, ny, nz)))
+                           bad << " (" << ddx << "," << dy << "," << dz << ")";
+                     }
+               o << " | neighbours L/I/G/obst=" << nL << "/" << nI << "/" << nG << "/" << nO;
+               if (nO) o << " | obstacle neighbours:" << obs.str();
+               if (!bad.str().empty()) o << " | non-finite smoothFill at:" << bad.str();
+               WALBERLA_LOG_WARNING(o.str());
+            }
+   }
+   if (t % uint_t(1000) == uint_t(0))
+   {
+      std::vector< uint_t > c(counted, counted + 3);
+      mpi::reduceInplace(c, mpi::SUM);
+      WALBERLA_LOG_INFO_ON_ROOT("[NAN-NORMAL-SUMMARY t=" << t << "] inner cells with non-finite normal / smoothFill / "
+                                "obstacleNormal since the last summary: " << c[0] << " / " << c[1] << " / " << c[2]);
+      counted[0] = counted[1] = counted[2] = uint_t(0);
+      checkOuterGhostLayerFlags(simObjs, "t=" + std::to_string(t)); // [Claude, 2026-10-03]
+   }
 }
 
 void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& simParams,
@@ -564,7 +777,13 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
    timeloop->add() << Sweep(normalSweep, "Sweep: normal computation", StateSweep::fullFreeSurface)
                    << Sweep(EmptySweep(), "Empty sweep: normal")
                    << AfterFunction(Communication_T(simObjs->blockForest, simObjs->normalFieldID),
-                                    "Communication: after normal sweep");
+                                    "Communication: after normal sweep")
+                   // [Claude, 2026-10-02] prm ModelParameters.diagnoseNaNNormals (see diagnoseNaNNormals)
+                   << AfterFunction(
+                         [simObjs, on = simParams->model.diagnoseNaNNormals]() {
+                            if (on) diagnoseNaNNormals(simObjs, *simObjs->currentMainStep);
+                         },
+                         "Diagnostic: non-finite normals");
 
    // Laplace pressure = 2 * surface tension * curvature; curvature computation is not necessary with no surface tension
    const bool computeCurvature = !realIsEqual(simParams->computed.surfaceTension, real_c(0), real_c(1e-14));
@@ -577,6 +796,10 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
                    simObjs->flagFieldID, walberla::free_surface::flagIDs::interfaceFlagID,
                    walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs, simObjs->flagInfo.getObstacleIDSet(),
                    false, real_c(0));
+      // [Claude, 2026-10-02] prm ModelParameters.guardCurvatureInputs (default false = unchanged upstream behaviour)
+      curvSweep.setGuardInvalidNeighbours(simParams->model.guardCurvatureInputs);
+      WALBERLA_LOG_INFO_ON_ROOT("Curvature input guard (guardCurvatureInputs): "
+                                << (simParams->model.guardCurvatureInputs ? "on" : "off"));
 
       timeloop->add() << Sweep(curvSweep, "Sweep: curvature computation (finite difference method)",
                                StateSweep::fullFreeSurface)
@@ -1051,6 +1274,10 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
          (*simObjs->acceleration)[2],                    // a_z (= -gravity), same value HydrostaticDensityFtor uses
          simParams->staticReferenceHeight(),             // flat static reference H (same as SimpleBB)
          simParams->model.usePass3Reresolution);
+   // [Claude, 2026-10-01] prm ModelParameters.seedFillFromAllNeighbours (default false = legacy seeding)
+   bognerReconstructionManager->setSeedFillFromAllNeighbours(simParams->model.seedFillFromAllNeighbours);
+   WALBERLA_LOG_INFO_ON_ROOT("FormerMO interface fill seeding: "
+                             << (simParams->model.seedFillFromAllNeighbours ? "all resolved neighbours" : "interface neighbours (legacy)"));
 
    const uint_t convLogFreq = simParams->evaluation.evaluationFrequency;
 

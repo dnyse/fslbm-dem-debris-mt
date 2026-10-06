@@ -44,6 +44,7 @@
 #include "ParticleKernels.h"
 #include "PaperAnalyticalContacts.h"
 
+#include <sstream>
 #include <mesa_pd/collision_detection/GeneralContactDetection.h>
 #include <mesa_pd/data/ParticleAccessor.h>
 #include <mesa_pd/data/ParticleStorage.h>
@@ -5194,6 +5195,492 @@ void testCylinderCylinderContinuityAlongPaths()
 // Reported: existence errors (missed / false contacts), depth errors > max(0.01, 5 %), max depth error, normal angle,
 // mean projection-overlap evaluations per refined call, and the time per call of each variant.
 //======================================================================================================================
+//! [Claude, 2026-09-30] Signed distance of point p to the surface of cylinder c (negative inside).
+real_t cylinderSignedDistance(const CylinderState& c, const Vec3& p)
+{
+   const Vec3   d   = p - c.pos;
+   const Vec3   a   = c.axis();
+   const real_t ax  = d * a;
+   const real_t rad = (d - ax * a).length();
+   const real_t dr = rad - c.radius, dz = std::abs(ax) - real_t(0.5) * c.length;
+   if (dr <= 0 && dz <= 0) return std::max(dr, dz);
+   return std::sqrt(std::max(dr, real_t(0)) * std::max(dr, real_t(0)) + std::max(dz, real_t(0)) * std::max(dz, real_t(0)));
+}
+
+//======================================================================================================================
+// [Claude, 2026-10-01] Box-box CONTACT POINT (detail::boxBoxContactPoint, used by boxBoxSAT). The former point lay on the
+// line between the centres and could be several units from the contact and outside both boxes; elastic collisions then
+// gained up to 98x their kinetic energy (DEMValidation cuboidPairEnergyFuzz). These tests check the new point against
+// hand-derived exact points, inside-the-intersection on random pairs, and its continuity along a motion.
+//======================================================================================================================
+real_t boxSignedDistance(const Vec3& c, const Mat3& R, const Vec3& h, const Vec3& p)
+{
+   const Vec3 l = R.getTranspose() * (p - c);
+   Vec3       q(std::abs(l[0]) - h[0], std::abs(l[1]) - h[1], std::abs(l[2]) - h[2]);
+   const real_t inside = std::min(std::max(q[0], std::max(q[1], q[2])), real_t(0));
+   const Vec3   qp(std::max(q[0], real_t(0)), std::max(q[1], real_t(0)), std::max(q[2], real_t(0)));
+   return qp.length() + inside;
+}
+
+//! the former boxBoxSAT point, for comparison only
+Vec3 formerSatPoint(const Vec3& posA, const Mat3& RA, const Vec3& halfA, const Vec3& posB, const Mat3& RB, const Vec3& halfB,
+                    const Vec3& normal)
+{
+   const Vec3 axis = -normal; // former: normal = -sign * axis with sign chosen so that sign*axis points from A to B
+   real_t     ra = 0, rb = 0;
+   for (uint_t i = 0; i < 3; ++i)
+   {
+      ra += halfA[i] * std::abs(Vec3(RA(0, i), RA(1, i), RA(2, i)) * axis);
+      rb += halfB[i] * std::abs(Vec3(RB(0, i), RB(1, i), RB(2, i)) * axis);
+   }
+   return real_t(0.5) * (posA + posB) + real_t(0.5) * (ra - rb) * axis;
+}
+
+struct BoxPointCheck
+{
+   bool   inside;
+   real_t outside, deepest; // outside: max signed distance; deepest: max depth below either surface / overlap
+};
+BoxPointCheck checkBoxPoint(const Vec3& pA, const Mat3& RA, const Vec3& hA, const Vec3& pB, const Mat3& RB, const Vec3& hB,
+                            const Vec3& point, real_t depth)
+{
+   const real_t dA = boxSignedDistance(pA, RA, hA, point), dB = boxSignedDistance(pB, RB, hB, point);
+   const real_t tol = real_t(1e-9) + real_t(1e-6) * depth;
+   return BoxPointCheck{ std::max(dA, dB) <= tol, std::max(dA, dB), std::max(-dA, -dB) / depth };
+}
+
+void testBoxBoxContactPointHandCases()
+{
+   const Mat3 I;
+   auto run = [&](const char* name, const Vec3& pA, const Mat3& RA, const Vec3& hA, const Vec3& pB, const Mat3& RB,
+                  const Vec3& hB, const Vec3& expected, real_t tolPoint) {
+      const ContactResult r = boxBoxSAT(pA, RA, hA, pB, RB, hB);
+      WALBERLA_CHECK(r.contact, name);
+      const auto   chk = checkBoxPoint(pA, RA, hA, pB, RB, hB, r.point, r.overlap);
+      const Vec3   old = formerSatPoint(pA, RA, hA, pB, RB, hB, r.normal);
+      const auto   chkOld = checkBoxPoint(pA, RA, hA, pB, RB, hB, old, r.overlap);
+      WALBERLA_LOG_INFO_ON_ROOT("[box-point] " << name << ": overlap=" << r.overlap << " normal=" << r.normal << " point="
+                                << r.point << " expected=" << expected << " |diff|=" << (r.point - expected).length()
+                                << " inside=" << chk.inside << " | former point " << old << " |diff|="
+                                << (old - expected).length() << " inside=" << chkOld.inside);
+      WALBERLA_CHECK_LESS((r.point - expected).length(), tolPoint, name);
+      WALBERLA_CHECK(chk.inside, name);
+      return (old - expected).length();
+   };
+   const real_t d = real_t(0.1);
+   // (a) centred stack: unchanged (the line between the centres runs through the contact)
+   run("centred stack", Vec3(0, 0, 0), I, Vec3(1, 1, 1), Vec3(0, 0, real_t(2) - d), I, Vec3(1, 1, 1),
+       Vec3(0, 0, real_t(1) - real_t(0.5) * d), real_t(1e-9));
+   // (b) small box near the end of a long one: contact area x in [4, 6] -> centroid x = 5 (former point: x = 2.5)
+   const real_t oldB = run("small box on the end of a long one", Vec3(0, 0, 0), I, Vec3(6, 1, real_t(1.5)),
+                           Vec3(5, 0, real_t(2.5) - d), I, Vec3(1, 1, 1), Vec3(5, 0, real_t(1.5) - real_t(0.5) * d), real_t(1e-9));
+   WALBERLA_CHECK_GREATER(oldB, real_t(2), "the former point should be ~2.5 off here");
+   // (c) two equal faces, partly overlapping: rectangle x in [1, 2], y in [-1, 2] -> (1.5, 0.5)
+   run("partly overlapping faces", Vec3(0, 0, 0), I, Vec3(2, 2, 1), Vec3(3, 1, real_t(2) - d), I, Vec3(2, 2, 1),
+       Vec3(real_t(1.5), real_t(0.5), real_t(1) - real_t(0.5) * d), real_t(1e-9));
+   // (d) corner into a face, off centre: cube with a body diagonal vertical, lowest vertex at height 1 - d above (0.7,-0.3)
+   {
+      Rot3 rot;
+      rot.rotate(Vec3(1, -1, 0).getNormalized(), std::acos(real_t(1) / std::sqrt(real_t(3))));
+      const Mat3 RB  = rot.getMatrix();
+      const Vec3 hB(real_t(0.5), real_t(0.5), real_t(0.5));
+      // lowest vertex in the body frame
+      Vec3   low;
+      real_t lowZ = std::numeric_limits< real_t >::max();
+      for (int sx = -1; sx <= 1; sx += 2)
+         for (int sy = -1; sy <= 1; sy += 2)
+            for (int sz = -1; sz <= 1; sz += 2)
+            {
+               const Vec3 v = RB * Vec3(sx * hB[0], sy * hB[1], sz * hB[2]);
+               if (v[2] < lowZ) { lowZ = v[2]; low = v; }
+            }
+      const Vec3 target(real_t(0.7), real_t(-0.3), real_t(1) - d);
+      const Vec3 pB = target - low;
+      run("corner into a face", Vec3(0, 0, 0), I, Vec3(2, 2, 1), pB, RB, hB, target + Vec3(0, 0, real_t(0.5) * d), real_t(1e-6));
+   }
+   // (e) crossing edges: bar A along x rotated 45 deg about x (top edge along x at z = sqrt(2)/2), bar B along y rotated
+   //     45 deg about y (bottom edge along y), centred at x = 3, y = -2 -> edges cross at (3, 0)
+   {
+      Rot3 rA, rB;
+      rA.rotate(Vec3(1, 0, 0), math::pi * real_t(0.25));
+      rB.rotate(Vec3(0, 1, 0), math::pi * real_t(0.25));
+      const real_t e = std::sqrt(real_t(2)) * real_t(0.5);
+      const Vec3   pB(3, -2, real_t(2) * e - d);
+      const real_t oldE = run("crossing edges", Vec3(0, 0, 0), rA.getMatrix(), Vec3(6, real_t(0.5), real_t(0.5)), pB,
+                              rB.getMatrix(), Vec3(real_t(0.5), 6, real_t(0.5)), Vec3(3, 0, e - real_t(0.5) * d), real_t(1e-6));
+      WALBERLA_CHECK_GREATER(oldE, real_t(0.5), "the former point should be off here");
+   }
+   // (f) the launch pair of the randomised cuboid drop test (local reproduction, step 20522, sub-cycle 9): the former
+   //     point was 4.3 LU from the centroid of the overlap and outside both cuboids
+   {
+      const Vec3 pA(real_t(1.37178412), real_t(6.07269819), real_t(1.71354156));
+      const Vec3 pB(real_t(2.48370382), real_t(1.60370074), real_t(6.09968309));
+      const Vec3 h(6, 1, real_t(1.5));
+      // rotation matrices as logged by [LAUNCH-TRACE] (row-major)
+      const Mat3 RA = Mat3(real_t(-0.00032603468), real_t(0.957859121), real_t(0.287238225), real_t(0.999999942), real_t(0.000341559239), real_t(-3.93737322e-06), real_t(-0.000101880317), real_t(0.287238207), real_t(-0.957859176));
+      const Mat3 RB = Mat3(real_t(-0.228133258), real_t(-0.968314389), real_t(-0.101599512), real_t(0.00176512624), real_t(0.10393976), real_t(-0.994582028), real_t(0.973628318), real_t(-0.227076574), real_t(-0.0220029189));
+      const ContactResult r = boxBoxSAT(pA, RA, h, pB, RB, h);
+      WALBERLA_CHECK(r.contact);
+      // centroid of the overlap by sampling box A (deterministic grid) and keeping the points inside B
+      Vec3 sum(0);
+      int  n = 0;
+      for (int i = 0; i < 120; ++i)
+         for (int j = 0; j < 20; ++j)
+            for (int k = 0; k < 30; ++k)
+            {
+               const Vec3 loc((real_t(i) + real_t(0.5)) / real_t(120) * real_t(12) - real_t(6),
+                              (real_t(j) + real_t(0.5)) / real_t(20) * real_t(2) - real_t(1),
+                              (real_t(k) + real_t(0.5)) / real_t(30) * real_t(3) - real_t(1.5));
+               const Vec3 x = pA + RA * loc;
+               if (boxSignedDistance(pB, RB, h, x) <= real_t(0)) { sum += x; ++n; }
+            }
+      WALBERLA_CHECK_GREATER(n, 0);
+      const Vec3 cen = sum / real_t(n);
+      const auto chk = checkBoxPoint(pA, RA, h, pB, RB, h, r.point, r.overlap);
+      const Vec3 old = formerSatPoint(pA, RA, h, pB, RB, h, r.normal);
+      WALBERLA_LOG_INFO_ON_ROOT("[box-point] drop-test launch pair: overlap=" << r.overlap << " point=" << r.point
+                                << " inside=" << chk.inside << " overlap-centroid=" << cen << " |point-centroid|="
+                                << (r.point - cen).length() << " | former point " << old << " |former-centroid|="
+                                << (old - cen).length());
+      WALBERLA_CHECK(chk.inside);
+      WALBERLA_CHECK_LESS((r.point - cen).length(), real_t(1));
+      WALBERLA_CHECK_GREATER((old - cen).length(), real_t(3));
+   }
+}
+
+//! [Claude, 2026-10-01] random pairs near the contact boundary (as testBoxBoxRandomizedFuzz) plus elongated drop-test
+//! cuboids; every reported point must lie in the intersection and not deeper than the overlap in either box.
+void testBoxBoxContactPointFuzz()
+{
+   FuzzRng                                  fuzz(13579);
+   std::uniform_real_distribution< real_t > halfExtentDist(real_t(0.3), real_t(2.0));
+   int    contacts = 0, outside = 0, tooDeep = 0, formerOutside = 0;
+   real_t maxOutside = 0, maxDeep = 0, formerMaxOutside = 0;
+   std::vector< real_t > distToGjk;
+   for (int trial = 0; trial < 10000; ++trial)
+   {
+      Vec3 hA, hB;
+      if (trial % 2 == 0)
+      {
+         hA = Vec3(halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng));
+         hB = Vec3(halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng));
+      }
+      else
+         hA = hB = Vec3(6, 1, real_t(1.5)); // the drop-test cuboids
+      const Rot3   rA = fuzz.randomRotation(), rB = fuzz.randomRotation();
+      const Vec3   dir = fuzz.randomUnitVec();
+      const Vec3   pA(0, 0, 0);
+      const real_t minSize = std::min({ hA[0], hA[1], hA[2], hB[0], hB[1], hB[2] });
+      auto contactAt = [&](real_t sep) { return gjkBoxBox(pA, rA, real_t(2) * hA, pA + dir * sep, rB, real_t(2) * hB).contact; };
+      const Vec3 pB = pA + dir * fuzz.sampleSeparationNearBoundary(contactAt, real_t(0), real_t(3) * (hA.length() + hB.length()), minSize);
+      const Mat3 RA = rA.getMatrix(), RB = rB.getMatrix();
+      const ContactResult r = boxBoxSAT(pA, RA, hA, pB, RB, hB);
+      if (!r.contact || r.overlap <= real_t(0)) continue;
+      ++contacts;
+      const auto chk = checkBoxPoint(pA, RA, hA, pB, RB, hB, r.point, r.overlap);
+      maxOutside = std::max(maxOutside, chk.outside / r.overlap);
+      maxDeep    = std::max(maxDeep, chk.deepest);
+      if (!chk.inside) ++outside;
+      if (chk.deepest > real_t(1) + real_t(1e-6)) ++tooDeep;
+      const auto chkOld = checkBoxPoint(pA, RA, hA, pB, RB, hB, formerSatPoint(pA, RA, hA, pB, RB, hB, r.normal), r.overlap);
+      if (!chkOld.inside) ++formerOutside;
+      formerMaxOutside = std::max(formerMaxOutside, chkOld.outside / r.overlap);
+      const GjkResult g = gjkBoxBox(pA, rA, real_t(2) * hA, pB, rB, real_t(2) * hB);
+      if (g.contact) distToGjk.push_back((r.point - g.point).length());
+   }
+   std::sort(distToGjk.begin(), distToGjk.end());
+   auto pct = [&](real_t q) { return distToGjk.empty() ? real_t(0) : distToGjk[size_t(q * real_t(distToGjk.size() - 1))]; };
+   WALBERLA_LOG_INFO_ON_ROOT("[box-point fuzz] 10000 pairs (half uniform-random, half 12x2x3), " << contacts
+                             << " contacts: points outside the intersection " << outside << " (max signed distance "
+                             << maxOutside << " x overlap), deeper than the overlap " << tooDeep << " (max " << maxDeep
+                             << " x overlap) | former point: outside " << formerOutside << " (max " << formerMaxOutside
+                             << " x overlap) | distance to the GJK/EPA point median " << pct(0.5) << " p95 " << pct(0.95)
+                             << " max " << pct(1));
+   WALBERLA_CHECK_EQUAL(outside, 0);
+   WALBERLA_CHECK_EQUAL(tooDeep, 0);
+}
+
+//! [Claude, 2026-10-01] continuity of the contact point along straight paths through the contact (300 random pairs,
+//! 300 steps each, translation only): largest jump of the point per step, in units of the step length. Feature changes
+//! (vertex <-> edge <-> face as the overlap grows) are real jumps of a single-point model; reported, not asserted.
+void testBoxBoxContactPointContinuity()
+{
+   FuzzRng fuzz(24601);
+   real_t  worstJump = 0, sumJumps = 0;
+   int     paths = 0, pathsWithJumpOver10 = 0;
+   for (int k = 0; k < 300; ++k)
+   {
+      const Vec3   hA(6, 1, real_t(1.5)), hB(6, 1, real_t(1.5));
+      const Rot3   rA = fuzz.randomRotation(), rB = fuzz.randomRotation();
+      const Vec3   dir = fuzz.randomUnitVec();
+      const Vec3   pA(0, 0, 0);
+      auto contactAt = [&](real_t sep) { return gjkBoxBox(pA, rA, real_t(2) * hA, pA + dir * sep, rB, real_t(2) * hB).contact; };
+      // touching separation along dir, then a path from an overlap of 0.3 to a gap of 0.1 along dir
+      real_t lo = 0, hi = real_t(3) * (hA.length() + hB.length());
+      for (int it = 0; it < 60; ++it) { const real_t m = real_t(0.5) * (lo + hi); (contactAt(m) ? lo : hi) = m; }
+      const real_t s0 = lo - real_t(0.3), s1 = lo + real_t(0.1), ds = (s1 - s0) / real_t(300);
+      const Mat3   RA = rA.getMatrix(), RB = rB.getMatrix();
+      bool havePrev = false;
+      Vec3 prev;
+      real_t pathMax = 0;
+      for (int i = 0; i <= 300; ++i)
+      {
+         const Vec3          pB = pA + dir * (s0 + ds * real_t(i));
+         const ContactResult r  = boxBoxSAT(pA, RA, hA, pB, RB, hB);
+         if (!r.contact) { havePrev = false; continue; }
+         if (havePrev) pathMax = std::max(pathMax, (r.point - prev).length() / ds);
+         prev = r.point;
+         havePrev = true;
+      }
+      ++paths;
+      worstJump = std::max(worstJump, pathMax);
+      sumJumps += pathMax;
+      if (pathMax > real_t(10)) ++pathsWithJumpOver10;
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("[box-point continuity] " << paths << " paths of 12x2x3 cuboids, step ds: largest point jump "
+                             << worstJump << " ds (mean of per-path maxima " << sumJumps / real_t(paths)
+                             << " ds), paths with a jump > 10 ds: " << pathsWithJumpOver10);
+}
+
+//! [Claude, 2026-10-02] cost of the box-box contact point: random near-boundary pairs vs. nearly flat resting contacts
+//! (face on face, tilt 1e-4..5e-2 rad, overlap 1e-4..1e-2), the configurations of a settled cuboid pile.
+void benchmarkBoxBoxContactPoint()
+{
+   using clk = std::chrono::steady_clock;
+   FuzzRng fuzz(31415);
+   auto runSet = [&](const char* name, const std::vector< std::array< Vec3, 2 > >& pos, const std::vector< std::array< Mat3, 2 > >& rot,
+                     const Vec3& h) {
+      auto& st = detail::boxPointIterationStats();
+      st = detail::BoxPointIterationStats{};
+      int        contacts = 0;
+      const auto t0       = clk::now();
+      for (size_t i = 0; i < pos.size(); ++i)
+         contacts += boxBoxSAT(pos[i][0], rot[i][0], h, pos[i][1], rot[i][1], h).contact ? 1 : 0;
+      const double us = std::chrono::duration< double, std::micro >(clk::now() - t0).count() / double(pos.size());
+      WALBERLA_LOG_INFO_ON_ROOT("[box-point cost] " << name << ": " << pos.size() << " pairs, " << contacts << " contacts, "
+                                << us << " us/pair | pull iterations: mean "
+                                << (st.calls ? double(st.iterations) / double(st.calls) : 0.0) << " max " << st.maxIterations
+                                << " capped(2000) " << st.capped);
+   };
+   const Vec3 h(6, 1, real_t(1.5));
+   std::vector< std::array< Vec3, 2 > > posR, posF;
+   std::vector< std::array< Mat3, 2 > > rotR, rotF;
+   std::uniform_real_distribution< real_t > u01(real_t(0), real_t(1));
+   for (int t = 0; t < 4000; ++t)
+   {
+      const Rot3 rA = fuzz.randomRotation(), rB = fuzz.randomRotation();
+      const Vec3 dir = fuzz.randomUnitVec();
+      auto contactAt = [&](real_t sep) { return gjkBoxBox(Vec3(0), rA, real_t(2) * h, dir * sep, rB, real_t(2) * h).contact; };
+      posR.push_back({ Vec3(0), dir * fuzz.sampleSeparationNearBoundary(contactAt, real_t(0), real_t(3) * real_t(2) * h.length(), real_t(1)) });
+      rotR.push_back({ rA.getMatrix(), rB.getMatrix() });
+      // flat: B on top of A (z), small tilt about a random horizontal axis, random lateral offset, small overlap
+      const real_t tilt = std::pow(real_t(10), real_t(-4) + real_t(2.7) * u01(fuzz.rng));
+      const real_t ov   = std::pow(real_t(10), real_t(-4) + real_t(2) * u01(fuzz.rng));
+      const real_t phi  = real_t(2) * math::pi * u01(fuzz.rng);
+      Rot3         rT;
+      rT.rotate(Vec3(std::cos(phi), std::sin(phi), 0), tilt);
+      Rot3 yaw;
+      yaw.rotate(Vec3(0, 0, 1), real_t(2) * math::pi * u01(fuzz.rng));
+      const Mat3   RB  = rT.getMatrix() * yaw.getMatrix();
+      const Vec3   off((u01(fuzz.rng) - real_t(0.5)) * real_t(6), (u01(fuzz.rng) - real_t(0.5)) * real_t(2), 0);
+      // lowest point of B for this rotation, so that B penetrates A's top face (z = 1.5) by ov
+      real_t lowZ = std::numeric_limits< real_t >::max();
+      for (int sx = -1; sx <= 1; sx += 2)
+         for (int sy = -1; sy <= 1; sy += 2)
+            for (int sz = -1; sz <= 1; sz += 2)
+               lowZ = std::min(lowZ, (RB * Vec3(sx * h[0], sy * h[1], sz * h[2]))[2]);
+      posF.push_back({ Vec3(0), off + Vec3(0, 0, real_t(1.5) - ov - lowZ) });
+      rotF.push_back({ Mat3(), RB });
+   }
+   runSet("random near-boundary 12x2x3", posR, rotR, h);
+   runSet("flat resting face-on-face 12x2x3", posF, rotF, h);
+}
+
+//! [Claude, 2026-10-02] detail::clipLineToBox, hand cases: the interval of t for which x0 + t dir lies in the box
+void testClipLineToBox()
+{
+   const Vec3 axesI[3] = { Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1) };
+   auto clip = [&](const Vec3& x0, const Vec3& dir, const Vec3& pos, const Vec3 axes[3], const Vec3& half) {
+      real_t lo = -std::numeric_limits< real_t >::max(), hi = std::numeric_limits< real_t >::max();
+      detail::clipLineToBox(x0, dir, pos, axes, half, lo, hi);
+      return std::make_pair(lo, hi);
+   };
+   const Vec3 h(6, 1, real_t(1.5));
+   // through the centre along z: [-1.5, 1.5]
+   auto r = clip(Vec3(0), Vec3(0, 0, 1), Vec3(0), axesI, h);
+   WALBERLA_CHECK_FLOAT_EQUAL(r.first, real_t(-1.5));
+   WALBERLA_CHECK_FLOAT_EQUAL(r.second, real_t(1.5));
+   // offset start and box: x0 = (2, 0.5, 10), box at (1, 0, 3) -> z in [1.5, 4.5] -> t in [-8.5, -5.5]
+   r = clip(Vec3(2, real_t(0.5), 10), Vec3(0, 0, 1), Vec3(1, 0, 3), axesI, h);
+   WALBERLA_CHECK_FLOAT_EQUAL(r.first, real_t(-8.5));
+   WALBERLA_CHECK_FLOAT_EQUAL(r.second, real_t(-5.5));
+   // parallel to an axis but outside that slab: empty
+   r = clip(Vec3(0, 2, 0), Vec3(0, 0, 1), Vec3(0), axesI, h);
+   WALBERLA_CHECK_GREATER(r.first, r.second);
+   // diagonal in the x-z plane through the centre: limited by z (|t| sqrt(1/2) <= 1.5) -> |t| <= 1.5 sqrt(2)
+   r = clip(Vec3(0), Vec3(1, 0, 1).getNormalized(), Vec3(0), axesI, h);
+   WALBERLA_CHECK_FLOAT_EQUAL(r.first, -real_t(1.5) * std::sqrt(real_t(2)));
+   WALBERLA_CHECK_FLOAT_EQUAL(r.second, real_t(1.5) * std::sqrt(real_t(2)));
+   // rotated box (45 deg about z), line along z through a point inside: full z extent
+   Rot3 rot;
+   rot.rotate(Vec3(0, 0, 1), math::pi * real_t(0.25));
+   const Mat3 R = rot.getMatrix();
+   const Vec3 axesR[3] = { Vec3(R(0, 0), R(1, 0), R(2, 0)), Vec3(R(0, 1), R(1, 1), R(2, 1)), Vec3(R(0, 2), R(1, 2), R(2, 2)) };
+   r = clip(Vec3(3, 3, 0), Vec3(0, 0, 1), Vec3(0), axesR, h); // (3,3) lies on the long axis at 4.24 < 6
+   WALBERLA_CHECK_FLOAT_EQUAL(r.first, real_t(-1.5));
+   WALBERLA_CHECK_FLOAT_EQUAL(r.second, real_t(1.5));
+   r = clip(Vec3(3, -3, 0), Vec3(0, 0, 1), Vec3(0), axesR, h); // 4.24 across the short axis (half 1): outside
+   WALBERLA_CHECK_GREATER(r.first, r.second);
+   // narrowing: the second box shrinks the interval of the first
+   real_t lo = -std::numeric_limits< real_t >::max(), hi = std::numeric_limits< real_t >::max();
+   detail::clipLineToBox(Vec3(0), Vec3(0, 0, 1), Vec3(0), axesI, h, lo, hi);
+   detail::clipLineToBox(Vec3(0), Vec3(0, 0, 1), Vec3(0, 0, real_t(2.9)), axesI, h, lo, hi); // z in [1.4, 4.4]
+   WALBERLA_CHECK_FLOAT_EQUAL(lo, real_t(1.4));
+   WALBERLA_CHECK_FLOAT_EQUAL(hi, real_t(1.5));
+   WALBERLA_LOG_INFO_ON_ROOT("[clip-line] hand cases passed");
+}
+
+//! [Claude, 2026-10-02] contacts as in a settled pile: two arbitrarily rotated 12x2x3 cuboids, B placed along a random
+//! direction at the touching distance minus a tiny overlap (1e-7..1e-2, log-uniform). The alternating projection needed
+//! up to its 2000-iteration cap here (225 of 362 contacts of the random_cuboids drop-test pile, 4284396 step 70000).
+//! Checks for the closed-form point (line clip along the normal): inside the intersection (asserted), its offset from
+//! the former projected point perpendicular to the normal (the lever-arm change; reported), and the cost of both.
+void testBoxBoxContactPointRestingContacts()
+{
+   using clk = std::chrono::steady_clock;
+   FuzzRng fuzz(27182);
+   std::uniform_real_distribution< real_t > u01(real_t(0), real_t(1));
+   const Vec3 h(6, 1, real_t(1.5));
+   struct Case { Vec3 pB; Mat3 RA, RB; };
+   std::vector< Case > cases;
+   for (int t = 0; t < 4000; ++t)
+   {
+      const Rot3 rA = fuzz.randomRotation(), rB = fuzz.randomRotation();
+      const Vec3 dir = fuzz.randomUnitVec();
+      const Mat3 RA = rA.getMatrix(), RB = rB.getMatrix();
+      real_t lo = 0, hi = real_t(3) * real_t(2) * h.length();
+      for (int it = 0; it < 80; ++it)
+      {
+         const real_t m = real_t(0.5) * (lo + hi);
+         (boxBoxSAT(Vec3(0), RA, h, dir * m, RB, h).contact ? lo : hi) = m;
+      }
+      const real_t ov = std::pow(real_t(10), real_t(-7) + real_t(5) * u01(fuzz.rng));
+      cases.push_back(Case{ dir * (lo - ov), RA, RB });
+   }
+   auto axesOf = [](const Mat3& R, Vec3 a[3]) {
+      for (uint_t i = 0; i < 3; ++i) a[i] = Vec3(R(0, i), R(1, i), R(2, i));
+   };
+   int    contacts = 0, outsideNew = 0, outsideOld = 0;
+   real_t maxOutsideNew = 0, maxOutsideOld = 0;
+   std::vector< real_t > perp, perpRel;
+   auto& st = detail::boxPointIterationStats();
+   st = detail::BoxPointIterationStats{};
+   double usNew = 0, usOld = 0;
+   for (const auto& c : cases)
+   {
+      const ContactResult r = boxBoxSAT(Vec3(0), c.RA, h, c.pB, c.RB, h);
+      if (!r.contact || r.overlap <= real_t(0)) continue;
+      ++contacts;
+      Vec3 aA[3], aB[3];
+      axesOf(c.RA, aA);
+      axesOf(c.RB, aB);
+      const auto t0 = clk::now();
+      const Vec3 pNew = detail::boxBoxContactPoint(Vec3(0), aA, h, c.pB, aB, h, r.normal, r.overlap);
+      const auto t1 = clk::now();
+      const Vec3 pOld = detail::boxBoxContactPoint(Vec3(0), aA, h, c.pB, aB, h, r.normal, r.overlap, true);
+      const auto t2 = clk::now();
+      usNew += std::chrono::duration< double, std::micro >(t1 - t0).count();
+      usOld += std::chrono::duration< double, std::micro >(t2 - t1).count();
+      WALBERLA_CHECK_FLOAT_EQUAL((pNew - r.point).length() + real_t(1), real_t(1), "boxBoxSAT must use the new point");
+      const auto chkN = checkBoxPoint(Vec3(0), c.RA, h, c.pB, c.RB, h, pNew, r.overlap);
+      const auto chkO = checkBoxPoint(Vec3(0), c.RA, h, c.pB, c.RB, h, pOld, r.overlap);
+      if (!chkN.inside) ++outsideNew;
+      if (!chkO.inside) ++outsideOld;
+      maxOutsideNew = std::max(maxOutsideNew, chkN.outside);
+      maxOutsideOld = std::max(maxOutsideOld, chkO.outside);
+      const Vec3 d = pNew - pOld;
+      const real_t dp = (d - (d * r.normal) * r.normal).length();
+      perp.push_back(dp);
+      perpRel.push_back(dp / r.overlap);
+   }
+   std::sort(perp.begin(), perp.end());
+   std::sort(perpRel.begin(), perpRel.end());
+   auto pct = [](const std::vector< real_t >& v, real_t q) { return v.empty() ? real_t(0) : v[size_t(q * real_t(v.size() - 1))]; };
+   const uint64_t calls = uint64_t(contacts); // one new + one legacy evaluation per contact
+   WALBERLA_LOG_INFO_ON_ROOT("[box-point resting] " << cases.size() << " pairs, " << contacts << " contacts | new point: "
+                             << usNew / contacts << " us, line clip hit " << st.lineClipHits / 2 << " / polytope shift "
+                             << st.polytopeShifts / 2 << " / projection fallback " << st.projectionFallbacks / 2 << " of " << calls
+                             << ", outside the intersection " << outsideNew << " (max " << maxOutsideNew << ") | former "
+                             << "projection: " << usOld / contacts << " us, outside " << outsideOld << " (max "
+                             << maxOutsideOld << "), projection calls " << st.calls << " mean iterations "
+                             << (st.calls ? double(st.iterations) / double(st.calls) : 0.0) << " capped " << st.capped
+                             << " | offset new-former perpendicular to the normal: median " << pct(perp, real_t(0.5))
+                             << " p95 " << pct(perp, real_t(0.95)) << " max " << pct(perp, real_t(1)) << " (x overlap: median "
+                             << pct(perpRel, real_t(0.5)) << " p95 " << pct(perpRel, real_t(0.95)) << ")");
+   WALBERLA_CHECK_GREATER(contacts, 3000);
+   WALBERLA_CHECK_EQUAL(outsideNew, 0);
+   WALBERLA_CHECK_LESS(usNew, usOld);
+}
+
+//! [Claude, 2026-10-02] ANTIDUNES_BOX_PAIRS_EVAL=<file> (optional): the same comparison on dumped cuboid pairs, one pair
+//! per line: posA(3) axesA(3x3, one axis per triple) halfA(3) posB(3) axesB(3x3) halfB(3) -- e.g. the near-contact
+//! pairs of the random_cuboids drop-test pile (4284396, step 70000)
+void evaluateBoxPairsDump()
+{
+   const char* path = std::getenv("ANTIDUNES_BOX_PAIRS_EVAL");
+   if (!path) return;
+   std::ifstream in(path);
+   WALBERLA_CHECK(in.good(), "cannot open " << path);
+   using clk = std::chrono::steady_clock;
+   int    pairs = 0, contacts = 0, outsideNew = 0, outsideOld = 0;
+   double usNew = 0, usOld = 0;
+   std::vector< real_t > perp;
+   auto& st = detail::boxPointIterationStats();
+   st = detail::BoxPointIterationStats{};
+   real_t v[30];
+   while (true)
+   {
+      bool ok = true;
+      for (int k = 0; k < 30 && ok; ++k) ok = bool(in >> v[k]);
+      if (!ok) break;
+      ++pairs;
+      Vec3 pA(v[0], v[1], v[2]), pB(v[15], v[16], v[17]), aA[3], aB[3];
+      Mat3 RA, RB;
+      for (uint_t i = 0; i < 3; ++i)
+      {
+         aA[i] = Vec3(v[3 + 3 * i], v[4 + 3 * i], v[5 + 3 * i]);
+         aB[i] = Vec3(v[18 + 3 * i], v[19 + 3 * i], v[20 + 3 * i]);
+         for (uint_t r = 0; r < 3; ++r) { RA(r, i) = aA[i][r]; RB(r, i) = aB[i][r]; }
+      }
+      const Vec3 hA(v[12], v[13], v[14]), hB(v[27], v[28], v[29]);
+      const ContactResult r = boxBoxSAT(pA, RA, hA, pB, RB, hB);
+      if (!r.contact || r.overlap <= real_t(0)) continue;
+      ++contacts;
+      const auto t0 = clk::now();
+      const Vec3 pNew = detail::boxBoxContactPoint(pA, aA, hA, pB, aB, hB, r.normal, r.overlap);
+      const auto t1 = clk::now();
+      const Vec3 pOld = detail::boxBoxContactPoint(pA, aA, hA, pB, aB, hB, r.normal, r.overlap, true);
+      const auto t2 = clk::now();
+      usNew += std::chrono::duration< double, std::micro >(t1 - t0).count();
+      usOld += std::chrono::duration< double, std::micro >(t2 - t1).count();
+      if (!checkBoxPoint(pA, RA, hA, pB, RB, hB, pNew, r.overlap).inside) ++outsideNew;
+      if (!checkBoxPoint(pA, RA, hA, pB, RB, hB, pOld, r.overlap).inside) ++outsideOld;
+      const Vec3 d = pNew - pOld;
+      perp.push_back((d - (d * r.normal) * r.normal).length());
+   }
+   std::sort(perp.begin(), perp.end());
+   auto pct = [&](real_t q) { return perp.empty() ? real_t(0) : perp[size_t(q * real_t(perp.size() - 1))]; };
+   WALBERLA_LOG_INFO_ON_ROOT("[box-point pairs " << path << "] " << pairs << " pairs, " << contacts << " contacts | new: "
+                             << usNew / contacts << " us, line clip hit " << st.lineClipHits / 2 << " / polytope shift "
+                             << st.polytopeShifts / 2 << " / projection fallback " << st.projectionFallbacks / 2 << " of "
+                             << contacts << ", outside " << outsideNew
+                             << " | former projection: " << usOld / contacts << " us, outside " << outsideOld
+                             << ", mean iterations " << (st.calls ? double(st.iterations) / double(st.calls) : 0.0)
+                             << " capped " << st.capped << " | perpendicular offset new-former: median " << pct(real_t(0.5))
+                             << " p95 " << pct(real_t(0.95)) << " max " << pct(real_t(1)));
+   WALBERLA_CHECK_EQUAL(outsideNew, 0);
+}
+
 void testRefinedCylinderContactVsGjk()
 {
    FuzzRng                                  fuzz(24680);
@@ -5215,6 +5702,25 @@ void testRefinedCylinderContactVsGjk()
    }
 
    struct Stats { int missed = 0, falsePos = 0, wrongDepth = 0; real_t maxErr = 0, maxErrRel = 0, maxAngle = 0; };
+   // Contact-point check (the point need not be unique, e.g. face on band): the point must lie in the intersection of
+   // the two cylinders -- signed distance to both surfaces <= tol -- and must not lie deeper than the penetration depth
+   // in either body. Counted per method over the contacts both GJK/EPA and the method report.
+   struct PointStats { int checked = 0, outside = 0, tooDeep = 0; real_t maxOutside = 0, maxDepthRatio = 0; };
+   std::map< std::string, PointStats > pst;
+   auto checkPoint = [&](const std::string& name, const CylinderState& ci, const CylinderState& cj, bool c,
+                         const Vec3& point, real_t depth) {
+      if (!c || depth <= real_t(0)) return;
+      auto&        ps  = pst[name];
+      const real_t di  = cylinderSignedDistance(ci, point), dj = cylinderSignedDistance(cj, point);
+      const real_t tol = real_t(1e-6) + real_t(1e-3) * depth;
+      ++ps.checked;
+      const real_t out = std::max(di, dj);
+      ps.maxOutside    = std::max(ps.maxOutside, out / depth);
+      if (out > tol) ++ps.outside;
+      const real_t deep = std::max(-di, -dj) / depth;
+      ps.maxDepthRatio  = std::max(ps.maxDepthRatio, deep);
+      if (deep > real_t(1) + real_t(1e-3)) ++ps.tooDeep;
+   };
    Stats raw, hyb, trust, ref;
    int   contacts = 0;
    long  evals = 0, refineCalls = 0;
@@ -5240,6 +5746,14 @@ void testRefinedCylinderContactVsGjk()
       score(hyb, h.contact, h.overlap, h.normal, g);
       score(trust, r.contact, r.overlap, r.normal, g); // identical to raw by construction: "no scenario" -> no contact
       score(ref, rf.contact, rf.overlap, rf.normal, g);
+      if (g.contact)
+      {
+         checkPoint("gjk", p.ci, p.cj, true, g.point, -g.penetrationDepth);
+         checkPoint("raw", p.ci, p.cj, r.contact, r.point, r.overlap);
+         checkPoint("hybrid", p.ci, p.cj, h.contact, h.point, h.overlap);
+         checkPoint("refined", p.ci, p.cj, rf.contact, rf.point, rf.overlap);
+         if (r.contact) checkPoint(std::string("raw:") + r.scenario, p.ci, p.cj, r.contact, r.point, r.overlap);
+      }
       if (rf.contact && !g.contact && std::getenv("ANTIDUNES_REFINED_DEBUG"))
       {
          Vec3 p0i, p1i, p0j, p1j;
@@ -5348,11 +5862,21 @@ void testRefinedCylinderContactVsGjk()
    line("hybrid (GJK fallback)", hyb, tHyb);
    line("trust no-scenario    ", trust, tRaw);
    line("refined (no GJK/EPA) ", ref, tRef);
+   for (const auto& [m, ps] : pst)
+   {
+      WALBERLA_LOG_INFO_ON_ROOT("[refined] contact point " << m << ": " << ps.checked << " contacts, outside the intersection="
+         << ps.outside << " (max signed distance " << ps.maxOutside << " x depth), deeper than the penetration depth="
+         << ps.tooDeep << " (max " << ps.maxDepthRatio << " x depth)");
+   }
    WALBERLA_LOG_INFO_ON_ROOT("[refined] GJK/EPA alone: " << tGjk << " us/pair");
    // regression guard for the refined detection (values of the 2026-09-30 run: 0 / 0 / 0, max depth error 2.2e-4)
    WALBERLA_CHECK_EQUAL(ref.missed, 0);
    WALBERLA_CHECK_EQUAL(ref.falsePos, 0);
    WALBERLA_CHECK_EQUAL(ref.wrongDepth, 0);
+   // contact point of the refined detection inside the intersection of the two cylinders (2026-09-30: 0 of 1698)
+   WALBERLA_CHECK_EQUAL(pst["refined"].outside, 0);
+   WALBERLA_CHECK_EQUAL(pst["refined"].tooDeep, 0);
+   WALBERLA_CHECK_EQUAL(pst["raw:band-band-skewed"].outside, 0);
 }
 
 //======================================================================================================================
@@ -5436,10 +5960,182 @@ void testIndependentReferenceDump()
                              << " box pairs (uniform SO(3) orientations) to " << dir);
 }
 
+//======================================================================================================================
+// [Claude, 2026-10-01] Independent-reference dump for rod-PILLAR (solid CylindricalBoundary) and rod-WALL (HalfSpace)
+// contacts, the obstacles of the clogging layouts. Opt-in like testIndependentReferenceDump (ANTIDUNES_REFERENCE_DUMP).
+// Production detection: SolidCylinderContactDetection (ParticleKernels.h, "pillar exterior" and Cylinder x HalfSpace).
+// scripts/contact-validation/brute_force_reference.py recomputes the depth from the support functions, with the
+// infinite pillar represented by a cylinder of half-length 1000 and the wall by its support function.
+//======================================================================================================================
+void testIndependentReferenceDumpObstacles()
+{
+   const char* dir = std::getenv("ANTIDUNES_REFERENCE_DUMP");
+   if (dir == nullptr) return;
+   const int numTrials = std::getenv("ANTIDUNES_REFERENCE_TRIALS") ? std::atoi(std::getenv("ANTIDUNES_REFERENCE_TRIALS"))
+                                                                   : 2000;
+   FuzzRng fuzz(86420);
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0)), lengthDist(real_t(0.5), real_t(4.0));
+   std::uniform_real_distribution< real_t > pillarDist(real_t(0.5), real_t(3.0));
+
+   auto detect = [](const Vec3& pos, const Rot3& rot, real_t R, real_t L, auto&& obstacleShape, const Vec3& obstaclePos,
+                    GjkResult& out, bool refine = false) {
+      auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+      mesa_pd::data::ParticleAccessor ac(ps);
+      auto rod = ps->create();
+      rod->setPosition(pos);
+      rod->setRotation(rot);
+      rod->setInteractionRadius(std::sqrt(R * R + real_t(0.25) * L * L));
+      auto obs = ps->create();
+      obs->setPosition(obstaclePos);
+      const mesa_pd::data::Cylinder cyl(R, L);
+      SolidCylinderContactDetection scd;
+      scd.refineCylinderContacts = refine;
+      const bool c = scd(0, 1, cyl, obstacleShape, ac);
+      out = GjkResult{ c, scd.getPenetrationDepth(), scd.getContactNormal(), scd.getContactPoint() };
+      return c;
+   };
+
+   for (const std::string kind : { "pillar", "wall" })
+   {
+      std::ofstream f(std::string(dir) + "/" + kind + "_pairs.csv");
+      f.precision(17);
+      f << "trial,R,L,x,y,z,A00,A01,A02,A10,A11,A12,A20,A21,A22,Rp,ax,ay,az,contact,depth,nx,ny,nz,px,py,pz,"
+           "r_contact,r_depth,r_nx,r_ny,r_nz,r_px,r_py,r_pz\n";
+      for (int t = 0; t < numTrials; ++t)
+      {
+         const real_t R = radiusDist(fuzz.rng), L = lengthDist(fuzz.rng);
+         const Rot3   rot  = fuzz.randomRotation();
+         const Vec3   axis = fuzz.randomUnitVec(); // pillar axis or wall normal
+         const real_t Rp   = (kind == "pillar") ? pillarDist(fuzz.rng) : real_t(0);
+         const Vec3   dir3 = fuzz.randomUnitVec();
+         const Vec3   origin(0, 0, 0);
+         const mesa_pd::data::CylindricalBoundary pillar(Rp > 0 ? Rp : real_t(1), axis);
+         const mesa_pd::data::HalfSpace           wall(axis);
+         GjkResult                                res{ false, real_t(0), Vec3(real_t(0)), Vec3(real_t(0)) };
+         auto contactAt = [&](real_t sep) {
+            GjkResult tmp{ false, real_t(0), Vec3(real_t(0)), Vec3(real_t(0)) };
+            return (kind == "pillar") ? detect(origin + dir3 * sep, rot, R, L, pillar, origin, tmp)
+                                      : detect(origin + dir3 * sep, rot, R, L, wall, origin, tmp);
+         };
+         // wall: dir3 must point to the free side for the rod to leave the wall
+         Vec3 d3 = dir3;
+         if (kind == "wall" && d3 * axis < real_t(0.2)) d3 = (d3 + axis).getNormalized();
+         auto contactAtW = [&](real_t sep) {
+            GjkResult tmp{ false, real_t(0), Vec3(real_t(0)), Vec3(real_t(0)) };
+            // sampling with the refined detection (validated against the reference); the legacy pillar detection misses
+            // contacts, which would bias the sampled overlaps towards large values
+            return (kind == "pillar") ? detect(origin + d3 * sep, rot, R, L, pillar, origin, tmp, true)
+                                      : detect(origin + d3 * sep, rot, R, L, wall, origin, tmp, true);
+         };
+         WALBERLA_UNUSED(contactAt);
+         const real_t far = real_t(3) * (Rp + R + L);
+         const Vec3   pos = origin + d3 * fuzz.sampleSeparationNearBoundary(contactAtW, real_t(0), far, std::min(R, Rp > 0 ? Rp : R));
+         GjkResult rres{ false, real_t(0), Vec3(real_t(0)), Vec3(real_t(0)) };
+         if (kind == "pillar") { detect(pos, rot, R, L, pillar, origin, res); detect(pos, rot, R, L, pillar, origin, rres, true); }
+         else { detect(pos, rot, R, L, wall, origin, res); detect(pos, rot, R, L, wall, origin, rres, true); }
+         f << t << ',' << R << ',' << L << ',' << pos[0] << ',' << pos[1] << ',' << pos[2];
+         dumpMat(f, rot.getMatrix());
+         f << ',' << Rp << ',' << axis[0] << ',' << axis[1] << ',' << axis[2] << ',' << res.contact << ',' << res.penetrationDepth
+           << ',' << res.normal[0] << ',' << res.normal[1] << ',' << res.normal[2] << ',' << res.point[0] << ',' << res.point[1]
+           << ',' << res.point[2] << ',' << rres.contact << ',' << rres.penetrationDepth << ',' << rres.normal[0] << ','
+           << rres.normal[1] << ',' << rres.normal[2] << ',' << rres.point[0] << ',' << rres.point[1] << ',' << rres.point[2] << '\n';
+      }
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("[reference-dump] wrote " << numTrials << " rod-pillar and " << numTrials << " rod-wall pairs to " << dir);
+
+}
+//! [Claude, 2026-10-01] Offline evaluation of the refined detection on pairs dumped from a packing run
+//! (ParticleKernels ANTIDUNES_REFINE_DUMP). Only with ANTIDUNES_REFINE_EVAL=<dir with dump_rank*.csv>. For the
+//! contacts the fast path rejected because the short descent found a smaller overlap ("smaller-elsewhere"), it compares
+//! the full refinement with cheaper acceptance rules: accept the closed form if the descent improves on it by less than a
+//! relative tolerance, or take the short descent's own minimum.
+void evaluateRefineDump()
+{
+   const char* dir = std::getenv("ANTIDUNES_REFINE_EVAL");
+   if (dir == nullptr) return;
+   using clk = std::chrono::steady_clock;
+   auto stateFrom = [](const std::vector< double >& v, size_t o) {
+      Vec3 a(v[o + 3], v[o + 4], v[o + 5]);
+      a /= a.length();
+      Vec3 e1 = a % Vec3(real_t(1), real_t(0), real_t(0));
+      if (e1.length() < real_t(0.5)) e1 = a % Vec3(real_t(0), real_t(1), real_t(0));
+      e1 /= e1.length();
+      const Vec3 e2 = a % e1;
+      const Mat3 R(e1[0], e2[0], a[0], e1[1], e2[1], a[1], e1[2], e2[2], a[2]);
+      return CylinderState{ Vec3(v[o], v[o + 1], v[o + 2]), R, real_t(v[o + 6]), real_t(v[o + 7]) };
+   };
+   const real_t tols[4] = { real_t(1e-9), real_t(1e-6), real_t(1e-4), real_t(1e-3) }; // relative to D0
+   uint_t n = 0, nAcc[4] = {}, nScenarioMismatch = 0;
+   double maxErrAcc[4] = {}, maxAngAcc[4] = {}, maxErrShort = 0, maxAngShort = 0, tFull = 0, tShort = 0;
+   std::map< std::string, uint_t > byScenario;
+   for (const auto& entry : std::filesystem::directory_iterator(dir))
+   {
+      if (entry.path().filename().string().rfind("dump_rank", 0) != 0) continue;
+      std::ifstream in(entry.path());
+      std::string   line;
+      std::getline(in, line); // header
+      while (std::getline(in, line))
+      {
+         std::vector< std::string > f;
+         std::stringstream          ss(line);
+         std::string                tok;
+         while (std::getline(ss, tok, ',')) f.push_back(tok);
+         if (f.size() != 23 || f[4] != "3") continue; // smaller-elsewhere only
+         std::vector< double > v;
+         for (size_t k = 7; k < 23; ++k) v.push_back(std::stod(f[k]));
+         const CylinderState ci = stateFrom(v, 0), cj = stateFrom(v, 8);
+         const ContactResult raw = cylinderCylinderContact(ci, cj);
+         if (!raw.contact || std::string(raw.scenario) != f[0]) { ++nScenarioMismatch; continue; }
+         ++n;
+         ++byScenario[f[0]];
+         const auto          t0   = clk::now();
+         const ContactResult full = refineCylinderContact(ci, cj, raw);
+         const auto          t1   = clk::now();
+         tFull += std::chrono::duration< double >(t1 - t0).count();
+         // the fast path's short descent, as in refineCylinderContact
+         const auto   t2 = clk::now();
+         const Vec3   L0 = -raw.normal;
+         const real_t D0 = detail::cylinderProjectionOverlap(ci, cj, L0);
+         Vec3         std5[5];
+         detail::cylinderSeedDirections(ci, cj, std5);
+         const detail::OverlapMinimum q = detail::minimiseCylinderProjectionOverlap(ci, cj, std5, 1, false, 20, real_t(1e-7));
+         const auto t3 = clk::now();
+         tShort += std::chrono::duration< double >(t3 - t2).count();
+         const double ref = full.contact ? double(full.overlap) : 0.0;
+         auto angle = [](const Vec3& a, const Vec3& b) {
+            return std::acos(std::clamp(double(a * b), -1.0, 1.0)) * 180.0 / math::pi;
+         };
+         for (int k = 0; k < 4; ++k)
+            if (q.value >= D0 - tols[k] * D0)
+            {
+               ++nAcc[k];
+               maxErrAcc[k] = std::max(maxErrAcc[k], std::abs(double(D0) - ref) / std::max(ref, 1e-30));
+               if (full.contact) maxAngAcc[k] = std::max(maxAngAcc[k], angle(raw.normal, full.normal));
+            }
+         const real_t   shortVal = std::min(q.value, D0);
+         const Vec3 shortNormal = (q.value < D0) ? Vec3(-q.direction) : raw.normal;
+         maxErrShort = std::max(maxErrShort, std::abs(double(shortVal) - ref) / std::max(ref, 1e-30));
+         if (full.contact) maxAngShort = std::max(maxAngShort, angle(shortNormal, full.normal));
+      }
+   }
+   std::cout << "[RefineDumpEval] smaller-elsewhere pairs " << n << " (scenario mismatch / lost " << nScenarioMismatch
+             << "); full refinement " << (n ? 1e6 * tFull / double(n) : 0.0) << " us, short descent "
+             << (n ? 1e6 * tShort / double(n) : 0.0) << " us\n";
+   for (const auto& [k, c] : byScenario) std::cout << "   " << k << ": " << c << "\n";
+   for (int k = 0; k < 4; ++k)
+      std::cout << "   accept closed form if improvement < " << tols[k] << " D0: " << nAcc[k] << " ("
+                << (n ? 100.0 * double(nAcc[k]) / double(n) : 0.0) << " %), max rel. depth error " << maxErrAcc[k]
+                << ", max normal angle " << maxAngAcc[k] << " deg\n";
+   std::cout << "   take min(D0, short descent): max rel. depth error " << maxErrShort << ", max normal angle "
+             << maxAngShort << " deg\n";
+}
+
+
 } // namespace test
 } // namespace paper_analytical
 } // namespace antidunes
 } // namespace walberla
+
 
 int main(int argc, char** argv)
 {
@@ -5556,6 +6252,15 @@ int main(int argc, char** argv)
    testRefinedCylinderContactVsGjk();
    testCylinderCylinderContinuityAlongPaths();
    testIndependentReferenceDump();
+   testBoxBoxContactPointHandCases();
+   testBoxBoxContactPointFuzz();
+   testBoxBoxContactPointContinuity();
+   benchmarkBoxBoxContactPoint();
+   testClipLineToBox();
+   testBoxBoxContactPointRestingContacts();
+   evaluateBoxPairsDump();
+   testIndependentReferenceDumpObstacles();
+   evaluateRefineDump();
 
    return EXIT_SUCCESS;
 }

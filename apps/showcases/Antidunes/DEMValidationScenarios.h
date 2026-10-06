@@ -1373,6 +1373,130 @@ inline bool runCylinderPairEnergyFuzz(const config::Config::BlockHandle& b)
    return acc.allPassed();
 }
 
+//! [Claude, 2026-10-01] Cuboid version of runCylinderPairEnergyFuzz: oblique elastic (e = 1, mu = 0) collisions of two
+//! freely rotating cuboids with random orientations and lateral offsets, no gravity; kinetic energy must be conserved.
+//! Modes: "gjk" (GJK/EPA) and "sat" (closed-form separating-axis test, as in the drop tests). Written to test whether
+//! the energy gain seen in the randomised cuboid drop tests comes from the SAT contact point (placed on the line between
+//! the centres, not at the contact).
+inline bool runCuboidPairEnergyFuzz(const config::Config::BlockHandle& b)
+{
+   const Vec3   halfExt       = b.getParameter< Vec3 >("cuboidHalfExtents", Vec3(6, 1, real_t(1.5)));
+   const real_t radius        = std::min(halfExt[0], std::min(halfExt[1], halfExt[2])); // penetration reported / this
+   const real_t density       = b.getParameter< real_t >("density", real_t(1));
+   const real_t poisson       = b.getParameter< real_t >("poissonsRatio", real_t(0.22));
+   const real_t collisionTime = b.getParameter< real_t >("collisionTime", real_t(0.01));
+   const real_t dt            = b.getParameter< real_t >("dt", collisionTime / real_t(50));
+   const real_t speed         = b.getParameter< real_t >("approachSpeed", real_t(1));
+   const uint_t numCollisions = b.getParameter< uint_t >("numCollisions", uint_t(200));
+   const real_t tolerance     = b.getParameter< real_t >("toleranceRelError", real_t(0.02));
+   const uint_t seed          = b.getParameter< uint_t >("seed", uint_t(4242));
+
+   struct Init { Rot3 rotA, rotB; Vec3 offset; };
+   std::mt19937                             rng(seed);
+   std::uniform_real_distribution< real_t > u(real_t(0), real_t(1));
+   auto uniformRot = [&]() {
+      const real_t u1 = u(rng), u2 = u(rng), u3 = u(rng);
+      const real_t a = std::sqrt(real_t(1) - u1), bb = std::sqrt(u1);
+      const real_t w = a * std::sin(real_t(2) * math::pi * u2), x = a * std::cos(real_t(2) * math::pi * u2);
+      const real_t y = bb * std::sin(real_t(2) * math::pi * u3), z = bb * std::cos(real_t(2) * math::pi * u3);
+      Rot3 r;
+      const Vec3 axis = (w < 0 ? real_t(-1) : real_t(1)) * Vec3(x, y, z);
+      if (axis.length() > real_t(1e-12)) r.rotate(axis.getNormalized(), real_t(2) * std::acos(std::min(std::abs(w), real_t(1))));
+      return r;
+   };
+   const real_t reach = halfExt.length();
+   std::vector< Init > inits;
+   for (uint_t c = 0; c < numCollisions; ++c)
+      inits.push_back(Init{ uniformRot(), uniformRot(),
+                            Vec3(0, (u(rng) - real_t(0.5)) * real_t(2) * reach, (u(rng) - real_t(0.5)) * real_t(2) * reach) });
+
+   std::vector< std::string > modes;
+   {
+      std::stringstream ss(b.getParameter< std::string >("modes", "gjk,sat"));
+      for (std::string item; std::getline(ss, item, ',');) modes.push_back(item);
+   }
+   std::map< std::string, std::vector< real_t > > keErr, pErr, pen;
+   std::map< std::string, std::vector< bool > >   contacted;
+   const real_t sep0 = real_t(2.5) * reach;
+   for (const auto& mode : modes)
+   {
+      for (const auto& in : inits)
+      {
+         // modes: gjk (GJK/EPA), sat (plain SAT, as in the drop tests), multipoint (useMultiPointBoxContact),
+         // fraige (useFraigeBoxContactModel)
+         DEMEngine engine(dt, real_t(1), real_t(0), poisson, collisionTime, real_t(0), real_t(10) * reach,
+                          /*useAnalyticalContactDetection=*/mode != "gjk", /*useRoundedBoxCorners=*/false,
+                          /*boxRoundingRadius=*/real_t(0.05), /*useMultiPointBoxContact=*/mode == "multipoint",
+                          false, real_t(0.3), false, real_t(0.15), false, real_t(0.25), false, false, real_t(0.05), false,
+                          /*useFraigeBoxContactModel=*/mode == "fraige");
+         const size_t A = engine.addBox(Vec3(-sep0 / 2, 0, 0) - in.offset * real_t(0.5), Vec3(speed / 2, 0, 0), in.rotA,
+                                        real_t(2) * halfExt, density);
+         const size_t B = engine.addBox(Vec3(sep0 / 2, 0, 0) + in.offset * real_t(0.5), Vec3(-speed / 2, 0, 0), in.rotB,
+                                        real_t(2) * halfExt, density);
+         engine.finalizeSetup();
+         const real_t ke0 = engine.kineticEnergy(A) + engine.kineticEnergy(B);
+         const Vec3   p0  = engine.ac().getMass(A) * engine.ac().getLinearVelocity(A) +
+                            engine.ac().getMass(B) * engine.ac().getLinearVelocity(B);
+         bool   touched = false;
+         real_t maxPen = 0, penetration = 0;
+         uint_t quiet = 0;
+         const uint_t maxSteps = uint_t(real_t(3) * sep0 / (speed * dt));
+         for (uint_t s = 0; s < maxSteps; ++s)
+         {
+            engine.step();
+            const bool c = engine.queryContact(A, B, penetration) && penetration < real_t(0);
+            if (std::getenv("ANTIDUNES_ENERGY_DEBUG") && int(&in - &inits[0]) == std::atoi(std::getenv("ANTIDUNES_ENERGY_DEBUG")))
+            {
+               const auto r = paper_analytical::boxBoxSAT(engine.ac().getPosition(A), engine.ac().getRotation(A).getMatrix(),
+                                                          halfExt, engine.ac().getPosition(B),
+                                                          engine.ac().getRotation(B).getMatrix(), halfExt);
+               if (c || r.contact)
+                  WALBERLA_LOG_INFO_ON_ROOT("[energy-debug] mode=" << mode << " step " << s << " contact=" << c << " pen="
+                     << -penetration << " sat=" << r.overlap << " n=" << r.normal << " p=" << r.point
+                     << " KE=" << engine.kineticEnergy(A) + engine.kineticEnergy(B));
+            }
+            if (c) { touched = true; quiet = 0; maxPen = std::max(maxPen, -penetration); }
+            else if (touched && ++quiet > uint_t(20) * uint_t(collisionTime / dt + real_t(1))) break;
+         }
+         const real_t ke1 = engine.kineticEnergy(A) + engine.kineticEnergy(B);
+         const Vec3   p1  = engine.ac().getMass(A) * engine.ac().getLinearVelocity(A) +
+                            engine.ac().getMass(B) * engine.ac().getLinearVelocity(B);
+         contacted[mode].push_back(touched);
+         keErr[mode].push_back(touched ? std::abs(ke1 / ke0 - real_t(1)) : real_t(0));
+         pErr[mode].push_back((p1 - p0).length() / (engine.ac().getMass(A) * speed));
+         pen[mode].push_back(maxPen / radius);
+      }
+   }
+
+   detail::PassFailAccumulator acc;
+   for (const auto& mode : modes)
+   {
+      real_t sum = 0, mx = 0, pmx = 0, penmx = 0;
+      int    n = 0, over = 0, missedVsGjk = 0;
+      for (size_t c = 0; c < inits.size(); ++c)
+      {
+         if (contacted.count("gjk") && contacted["gjk"][c] && !contacted[mode][c]) ++missedVsGjk;
+         if (!contacted[mode][c]) continue;
+         ++n; sum += keErr[mode][c]; mx = std::max(mx, keErr[mode][c]);
+         pmx = std::max(pmx, pErr[mode][c]); penmx = std::max(penmx, pen[mode][c]);
+         if (keErr[mode][c] > tolerance)
+         {
+            ++over;
+            WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] cuboidPairEnergyFuzz mode=" << mode << " collision " << c
+                                       << " |KE ratio-1|=" << keErr[mode][c] << " maxPenetration/R=" << pen[mode][c]);
+         }
+      }
+      WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] cuboidPairEnergyFuzz mode=" << mode << " collisions=" << n << "/"
+         << inits.size() << " mean|KE ratio-1|=" << (n ? sum / real_t(n) : real_t(0)) << " max=" << mx
+         << " over tolerance(" << tolerance << ")=" << over << " maxMomentumErr=" << pmx << " maxPenetration/R=" << penmx
+         << " noContactWhereGjkHad=" << missedVsGjk);
+      acc.record(over == 0 && missedVsGjk == 0);
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] cuboidPairEnergyFuzz OVERALL: " << (acc.allPassed() ? "PASS" : "FAIL") << " ("
+                             << acc.passed << "/" << acc.total << ", all modes checked)");
+   return acc.allPassed();
+}
+
 inline bool runEnergyConservation(const config::Config::BlockHandle& b)
 {
    const real_t sphereRadius   = b.getParameter< real_t >("sphereRadius", real_t(1));
@@ -2071,7 +2195,11 @@ inline bool runCornerFixComparison(const config::Config::BlockHandle& b)
    // meaningful pass criterion is "the defect is still confirmed present at baseline (otherwise this
    // whole comparison is moot) AND at least one mitigation actually clears it" -- both being true is
    // the direct, minimal evidence that (a) the reproduction still holds and (b) a real fix exists.
-   const bool pass = baselineFailed && anyFixPassed;
+   // [Claude, 2026-10-01] since the SAT contact-point fix (detail::boxBoxContactPoint) the baseline no longer injects energy
+   // here, so "baseline reproduces the defect" no longer holds; the criterion is now that NO configuration injects
+   // energy (with ANTIDUNES_SAT_FORMER_POINT set, the former point and the former outcome are reproduced).
+   const bool pass = configsWithoutInjection == uint_t(sizeof(configs) / sizeof(configs[0]));
+   (void) anyFixPassed;
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] cornerFixComparison: baseline reproduces the defect="
       << baselineFailed << ", at least one mitigation fixes it=" << anyFixPassed << "  "
       << (pass ? "PASS" : "FAIL"));

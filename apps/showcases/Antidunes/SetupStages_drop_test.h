@@ -481,6 +481,14 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       createCylinder(*simObjs->particleStorage, pillar.center, pillar.radius);
    }
 
+   // [Claude, 2026-10-03] vertical round containers (ContainerCylinders prm block, see ContainerCylinderParams)
+   for (const auto& container : simParams->containerCylinders)
+   {
+      createContainerCylinder(*simObjs->particleStorage, container.center, container.radius);
+      WALBERLA_LOG_INFO_ON_ROOT("Created container cylinder (containment, axis z): center=" << container.center
+                                << " radius=" << container.radius);
+   }
+
    // ModelParams.useArchTunnelAsMesaPDObject (see its own doc comment): when enabled, each arch
    // tunnel becomes a real, infinite-mass mesa_pd body instead of the one-sided ComputeTunnelContacts
    // kernel (ParticleKernels.h's ParticleKernels constructor skips constructing that kernel whenever
@@ -566,8 +574,11 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          if (std::abs(fbp.initialTiltAngleDeg) > real_t(1e-10))
          {
             const real_t angle = fbp.initialTiltAngleDeg * math::pi / real_t(180);
-            // Rotate about Y-axis (body axis v in Bogner's diagram)
-            p->setRotation(mesa_pd::Rot3(mesa_pd::Vec3(0, 1, 0), angle));
+            // Rotate about Y-axis (body axis v in Bogner's diagram) by default; [Claude, 2026-10-01] about
+            // FloatingBoxParams::initialTiltAxis if given (randomised drop tests).
+            mesa_pd::Vec3 tiltAxis(fbp.initialTiltAxis[0], fbp.initialTiltAxis[1], fbp.initialTiltAxis[2]);
+            tiltAxis = (tiltAxis.length() > real_t(1e-12)) ? tiltAxis / tiltAxis.length() : mesa_pd::Vec3(0, 1, 0);
+            p->setRotation(mesa_pd::Rot3(tiltAxis, angle));
          }
          // pinPosition holds only the TRANSLATIONAL DOFs (done each DEM sub-cycle in ParticleKernels);
          // it must NOT set the FIXED flag, which would also freeze rotation. settlingSteps still uses
@@ -744,7 +755,25 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    for (const auto& fpp : simParams->floatingCapsules)
       maxParticleDiameter = std::max(maxParticleDiameter, fpp.length);
 
-   if (maxParticleDiameter < real_c(2) * real_c(simParams->blockForest.cellsPerBlock.min()) - blockSyncExtension) {
+   // [Claude, 2026-10-01] SyncNextNeighbors only exchanges with neighbouring ranks. Each floater is ghosted to every
+   // block within its circumscribed radius + blockSyncExtension; if that reach exceeds the block width in a direction
+   // with at least three blocks, a floater can hold a ghost two blocks away, and after it migrates its new owner sends
+   // to a non-neighbour rank, whose buffer lacks the leading dummy byte ("Received invalid notification type", mixed
+   // drop test job 4282283 at step 8549, reproduced locally). The former test below alone (diameter < 2 * minBlock -
+   // extension) did not catch this; such cases now use SyncGhostOwners.
+   const real_t particleSyncReach = real_c(0.5) * maxParticleDiameter + blockSyncExtension;
+   bool         ghostsStayWithinNeighbours = true;
+   for (uint_t d = 0; d < 3; ++d)
+   {
+      const uint_t blocksAlongD = simParams->domain.domainSize[d] / simParams->blockForest.cellsPerBlock[d];
+      if (blocksAlongD >= uint_t(3) && particleSyncReach > real_c(simParams->blockForest.cellsPerBlock[d]))
+         ghostsStayWithinNeighbours = false;
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("Particle sync reach (circumscribed radius + blockSyncExtension) = " << particleSyncReach
+                             << (ghostsStayWithinNeighbours ? "" : " exceeds the block width along a direction with "
+                                                                   ">= 3 blocks"));
+   if (ghostsStayWithinNeighbours &&
+       maxParticleDiameter < real_c(2) * real_c(simParams->blockForest.cellsPerBlock.min()) - blockSyncExtension) {
       WALBERLA_LOG_INFO_ON_ROOT("Using SyncNextNeighbors for particles");
       simObjs->syncCall = [&simObjs, blockSyncExtension]() {
          mesa_pd::mpi::SyncNextNeighbors{}(*simObjs->particleStorage, *simObjs->mesapdDomain, blockSyncExtension);

@@ -23,6 +23,7 @@
 //======================================================================================================================
 
 #include "core/debug/CheckFunctions.h"
+#include <cmath>
 #include "core/logging/Logging.h"
 #include "core/math/Matrix3.h"
 #include "core/math/Utility.h"
@@ -93,6 +94,43 @@ void CurvatureSweepFiniteDifferences< Stencil_T, FlagField_T, ScalarField_T, Vec
 
                Vector3< real_t > neighborNormal;
 
+               // [Claude, 2026-10-02] guardInvalidNeighbours_ (prm guardCurvatureInputs): see setGuardInvalidNeighbours
+               if (guardInvalidNeighbours_)
+               {
+                  neighborNormal = Vector3< real_t >(real_c(0));
+                  const flag_t nbrFlag = flagFieldIt.neighbor(*dir);
+                  int          reason  = 0; // 1: neighbour in no flag group, 2: non-finite neighbour normal
+                  if (!isPartOfMaskSet(nbrFlag, liquidInterfaceGasFlagMask | obstacleFlagMask)) { reason = 1; }
+                  else if (isPartOfMaskSet(nbrFlag, liquidInterfaceGasFlagMask))
+                  {
+                     const Vector3< real_t > nn = normalFieldIt.neighbor(*dir);
+                     if (!std::isfinite(nn[0]) || !std::isfinite(nn[1]) || !std::isfinite(nn[2])) reason = 2;
+                  }
+                  if (reason != 0)
+                  {
+                     // (no brace initialisers here: commas would split the WALBERLA_FOR_ALL_CELLS macro argument)
+                     static uint_t noGroupLogCount   = uint_t(0);
+                     static uint_t nonFiniteLogCount = uint_t(0);
+                     const uint_t  k                 = (reason == 1) ? ++noGroupLogCount : ++nonFiniteLogCount;
+                     if (k <= uint_t(20) || k % uint_t(5000) == uint_t(0))
+                     {
+                        const Cell   c    = flagFieldIt.cell();
+                        const auto&  aabb = block->getAABB();
+                        const real_t cdx  = aabb.xSize() / real_c(flagField->xSize());
+                        WALBERLA_LOG_WARNING("[CURVATURE-GUARD] (#" << k << ", "
+                           << (reason == 1 ? "neighbour in no flag group" : "non-finite neighbour normal")
+                           << ") interface cell (" << c.x() << "," << c.y() << "," << c.z() << ") world~("
+                           << (aabb.xMin() + (real_c(c.x()) + real_t(0.5)) * cdx) << ","
+                           << (aabb.yMin() + (real_c(c.y()) + real_t(0.5)) * cdx) << ","
+                           << (aabb.zMin() + (real_c(c.z()) + real_t(0.5)) * cdx) << ") dir=(" << dir.cx() << ","
+                           << dir.cy() << "," << dir.cz() << ") neighbourFlag=" << uint64_t(nbrFlag)
+                           << " neighbourNormal=" << normalFieldIt.neighbor(*dir) << " ownNormal=" << *normalFieldIt
+                           << " -- direction skipped");
+                     }
+                     continue;
+                  }
+               }
+
                if (isPartOfMaskSet(flagFieldIt.neighbor(*dir), liquidInterfaceGasFlagMask | obstacleFlagMask))
                {
                   // get interface normal of neighbor in direction dir with respect to wetting model
@@ -136,6 +174,16 @@ void CurvatureSweepFiniteDifferences< Stencil_T, FlagField_T, ScalarField_T, Vec
             // which there is no liquid, interface, gas, or obstacle cell (only when wetting is enabled, otherwise
             // obstacle cell is also not considered); must be done like this because otherwise such non-valid
             // directions would implicitly influence the finite difference scheme by assuming a normal of zero
+            if (guardInvalidNeighbours_ && weightSum <= real_c(0))
+            {
+               // [Claude, 2026-10-02] no usable direction left: no curvature (instead of 0/0)
+               static uint_t emptyLogCount = 0;
+               if (++emptyLogCount <= uint_t(20) || emptyLogCount % uint_t(5000) == uint_t(0))
+                  WALBERLA_LOG_WARNING("[CURVATURE-GUARD] (#" << emptyLogCount << ", no usable direction) interface cell ("
+                                       << flagFieldIt.cell() << ") -- curvature set to 0");
+               curv = real_c(0);
+               continue;
+            }
             curv /= weightSum;
          }
       }) // WALBERLA_FOR_ALL_CELLS
