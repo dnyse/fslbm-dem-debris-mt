@@ -1252,7 +1252,8 @@ struct FuzzRng
    // false); nearSep must be guaranteed overlapping (contactAt(nearSep) == true). minBodySize caps
    // how deep past the found boundary this will sample (see sampleSeparation's own comment).
    template< typename ContactAtFn >
-   real_t sampleSeparationNearBoundary(ContactAtFn contactAt, real_t nearSep, real_t farSep, real_t minBodySize)
+   real_t sampleSeparationNearBoundary(ContactAtFn contactAt, real_t nearSep, real_t farSep, real_t minBodySize,
+                                       real_t maxOverlapFraction = real_t(0.15))
    {
       WALBERLA_ASSERT(contactAt(nearSep));
       WALBERLA_ASSERT(!contactAt(farSep));
@@ -1264,7 +1265,7 @@ struct FuzzRng
          else { hi = mid; }
       }
       const real_t boundary   = real_t(0.5) * (lo + hi);
-      const real_t maxOverlap = real_t(0.15) * minBodySize;
+      const real_t maxOverlap = maxOverlapFraction * minBodySize; // [Claude, 2026-10-11] fraction optional (default 0.15)
       // Sample from "maxOverlap past the boundary, into contact" to "twice that far out, clearly
       // separated" -- covers realistic overlap depth and near-miss geometry either side of the true
       // boundary, centred where contact actually starts instead of a loose analytic guess.
@@ -5900,7 +5901,12 @@ void testIndependentReferenceDump()
    if (dir == nullptr) return;
    const int numTrials = std::getenv("ANTIDUNES_REFERENCE_TRIALS") ? std::atoi(std::getenv("ANTIDUNES_REFERENCE_TRIALS"))
                                                                    : 2000;
-   FuzzRng fuzz(13579);
+   // [Claude, 2026-10-11] ANTIDUNES_REFERENCE_SEED (default 13579, the seed of the thesis figure) for an out-of-sample check,
+   // ANTIDUNES_REFERENCE_OVERLAP (default 0.15) for the depth of the sampling band in units of the smaller radius
+   const unsigned seed = std::getenv("ANTIDUNES_REFERENCE_SEED") ? unsigned(std::atol(std::getenv("ANTIDUNES_REFERENCE_SEED"))) : 13579u;
+   const real_t   band = std::getenv("ANTIDUNES_REFERENCE_OVERLAP") ? real_t(std::atof(std::getenv("ANTIDUNES_REFERENCE_OVERLAP")))
+                                                                    : real_t(0.15);
+   FuzzRng fuzz(seed);
    std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0)), lengthDist(real_t(0.5), real_t(4.0));
    std::uniform_real_distribution< real_t > halfDist(real_t(0.3), real_t(2.0));
 
@@ -5908,7 +5914,10 @@ void testIndependentReferenceDump()
    fc.precision(17);
    fc << "trial,Ri,Li,Rj,Lj,xj,yj,zj,Ai00,Ai01,Ai02,Ai10,Ai11,Ai12,Ai20,Ai21,Ai22,Aj00,Aj01,Aj02,Aj10,Aj11,Aj12,Aj20,Aj21,"
          "Aj22,gjk_contact,gjk_depth,gjk_nx,gjk_ny,gjk_nz,cf_contact,cf_overlap,cf_nx,cf_ny,cf_nz,cf_scenario,"
-         "hyb_contact,hyb_overlap,hyb_fallback,ref_contact,ref_overlap,ref_nx,ref_ny,ref_nz\n";
+         "hyb_contact,hyb_overlap,hyb_fallback,rfd_contact,rfd_overlap,rfd_nx,rfd_ny,rfd_nz,"
+         // [Claude, 2026-10-10] columns of the refined result renamed ref_* -> rfd_* (they never held the reference); contact
+         // points of every method and the normal of the hybrid added for the normal and contact-point panels of the thesis
+         "gjk_px,gjk_py,gjk_pz,cf_px,cf_py,cf_pz,hyb_nx,hyb_ny,hyb_nz,hyb_px,hyb_py,hyb_pz,rfd_px,rfd_py,rfd_pz\n";
    for (int t = 0; t < numTrials; ++t)
    {
       const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng), Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
@@ -5917,7 +5926,7 @@ void testIndependentReferenceDump()
       const Vec3   posI(0, 0, 0);
       const real_t circ = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li) + std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
       auto contactAt = [&](real_t sep) { return gjkCylCyl(posI, rotI, Ri, Li, posI + dir3 * sep, rotJ, Rj, Lj).contact; };
-      const Vec3 posJ = posI + dir3 * fuzz.sampleSeparationNearBoundary(contactAt, real_t(0), real_t(3) * circ, std::min(Ri, Rj));
+      const Vec3 posJ = posI + dir3 * fuzz.sampleSeparationNearBoundary(contactAt, real_t(0), real_t(3) * circ, std::min(Ri, Rj), band);
       const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li }, cj{ posJ, rotJ.getMatrix(), Rj, Lj };
       const GjkResult     g  = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
       const ContactResult cf = cylinderCylinderContact(ci, cj);
@@ -5929,13 +5938,17 @@ void testIndependentReferenceDump()
       fc << ',' << g.contact << ',' << g.penetrationDepth << ',' << g.normal[0] << ',' << g.normal[1] << ',' << g.normal[2]
          << ',' << cf.contact << ',' << cf.overlap << ',' << cf.normal[0] << ',' << cf.normal[1] << ',' << cf.normal[2]
          << ',' << cf.scenario << ',' << hy.contact << ',' << hy.overlap << ',' << hy.usedFallback << ',' << rf.contact
-         << ',' << rf.overlap << ',' << rf.normal[0] << ',' << rf.normal[1] << ',' << rf.normal[2] << '\n';
+         << ',' << rf.overlap << ',' << rf.normal[0] << ',' << rf.normal[1] << ',' << rf.normal[2];
+      for (const Vec3* v : { &g.point, &cf.point, &hy.normal, &hy.point, &rf.point })
+         fc << ',' << (*v)[0] << ',' << (*v)[1] << ',' << (*v)[2];
+      fc << '\n';
    }
 
    std::ofstream fb(std::string(dir) + "/box_pairs.csv");
    fb.precision(17);
    fb << "trial,hax,hay,haz,hbx,hby,hbz,xb,yb,zb,Aa00,Aa01,Aa02,Aa10,Aa11,Aa12,Aa20,Aa21,Aa22,Ab00,Ab01,Ab02,Ab10,Ab11,Ab12,"
-         "Ab20,Ab21,Ab22,gjk_contact,gjk_depth,gjk_nx,gjk_ny,gjk_nz,sat_contact,sat_overlap,sat_nx,sat_ny,sat_nz\n";
+         "Ab20,Ab21,Ab22,gjk_contact,gjk_depth,gjk_nx,gjk_ny,gjk_nz,sat_contact,sat_overlap,sat_nx,sat_ny,sat_nz,"
+         "gjk_px,gjk_py,gjk_pz,sat_px,sat_py,sat_pz\n";  // [Claude, 2026-10-10] contact points added
    for (int t = 0; t < numTrials; ++t)
    {
       const Vec3 hA(halfDist(fuzz.rng), halfDist(fuzz.rng), halfDist(fuzz.rng));
@@ -5945,7 +5958,7 @@ void testIndependentReferenceDump()
       const Vec3 posA(0, 0, 0);
       const real_t minSize = std::min({ hA[0], hA[1], hA[2], hB[0], hB[1], hB[2] });
       auto contactAt = [&](real_t sep) { return gjkBoxBox(posA, rotA, real_t(2) * hA, posA + dir3 * sep, rotB, real_t(2) * hB).contact; };
-      const Vec3 posB = posA + dir3 * fuzz.sampleSeparationNearBoundary(contactAt, real_t(0), real_t(3) * (hA.length() + hB.length()), minSize);
+      const Vec3 posB = posA + dir3 * fuzz.sampleSeparationNearBoundary(contactAt, real_t(0), real_t(3) * (hA.length() + hB.length()), minSize, band);
       const GjkResult g   = gjkBoxBox(posA, rotA, real_t(2) * hA, posB, rotB, real_t(2) * hB);
       const auto      sat = boxBoxSAT(posA, rotA.getMatrix(), hA, posB, rotB.getMatrix(), hB);
       fb << t << ',' << hA[0] << ',' << hA[1] << ',' << hA[2] << ',' << hB[0] << ',' << hB[1] << ',' << hB[2] << ','
@@ -5954,7 +5967,8 @@ void testIndependentReferenceDump()
       dumpMat(fb, rotB.getMatrix());
       fb << ',' << g.contact << ',' << g.penetrationDepth << ',' << g.normal[0] << ',' << g.normal[1] << ',' << g.normal[2]
          << ',' << sat.contact << ',' << sat.overlap << ',' << sat.normal[0] << ',' << sat.normal[1] << ',' << sat.normal[2]
-         << '\n';
+         << ',' << g.point[0] << ',' << g.point[1] << ',' << g.point[2] << ',' << sat.point[0] << ',' << sat.point[1] << ','
+         << sat.point[2] << '\n';
    }
    WALBERLA_LOG_INFO_ON_ROOT("[reference-dump] wrote " << numTrials << " cylinder and " << numTrials
                              << " box pairs (uniform SO(3) orientations) to " << dir);
@@ -5967,6 +5981,63 @@ void testIndependentReferenceDump()
 // scripts/contact-validation/brute_force_reference.py recomputes the depth from the support functions, with the
 // infinite pillar represented by a cylinder of half-length 1000 and the wall by its support function.
 //======================================================================================================================
+//======================================================================================================================
+// [Claude, 2026-10-11] Replay of rod-pillar configurations taken from the floater snapshots of the clogging runs (opt-in:
+// ANTIDUNES_PILLAR_REPLAY=<input csv> ANTIDUNES_PILLAR_REPLAY_OUT=<output csv>). Input per line: id,R,L,x,y,z,ax,ay,az,Rp,px,py
+// (rod radius and length already inflated by the contact skin, world centre, world axis; vertical pillar of radius Rp through
+// (px,py)). Writes the production rod-pillar detection (projection variant, refine = false) and the refined one, so that
+// scripts compare both with the exact depth.
+//======================================================================================================================
+void replayPillarConfigurations()
+{
+   const char* in  = std::getenv("ANTIDUNES_PILLAR_REPLAY");
+   const char* out = std::getenv("ANTIDUNES_PILLAR_REPLAY_OUT");
+   if (in == nullptr || out == nullptr) return;
+   std::ifstream fi(in);
+   std::ofstream fo(out);
+   fo.precision(17);
+   fo << "id,contact,depth,r_contact,r_depth\n";
+   std::string line;
+   while (std::getline(fi, line))
+   {
+      if (line.empty() || line[0] == '#' || line[0] == 'i') continue;
+      std::stringstream ss(line);
+      std::string       tok, id;
+      std::vector< real_t > v;
+      std::getline(ss, id, ',');
+      while (std::getline(ss, tok, ',')) v.push_back(real_t(std::atof(tok.c_str())));
+      WALBERLA_CHECK_EQUAL(v.size(), 11u); // R, L, x, y, z, ax, ay, az, Rp, px, py
+      const real_t R = v[0], L = v[1], Rp = v[8];
+      const Vec3   rodPos(v[2] - v[9], v[3] - v[10], v[4]); // pillar axis moved to the origin
+      const Vec3   a = Vec3(v[5], v[6], v[7]).getNormalized();
+      const Vec3   ez(0, 0, 1);
+      const Vec3   k  = ez % a;
+      const real_t sn = k.length(), cs = ez * a;
+      // mesa_pd cylinders have their axis along the body z axis: rotate e_z onto a
+      const Rot3 rot = (sn < real_t(1e-12)) ? Rot3() : Rot3(k / sn, std::atan2(sn, cs));
+      const mesa_pd::data::CylindricalBoundary pillar(Rp, ez);
+      const mesa_pd::data::Cylinder            cyl(R, L);
+      auto detect = [&](bool refine, real_t& depth) {
+         auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+         mesa_pd::data::ParticleAccessor ac(ps);
+         auto rod = ps->create();
+         rod->setPosition(rodPos);
+         rod->setRotation(rot);
+         rod->setInteractionRadius(std::sqrt(R * R + real_t(0.25) * L * L));
+         auto obs = ps->create();
+         obs->setPosition(Vec3(0, 0, 0));
+         SolidCylinderContactDetection scd;
+         scd.refineCylinderContacts = refine;
+         const bool c = scd(0, 1, cyl, pillar, ac);
+         depth        = c ? -scd.getPenetrationDepth() : real_t(0);
+         return c;
+      };
+      real_t d0 = 0, d1 = 0;
+      const bool c0 = detect(false, d0), c1 = detect(true, d1);
+      fo << id << ',' << c0 << ',' << d0 << ',' << c1 << ',' << d1 << '\n';
+   }
+}
+
 void testIndependentReferenceDumpObstacles()
 {
    const char* dir = std::getenv("ANTIDUNES_REFERENCE_DUMP");
@@ -6148,6 +6219,12 @@ int main(int argc, char** argv)
    // Debug output (cylinder-mismatch VTK/CSV) goes next to the executable in the build tree,
    // regardless of the process's current working directory at launch.
    g_outputDir = std::filesystem::weakly_canonical(std::filesystem::path(argv[0])).parent_path();
+
+   // [Claude, 2026-10-10] ANTIDUNES_BANDEDGE_AXIAL: run with paper_analytical::kodamBandEdgeAxialCheck on (prm
+   // kodamBandEdgeAxialCheck); ANTIDUNES_REFERENCE_DUMP_ONLY: write only the independent-reference dump and exit.
+   walberla::antidunes::paper_analytical::kodamBandEdgeAxialCheck = (std::getenv("ANTIDUNES_BANDEDGE_AXIAL") != nullptr);
+   if (std::getenv("ANTIDUNES_REFERENCE_DUMP_ONLY")) { testIndependentReferenceDump(); return EXIT_SUCCESS; }
+   if (std::getenv("ANTIDUNES_PILLAR_REPLAY")) { replayPillarConfigurations(); return EXIT_SUCCESS; } // [Claude, 2026-10-11]
 
    // Box x Box
    testBoxBoxSATMatchesExisting();

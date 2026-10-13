@@ -688,6 +688,114 @@ inline void diagnoseNaNNormals(const std::shared_ptr< SimulationObjects >& simOb
    }
 }
 
+// [Claude, 2026-10-09] momentum budget diagnostics (ModelParameters.logMomentumBudget).
+// Rank-local {fluid Px, Py, Pz, fluid mass, bodies Px, Pz}: liquid + fill-weighted interface inner cells, and m*v of the
+// local non-ghost bodies.
+inline std::array< real_t, 6 > localFluidBodyMomentum(const std::shared_ptr< SimulationObjects >& simObjs)
+{
+   real_t px = 0, py = 0, pz = 0, mass = 0;
+   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
+   {
+      const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
+      const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
+      const auto* pdfField  = blockIt->getData< const PdfField_T >(simObjs->pdfFieldID);
+      const auto  liquid    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
+      const auto  interface = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
+      const cell_idx_t X = cell_idx_c(flagField->xSize()), Y = cell_idx_c(flagField->ySize()), Z = cell_idx_c(flagField->zSize());
+      for (cell_idx_t z = 0; z < Z; ++z)
+         for (cell_idx_t y = 0; y < Y; ++y)
+            for (cell_idx_t x = 0; x < X; ++x)
+      {
+         const auto   f = flagField->get(x, y, z);
+         const real_t w = isFlagSet(f, liquid) ? real_t(1)
+                          : isFlagSet(f, interface) ? std::clamp(fillField->get(x, y, z), real_t(0), real_t(1)) : real_t(0);
+         if (w > real_t(0))
+         {
+            const Vector3< real_t > m = pdfField->getMomentumDensity(x, y, z);
+            px += w * m[0]; py += w * m[1]; pz += w * m[2];
+            mass += w * pdfField->getDensity(x, y, z);
+         }
+      }
+   }
+   real_t bx = 0, bz = 0;
+   const auto& ac = *simObjs->particleAccessor;
+   for (size_t i = 0; i < ac.size(); ++i)
+   {
+      if (isSet(ac.getFlags(i), mesa_pd::data::particle_flags::GHOST) || ac.getInvMass(i) <= real_t(0)) continue;
+      bx += ac.getLinearVelocity(i)[0] / ac.getInvMass(i);
+      bz += ac.getLinearVelocity(i)[2] / ac.getInvMass(i);
+   }
+   return { px, py, pz, mass, bx, bz };
+}
+
+// Change of {fluid Px, fluid Pz, bodies Px, bodies Pz} attributed to the timeloop stage that ends at each probe, summed since
+// the last report (rank-local). A probe charges everything since the previous probe to its own stage; the stage list is the
+// order in which the probes run within one time step.
+struct MomentumStageBudget
+{
+   static constexpr const char* names[] = { "boundary(gas blocks)", "forceWeighting", "streamReconstructAdvect", "collide",
+                                            "cellConversion", "refilling", "excessMass+flagReset", "DEM", "mapping",
+                                            "reconstruction" };
+   static constexpr size_t nStages = sizeof(names) / sizeof(names[0]);
+   std::array< real_t, 4 > last{};
+   bool init = false;
+   std::array< real_t, 4 * nStages > acc{};
+};
+inline MomentumStageBudget& momentumStageBudget()
+{
+   static MomentumStageBudget b;
+   return b;
+}
+inline void momentumStageProbe(const std::shared_ptr< SimulationObjects >& simObjs, const size_t stage)
+{
+   const auto m = localFluidBodyMomentum(simObjs);
+   const std::array< real_t, 4 > p{ m[0], m[2], m[4], m[5] };
+   auto& b = momentumStageBudget();
+   if (b.init)
+      for (size_t k = 0; k < 4; ++k) b.acc[4 * stage + k] += p[k] - b.last[k];
+   b.last = p;
+   b.init = true;
+}
+
+// [MOMENTUM-BUDGET] line: momentum the freed cells carried into the fluid and the covered cells took out of it since the last
+// report (each {Px, Py, Pz, L_y about the body centre, mass, cells}, rank-local, see PdfReconstructionManager::takeFreedMomentum),
+// the total fluid momentum now and the bodies' momentum m*v. [MOMENTUM-STAGES] line: the stage budget above and the MEM link sums
+// of SimpleBB.h (MemLinkMomentumBudget). Resets `covered`, the stage budget and the link sums.
+inline void logMomentumBudget(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
+                              const std::array< real_t, 6 >& freed, std::array< real_t, 6 >& covered)
+{
+   std::vector< real_t > v(freed.begin(), freed.end());
+   v.insert(v.end(), covered.begin(), covered.end());
+   covered.fill(real_t(0));
+   const auto now = localFluidBodyMomentum(simObjs);
+   v.insert(v.end(), { now[0], now[1], now[2], now[3], now[4], now[5] });
+   auto& stages = momentumStageBudget();
+   v.insert(v.end(), stages.acc.begin(), stages.acc.end());
+   stages.acc.fill(real_t(0));
+   auto& links = lbm_mesapd_coupling::MemLinkMomentumBudget::sums();
+   v.insert(v.end(), links.begin(), links.end());
+   links.fill(real_t(0));
+   walberla::mpi::reduceInplace(v, walberla::mpi::SUM);
+   WALBERLA_ROOT_SECTION()
+   {
+      WALBERLA_LOG_INFO("[MOMENTUM-BUDGET t=" << t << "] since last report: freed cells n=" << v[5] << " P=(" << v[0] << ","
+         << v[1] << "," << v[2] << ") Ly=" << v[3] << " mass=" << v[4] << " | covered cells n=" << v[11] << " P=(" << v[6] << ","
+         << v[7] << "," << v[8] << ") Ly=" << v[9] << " mass=" << v[10] << " | now: fluid P=(" << v[12] << "," << v[13] << ","
+         << v[14] << ") mass=" << v[15] << " bodies P=(" << v[16] << ",.," << v[17] << ")");
+      std::ostringstream os;
+      os << "[MOMENTUM-STAGES t=" << t << "] since last report, per stage dP fluid (x,z) / bodies (x,z):";
+      const size_t o = 18;
+      for (size_t k = 0; k < MomentumStageBudget::nStages; ++k)
+         os << " " << MomentumStageBudget::names[k] << "=(" << v[o + 4 * k] << "," << v[o + 4 * k + 1] << ")/(" << v[o + 4 * k + 2]
+            << "," << v[o + 4 * k + 3] << ")";
+      const size_t l = o + 4 * MomentumStageBudget::nStages;
+      os << " | MEM links (x,z): fluidLoss=(" << v[l] << "," << v[l + 1] << ") fluidLossFillWeighted=(" << v[l + 2] << ","
+         << v[l + 3] << ") refSubtraction=(" << v[l + 4] << "," << v[l + 5] << ") wenCorrection=(" << v[l + 6] << "," << v[l + 7]
+         << ") givenToBodies=(" << v[l + 8] << "," << v[l + 9] << ")";
+      WALBERLA_LOG_INFO(os.str());
+   }
+}
+
 void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& simParams,
                              const std::shared_ptr< SimulationObjects >& simObjs,
                              const std::unique_ptr< SweepTimeloop >& timeloop)
@@ -870,7 +978,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-boundarySweep"); },
                                     "Intra-step NaN scan: after boundary handling")
                    << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-boundarySweep"); },
-                                    "Hopper crash region probe: after boundary handling");
+                                    "Hopper crash region probe: after boundary handling")
+                   << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 0); },
+                                    "Momentum budget probe: after boundary handling");
 
    // comopute force density field (acceleration applied to fluid and interface cells)
    const ForceDensityCodegenSweep< PdfField_T, FlagField_T, VectorFieldFlattened_T, ScalarField_T >
@@ -886,7 +996,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-forceDensitySweep"); },
                                     "Intra-step NaN scan: after force weighting")
                    << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-forceDensitySweep"); },
-                                    "Hopper crash region probe: after force weighting");
+                                    "Hopper crash region probe: after force weighting")
+                   << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 1); },
+                                    "Momentum budget probe: after force weighting");
 
    // sweep for
    // - reconstruction of PDFs in interface cells
@@ -923,7 +1035,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
       << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-streamReconstructAdvect"); },
                        "Intra-step NaN scan: after StreamReconstructAdvect")
       << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-streamReconstructAdvect"); },
-                       "Hopper crash region probe: after StreamReconstructAdvect");
+                       "Hopper crash region probe: after StreamReconstructAdvect")
+                   << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 2); },
+                                    "Momentum budget probe: after StreamReconstructAdvect");
 
    // Generated sweeps
    auto lbmSweepGenerated = typename LatticeModel_T::Sweep(simObjs->pdfFieldID);
@@ -980,7 +1094,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                          if (!simParams->model.repairDegenerateObstaclePdfs) return; // Option B: prm-controlled, default off
                          const uint_t t = *simObjs->currentMainStep;
                          repairDegenerateObstacleCells(simObjs, "after-collide", t);
-                      }, "Repair: degenerate obstacle-cell PDFs after collide");
+                      }, "Repair: degenerate obstacle-cell PDFs after collide")
+                   << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 3); },
+                                    "Momentum budget probe: after collide");
 
    // convert cells
    // - according to the flags from StreamReconstructAdvectSweep (interface -> gas/liquid)
@@ -1007,7 +1123,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-cellConversion"); },
                                     "Intra-step NaN scan: after cell conversion")
                    << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-cellConversion"); },
-                                    "Hopper crash region probe: after cell conversion");
+                                    "Hopper crash region probe: after cell conversion")
+                   << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 4); },
+                                    "Momentum budget probe: after cell conversion");
 
    // reinitialize PDFs, i.e., refill cells that were converted from gas to interface
    // - when the flag "convertedFromGasToInterface" has been set (by CellConversionSweep)
@@ -1023,7 +1141,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-equilibriumRefilling"); },
                                     "Intra-step NaN scan: after EquilibriumRefilling")
                    << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-equilibriumRefilling"); },
-                                    "Hopper crash region probe: after EquilibriumRefilling");
+                                    "Hopper crash region probe: after EquilibriumRefilling")
+                   << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 5); },
+                                    "Momentum budget probe: after EquilibriumRefilling");
 
    const walberla::free_surface::ExcessMassDistributionModel excessMassModel(
       simParams->model.excessMassDistributionModel);
@@ -1111,7 +1231,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                     "Communication: after excess mass distribution sweep")
                    << AfterFunction(
                          blockforest::UpdateSecondGhostLayer< FlagField_T >(simObjs->blockForest, simObjs->flagFieldID),
-                         "Second ghost layer update: after excess mass distribution sweep (flag field)");
+                         "Second ghost layer update: after excess mass distribution sweep (flag field)")
+                   << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 6); },
+                                    "Momentum budget probe: after excess mass distribution and conversion flag reset");
 
    // update block states
    auto blockStateUpdate = StateSweep(simObjs->blockForest, simObjs->flagInfo, simObjs->flagFieldID);
@@ -1194,22 +1316,54 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
       }
    };
 
+   // [Claude, 2026-10-09] momentum budget diagnostic (ModelParameters.logMomentumBudget): fluid momentum lost to cells the
+   // bodies cover, weighted like fluid mass (liquid 1, interface its fill, gas 0) -- {Px, Py, Pz, L_y about the covering
+   // particle's centre, mass, cells}, rank-local, reported and reset with the conversion counts below
+   auto coveredMomentum = std::make_shared< std::array< real_t, 6 > >();
+   coveredMomentum->fill(real_t(0));
+   std::function< void(IBlock&, cell_idx_t, cell_idx_t, cell_idx_t, size_t) > onNewlyCovered; // see MovingParticleMapping.h
+   if (simParams->model.logMomentumBudget)
+      onNewlyCovered = [simObjs, coveredMomentum](IBlock& block, cell_idx_t x, cell_idx_t y, cell_idx_t z, size_t idx) {
+         const auto* flagField = block.getData< const FlagField_T >(simObjs->flagFieldID);
+         const auto* fillField = block.getData< const ScalarField_T >(simObjs->fillFieldID);
+         const auto* pdfField  = block.getData< const PdfField_T >(simObjs->pdfFieldID);
+         const auto  f         = flagField->get(x, y, z);
+         const real_t w = isFlagSet(f, flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID)) ? real_t(1)
+                          : isFlagSet(f, flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID))
+                             ? std::clamp(fillField->get(x, y, z), real_t(0), real_t(1))
+                             : real_t(0);
+         if (w <= real_t(0)) return;
+         const Vector3< real_t > m = pdfField->getMomentumDensity(x, y, z);
+         const Vector3< real_t > r =
+            simObjs->blockForest->getBlockLocalCellCenter(block, Cell(x, y, z)) - simObjs->particleAccessor->getPosition(idx);
+         auto& c = *coveredMomentum;
+         c[0] += w * m[0]; c[1] += w * m[1]; c[2] += w * m[2];
+         c[3] += w * (r[2] * m[0] - r[0] * m[2]);
+         c[4] += w * pdfField->getDensity(x, y, z);
+         c[5] += real_t(1);
+      };
+
    // sweep for mapping particles into the LBM cells
    const bool strictlyConserveMomentum = false;
+   lbm_mesapd_coupling::MemLinkMomentumBudget::enabled() = simParams->model.logMomentumBudget;
    timeloop->add() << BeforeFunction(
       [simObjs]() { trackWatchCells(simObjs, "BEFORE-MAPPING", *simObjs->currentMainStep, couplingProbeCells); },
       "Probe: before MovingParticleMapping")
+   << BeforeFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 7); },
+                     "Momentum budget probe: after DEM")
    << Sweep(
       lbm_mesapd_coupling::makeMovingParticleMapping< PdfField_T, AntidunesBoundaryHandling_T::BoundaryHandling_T >(
          simObjs->blockForest, simObjs->pdfFieldID, simObjs->antidunesBoundaryHandling->getHandlingID(),
          simObjs->particleFieldID, simObjs->particleAccessor, AntidunesBoundaryHandling_T::movingObstacleFlagID,
          FormerMO_Flag,
          movingObstacleSelector, // all spheres + floating boxes (not fixed pillars)
-         strictlyConserveMomentum, simParams->model.mappingTieOffset, onOwnershipHandoff),
+         strictlyConserveMomentum, simParams->model.mappingTieOffset, onOwnershipHandoff, onNewlyCovered),
       "Sweep (coupling): MovingParticleMapping")
    << AfterFunction(
       [simObjs]() { trackWatchCells(simObjs, "AFTER-MAPPING", *simObjs->currentMainStep, couplingProbeCells); },
-      "Probe: after MovingParticleMapping, before PdfReconstructionManager");
+      "Probe: after MovingParticleMapping, before PdfReconstructionManager")
+   << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 8); },
+                    "Momentum budget probe: after MovingParticleMapping");
 
    // sweep for restoring PDFs in cells previously occupied by particles
    //
@@ -1276,8 +1430,19 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
          simParams->model.usePass3Reresolution);
    // [Claude, 2026-10-01] prm ModelParameters.seedFillFromAllNeighbours (default false = legacy seeding)
    bognerReconstructionManager->setSeedFillFromAllNeighbours(simParams->model.seedFillFromAllNeighbours);
+   // [Claude, 2026-10-08] prm ModelParameters.seedSkipObstacleNeighbours (default true = behaviour since 2026-10-01)
+   bognerReconstructionManager->setSeedSkipObstacleNeighbours(simParams->model.seedSkipObstacleNeighbours);
    WALBERLA_LOG_INFO_ON_ROOT("FormerMO interface fill seeding: "
-                             << (simParams->model.seedFillFromAllNeighbours ? "all resolved neighbours" : "interface neighbours (legacy)"));
+                             << (simParams->model.seedFillFromAllNeighbours ? "all resolved neighbours" : "interface neighbours (legacy)")
+                             << ", obstacle-flagged neighbours " << (simParams->model.seedSkipObstacleNeighbours ? "skipped" : "counted if interface (pre-2026-10-01)"));
+   // [Claude, 2026-10-08] prm ModelParameters.strictBognerClassification (default false = same-step interface fallback)
+   bognerReconstructionManager->setStrictBognerClassification(simParams->model.strictBognerClassification);
+   // [Claude, 2026-10-10] prm ModelParameters.strictBognerNoLiquidAtGas (default false)
+   bognerReconstructionManager->setStrictBognerNoLiquidAtGas(simParams->model.strictBognerNoLiquidAtGas);
+   WALBERLA_LOG_INFO_ON_ROOT("strictBognerNoLiquidAtGas = " << (simParams->model.strictBognerNoLiquidAtGas ? "true" : "false"));
+   WALBERLA_LOG_INFO_ON_ROOT("FormerMO classification: "
+                             << (simParams->model.strictBognerClassification ? "strict Bogner rule (same-step freed cells not in B(x))"
+                                                                             : "same-step interface fallback"));
 
    const uint_t convLogFreq = simParams->evaluation.evaluationFrequency;
 
@@ -1290,11 +1455,17 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
       << AfterFunction(
             [simObjs]() { trackWatchCells(simObjs, "AFTER-RECONSTRUCTION", *simObjs->currentMainStep, couplingProbeCells); },
             "Probe: after PdfReconstructionManager, before its own communication")
+      << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 9); },
+                       "Momentum budget probe: after PdfReconstructionManager")
       << AfterFunction(
-            [bognerReconstructionManager, convLogFreq, step = uint_t(0)]() mutable {
+            [bognerReconstructionManager, convLogFreq, simObjs, simParams, coveredMomentum, step = uint_t(0)]() mutable {
                ++step;
                if (convLogFreq > uint_t(0) && step % convLogFreq == uint_t(0))
+               {
                   bognerReconstructionManager->logAndResetConversionCounts(step);
+                  if (simParams->model.logMomentumBudget) logMomentumBudget(simObjs, step, bognerReconstructionManager->takeFreedMomentum(),
+                                                                            *coveredMomentum);
+               }
             },
             "AfterFunction (coupling): log FormerMO→state conversion counts")
       << AfterFunction(

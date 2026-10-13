@@ -211,6 +211,15 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
          walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk
          AntidunesLatticeModelGeneration )
 
+   # [Claude, 2026-10-10] Diagnostic: A/B cylinder pair of the round-container drop-test energy spike (job 4292501).
+   waLBerla_add_test_executable ( ANTIDUNES_KodamRoundSpikeProbe KodamRoundSpikeProbeTest.cpp )
+   target_include_directories ( ANTIDUNES_KodamRoundSpikeProbe PRIVATE ${ANTIDUNES_SRC_DIR} )
+   target_link_libraries ( ANTIDUNES_KodamRoundSpikeProbe
+         walberla::blockforest walberla::boundary walberla::core walberla::domain_decomposition
+         walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
+         walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk
+         AntidunesLatticeModelGeneration )
+
    # ForcingAdjuster's mid-run PID switch-off (PIDParameters.switchOffStep): freezes acceleration_x at the
    # mean of the PID's recent commanded values, including across checkpoint resumes. Needs PIDController.cpp
    # compiled in (it is a separate translation unit in the app, not a library).

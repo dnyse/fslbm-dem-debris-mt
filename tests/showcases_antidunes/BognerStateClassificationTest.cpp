@@ -379,13 +379,13 @@ FillCube uniformFill(real_t v)
    return c;
 }
 
-real_t seedCube(const Cube& flags, const FillCube& fills, bool allNeighbours, bool& fallback)
+real_t seedCube(const Cube& flags, const FillCube& fills, bool allNeighbours, bool& fallback, bool skipObstacle = true)
 {
    auto idx = [](int d) { return static_cast< size_t >(d) + size_t(1); };
    return seedInterfaceFillFromNeighbourhood< MockFlag >(
       [&](int dx, int dy, int dz) { return flags[idx(dz)][idx(dy)][idx(dx)]; },
       [&](int dx, int dy, int dz) { return fills[idx(dz)][idx(dy)][idx(dx)]; }, LIQUID, GAS, INTERFACE, FORMER_OBSTACLE,
-      OBSTACLE, allNeighbours, fallback);
+      OBSTACLE, allNeighbours, skipObstacle, fallback);
 }
 
 void checkSeed(const char* name, const Cube& flags, const FillCube& fills, real_t expectLegacy, bool expectLegacyFallback,
@@ -458,6 +458,77 @@ void testSeedIgnoresStaleFillOfExcludedCells()
    checkSeed("excluded cells with stale fill", c, f, real_t(0.5), true, real_t(0.5), false);
 }
 
+void testSeedSkipObstacleNeighboursToggle()
+{
+   // [Claude, 2026-10-08] an interface neighbour that still carries the formerObstacle flag: skipped by default (since
+   // 2026-10-01) -> no evidence, 0.5 fallback; counted with skipObstacle = false (legacy rule before 2026-10-01) -> its fill.
+   // The all-neighbour rule always skips it.
+   Cube     c = uniformCube(OBSTACLE);
+   FillCube f = uniformFill(real_t(0.3));
+   c[1][1][2] = MockFlag(INTERFACE | FORMER_OBSTACLE);
+   bool fb = false;
+   real_t v = seedCube(c, f, false, fb, true);
+   WALBERLA_CHECK_FLOAT_EQUAL(v, real_t(0.5), "skip: no evidence");
+   WALBERLA_CHECK(fb);
+   v = seedCube(c, f, false, fb, false);
+   WALBERLA_CHECK_FLOAT_EQUAL(v, real_t(0.3), "no skip: interface fill counted");
+   WALBERLA_CHECK(!fb);
+   v = seedCube(c, f, true, fb, false);
+   WALBERLA_CHECK_FLOAT_EQUAL(v, real_t(0.5), "all-neighbour rule always skips");
+   WALBERLA_CHECK(fb);
+   WALBERLA_LOG_INFO_ON_ROOT("[seed] skipObstacleNeighbours toggle: ok");
+}
+
+// [Claude, 2026-10-08] strict Bogner rule (classifyStrictBognerNeighbourhood / classifyFormerObstacleCellStrict): Bogner's
+// three cases in his order, and cells freed in the same step (formerObstacle) are not in B(x).
+BognerNeighbourhoodState classifyCubeStrict(const Cube& cube, bool& hasGas, bool& hasLiquid)
+{
+   return classifyFormerObstacleCellStrict(
+      [&](int dx, int dy, int dz) {
+         return cube[static_cast< size_t >(dz) + size_t(1)][static_cast< size_t >(dy) + size_t(1)]
+                    [static_cast< size_t >(dx) + size_t(1)];
+      },
+      LIQUID, GAS, FORMER_OBSTACLE, OBSTACLE, hasGas, hasLiquid);
+}
+
+void testStrictBognerTruthTable()
+{
+   WALBERLA_CHECK(classifyStrictBognerNeighbourhood(true, false) == BognerNeighbourhoodState::Gas);
+   WALBERLA_CHECK(classifyStrictBognerNeighbourhood(false, true) == BognerNeighbourhoodState::Liquid);
+   WALBERLA_CHECK(classifyStrictBognerNeighbourhood(true, true) == BognerNeighbourhoodState::Interface);
+   // neither: "B(x) contains no liquid" is Bogner's first case -> gas
+   WALBERLA_CHECK(classifyStrictBognerNeighbourhood(false, false) == BognerNeighbourhoodState::Gas);
+}
+
+void testStrictBognerSameStepNeighbours()
+{
+   bool g, l;
+   // dry upper face: gas above, the rest of the freed sheet beside it, body below -> gas (the fallback rule gives interface)
+   Cube c = uniformCube(OBSTACLE);
+   for (auto& row : c[2]) row.fill(GAS);
+   for (auto& row : c[1]) row.fill(FORMER_OBSTACLE);
+   WALBERLA_CHECK(classifyCubeStrict(c, g, l) == BognerNeighbourhoodState::Gas);
+   WALBERLA_CHECK(g && !l);
+   WALBERLA_CHECK(classifyCube(c) == BognerNeighbourhoodState::Interface);
+   // submerged face: liquid below, freed sheet beside -> liquid
+   c = uniformCube(OBSTACLE);
+   for (auto& row : c[0]) row.fill(LIQUID);
+   for (auto& row : c[1]) row.fill(FORMER_OBSTACLE);
+   WALBERLA_CHECK(classifyCubeStrict(c, g, l) == BognerNeighbourhoodState::Liquid);
+   // waterline: liquid below, gas above -> interface
+   for (auto& row : c[2]) row.fill(GAS);
+   WALBERLA_CHECK(classifyCubeStrict(c, g, l) == BognerNeighbourhoodState::Interface);
+   // a stale gas bit on a covered cell is no evidence
+   c = uniformCube(LIQUID);
+   c[2][1][1] = MockFlag(GAS | OBSTACLE);
+   WALBERLA_CHECK(classifyCubeStrict(c, g, l) == BognerNeighbourhoodState::Liquid);
+   // a formerObstacle neighbour that still carries a gas bit is not in B(x) either
+   c = uniformCube(LIQUID);
+   c[2][1][1] = MockFlag(GAS | FORMER_OBSTACLE);
+   WALBERLA_CHECK(classifyCubeStrict(c, g, l) == BognerNeighbourhoodState::Liquid);
+   WALBERLA_LOG_INFO_ON_ROOT("[strict] Bogner rule: ok");
+}
+
 } // namespace lbm_mesapd_coupling
 } // namespace walberla
 
@@ -497,6 +568,10 @@ int main(int argc, char** argv)
    testSeedWithInterfaceNeighbours();
    testSeedNoResolvedNeighbour();
    testSeedIgnoresStaleFillOfExcludedCells();
+   testSeedSkipObstacleNeighboursToggle();
+
+   testStrictBognerTruthTable();
+   testStrictBognerSameStepNeighbours();
 
    return EXIT_SUCCESS;
 }

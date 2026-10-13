@@ -40,6 +40,7 @@
 
 #include "mesa_pd/data/IAccessor.h"
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <sstream>
@@ -167,6 +168,47 @@ inline BognerNeighbourhoodState classifyFormerObstacleCell(NeighbourFlagGetter g
 }
 
 //**************************************************************************************************************************************
+/*!\brief [Claude, 2026-10-08] Strict Bogner rule (prm ModelParameters.strictBognerClassification), Bogner (2017) pp. 113-114,
+ * Bogner & Ruede (2013) Sec. 5.2, applied literally and in his order:
+ *  - B(x) contains no liquid -> Gas
+ *  - B(x) contains no gas    -> Liquid
+ *  - B(x) contains both      -> Interface
+ * B(x) is the non-obstacle neighbourhood. A neighbour freed in the same step (formerObstacle) was an obstacle when the
+ * step began, so it is not in B(x) -- it is neither evidence nor "unknown", unlike classifyFormerObstacleNeighbourhood,
+ * which falls back to interface for such cells. Bogner gives no same-step rule: he assumes the body is slow enough that a
+ * freed cell always borders fluid that already has a state.
+ */
+//**************************************************************************************************************************************
+inline BognerNeighbourhoodState classifyStrictBognerNeighbourhood(bool hasGas, bool hasLiquid)
+{
+   if (!hasLiquid) return BognerNeighbourhoodState::Gas;
+   if (!hasGas) return BognerNeighbourhoodState::Liquid;
+   return BognerNeighbourhoodState::Interface;
+}
+
+//! [Claude, 2026-10-08] Scan for classifyStrictBognerNeighbourhood: neighbours flagged obstacle or formerObstacle are not in
+//! B(x); hasGas/hasLiquid count real gas/liquid flags only (an interface neighbour counts toward neither, as in
+//! classifyFormerObstacleCell).
+template< typename Flag_T, typename NeighbourFlagGetter >
+inline BognerNeighbourhoodState classifyFormerObstacleCellStrict(NeighbourFlagGetter getNeighbourFlag, Flag_T bognerLiquid,
+                                                                   Flag_T bognerGas, Flag_T formerObstacle, Flag_T obstacle,
+                                                                   bool& hasGasOut, bool& hasLiquidOut)
+{
+   hasGasOut = false; hasLiquidOut = false;
+   for (int dz = -1; dz <= 1; ++dz)
+      for (int dy = -1; dy <= 1; ++dy)
+         for (int dx = -1; dx <= 1; ++dx)
+         {
+            if (dx == 0 && dy == 0 && dz == 0) continue;
+            const Flag_T nf = getNeighbourFlag(dx, dy, dz);
+            if (isFlagSet(nf, obstacle) || isFlagSet(nf, formerObstacle)) continue; // not in B(x)
+            if (isFlagSet(nf, bognerLiquid)) hasLiquidOut = true;
+            if (isFlagSet(nf, bognerGas)) hasGasOut = true;
+         }
+   return classifyStrictBognerNeighbourhood(hasGasOut, hasLiquidOut);
+}
+
+//**************************************************************************************************************************************
 /*!\brief Pass-3 candidacy rule: should this FormerMO cell's fallback-to-interface outcome from
  * Pass 2 be re-examined once every same-pass FormerMO cell in the block has a final state?
  *
@@ -204,13 +246,21 @@ inline bool isPass3Candidate(BognerNeighbourhoodState state, bool hasGas, bool h
  *   surface cell (D) the local liquid fraction. Only the fill changes, never the cell state, so the liquid/gas
  *   separation invariant is unaffected.
  *
+ * skipObstacleNeighbours (prm ModelParameters.seedSkipObstacleNeighbours, default true) -- [Claude, 2026-10-08]: true
+ *   (behaviour since 2026-10-01) excludes every neighbour flagged obstacle or formerObstacle, in both rules. false restores
+ *   the legacy rule as it was before 2026-10-01: an INTERFACE-flagged neighbour counts even if it also carries an obstacle
+ *   or formerObstacle flag (the exclusion then applies to the all-neighbour rule only). The 2026-10-01 refactor changed the
+ *   legacy rule unintentionally: with it, the free r075 equilibrium cylinder (bogner3_r075_cyl_s32_*_freesharedstart)
+ *   goes NaN at step 8750, without it it does not (crash bisect 4314813 / 4314814, THESIS_PLAN.md 2026-10-08).
+ *
  * fallbackOut is set when no evidence was found and 0.5 was used.
  */
 //**************************************************************************************************************************************
 template< typename Flag_T, typename NeighbourFlagGetter, typename NeighbourFillGetter >
 inline real_t seedInterfaceFillFromNeighbourhood(NeighbourFlagGetter getNeighbourFlag, NeighbourFillGetter getNeighbourFill,
                                                  Flag_T liquid, Flag_T gas, Flag_T interface, Flag_T formerObstacle,
-                                                 Flag_T obstacle, bool allResolvedNeighbours, bool& fallbackOut)
+                                                 Flag_T obstacle, bool allResolvedNeighbours, bool skipObstacleNeighbours,
+                                                 bool& fallbackOut)
 {
    real_t sum = real_t(0);
    uint_t cnt = uint_t(0);
@@ -220,7 +270,9 @@ inline real_t seedInterfaceFillFromNeighbourhood(NeighbourFlagGetter getNeighbou
          {
             if (dx == 0 && dy == 0 && dz == 0) continue;
             const Flag_T nf = getNeighbourFlag(dx, dy, dz);
-            if (isFlagSet(nf, obstacle) || isFlagSet(nf, formerObstacle)) continue;
+            if ((allResolvedNeighbours || skipObstacleNeighbours) &&
+                (isFlagSet(nf, obstacle) || isFlagSet(nf, formerObstacle)))
+               continue;
             if (isFlagSet(nf, interface))
             {
                sum += getNeighbourFill(dx, dy, dz);
@@ -307,6 +359,23 @@ class PdfReconstructionManager
 
    //! [Claude, 2026-10-01] prm ModelParameters.seedFillFromAllNeighbours (see seedInterfaceFillFromNeighbourhood)
    void setSeedFillFromAllNeighbours(bool on) { seedFillFromAllNeighbours_ = on; }
+   //! [Claude, 2026-10-08] prm ModelParameters.seedSkipObstacleNeighbours (see seedInterfaceFillFromNeighbourhood)
+   void setSeedSkipObstacleNeighbours(bool on) { seedSkipObstacleNeighbours_ = on; }
+   //! [Claude, 2026-10-08] prm ModelParameters.strictBognerClassification (see classifyStrictBognerNeighbourhood)
+   void setStrictBognerClassification(bool on) { strictBognerClassification_ = on; }
+   //! [Claude, 2026-10-10] prm ModelParameters.strictBognerNoLiquidAtGas: with the strict rule, a freed cell decided liquid that
+   //! touches a (non-obstacle) gas cell once all decisions of the step are applied becomes interface with fill 1 instead (see Pass 2)
+   void setStrictBognerNoLiquidAtGas(bool on) { strictBognerNoLiquidAtGas_ = on; }
+
+   //! [Claude, 2026-10-09] momentum budget diagnostic: what the cells freed since the last call carry into the fluid, weighted
+   //! like fluid mass (liquid 1, interface its fill, gas 0) after this step's classification -- {Px, Py, Pz, L_y about the
+   //! freeing particle's centre, mass, cells}. Rank-local (caller reduces); resets.
+   std::array< real_t, 6 > takeFreedMomentum()
+   {
+      const std::array< real_t, 6 > r = freedMomentum_;
+      freedMomentum_.fill(real_t(0));
+      return r;
+   }
 
    // Diagnostic: MPI-reduce (to root), log, and reset the FormerMO→state conversion counters
    // accumulated since the last call. One line per call → invoke periodically (e.g. once per
@@ -360,6 +429,17 @@ class PdfReconstructionManager
          seededInterfaceCells_ = seededInterfaceFallback_ = uint_t(0);
          seededInterfaceFillSum_ = real_t(0);
       }
+      // [Claude, 2026-10-08] strict Bogner rule: cells that became gas with no gas in B(x) (only interface, or nothing), and
+      // cells that became liquid while a cell of the same step next to them became gas (liquid touching gas)
+      if (strictBognerClassification_)
+      {
+         std::vector< uint_t > sb = { strictGasWithoutGas_, strictLiquidTouchingGas_, strictLiquidToInterface_ };
+         walberla::mpi::reduceInplace(sb, walberla::mpi::SUM);
+         WALBERLA_LOG_INFO_ON_ROOT("[FORMERMO-STRICT t=" << t << "] strict Bogner rule since last report: gas with no gas in B(x)="
+                                   << sb[0] << " | liquid touching gas after the step=" << sb[1]
+                                   << " | of these made interface (strictBognerNoLiquidAtGas)=" << sb[2]);
+         strictGasWithoutGas_ = strictLiquidTouchingGas_ = strictLiquidToInterface_ = uint_t(0);
+      }
       convGas_ = convLiquid_ = convIntfUnknown_ = convIntfUnknownGas_ = convIntfSurface_ = convIntfUnresolved_ = uint_t(0);
       formerMoTotal_ = formerMoWithUnknownNbr_ = unknownNbrSum_ = unknownNbrMax_ = uint_t(0);
       unknownNbrHist_.fill(uint_t(0));
@@ -407,7 +487,8 @@ class PdfReconstructionManager
             [&](int dx, int dy, int dz) {
                return fillField->get(x + cell_idx_c(dx), y + cell_idx_c(dy), z + cell_idx_c(dz));
             },
-            liquidFlag, gasFlag, interfaceFlag, formerObstacleFlag, obstacleFlag, seedFillFromAllNeighbours_, fallback);
+            liquidFlag, gasFlag, interfaceFlag, formerObstacleFlag, obstacleFlag, seedFillFromAllNeighbours_,
+            seedSkipObstacleNeighbours_, fallback);
          const uint_t cnt = fallback ? uint_t(0) : uint_t(1);
          if (x >= 0 && y >= 0 && z >= 0 && x < cell_idx_c(flagField->xSize()) && y < cell_idx_c(flagField->ySize()) &&
              z < cell_idx_c(flagField->zSize()))
@@ -486,6 +567,12 @@ class PdfReconstructionManager
    // to the plain Pass-2-only fallback behaviour.
    const bool usePass3Reresolution_ = false;
    bool       seedFillFromAllNeighbours_ = false; // see setSeedFillFromAllNeighbours
+   bool       seedSkipObstacleNeighbours_ = true; // see setSeedSkipObstacleNeighbours
+   bool       strictBognerClassification_ = false; // see setStrictBognerClassification
+   uint_t     strictGasWithoutGas_        = uint_t(0);
+   uint_t     strictLiquidTouchingGas_    = uint_t(0);
+   bool       strictBognerNoLiquidAtGas_  = false;    // see setStrictBognerNoLiquidAtGas
+   uint_t     strictLiquidToInterface_    = uint_t(0);
    // [Claude, 2026-10-01] seeding bookkeeping (inner cells, since the last logAndResetConversionCounts): interface cells
    // seeded, how many of them fell back to 0.5, and the sum of their seeded fill (= liquid volume created, in cells)
    mutable uint_t seededInterfaceCells_    = uint_t(0);
@@ -524,6 +611,7 @@ class PdfReconstructionManager
    uint_t convPass3ToGas_           = uint_t(0);
    uint_t convPass3StillInterface_  = uint_t(0);
    uint_t convPass3UnresolvedIsland_ = uint_t(0);
+   std::array< real_t, 6 > freedMomentum_{}; // see takeFreedMomentum
 };
 
 template< typename PdfField_T, typename BoundaryHandling_T, typename ParticleAccessor_T, typename Reconstructor_T,
@@ -771,6 +859,9 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
 
    // ---- Pass 1: reconstruct missing PDFs (inner domain only) ------------------
 
+   struct FreedCell { Cell cell; size_t particleIdx; }; // inner freed cells, for the momentum budget (takeFreedMomentum)
+   std::vector< FreedCell > freedInner;
+
    if (optimizeForSmallObstacleFraction_)
    {
       const uint_t numberOfGhostLayersToInclude = uint_t(0);
@@ -783,6 +874,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
                               ac_->uidToIdx(particleField->get(x, y, z)) == idx) {
                (*reconstructor_)(block, x, y, z, pdfField, idx, *ac_);
                reseedHydrostatic(x, y, z);
+               if (pdfField->isInInnerPart(Cell(x, y, z))) freedInner.push_back({ Cell(x, y, z), idx });
                if (conserveMomentumWhenRestoring_ && pdfField->isInInnerPart(Cell(x, y, z)))
                {
                   Vector3< real_t > force      = pdfField->getMomentumDensity(x, y, z);
@@ -800,6 +892,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             WALBERLA_ASSERT_UNEQUAL(particleIdx, ac_->getInvalidIdx(), "Index of particle is invalid!");
             (*reconstructor_)(block, x, y, z, pdfField, particleIdx, *ac_);
             reseedHydrostatic(x, y, z);
+            if (pdfField->isInInnerPart(Cell(x, y, z))) freedInner.push_back({ Cell(x, y, z), particleIdx });
 
             if (conserveMomentumWhenRestoring_ && pdfField->isInInnerPart(Cell(x, y, z)))
             {
@@ -813,7 +906,102 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
    // ---- Pass 2: update flags formerObstacle → target (inner domain + ghost layers),
    //             invalidate particle field entries --------------------------------
 
-   if (optimizeForSmallObstacleFraction_)
+   // [Claude, 2026-10-08] strict Bogner rule (strictBognerClassification_, see classifyStrictBognerNeighbourhood): every
+   // freed cell is decided against the flags as they are before this pass -- the other cells freed now still carry
+   // formerObstacle there, so they are not in B(x) -- and the decisions are applied only afterwards, so the result does not
+   // depend on the loop order. Interface fill: mean fill of the interface cells in B(x) (Bogner), 0.5 if there is none
+   // (Bogner gives no rule for that case). Pass 3 has no candidates in this mode.
+   if (useBognerStateSelection_ && strictBognerClassification_)
+   {
+      struct StrictDecision { Cell cell; flag_t target; real_t fill; };
+      std::vector< StrictDecision > decisions;
+      const cell_idx_t xs = cell_idx_c(flagField->xSize());
+      const cell_idx_t ys = cell_idx_c(flagField->ySize());
+      const cell_idx_t zs = cell_idx_c(flagField->zSize());
+      auto isInner = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) {
+         return cx >= 0 && cx < xs && cy >= 0 && cy < ys && cz >= 0 && cz < zs;
+      };
+      auto decide = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) {
+         auto nbr = [&](int dx, int dy, int dz) -> flag_t { return getBoundedNeighbourFlag(cx, cy, cz, dx, dy, dz); };
+         bool hasGas, hasLiquid;
+         const BognerNeighbourhoodState state = classifyFormerObstacleCellStrict(nbr, bognerLiquid, bognerGas, formerObstacle,
+                                                                                 movingObstacle, hasGas, hasLiquid);
+         const bool inner  = isInner(cx, cy, cz);
+         flag_t     target = bognerInterface;
+         real_t     fill   = real_t(0);
+         if (state == BognerNeighbourhoodState::Gas)
+         {
+            target = bognerGas;
+            if (inner) { ++convGas_; if (!hasGas) ++strictGasWithoutGas_; }
+         }
+         else if (state == BognerNeighbourhoodState::Liquid)
+         {
+            target = bognerLiquid;
+            fill   = real_t(1);
+            if (inner) ++convLiquid_;
+         }
+         else
+         {
+            if (inner) ++convIntfSurface_;
+            bool fallback = false;
+            if constexpr (!std::is_void_v< ScalarField_T >)
+               if (fillField != nullptr)
+                  fill = seedInterfaceFillFromNeighbourhood< flag_t >(
+                     nbr,
+                     [&](int dx, int dy, int dz) {
+                        return fillField->get(cx + cell_idx_c(dx), cy + cell_idx_c(dy), cz + cell_idx_c(dz));
+                     },
+                     bognerLiquid, bognerGas, bognerInterface, formerObstacle, movingObstacle,
+                     /* allResolvedNeighbours */ false, /* skipObstacleNeighbours */ true, fallback);
+            if (inner)
+            {
+               ++seededInterfaceCells_;
+               if (fallback) ++seededInterfaceFallback_;
+               seededInterfaceFillSum_ += fill;
+            }
+         }
+         decisions.push_back(StrictDecision{ Cell(cx, cy, cz), target, fill });
+      };
+
+      WALBERLA_FOR_ALL_CELLS_IN_INTERVAL_XYZ(flagField->xyzSizeWithGhostLayer(),
+                                             if (isFlagSet(flagField->get(x, y, z), formerObstacle)) { decide(x, y, z); })
+
+      for (const auto& d : decisions)
+      {
+         boundaryHandling->setDomain(d.target, d.cell.x(), d.cell.y(), d.cell.z());
+         if constexpr (!std::is_void_v< ScalarField_T >)
+            if (fillField != nullptr) fillField->get(d.cell) = d.fill;
+         removeFlag(flagField->get(d.cell), formerObstacle);
+         particleField->get(d.cell) = ac_->getInvalidUid();
+      }
+
+      // a new liquid cell next to gas (possible when cells freed in the same step go different ways: Y has no gas in B(x) and
+      // becomes liquid, its freed neighbour Z no liquid and becomes gas). Counted; with strictBognerNoLiquidAtGas_ (prm
+      // strictBognerNoLiquidAtGas) the liquid cell becomes interface with fill 1, since a liquid cell next to gas streams the
+      // gas cell's invalid PDFs (THESIS_PLAN.md 2026-10-10: NaN of the r025 cuboid 4320573 at step 14439). Inner cells only:
+      // the flag field is communicated right after this sweep, so the owner's decision reaches the ghost layers.
+      for (const auto& d : decisions)
+      {
+         if (d.target != bognerLiquid || !isInner(d.cell.x(), d.cell.y(), d.cell.z())) continue;
+         bool touches = false;
+         for (int dz = -1; dz <= 1 && !touches; ++dz)
+            for (int dy = -1; dy <= 1 && !touches; ++dy)
+               for (int dx = -1; dx <= 1 && !touches; ++dx)
+               {
+                  const flag_t nf = getBoundedNeighbourFlag(d.cell.x(), d.cell.y(), d.cell.z(), dx, dy, dz);
+                  touches = (dx != 0 || dy != 0 || dz != 0) && isFlagSet(nf, bognerGas) && !isFlagSet(nf, movingObstacle);
+               }
+         if (touches) ++strictLiquidTouchingGas_;
+         if (touches && strictBognerNoLiquidAtGas_)
+         {
+            boundaryHandling->setDomain(bognerInterface, d.cell.x(), d.cell.y(), d.cell.z());
+            if constexpr (!std::is_void_v< ScalarField_T >)
+               if (fillField != nullptr) fillField->get(d.cell) = real_t(1);
+            ++strictLiquidToInterface_;
+         }
+      }
+   }
+   else if (optimizeForSmallObstacleFraction_)
    {
       const uint_t numberOfGhostLayersToInclude = flagField->nrOfGhostLayers();
 
@@ -930,6 +1118,27 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
          }
       }
    }
+
+   // [Claude, 2026-10-09] momentum budget (takeFreedMomentum): the freed cells' final state decides how much of their PDFs'
+   // momentum is fluid -- liquid all of it, interface its fill, gas none
+   if constexpr (!std::is_void_v< ScalarField_T >)
+      if (fillField != nullptr)
+         for (const auto& f : freedInner)
+         {
+            const flag_t fl = flagField->get(f.cell);
+            const real_t w  = isFlagSet(fl, bognerLiquid) ? real_t(1)
+                              : isFlagSet(fl, bognerInterface) ? std::clamp(fillField->get(f.cell), real_t(0), real_t(1))
+                                                                : real_t(0);
+            if (w <= real_t(0)) continue;
+            const Vector3< real_t > m = pdfField->getMomentumDensity(f.cell.x(), f.cell.y(), f.cell.z());
+            const Vector3< real_t > r = blockStorage_->getBlockLocalCellCenter(*block, f.cell) - ac_->getPosition(f.particleIdx);
+            freedMomentum_[0] += w * m[0];
+            freedMomentum_[1] += w * m[1];
+            freedMomentum_[2] += w * m[2];
+            freedMomentum_[3] += w * (r[2] * m[0] - r[0] * m[2]);
+            freedMomentum_[4] += w * pdfField->getDensity(f.cell.x(), f.cell.y(), f.cell.z());
+            freedMomentum_[5] += real_t(1);
+         }
 }
 
 // ---- Free factory functions ------------------------------------------------

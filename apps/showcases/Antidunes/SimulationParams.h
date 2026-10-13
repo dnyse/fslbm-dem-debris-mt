@@ -922,6 +922,25 @@ struct ModelParams {
    //         hopper runs) or half a cell of water in the air (A'). Changes only the fill, never the cell state.
    bool        seedFillFromAllNeighbours;
 
+   // [Claude, 2026-10-08] true (default) -> the seeding above ignores neighbours flagged obstacle / formerObstacle, as since
+   //         2026-10-01; false -> legacy rule as before 2026-10-01 (an interface-flagged neighbour counts even if it also
+   //         carries such a flag). See seedInterfaceFillFromNeighbourhood; false avoids the NaN of the free r075 cylinder.
+   bool        seedSkipObstacleNeighbours;
+
+   // [Claude, 2026-10-08] true -> freshly uncovered cells follow Bogner's rule literally (Bogner 2017 pp. 113-114): B(x) =
+   //         non-obstacle neighbours, with cells freed in the same step counted as obstacle; no liquid -> gas, else no gas ->
+   //         liquid, else interface (fill = mean of the interface cells in B(x), 0.5 if none). No same-step interface fallback.
+   //         See PdfReconstructionManager.h, classifyStrictBognerNeighbourhood. false (default) -> the fallback rule.
+   bool        strictBognerClassification;
+   // [Claude, 2026-10-10] true -> (with strictBognerClassification) a freed cell decided liquid that touches gas after the step's
+   //         decisions are applied becomes interface with fill 1 (PdfReconstructionManager.h Pass 2). Fixes the waterline NaN of the
+   //         r025 cuboid (THESIS_PLAN.md 2026-10-10). false (default) -> counted only ([FORMERMO-STRICT]).
+   bool        strictBognerNoLiquidAtGas;
+   // [Claude, 2026-10-09] true -> log [MOMENTUM-BUDGET] every evaluationFrequency steps: momentum the freed cells carry into the
+   //         fluid, momentum of the fluid in newly covered cells, and the total fluid momentum (liquid + fill-weighted interface).
+   //         Diagnostic only. false (default) -> off.
+   bool        logMomentumBudget;
+
    // [Claude, 2026-10-02] true -> finite-difference curvature (CurvatureSweepFiniteDifferences) skips neighbour directions
    //         whose flag is in no group (upstream reads an UNINITIALISED neighbour normal there) or whose normal is not
    //         finite, sets curvature 0 if no direction remains, and logs each case as [CURVATURE-GUARD] (cell, neighbour
@@ -1037,6 +1056,13 @@ struct ModelParams {
    //         can be reported as grazing contacts (overlap <= 0.006).
    // false -> (DEFAULT) unchanged behaviour (GJK/EPA fallback for "no scenario" and special contacts).
    bool        refineCylinderContacts;
+
+   // [Claude, 2026-10-10] true -> cylinderCylinderContact (PaperAnalyticalContacts.h) passes a band-edge result to
+   //         refineCylinderContact when the projection overlap D(n) along its normal exceeds
+   //         kBandEdgeConsistencyFactor (3) times its depth (see paper_analytical::kodamBandEdgeAxialCheck). Fixes the
+   //         stacked equal-radius cylinders of the round-container drop test (THESIS_PLAN.md 2026-10-10, "FIX B REVISED").
+   // false -> (DEFAULT) unchanged closed-form dispatch.
+   bool        kodamBandEdgeAxialCheck;
 
    // true  → (only meaningful together with useAnalyticalContactDetection=true) cylinderCylinderResultIsUncertain's
    //         Tier 1 check (fired when the analytical dispatch found no scenario at all) uses the tight,
@@ -1638,6 +1664,10 @@ struct ModelParams {
       , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
       , usePass3Reresolution        { b.getParameter< bool >       ("usePass3Reresolution", false) }
       , seedFillFromAllNeighbours   { b.getParameter< bool >       ("seedFillFromAllNeighbours", false) }
+      , seedSkipObstacleNeighbours  { b.getParameter< bool >       ("seedSkipObstacleNeighbours", true) }
+      , strictBognerClassification  { b.getParameter< bool >       ("strictBognerClassification", false) }
+      , strictBognerNoLiquidAtGas   { b.getParameter< bool >       ("strictBognerNoLiquidAtGas", false) }
+      , logMomentumBudget           { b.getParameter< bool >       ("logMomentumBudget", false) }
       , guardCurvatureInputs        { b.getParameter< bool >       ("guardCurvatureInputs", false) }
       , wallOuterGhostLayer         { b.getParameter< bool >       ("wallOuterGhostLayer", false) }
       , diagnoseNaNNormals          { b.getParameter< bool >       ("diagnoseNaNNormals", false) }
@@ -1650,6 +1680,7 @@ struct ModelParams {
       , useAnalyticalContactDetection{ b.getParameter< bool >      ("useAnalyticalContactDetection", false) }
       , usePureAnalyticalCylinder   { b.getParameter< bool >       ("usePureAnalyticalCylinder", false) }
       , refineCylinderContacts      { b.getParameter< bool >       ("refineCylinderContacts", false) }
+      , kodamBandEdgeAxialCheck     { b.getParameter< bool >       ("kodamBandEdgeAxialCheck", false) }
       , useTightTier1               { b.getParameter< bool >       ("useTightTier1", false) }
       , useTightLayer1              { b.getParameter< bool >       ("useTightLayer1", true) }
       , useCapsuleShapeForCylinders { b.getParameter< bool >       ("useCapsuleShapeForCylinders", false) }

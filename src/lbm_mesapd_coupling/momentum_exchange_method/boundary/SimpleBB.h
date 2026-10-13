@@ -49,6 +49,7 @@
 #include "stencil/Directions.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 
 namespace walberla {
@@ -62,6 +63,21 @@ namespace lbm_mesapd_coupling {
 *
 */
 //**************************************************************************************************************************************
+
+// [Claude, 2026-10-09] momentum budget diagnostic (Antidunes ModelParameters.logMomentumBudget): rank-local sums over the
+// inner links treated since the last reset, x and z components each, pre dx scaling. With phi the clamped fill of the
+// near-boundary cell (1 without fill weighting):
+//   [0,1] c (f_old + f_new)          momentum the fluid cell loses through the link
+//   [2,3] phi c (f_old + f_new)      the same, fill weighted like the fluid mass
+//   [4,5] phi c 2 rho_ref w_q        reference subtraction (rho_ref = 1, or rho_hs with a hydrostatic reference)
+//   [6,7] -phi (f_old - f_new) u_b   Wen correction
+//   [8,9] force given to the body    = [2,3] - [4,5] + [6,7]
+// Only written while enabled() is true; not thread safe (Antidunes builds without OpenMP).
+struct MemLinkMomentumBudget
+{
+   static std::array< real_t, 10 >& sums() { static std::array< real_t, 10 > s{}; return s; }
+   static bool& enabled() { static bool e = false; return e; }
+};
 
 template< typename LatticeModel_T, typename FlagField_T, typename ParticleAccessor_T >
 class SimpleBB : public Boundary< typename FlagField_T::flag_t >
@@ -415,6 +431,8 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
       return;
    }
 
+   const real_t rawExchange = pdf_old + pdf_new; // [Claude, 2026-10-09] momentum budget: before the reference subtraction below
+
    // calculate the force on the obstacle
    // original work (MEM):      Ladd - Numerical simulations of particulate suspensions via a discretized Boltzmann equation. Part 1. Theoretical foundation (1994)
    // improved version (GIMEM): Wen et al. - Galilean invariant fluid-solid interfacial dynamics in lattice Boltzmann simulations (2014)
@@ -516,6 +534,19 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
       }
 
       force *= fillWeight;
+   }
+
+   if( MemLinkMomentumBudget::enabled() )
+   {
+      const real_t phi = fillLevelFct_ ? std::clamp( fillLevelFct_( nearBoundaryCell ), real_c(0), real_c(1) ) : real_c(1);
+      const real_t cx  = real_c( stencil::cx[dir] ), cz = real_c( stencil::cz[dir] );
+      const real_t ref = rawExchange - forceMEM; // 2 rho_ref w_q (0 on the incompressible path)
+      auto& s = MemLinkMomentumBudget::sums();
+      s[0] += cx * rawExchange;                         s[1] += cz * rawExchange;
+      s[2] += phi * cx * rawExchange;                   s[3] += phi * cz * rawExchange;
+      s[4] += phi * cx * ref;                           s[5] += phi * cz * ref;
+      s[6] -= phi * correction * boundaryVelocity[0];   s[7] -= phi * correction * boundaryVelocity[2];
+      s[8] += force[0];                                 s[9] += force[2];
    }
 
    force *= forceScalingFactor_;

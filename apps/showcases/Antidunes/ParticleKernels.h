@@ -4349,6 +4349,10 @@ public:
       computeContacts.setHistoryLogger(&floaterHistoryLogger_);
       computeContacts.setCylinderContactSkin(simParams->model.cylinderContactSkin);
       computeContacts.setRefineCylinderContacts(simParams->model.refineCylinderContacts);
+      // [Claude, 2026-10-10] ModelParameters.kodamBandEdgeAxialCheck: a switch of the closed form itself (free functions in
+      // PaperAnalyticalContacts.h), hence a namespace-level flag like kodamCapSelectionByAxisDistance
+      paper_analytical::kodamBandEdgeAxialCheck = simParams->model.kodamBandEdgeAxialCheck;
+      WALBERLA_LOG_INFO_ON_ROOT("kodamBandEdgeAxialCheck = " << (simParams->model.kodamBandEdgeAxialCheck ? "true" : "false"));
       if (simParams->model.cylinderContactSkin > real_t(0))
          WALBERLA_LOG_INFO_ON_ROOT("cylinderContactSkin = " << simParams->model.cylinderContactSkin
                                    << " LU (rod-rod contact below a surface gap of " << real_t(2) * simParams->model.cylinderContactSkin

@@ -3003,6 +3003,30 @@ inline Vec3 faceFaceStyleContactPoint(const Vec3& relBodyI, real_t Ri, real_t Li
 //! that dips into it (job 4251049, rods ...486/...489, steps 3484-3485.6; see THESIS_PLAN.md). The switch is kept so tests can reproduce the old behaviour.
 inline bool kodamCapSelectionByAxisDistance = true;
 
+//! [Claude, 2026-10-10] ModelParameters.kodamBandEdgeAxialCheck (default false = the dispatch as before). A band-edge result
+//! of cylinderCylinderContact is checked against the projection overlap D(n) along its own normal (detail::
+//! cylinderProjectionOverlap: the distance the bodies must move along n until their projections onto n separate, an upper
+//! bound of the depth that equals it at the true contact normal). If D(n) > kBandEdgeConsistencyFactor * overlap, the
+//! closed form is demonstrably wrong for this pair, and the result is replaced by the support-function refinement
+//! (refineCylinderContact, thesis Sec. cc-refinement), started from it. Reason (THESIS_PLAN.md 2026-10-10): two equal-radius
+//! cylinders stacked nearly coaxially (round-container drop test 4292501, step 125000) overlapped 0.46 face-to-face; face-edge
+//! was rejected because the probe rim's lowest point lay just outside the host's face disc, special contact because
+//! delta_a(P) > delta_r(P), so band-edge reported the radial depth at the single point P (0.005, horizontal normal) although
+//! D along that normal is 7.9; when the pose left that window the depth jumped to ~0.5 and injected the energy spike. A
+//! first version that returned face-edge with D along the host face normal fixed that pair but over-estimated oblique
+//! contacts (the face normal is not their contact normal; deep-overlap stress test 9x) and was replaced by this one.
+//! Threshold: in the 1019-contact reference sample, D(n)/overlap is at most 2.06 for the correct band-edge depths and
+//! 6.8-149 for four of the five wrong ones (the fifth has D(n) = overlap and is not detectable this way).
+inline bool   kodamBandEdgeAxialCheck    = false;
+inline real_t kBandEdgeConsistencyFactor = real_t(3);
+namespace detail
+{
+inline real_t cylinderProjectionOverlap(const CylinderState& ci, const CylinderState& cj, const Vec3& L);
+} // namespace detail
+struct RefineTrace;
+inline ContactResult refineCylinderContact(const CylinderState& ci, const CylinderState& cj, const ContactResult& raw,
+                                           RefineTrace* trace);
+
 inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderState& probe)
 {
    ContactResult result;
@@ -3366,17 +3390,23 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
    {
       // j's rim against i's face/band: rimVsFaceOrBand returns i->j (host->probe); negate for this
       // file's toward-1st-argument convention (see the face-face branch above).
+      // [Claude, 2026-10-10] kodamBandEdgeAxialCheck: an inconsistent band-edge result is refined (see the flag's comment)
+      const auto checked = [&](const ContactResult& res) {
+         if (!kodamBandEdgeAxialCheck || std::string(res.scenario) != "band-edge") return res;
+         if (detail::cylinderProjectionOverlap(ci, cj, -res.normal) <= kBandEdgeConsistencyFactor * res.overlap) return res;
+         return refineCylinderContact(ci, cj, res, nullptr);
+      };
       ContactResult jRimVsI = rimVsFaceOrBand(ci, cj);
       if (jRimVsI.contact)
       {
          jRimVsI.normal = -jRimVsI.normal;
-         return jRimVsI;
+         return checked(jRimVsI);
       }
 
       // i's rim against j's face/band: host=cj, probe=ci, so rimVsFaceOrBand's natural host->probe
       // direction (j->i) IS ALREADY this file's toward-1st-argument (i) convention -- no negation.
       const ContactResult iRimVsJ = rimVsFaceOrBand(cj, ci);
-      if (iRimVsJ.contact) { return iRimVsJ; }
+      if (iRimVsJ.contact) { return checked(iRimVsJ); }
    }
 
    // --- Edge-edge (Section 3.2.6, eq. 82-101): both rims (circular edges) facing each other. ------

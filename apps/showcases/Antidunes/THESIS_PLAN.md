@@ -5913,3 +5913,564 @@ tested conditions), not a failure of the study.
 >   (= the 4293495 prm plus the one flag line, diff checked). Job jobs/run_144_hopper_clog_cyl_startblock_skin0p5_cappid_drivebymass.sbatch,
 >   **SUBMITTED: job 4310128 (~/mt-dennys, 144 ranks, 5 h).** Expected change of the total streamwise drive on the rods: light
 >   rods -2.0 %, heavy +0.8 %, net about -1.2 %. For the load ratio of this run use sum(m_p) * a_x, not sum(V) * a_x.
+
+> - **[Claude, 2026-10-07] Fix B run 4310128 COMPLETED** (exit 0, 150 000 steps, ~4.7 h; vault
+>   antidunes-archive/antidunes-hopper-clog-cyl-startblock-skin0p5-cappid-drivebymass_4310128_20261007_004829). Not analysed yet.
+> - **[Claude, 2026-10-07] Contact-skin sensitivity, SUBMITTED** (author: "run two versions of these with smaller skin let's say
+>   0.25 and 0.1"): copies of 4293495 (skin 0.5, original drive) with cylinderContactSkin 0.25 / 0.1, everything else identical
+>   (`gen_hopper_stress_prms.py --cyl-startblock-skin-sweep-only`, diff = header + the skin line). **4311060 skin 0.25
+>   (~/mt-dennys-mirror), 4311061 skin 0.1 (~/mt-dennys-mirror2)**, 144 ranks, 6 h. Reference for m = 0: the identical run without
+>   skin failed after ~2900 steps (hybrid-dispatch.tex sec:contact-skin). Compare dh_end, leakage, load, passed rods, jam length and
+>   solid fraction with 4293495 / 4298713 (realisation scatter: dh 0.54 / 0.58, leakage 0.11 / 0.07).
+>   + third value (author: "a third one on the last mirror with even 0.05"): **4311067 skin 0.05 (~/mt-dennys)**, same generator
+>   option, same 6 h job template. All three checkouts are now busy.
+> - **[Claude, 2026-10-07] Fix B run 4310128 ANALYSED** (local animations/4310128_hopper_406rods_startblock_drivebymass_20261007:
+>   eval + floater VTK, fluid snapshots left on the vault; jam_backwater_models --step 149000 --col-min 10 --gap 15; build_run
+>   --leak-from 48000; results_figures metrics via a scratch run, thesis files untouched). vs 4293495 / 4298713 (old drive):
+>   dh_end 0.531 vs 0.537 / 0.582; peak 1.053 @ t* 5.6 vs 1.066 @ 6.0 / 1.112 @ 5.3; leakage 0.097 vs 0.114 / 0.074; load
+>   (with the drive actually applied: m_p a_x for fix B, V a_x for the old runs) 0.936 vs 0.919 / 0.889; mass -6.2 vs -5.9 / -6.5 %;
+>   jam L_A 143 vs 140 / 140, phi 0.413 vs 0.414 / 0.391, H1/H4 1.72 vs 1.81 / 1.75, C_D needed 19.5 vs 17 / 43; light rods above
+>   water 65 vs 75 / 54. All within the realisation scatter. **PASSING CHANGES:** 2 rods (0 light, 2 neutral) vs 16 (11 light, 5
+>   neutral) / 13 (12 light, 1 neutral). With the old drive the light rods (V a_x on half the mass = 2x their own weight's
+>   push) drift ahead: median x of the light rods 259 vs 242 at step 8000, 330 vs 319 at 12000; the leading light rod 442 (passed)
+>   vs 382 (held at the pillar front, x 372) at 12000; 7 light rods had passed by 12000 in 4293495, none in 4310128. => the
+>   light-rod passages of the hopper runs are at least partly an artefact of the old drive. Affects the passing statements of the
+>   hopper, cuboid, mixed, sphere and two-pillar runs (all old drive); jam metrics unaffected.
+> - **[Claude, 2026-10-07] Skin 0.05 run 4311067 FAILED** after 6:37 min (exit 1, "reynoldsNumber is nan", WriteData.h:148):
+>   step 2800 normal, 2900 meanVelocity nan. Chain on rank 138 at the periodic seam behind the rear rod row (cells (62..63,16..17,27),
+>   world x 767.5, y 37.5, z 27.5 = ~22 LU under water next to the y = 40 wall and a rod end): 2831/2832 excess mass with no
+>   neighbour to take it, 2856 "no usable direction" -> cell converted to gas under water, 2869 NaN normals + NaN PDFs ([DRY-LINK]),
+>   2900 NaN mean velocity. Same mechanism as the m = 0 failure (~2900 steps, sec:contact-skin): sub-cell water pockets between the
+>   densely stacked rods / rod ends / wall. 4311060 (0.25) and 4311061 (0.1) both past step 9600 at that time, no non-finite
+>   normals, no DRY-LINK. => stability threshold between m = 0.05 and 0.1.
+> - **[Claude, 2026-10-07] Sub-cell pocket test SUBMITTED: job 4311135** (~/mt-dennys, singlenode, 64 ranks, 1.5 h; author: "create a
+>   simple and cheap test run proofing this"). Motivation: in 4311067 (skin 0.05) the first failing cell (767.5, 37.5, 27.5) lay at
+>   the end of a rear neutral rod that had drifted back across the periodic seam (step 2000: rod at x 0.4, y 29.8, z 27.8, spanning
+>   y 21-39), i.e. in the sub-cell space between rod end, side wall (y 40) and neighbouring rods. Test:
+>   `gen_hopper_stress_prms.py --skin-pocket-test-only` -> prms/skin_pocket_test_m{0p05,0p1,0p25,0p5}_gas.prm: first 6 columns
+>   (84 rods) of the 4293495 start block, 128 x 40 x 96 periodic channel, no pillars, same flow/drive/cap, 8000 steps, floater+fluid
+>   VTK every 250 steps, diagnoseNaNNormals on, outputs *_m<tag>; the four skins run in parallel (16 ranks each, --bind-to none).
+>   Evidence sought: (1) precursor counts ([CURVATURE-GUARD] no usable direction, excess mass without neighbour, [DRY-LINK],
+>   [NAN-NORMAL], crash) rising as the skin shrinks; (2) event cells within < 1 LU of rod surfaces / walls on several sides.
+> - **[Claude, 2026-10-07] Sub-cell pocket test 4311139 (resubmit of 4311135, which failed on a missing mpirun module) COMPLETED**
+>   (11:45 min, all four skins exit 0, 8000 steps; vault antidunes-skin-pocket-test_4311139_20261007_014148; local
+>   animations/4311139_skin_pocket_test_20261007, analysis scratchpad/pocket_events.py). No crash at any skin (84 instead of 406
+>   rods), but the precursors separate: "no usable direction" 20 / 0 / 0 / 0 and "excess mass without neighbour" 342 / 95 / 96 / 100
+>   for skin 0.05 / 0.1 / 0.25 / 0.5. Located against the rods (world coordinates via domain decomposition, nearest floater snapshot):
+>   skin 0.05: all 20 no-usable-dir cells under water (median z 12, i.e. between the two heavy layers at z 4 / 11.5), all at a rod
+>   surface, 19 of 20 with >= 2 solid surfaces (rods / wall / floor) within 1 LU; of the 342 excess events 243 under water, 242 at a rod,
+>   198 with >= 2 surfaces within 1 LU. Skin 0.5: no no-usable-dir; all 100 excess events at the free surface (median z 49.5, ordinary
+>   FSLBM surface events), none under water. => the extra events at 0.05 are sub-cell water pockets between touching rods / rod and wall
+>   or floor; with skin 0.5 they do not occur. Distances use snapshots up to 125 steps off (rods move ~1 LU), hence small negative values.
+> - **[Claude, 2026-10-07] Skin runs 4311060 (m 0.25) and 4311061 (m 0.1) COMPLETED** (150 000 steps, exit 0, ~4.6 h; vault
+>   ..._4311060_20261007_052339 / ..._4311061_20261007_052309; local animations/431106{0,1}_hopper_406rods_startblock_skin*). 9 / 0
+>   "no usable direction" cells, no non-finite values. vs m 0.5 (4293495 / 4298713): dh_end 0.582 / 0.631 vs 0.537 / 0.582; leakage
+>   0.084 / 0.081 vs 0.114 / 0.074; load 1.033 / 0.992 vs 0.919 / 0.889; H1/H4 1.82 / 1.83 vs 1.81 / 1.75; phi 0.424 / 0.375 vs 0.414 /
+>   0.391; passed 20 / 14 vs 16 / 13. Written into hybrid-dispatch.tex sec:contact-skin (single runs: dh and load differences not
+>   separable from realisation scatter).
+> - **[Claude, 2026-10-07] Surface-tension scale test SUBMITTED: 4312261 (sigma/10, ~/mt-dennys-mirror) and 4312262 (sigma/100,
+>   ~/mt-dennys-mirror2)**, 144 ranks, 6 h. Copies of 4293495 with surfaceTensionOverride 1.63945e-4 / 1.63945e-5 (We-derived
+>   1.63945e-3; `gen_hopper_stress_prms.py --cyl-startblock-sigma-only`, diff = header + override line). Rod Bond number
+>   g R^2/sigma 0.32 -> 3.2 -> 32. Background: capillary length sqrt(sigma/g) = 5.3 LU > rod radius 3; the SI scale (dxSIOverride)
+>   only enters the unit conversion, so "a larger physical system at the same resolution" = smaller sigma (and larger Re, which
+>   is not feasible at tau = 0.5006; Re kept at 3100 as in a Froude-scaled flume). Compare dh, leakage, load, passing, jam shape,
+>   light rods above water with 4293495 / 4298713.
+> - **[Claude, 2026-10-07] sigma/100 run 4312262 FAILED** after 6:07 min (exit 1, "reynoldsNumber is nan"): step 2100 normal, 2200 NaN.
+>   Precursors from step 811: excess mass without neighbour, cells converted to gas, all at the FREE SURFACE (world z ~ 50-55, over and
+>   between the top layer of light rods inside the drifting block, x ~ 110-115), then 20 "no usable direction", 42 non-finite
+>   neighbour normals, 30 DRY-LINK. Different from the skin-pocket failures (under water): with sigma/100 the surface around the
+>   floating rods fragments and the solver loses it; surface tension also regularises the interface in the FSLBM. sigma/10
+>   (4312261) at step 3000 without any event. => sigma/100 not feasible at this resolution; sigma/10 still running.
+
+## 2026-10-07 (evening) -- equilibrium views: sphere/cylinder reruns with VTK, figures of the clogging runs
+- The sphere/cylinder VTK runs of 2026-09-29 (4278714/4278486/4278485, 4278476/4278477/4278484) are the thesis runs but wrote NO floater
+  point data (floater/, floaterCylinder/ empty; the writer follows the snapshot steps only since 2026-10-01) and only the fluid slab
+  y 43..47, which the bodies leave as they drift (end positions from forces.txt, e.g. sphere r075 at y 16.0 against the wall, cylinder
+  r050 at x 179; domain periodic in x). Cylinder orientation is not logged.
+- Rerun to 40000 steps with whole-domain VTK (fill_level + mapped_flag, 192x90x120) and floater output at
+  0,250,...,36000,39999: prms/gen_bogner3_sphcyl_vtk_prms.py -> bogner3_r{075,050,025}_sphere_s32_40k_vtk_gas.prm and
+  bogner3_r{...}_cyl_s32_40k_vtk_freesharedstart_gas.prm (thesis prm, only timesteps / VTK block / snapshot folder changed).
+  jobs/run_288_bogner3_cuboid_40k_vtk.sbatch now takes B3_SHAPE (default deep) and B3_VARIANT.
+  Spheres on mt-dennys-mirror: 4313584 (r075) -> 4313585 (r050) -> 4313586 (r025), afterany chain.
+  Cylinders on mt-dennys-mirror2: 4313587 (r075) -> 4313588 (r050) -> 4313589 (r025), afterany chain.
+  Vault: antidunes-bogner3-cuboid-40k-vtk_20261007/ (same folder as the cuboid reruns 4313356/4313358/4313357).
+- Cuboid reruns 4313356 (r075) and 4313358 (r050) completed exit=0; 4313357 (r025) running in ~/mt-dennys.
+- sigma/10 run 4312261 completed, archived antidunes-hopper-clog-cyl-startblock-skin0p5-cappid-sigmadiv10_4312261_20261007_185058
+  (eval copied to animations/4312261_hopper_406rods_startblock_sigmadiv10_20261007, not yet analysed).
+- Thesis figures from the run VTK (overleaf/scripts/figures/render_clog_views.py, assemble_clog_views.py):
+  views_{centred,hopper,shapes,twopillar}.pdf replace the four \clogfig placeholders; droptest_piles.pdf
+  (render_droptest_views.py) added to sec:results-large-scale-showcases. DropTest exports "rotation" + "glyphScale"/"edgeLength";
+  NOTE: vtkmodules dataset_adapter returns 9-component arrays as column-major 3x3 tensors (transposed) -- read raw with
+  vtk_to_numpy; with that, all 250 cuboid glyphs match the exact corners (inside 0-32 x 0-30, top 42.29).
+- sigma/10 (4312261) vs sigma (4293495 / 4298713), results_figures helpers, Q_ref of 4305662, leakage mean from step 48000, load
+  over the last 10 000 steps (V_p drive): dh_end 0.601 vs 0.537 / 0.582; dh_max 1.235 (t* 5.31) vs 1.066 (6.05) / 1.112 (5.31);
+  leakage 0.049 vs 0.114 / 0.074; load_end 0.963 vs 0.919 / 0.889; fluid mass at the end -10.1 % vs -6.0 % / -6.5 %. Same jam
+  (completed 149 900 steps, no crash), slightly higher peak and tighter; larger mass loss. Passing counts not evaluated (floater VTK
+  of 4312261 not copied; on the vault).
+- 2026-10-07 late: cylinder rerun 4313587 (bogner3_r075_cyl_s32_40k_vtk_freesharedstart, mt-dennys-mirror2, current code incl.
+  wallOuterGhostLayer/curvature guards as in the mirror) ABORTED at step 8750: NaN (LOW-RHO / DEGENERATE-FILL-RECONSTRUCTION) in interface
+  cells at world (97-102, 37-45, 29.5), just below the floating cylinder (centre z ~49.5, R 16), preceded by FALLBACK-ISOLATED-INTERFACE
+  warnings at z 73.5 from step 161. The thesis run 4278476 (same prm apart from timesteps/VTK, 2026-09-29 code) completed 101 000 steps.
+  => robustness regression of the current code for a floating cylinder in still water; NOT investigated yet. Data: animations/
+  4313587_bogner3_cyl_r075_40k_vtk_20261007 (fluid snapshots on the vault). Cylinder axis stayed within 0.9 deg of horizontal up to
+  step 8000 (floater VTK) -> supports the cross-section drawing of the equilibrium figures (eq_cross_sections.py).
+- 2026-10-07 night: crash analysis of 4313587. First NaN at step 8733 in an INTERFACE cell (rank 154, local (9,12,9), world (105.5, 27.5,
+  39.5)) on the lower surface of the rising cylinder, ~20 LU under water, 11/26 obstacle neighbours ("degenerate newRho from
+  reconstructInterfaceCellLegacy"); precursor at step 8712: excess mass without neighbour, cell converted to gas at world (102.5, 35.5, 63.5)
+  (top surface near the waterline). Mechanism (hypothesis): a rising body uncovers adjacent cells under its bottom in the same step; the Bogner
+  classifier makes them INTERFACE (unresolved same-pass neighbour), the legacy seeding gives fill 0.5 without interface neighbours
+  (FALLBACK-ISOLATED-INTERFACE: 1060 in 4313587, 1652 in the surviving thesis run 4278476 -> the path is old; the crash is a chance hit).
+  Trajectories of 4313587 and 4278476 are identical to step 500 and diverge slowly from ~750 (code differences since 09-29; the equilibrium
+  prm sets none of the new guard options). Test chain on mt-dennys-mirror2 (prms/gen_cylcrash_prms.py, jobs/run_288_cylcrash.sbatch):
+  4313839 base to 8501 with checkpoint at 8500 -> 4313840 resume base to 9000 (crash at 8733 expected) -> 4313841 resume usePass3Reresolution
+  -> 4313842 resume seedFillFromAllNeighbours -> 4313843 resume both.
+
+## 2026-10-08 -- equilibrium reruns resubmitted, cylinder crash test results
+- The sphere chain 4313584-86 and the cylinder jobs 4313588/89 of 2026-10-07 never ran (no results dir, no sbatch output, records
+  purged; sacct database unreachable 2026-10-08) -- presumably cancelled while pending.
+- Resubmitted (prms unchanged, 40000 steps, whole-domain VTK):
+  spheres on ~/mt-dennys-mirror: 4313899 (r075) -> 4313900 (r050) -> 4313901 (r025), afterany chain;
+  cylinders on ~/mt-dennys: 4313902 (r050) -> 4313903 (r025) -> 4313904 (r075, plain retry of the crashed 4313587), afterany chain.
+  ~/mt-dennys: jobs/run_288_bogner3_cuboid_40k_vtk.sbatch replaced by the mirror version (takes B3_SHAPE; old one kept as
+  .bak_20261008); the three cyl 40k prms copied from the mirror (identical to the prm of 4313587).
+- Cylinder crash chain (mirror2): 4313840 (resume base from the step-8500 checkpoint) reached step 9000, exit 0 -- the NaN at step
+  8733 of 4313587 does NOT reproduce from the checkpoint (not deterministic; supports "chance hit"). 4313841 (resume + usePass3Reresolution)
+  also reached 9000, exit 0 (no information, since the base did not crash). 4313842 (seedFillFromAllNeighbours) / 4313843 (both) pending.
+- 2026-10-08 (later): per "delete the archive for the cuboids, make sure every of the 9 runs write the velocity of the complete domain":
+  * all 9 equilibrium 40k prms now write velocity + fill_level + mapped_flag of the WHOLE domain (192x90x120) at the 15 snapshot steps
+    (prms/gen_bogner3_sphcyl_vtk_prms.py now also rewrites the VTK block of the three cuboid prms in place; was slab y 43..47).
+  * cuboid reruns 4313356 / 4313357 / 4313358 DELETED everywhere (vault, ~/pinscan_backup, pinscan_results, their snapshot dirs in the
+    build trees, local animations/ copies); vault PROVENANCE.md notes it.
+  * jobs/run_288_bogner3_cuboid_40k_vtk.sbatch: home backup without vtk-out; vtk-out goes to the vault as ONE tar (vtk-out.tar, file
+    quota: vault 196K of 200K files), checked (file count) and then removed from pinscan_results (home quota 75 of 105 GB).
+  * queue: spheres 4313899 -> 4313900 -> 4313901 -> cuboids 4313906 (r075) -> 4313907 (r050) -> 4313908 (r025) on ~/mt-dennys-mirror;
+    cylinders 4313902 (r050) -> 4313903 (r025) -> 4313904 (r075) on ~/mt-dennys. All 9 released 2026-10-08.
+  * moved the cuboids to a third lane: 4313906-08 (mirror) cancelled before start; now 4313909 (r075) -> 4313910 (r050) -> 4313911 (r025)
+    on ~/mt-dennys-mirror2 after the crash tests 4313842 -> 4313843. src/ and Antidunes C++ sources identical in all three checkouts
+    (diff -rq, 2026-10-08), so all 9 runs use the same code. prms + sbatch copied to mirror2 (md5 checked).
+  * crash tests 4313842 (seedFillFromAllNeighbours) / 4313843 (both options) CANCELLED before start (the unchanged resume 4313840 did not
+    crash, so they could not show an effect); dependency of 4313909 cleared, cuboids start without waiting.
+  * verified against the thesis runs' own logged parameter echo (fulllog.gz, sorted key/value sets): the 9 prms differ from the
+    thesis runs only in timesteps (40000 vs 101000/100000) and snapshotBaseFolder (+ the VTK block). Code is newer (2026-10-07 vs
+    09-29) -> same setup, not bit-identical trajectories; figures from the reruns are illustrative, numbers stay from the thesis runs.
+  * 40k vs settling steps t_s (stats.json): cylinder r075 settles at 59 500, r025 at 37 500 -> r075 cylinder not fully settled at
+    40k. Author decision 2026-10-08: "looking at the graphs in the thesis 40k looks good enough" -> kept at 40k; jobs released.
+- 2026-10-08 (results): equilibrium reruns finished. exit 0: spheres 4313899/4313900/4313901, cylinders r050 4313902 / r025 4313903,
+  cuboids 4313909/4313910/4313911. Cylinder r075 4313904 exit=1 at step 8750 -- SAME step as 4313587 -> reproducible from a fresh
+  start with the current code (the resume from the step-8500 checkpoint, 4313840, did not crash). Thesis run 4278476 (2026-09-29 code)
+  completed 101 000 steps -> regression since 09-29 (commits 67d5961d, cd1b991b, 5683c85f, a4b3b50b). Candidate (from the diff, not
+  proven): a4b3b50b moved the legacy interface-fill seeding into seedInterfaceFillFromNeighbourhood, which now skips neighbours flagged
+  obstacle/formerObstacle BEFORE the interface check (old code averaged every interface-flagged neighbour) -> more 0.5 fallbacks.
+  Proposed bisect: r075 cyl to step 9000 with a4b3b50b^ and with current code + old seeding rule.
+- Slurm mails all said exit 0 / same name: the sbatch ends with archiving (exit code only in .status) and has a fixed job name. To fix.
+- The six sphere/cylinder jobs were submitted before the sbatch change (Slurm keeps the script of submission time) and copied vtk-out
+  file by file (vault 216K files > 200K soft quota, /home/hpc 101.5 of 104.9 GB). Fixed by hand: vtk-out.tar per run in the vault
+  (file count checked), loose vault copy + results + backup vtk-out removed. After: /home/hpc 72.8 GB, vault 192K files.
+- 2026-10-08: jobs/run_288_bogner3_cuboid_40k_vtk.sbatch now exits with the simulation's exit code (SIMEXIT); job names per run at
+  submission (--job-name). Crash bisect of the r075 cylinder (prms/cylbisect_r075_gas.prm = thesis prm of 4278476 to 9000 steps,
+  jobs/run_288_cylbisect.sbatch): 4314800 in ~/mt-dennys-bisectA (git archive 5683c85f = a4b3b50b^), 4314801 in ~/mt-dennys-bisectB
+  (a4b3b50b + legacy seeding restored: the obstacle/formerObstacle skip only for seedFillFromAllNeighbours).
+- 2026-10-08: tarball test passed (4313909 script tar, 4313899 hand tar: 4383/4383 files extracted, ParaView opens the last snapshot,
+  whole domain 192x90x120, velocity + fill_level + mapped_flag, floater pvd). Equilibrium reruns copied + extracted to
+  data2/debris-clogging-archive/antidunes-bogner3-eq-40k-vtk_20261008/. Per request, the whole vault archive is being packed:
+  every vtk-out and eval/avgDataSlices -> <name>.tar next to it, folder removed only if the tar lists the same file count
+  (~/tar_vault_archive.sh on Fritz, log ~/tar_vault_archive.log). Before: 189 176 files.
+- 2026-10-08: vault packing changed per request to ONE tarball per top-level folder of antidunes-archive (<folder>.tar, folder
+  removed after the file count matches; INDEX.txt lists them; ~/tar_vault_archive.sh, log ~/tar_vault_archive.log; the first,
+  per-subfolder pass was stopped after 10 subfolders, log ~/tar_vault_archive_subfolders.log; its inner tars end up inside the
+  folder tarballs). Running.
+- 2026-10-08: 3D equilibrium figure figures/equilibrium/eq_views3d.pdf (overleaf scripts/figures/render_eq_3d.py + assemble_eq_3d.py,
+  8 reruns at step 39999, U_MAX 0.004, r075 cylinder panel empty) added after fig:eq-states as fig:eq-views3d. Cuboid heel sign of
+  eq_cross_sections.py rechecked on 4313909-11 (residual 0.00 deg). Cylinder r050 rerun yaws ~16 deg about z by 40k (axis stays
+  horizontal within 0.1 deg).
+- Crash tests 4314800/4314801 failed at start (fresh checkouts had no configured build dir); run_288_cylbisect.sbatch now runs
+  --configure first; resubmitted as 4314813 (A) / 4314814 (B).
+- 2026-10-08 CHANGE OF PLANS (author): "rerun all the shapes for the full timesteps like in the runs that we have the data from in the
+  thesis, but with vtk activated and periodic in xy, pin the cylinder in the same way as the cuboid, the rest like starting position
+  should be taken from these thesis original runs". prms/gen_bogner3_eqfull_vtk_prms.py -> bogner3_r{075,050,025}_{sphere,cyl,deep}_
+  s32_eqfull_vtk_gas.prm from the thesis prms; diff per prm (sorted key/value): periodicity <1,1,0>, N/S Border removed, snapshot
+  folder _eqfull_pxy, cylinders + pinPosition false / pinRotation true / pinRotationAxes <1,0,1>; plus the whole-domain VTK block
+  (velocity, fill_level, mapped_flag, 21 steps to 99999). jobs/run_288_bogner3_eqfull_vtk.sbatch (3 h, snapshot folder read from the
+  prm, exit code returned, vault antidunes-bogner3-eqfull-vtk_20261008, vtk-out as one tar). Chains:
+  mt-dennys 4314841 cyl r075 -> 4314842 sphere r050 -> 4314843 deep r025; mirror 4314844 cyl r050 -> 4314845 sphere r025 -> 4314846
+  deep r075; mirror2 4314847 cyl r025 -> 4314848 sphere r075 -> 4314849 deep r050. The pinned 40k cylinder plan was dropped (never
+  submitted). NOTE: periodic y and pinned cylinders differ from the thesis set-up (walls in y, free cylinders).
+- Crash bisect: A 4314813 (code 5683c85f = a4b3b50b^) reached step 9000, exit 0, 1062 FALLBACK-ISOLATED-INTERFACE -> the r075
+  cylinder NaN at 8750 is introduced by a4b3b50b. B 4314814 (a4b3b50b + legacy seeding restored) running.
+- Fritz login: many short ssh connections got the jump host csnhr to refuse ("Network is unreachable") -> use ONE ControlMaster
+  connection (ControlPath /tmp/claude-1000/fz.ctl; the scratchpad path is too long for a unix socket).
+- Crash bisect B 4314814 (a4b3b50b + legacy seeding restored, i.e. the obstacle/formerObstacle skip of seedInterfaceFillFromNeighbourhood
+  only for seedFillFromAllNeighbours) reached step 9000, exit 0, 1063 fallbacks -> CAUSE: the 2026-10-01 refactor of the legacy
+  interface-fill seeding (a4b3b50b) changed its behaviour. The nine eqfull jobs held before start pending the author's decision on the fix.
+- 2026-10-08: per "make it toggleable and turn it off for the equilibrium run": prm ModelParameters.seedSkipObstacleNeighbours
+  (default true = behaviour since 2026-10-01, so existing prms run as before; false = legacy seeding as before 2026-10-01):
+  seedInterfaceFillFromNeighbourhood(..., skipObstacleNeighbours, ...), PdfReconstructionManager::setSeedSkipObstacleNeighbours,
+  SimulationParams.h, BuildTimeloop.h (logged at start-up); BognerStateClassificationTest + testSeedSkipObstacleNeighboursToggle
+  (all seed tests pass, Antidunes release builds). The nine eqfull prms set it false (gen_bogner3_eqfull_vtk_prms.py). Synced to
+  ~/mt-dennys and both mirrors (md5 checked); jobs 4314841-4314849 released.
+- Which clogging runs used the 2026-10-01 seeding: the log marker [FORMERMO-SEED] (added with the refactor) is in every run from 4300945
+  (2026-10-05) on (4300945/46/48, 4304946/48, 4305662, 4310128, 4311060/61/67, 4311139, 4312261/62). For the earlier runs (4292482,
+  4292673, 4293495, 4293831, 4297652, 4297655, 4297864, 4298712-14) no simulation log survives (vault folders hold data only; the
+  sbatch outputs were cleaned) -> undetermined from logs.
+- 2026-10-08: eqfull cylinder r025 4314847 FAILED (exit 1) at step 30745: NaN in interface cells at the waterline next to the cylinder
+  (MEM-GARBAGE-LINK density 4e12 from step 30742, then LOW-RHO / DEGENERATE-FILL-RECONSTRUCTION / DRY-LINK; abort from the NaN check in
+  WriteData.h:148). Seeding confirmed legacy (log). CAUSE: spurious AXIAL SLIDE with periodic y -- v_y grows steadily from step ~9000
+  (0.0019 at 10k, 0.0098 at 15k, 0.019 at 22.5k, 0.027 at 30k; the cylinder crosses the periodic y boundary every ~3300 steps) until
+  the conversions at end caps / waterline break down. Walled runs (thesis 4278476/77/84, 40k 4313902/03): |v_y| <= 0.0006 throughout.
+  eqfull r050 4314844 reached 0.009 at 30k, decayed by 50k, finished; r075 4314841 stayed below 1e-4. No physical drive (symmetric body,
+  still water) -> coupling artefact that the y walls used to stop (L = 64 in a 90-wide periodic basin, end caps 26 LU apart through
+  the boundary).
+- Rerun from step 0 with the y-translation pinned as well (pinPosition true, pinAxes <0,1,0>; x, z free; rotation as the cuboids):
+  prms/bogner3_r{075,050,025}_cyl_s32_eqfull_vtk_ypin_gas.prm (generator), jobs/run_288_bogner3_eqfull_vtk.sbatch takes B3_VARIANT
+  and configures a fresh checkout. 4315494 (r025, _ypin) in the new checkout ~/mt-dennys-eq4 (rsync of the local tree, src identical
+  to ~/mt-dennys apart from two IDE dotfiles).
+- 2026-10-08 axial-slide analysis (eqfull cylinders, forces.txt + eval sqlite meanVelocity_y / totalFluidMass): total y-momentum of
+  body + fluid is NOT conserved although nothing acts along y (periodic y, gravity z, no drive): r025 0 -> +1157 at step 30000
+  (fluid carries 70 %, mean u_y 7.9e-4), r050 -> -464 at 30000 (then decays to -124 via floor friction; body stops), r075 |p| < 7.
+  Force on the body noisy (corr(F_y, v_y) ~ 0) but its mean equals the observed acceleration (r025 +0.011 vs +0.015, r050 -0.0095 vs
+  -0.0106). Strength ~ 1 / body mass (12.9k / 25.7k / 38.6k); direction set by symmetry breaking. Walls in y (thesis runs) block a
+  net y flow, so the effect never showed there.
+  CORRECTION of my first guess: pdfRefillingModel EquilibriumRefilling is the FREE-SURFACE gas->interface refilling, not the body
+  coupling. Uncovered cells are reconstructed by waLBerla's EquilibriumReconstructor (Reconstructor.h: equilibrium at the body's
+  local velocity, mean neighbour density; upstream, unchanged since 2025-03); neither this nor the removal of covered fluid puts a
+  balancing force on the body. Both models unchanged in all thesis runs (prms + logged config). Hypothesis (not proven): these
+  unbalanced conversions are the momentum source; test = log per-step momentum injected by reconstruction / removed by covering.
+- 2026-10-08: eqfull cuboid r025 4314843 FAILED at step 12341 (NaN at the waterline next to the rolling cuboid, world ~(160.5,
+  42.5, 60.5), DEGENERATE-FILL-RECONSTRUCTION with 9/26 obstacle neighbours, abort WriteData.h:148). Motion up to 12000 identical to
+  the thesis run 4273583 and the 40k rerun 4313911 (x drift 0.007-0.009 LU/step, heel 23 -> 53 -> 10 -> 34 deg), v_y ~ 0 -> periodic
+  y irrelevant; the 40k rerun (current seeding rule) passed this point. So with the CURRENT code neither seeding rule is safe for all
+  bodies (old rule: cuboid r025 NaN at 12341; current rule: cylinder r075 NaN at 8750); the 2026-09-29 code ran all nine with the old
+  rule -> some other change since 09-29 makes interface cells with many obstacle neighbours fragile. Not investigated further.
+  Rerun from 0: prms/bogner3_r025_deep_s32_eqfull_vtk_newseed_gas.prm (seedSkipObstacleNeighbours true), 4316290 on ~/mt-dennys.
+- /home/hpc reached 104.1 of 104.9 GB (soft; hard 209.7): running jobs' build-dir water-height (up to 4.6 GB each) + vtk-out, plus
+  checkpoint folders of the finished eqfull runs and snapshots_cylcrash (0.9 GB each) and the bisect checkouts (1.4 GB). Not deleted
+  (author to decide).
+- 2026-10-08 (author: "yes delete them"): deleted the checkpoint folders of the finished eqfull runs 4314841/42/44/45/48, snapshots_cylcrash
+  (crash tests 4313839-41), and the crash-bisect checkouts ~/mt-dennys-bisectA / -bisectB (their results are recorded above).
+- 2026-10-08 REVIEW 5683c85f..a4b3b50b (+ my uncommitted toggle), per "go over all changes and debug the issue": with all new prm options
+  at their defaults (driveFloatersByMass, seedFillFromAllNeighbours, guardCurvatureInputs, wallOuterGhostLayer, diagnoseNaNNormals,
+  boxContactSkin: off/0; initialTiltAxis default y = old behaviour) the ONLY physics change for these runs is the seeding refactor
+  (PdfReconstructionManager; now seedSkipObstacleNeighbours). CurvatureSweep: all behind guardCurvatureInputs. BuildTimeloop:
+  snapshot-aware VTK writes + diagnostics. ParticleKernels: contact detection / stats / drive-by-mass (off). SetupStages: stricter
+  particle-sync condition (same choice for the equilibrium basin: maxDiam 32-78 >= 2*15 already), tilt axis (default y). So the
+  current code with seedSkipObstacleNeighbours false == 5683c85f for these runs.
+  VTK ZeroSetter (gas_cell_zero_setter resets gas AND obstacle-cell PDFs to rho 1, u 0 before each fluid VTK write; only at the
+  snapshot steps): NOT the momentum source -- dp per 250 steps at VTK intervals 7.8 vs 10.1 otherwise (r025), 3.4 vs 4.3 (r050).
+  Momentum injection switches ON abruptly: r025 ~0.1 -> ~13 per 250 steps between 9250 and 9500, r050 one jump -13 at 11500 then ~-9;
+  coincides with recurring STALE-NEARBOUNDARY (interface->gas conversion at the waterline of cells still flagged near-boundary,
+  from step 9365 in r025). Likely also behind the drift of the walled thesis runs (bodies end against a side wall).
+  Test matrix for the r025 cuboid (crash 12341 with old rule + periodic y): 4316297 eqtest_deep025_walls_oldseed (old rule, walls,
+  14000 steps, new checkout ~/mt-dennys-eq5, jobs/run_288_eqtest.sbatch); 4316290 (current rule, periodic y, full run).
+- 2026-10-08 RESULTS of the test matrix and the last eqfull runs (all exit 0, last step reached, no real NaN; the "nan" log hits
+  are the NaN-scan headers and the "preventing NaN" text of STALE-NEARBOUNDARY):
+  4316297 (r025 cuboid, OLD rule, WALLS in y) passed step 14000 (crash point of the periodic run 12341) -> the crash needs
+  periodic y + old rule; 4316290 (r025 cuboid, CURRENT rule, periodic y) ran all 100000 steps (final pos <17.25,42.50,66.39>,
+  max |v_y| 3.4e-4). 4314846 (r075 cuboid) / 4314849 (r050 cuboid) 100000 steps; 4315494 (r025 cylinder, y pinned) 101000 steps.
+  Max |v_y| over the periodic-y runs (old rule): spheres r075 2.1e-3 (final y 54.9), r050 1.2e-4, r025 1.3e-4; cylinders r075
+  1.5e-4, r050 9.7e-3 (final y 37.5); cuboids r075 1.8e-4, r050 1.5e-4. So all nine have a complete run, but two with exceptions
+  (r025 cylinder y-pinned, r025 cuboid current rule) -> not yet one consistent set-up.
+  Proven consistent alternatives: (a) thesis set-up (walls in y, old rule) -- all nine thesis runs completed with it; (b) periodic
+  xy + current rule for all -- proven only for the r025 cuboid; the r075 cylinder crashed at 8750 with the current rule but
+  free-rotating and walled, untested rotation-pinned.
+- 2026-10-08 Settled state of the eqfull cuboids vs the thesis cuboids (last 20k steps, same stats as make_plots.py; scratch script
+  cmp_cuboids.py): r050 4314849 heel 44.3+-0.7 (thesis 44.7), residual -0.02 (thesis -0.04), level drop 2.32 (2.01) -- matches.
+  r025 4316290 (current rule) heel 61.3+-0.3 (thesis 65.4, stable 63.4), residual -0.09 (-0.03), level drop 1.04 (1.71) -- fine.
+  r075 4314846 (old rule, periodic y): heel 26.6 exactly from 20k to 76k, then an unprovoked upset at 76500-80000 (no contact force:
+  sinks 49.8 -> 46.9, heel 26.6 -> 37.9), back to 28.6 deg by 99750 but not resettled; level drop 4.31 vs thesis 2.37 (faster
+  fluid-mass loss), end residual -1.20+-0.78 (thesis -0.30). Not a clean end state.
+- 2026-10-08 Water pools on the rho 0.75 cuboid (4314846; scratch probe_top.py): wet cells (mapped_flag 1/2) 2-4 LU above the upper
+  face (outside the analytic box), about 14 LU above the free surface, not connected to it: 964 cells / mass ~346 at step 8000,
+  572 / ~282 at 20000, 676 / ~336 at 70000 (170 of them liquid cells). Origin: during the heave plunge (steps 3000-6500) the lower
+  half of the upper face was up to ~3 LU under water (face centre only +1.2 LU above the level at 4000); the water that ran onto
+  it stayed when the body rose and heeled to 26.6 deg. It does not drain off the 26.6-deg face (free-surface model, no-slip face,
+  mostly interface cells with fill < 0.5). r050 / r025 cuboids at 70000: 2 / 4 such cells (spray). Load ~336 LU^3 = 0.7 % of the
+  body weight (0.75*32*32*64 = 49152); spread over the waterplane (35.8 x 64) about 0.15 LU extra sinkage -- a plausible part of
+  the negative residual of the r075 cuboid (thesis -0.30, eqfull -0.58 over 55-75k), not checked further.
+  Figure eq_views3d: step 70000 of the eqfull runs (no fluid snapshot at 75000; author asked for 75k); water now drawn as the
+  fill = 0.5 iso-surface (render_eq_3d.py) instead of the faces of liquid+interface cells (one-cell speckles).
+- 2026-10-08 CORRECTION of the "stranded during the plunge" explanation above: the pools are CREATED on the dry upper face.
+  Snapshots of 4314846 (probe_top.py): step 500 0 wet cells above the water, 1000 126 (fill ~0.46, right on the face, body-frame
+  z 0.50), 2000 2202 (mass ~900), 4000 1945 (~957) -- at 1000/2000 the whole upper face is 6.5/4.6 LU ABOVE the free surface,
+  before the plunge. Mechanism (code): the sinking face uncovers a sheet of cells whose neighbourhood is gas above, obstacle below
+  and still-unclassified formerObstacle cells beside -> classifyFormerObstacleNeighbourhood branch A' (hasGas, !hasLiquid, hasUnknown)
+  -> interface, fill = mean of interface neighbours or 0.5 (seedInterfaceFillFromNeighbourhood) -> water created in the air.
+  usePass3Reresolution (default false; on 2026-09-24 recommended for this Bogner box family, never enabled for the thesis cuboid
+  runs) re-classifies these after the sheet has a state -> gas, fill 0. Seeding totals of 4314846 for context: 1.22e6 cell volumes
+  seeded into uncovered interface cells over 100k steps (rate x6 after step ~10000).
+  Rerun: 4316523 b3-eqfull-deep-r075-pass3 (prm bogner3_r075_deep_s32_eqfull_vtk_pass3_gas.prm = eqfull r075 cuboid +
+  usePass3Reresolution true, nothing else), ~/mt-dennys-mirror, code identical to the 4314846 run (md5 checked).
+  Check: wet cells above the water at the fluid snapshots 1000/2000/4000/70000 (probe_top.py), pass3ToGas in [FORMERMO-CONVERT].
+- 2026-10-08 ALL THREE cuboids create water above the surface during the heel-up, not only r075 (probe_top.py, cell volumes):
+  r075 63/900/957/346/336, r050 63/1567/1465/459/~0, r025 (current rule) 153/2475/2341/2717/~0 at steps 1000/2000/4000/8000/70000.
+  r050/r025 lose it later because they roll further / drift and wash it back; r075 sits still at 26.6 deg from ~15k and keeps pools.
+  Start positions checked: all three start at their unheeled equilibrium (bottom 24.5 / 16.5 / 8.5 of 32 LU below the initial
+  level 60.56; z_eq at 2.9 deg 52.57 / 60.56 / 68.55 vs start 52.09 / 60.09 / 68.08) and dip 3-6 LU while heeling (min z 47.1 /
+  55.2 / 62.0 at steps 3250-4000). Pass-3 reruns, all with the old seeding rule: 4316523 r075 (mirror), 4316529 r050 (mirror2),
+  4316530 r025 (eq4; also tests whether pass 3 avoids the r025 NaN at 12341 with periodic y). Spheres/cylinders not yet checked.
+- 2026-10-08 Disconnected water (flood fill from the floor through liquid/interface cells, 26-nbr, periodic xy; scratch
+  probe_islands.py), mass in cell volumes at steps 1000/2000/4000/8000/70000:
+  spheres r075 57/201/141/181/0, r050 0/0/0/0/0, r025 0; cylinders r075 0/0/0/0.5/2.5, r050 0, r025 (ypin) 0;
+  cuboids r075 63/900/1824/348/346, r050 63/751/796/4/2, r025 153/574/13/25/1. (The earlier "> H+2" counts for spheres/cylinders
+  included wave crests; this measure counts only water not connected to the bulk.) Only the r075 cuboid keeps it to the end.
+  Cylinders show none: water made on a curved top runs off at once and joins the bulk, so "none disconnected" != "none created".
+  Bogner's rule (bogner_direct_2017 pp. 113-114; bogner_simulation_2013 Sec. 5.2): B(x) = non-obstacle neighbours; no liquid -> GAS.
+  Our classifier deviates: an unresolved same-pass neighbour (formerObstacle) -> interface (A'/C), no gas and no liquid (E) ->
+  interface, and fill 0.5 if no interface neighbour (not Bogner). For the dry-face sheet Bogner's rule gives gas; pass 3
+  reproduces that. Thesis coupling.tex (sec:coupling-classification) already states the interface fallback and "Pass 3 ... not
+  used in this work" (comment) -- to update if the pass-3 reruns are used.
+- 2026-10-08 RESULTS pass-3 cuboid reruns (vault antidunes-bogner3-eqfull-vtk_20261008/<job>_*_pass3). 4316529 r050 and
+  4316530 r025 exit 0 at 100000 (r025 also passes the 12341 NaN of 4314843, same old seeding rule). 4316523 r075 exit 1: NaN at
+  step 96500 near the waterline (x~128-131, z~57-61), reynoldsNumber nan abort; first DEGENERATE-FILL-RECONSTRUCTION at 96500 itself.
+  Disconnected water (probe_islands.py) 0 at 1k/2k/4k/8k/70k in all three (old runs: up to 1824 cell volumes). The early plunge is gone
+  (min residual vs z_eq -0.2 instead of -6.5 / -5.3 / -3.8) and the water level stays at 60.4-60.6 LU over the whole run; the old eqfull
+  cuboids lost level (r075 60.8 -> 56.3, r050 61.0 -> 58.2, r025 61.0 -> 59.5), and so did the THESIS cuboid runs (60.6 -> 58.2-58.9;
+  spheres/cylinders constant). 50-70k: r075 heel 30.4±0.9 residual +0.20; r050 44.7±1.2 +0.05; r025 25.9±1.6 -0.00 (the other stable
+  branch than 4316290's 61.2). PROBLEM r075 pass3: steady self-propelled drift in -x, vx -0.95e-3 (20-30k) growing to -3.2e-3 LU/step
+  (90-100k), mean F_hydro_x ~ -2e-3 with no contact force; ~4.5k cells converted per 1k steps (pass3ToLiquid dominant) while it drifts;
+  body travels ~180 LU (almost once around the periodic x). r050 pass3 drifts +24 LU, decaying to 0; r025 none. Cause not found yet.
+- 2026-10-08 STRICT BOGNER RULE (per "Try todo what bogner does and rerun 0.75"). New prm ModelParameters.strictBognerClassification
+  (default false). PdfReconstructionManager.h: classifyStrictBognerNeighbourhood / classifyFormerObstacleCellStrict + a decide-then-apply
+  Pass 2 branch. B(x) = non-obstacle neighbours, cells freed in the same step (formerObstacle) count as obstacle (they were when the
+  step began); no liquid -> gas, else no gas -> liquid, else interface, fill = mean fill of the interface cells in B(x), 0.5 if none
+  (Bogner gives no rule for that); PDFs as before (equilibrium, mean neighbour density, body surface velocity = Bogner Eq. 5.3-5.5).
+  Decisions against the pre-pass flags, applied afterwards (order-independent). New log line [FORMERMO-STRICT]: gas with no gas in
+  B(x) (Bogner's first case taken with only interface / nothing around) and new liquid cells touching gas (possible when same-step
+  cells go different ways -- Bogner's slow-body assumption; diagnostic only, not prevented). Unit test BognerStateClassificationTest
+  (testStrictBogner*) passes; Antidunes builds. Run: 4316885 b3-eqfull-deep-r075-strict (~/mt-dennys-mirror), prm
+  bogner3_r075_deep_s32_eqfull_vtk_strict_gas.prm = eqfull r075 cuboid + strictBognerClassification true (generator appended).
+  RESULT 4316885: exit 0, all 100k steps, no NaN (pass3 4316523 hit NaN at 96.5k). [FORMERMO-STRICT] summed over 400 reports:
+  gas-with-no-gas 0, liquid-touching-gas 0; 560 interface cells needed the 0.5 fallback. No water disconnected from the pool at
+  1k/2k/4k/8k/70k. Same dynamics as pass3 within noise: heel 30.3-31.7 deg from 45k on (stable 26.6), residual vs z_eq at the actual
+  heel +0.15..+0.26, vs 26.6 deg +0.3..+0.5; -x drift identical (vx -0.98e-3 at 20-30k -> -3.08e-3 at 90-100k); level 60.42-60.59
+  (start 60.56). => the classification rule is NOT what sets the 30 deg heel or the drift; cause still open.
+- 2026-10-08 DEBUG r075 30-deg heel (scratchpad torque_check.py / probe_momentum.py). Measured hydroTorque_y vs ideal hydrostatic
+  torque of the square section at the logged z/heel/level: clean runs (4316523, 4316885) from 30k on measured ~0 on average while
+  hydrostatics says -0.04..-0.06 (restoring toward 26.6) => an extra +0.03..+0.06 holds the heel at ~30; it grows with the -x drift.
+  MOMENTUM NOT CONSERVED: total x momentum (fluid sum fill*u + body m*vx, rho~1) 8k: -6 / 70k: -687 (strict), -686 (pass3); old rule
+  4314846: +43 / +14. Clean runs: whole upper water layer flows in -x (ux -2.7e-4 at z24-32 -> -2.1e-3 at z56-64, bottom ~0), body
+  -2.8e-3 rides it. Creation rate ~ -0.011/step ~ 4.5 conversions/step x u_body => suspect freed-cell PDFs (u = u_P + w x r, Bogner
+  Eq. 5.3) inject body momentum not taken from the body / not balanced by covered cells. Old-rule runs held 26.5+-0.0 but with water
+  on top (extra torque +0.15..+0.6 vs hydrostatics), so they are no reference either. Next: log momentum injected by freed cells and
+  removed by covered cells per report; short strict run.
+- 2026-10-09 MOMENTUM BUDGET instrumentation (per "start debugging ... which force is the issue"): prm ModelParameters.logMomentumBudget
+  (default false). MovingParticleMapping.h: optional NewlyCoveredCallback_T (inner domain cell, before forceBoundary).
+  PdfReconstructionManager.h: takeFreedMomentum() -- freed inner cells weighted by their final state (liquid 1, interface fill, gas 0):
+  P, L_y about the body centre, mass, count. BuildTimeloop.h: logMomentumBudget() -> one [MOMENTUM-BUDGET t=] line per
+  evaluationFrequency: freed / covered P, Ly, mass, n since last report, total fluid P and mass now, bodies' m*v.
+  Runs (25000 steps, snapshots 0,1k,2k,4k,8k,12k,16k,20k,24999): 4317122 b3-r075-strict-mom (~/mt-dennys-mirror, _strict_mom prm),
+  4317123 b3-r075-old-mom (~/mt-dennys-mirror2, _mom prm = old rule control).
+  RESULT (scratchpad budget.py): both exit 0. 4317122 strict: total x momentum (fluid fill*rho*u + body m*v) -0.3 at 5k, -8.5 at
+  12.5k, -26.8 at 15k, -137.8 at 25k; freed minus covered cells explain only -5.7 of it (cum. freed Px -13.8, covered -8.1) =>
+  the cell conversions at the body are NOT the source; ~-0.010/step appears elsewhere from ~12.5k on. 4317123 old rule: no trend but
+  swings of +-70..130 (e.g. +132 at 2.5k, -69 at 12.5k, +41 at 25k), also unexplained by freed/covered (net +11.6). Remaining
+  candidates, all in SimpleBB.h / FSLBM, none measured yet: (a) fill weighting force *= phi (body gets phi, fluid loses the full link
+  exchange); (b) the -w (rho0) subtraction = atmospheric pressure on the dry side, an external force on the body only, exact only if
+  the dry-link set balances the free-surface BC links; (c) Wen correction -u_b(f_old-f_new), body only; (d) free-surface interface->gas
+  conversions / excess-mass distribution near the waterline (cell momentum deleted or created). Next: log per report the sum over
+  links of the fluid-side exchange vs the body force, split into (a)-(c), plus the momentum of interface<->gas conversions.
+- 2026-10-09 MOMENTUM STAGES instrumentation (per "Yes" to splitting the budget further), all behind logMomentumBudget:
+  BuildTimeloop.h: localFluidBodyMomentum() (shared with logMomentumBudget), MomentumStageBudget + momentumStageProbe(): after
+  boundary handling, force weighting, StreamReconstructAdvect, collide, cell conversion, refilling, excess mass + flag reset, DEM
+  (BeforeFunction of the mapping), mapping, reconstruction; each probe charges the fluid / body momentum change since the previous
+  probe to its stage. SimpleBB.h: MemLinkMomentumBudget (static, rank-local; no OpenMP in the build) sums per inner link
+  c(f_old+f_new), its fill-weighted value, the reference subtraction phi c 2 rho_ref w, the Wen correction and the force given to
+  the body (x, z). New log line [MOMENTUM-STAGES t=] next to [MOMENTUM-BUDGET]. Local build OK. Run: 4317356 b3-r075-strict-mom2
+  (~/mt-dennys-mirror), prm bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_gas.prm (= _strict_mom, own snapshot folder).
+  RESULT 4317356 (scratchpad stages.py): exit 0; [MOMENTUM-BUDGET] identical to 4317122 (total -137.81 at 25k), so the probes do
+  not change the dynamics. Cumulative x by 25k: body (DEM) -45.81 = SimpleBB givenToBodies -45.83 (body gets exactly what the links
+  give). Fluid: streamReconstructAdvect -71.35, collide -28.95 (contains streamCollide of the onlyLBM blocks), excessMass +13.27,
+  mapping +8.13, reconstruction -13.82, cellConversion +0.72, others 0. Stream+collide+body = -146.1 = the mismatch between two
+  large terms that should cancel: fluid change outside the MEM links (free-surface BC on gas links + fill-measure effects) -403023.7
+  vs the body-side reference subtraction (rho0 = 1 on the dry side) +402871.7 (-152.0, 0.04 %), plus Wen +5.6. The x imbalance of
+  the wet-link set (refSubtraction x per step) is ~0 +-15 until 14k and -40..-55 from 18k on. => the momentum is created in the
+  streaming step where water, body and gas meet, not by the cell conversions (those sum to +8). Hypothesis (not proven): the FSLBM
+  gas BC uses rho_G with the Laplace pressure, the MEM dry-side reference uses rho0 = 1; order of magnitude fits (6 sigma kappa,
+  sigma = 8.5e-4). Discriminating test proposed: same run with surface tension 0.
+  Run: 4318172 b3-r075-mom2-sigma0 (~/mt-dennys-mirror), prm bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigma0_gas.prm
+  (= _strict_mom2 + PhysicsParameters.surfaceTensionOverride 0, own snapshot folder). Compare total x momentum, the stream-stage
+  mismatch and the heel against 4317356. Note: the logged Weber number divides by sigma (inf in this run, harmless).
+  RESULT 4318172 (sigma 0): exit 0. Total x momentum +0.2 (2.5k), +4.7 (10k), +10.3 (15k), +10.5 (25k) vs -0.8 / -7.2 / -26.8 / -137.8
+  in 4317356; stream+collide +10.4 (was -100.3), body +4.8 (was -45.8). No -x drift: body x 96.1 -> 98.8, vx +1e-5..+2e-4 (4317356:
+  x -> 91.6, vx -8.3e-4 at 22.5-25k). Height residual vs z_eq -0.27..+0.22 (4317356 up to +0.76). Heel: the same slow swing in both
+  (peak ~36 deg at 12.5-15k, 24.1 / 25.7 deg at 22.5-25k), so 25k is too short to judge the final heel. => the momentum source and the
+  drift come from the surface-tension (Laplace) pressure: gas BC with rho_G(kappa) vs the MEM dry-side reference rho0 = 1. Open: does the
+  heel settle at 26.6 with sigma 0 (needs a 100k run); proper fix = Laplace pressure in the MEM gas term (check Bogner Eq. 5.9 first).
+
+- [Claude, 2026-10-09] RUN 4318312 (b3_sig0_100k, --time 03:00:00): prm bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigma0_100k_gas.prm
+  = _strict_mom2_sigma0 over 100000 steps, VTK steps of the 100k runs (incl. 70000). Question: does the heel settle at 26.6 deg with
+  sigma = 0. Bogner check (cld_kbase): Eq. 5.9 of bogner_direct_2017 uses f_eq(rho_g, 0) with rho_g = p_g/c_s^2 on the gas side; the
+  floating-cube equilibration test (bogner_direct_2017 Sec. 5.3.3, bogner_simulation_2013) lists domain 130x40x40, tau 0.526,
+  g 7.5e-4, s = 16 and states no surface tension (the 2013 paper mentions p'_G = p_G + 2 sigma kappa only as an option).
+
+- [Claude, 2026-10-09] RUN 4318318 (b3_sigd10_100k, ~/mt-dennys-mirror2, --time 03:00:00): prm
+  bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigmadiv10_100k_gas.prm = the sigma0_100k prm with surfaceTensionOverride 8.49592e-5
+  (sigma/10). Question: do the momentum creation, -x drift and heel error scale with sigma. Scale check from the log of 4318172
+  (dx_SI 4.83592e-4 m, dt_SI 4.99725e-5 s): nominal sigma_SI = 8.49592e-4 * 1000 * dx^3/dt^2 = 0.038 N/m (about half of water,
+  0.072); capillary length 4.1 cells = 2.0 mm, cuboid side 32 cells = 15.5 mm, Bond number g s^2/sigma = 61. => sigma is not
+  unphysically high for a 15 mm body; the error is the inconsistency between the gas BC and the MEM dry-side reference.
+- [Claude, 2026-10-09] 4318312 / 4318318: time limit lowered 03:00 -> 02:00 (scontrol, per "Yes"); previous 100k VTK runs took 4643-4975 s of simulation time, +6 % for logMomentumBudget.
+
+- [Claude, 2026-10-09] RESULT 4318312 (sigma 0) and 4318318 (sigma/10), both 100k, exit 0, VTK archived to
+  /home/vault/iwia/iwia148h/antidunes-archive/antidunes-bogner3-eqfull-vtk_20261008/<job>_.../vtk-out.tar. Analysis scratchpad
+  heel100k.py (windows of 10k) vs nominal strict 4316885:
+  heel mean 50-100k: nominal 30.6 (sd 0.8), sigma/10 27.2 (sd 1.4), sigma0 27.6 (sd 1.2); analytic 26.565.
+  height above z_eq 50-100k: nominal +0.21, sigma/10 +0.07, sigma0 +0.08 LU; stable heel implied by that draft (heel_vs_fill table):
+  28.8 / 27.2 / 27.3 -> the remaining ~1 deg is the small excess height, not a torque error.
+  x drift over 100k: nominal -193 cells (vx -3e-3, wraps the 192 domain), sigma/10 +15 cells (vx +1e-4 .. +2e-4),
+  sigma0 +5 cells (vx ~1e-5 at the end). Total x momentum (fluid + bodies) vs t=250: sigma0 +10 flat from 20k; sigma/10 +27 (20k)
+  -> +42 (70k), flat after 60k; nominal (4317356, 25k) -138 and growing. => the sigma-induced momentum is >10x smaller at sigma/10
+  but of opposite sign (not a linear scaling). Heel still oscillates +-1.3 deg at 100k with sigma0 (not fully at rest).
+  Heel at VTK steps, sigma0: 40k 25.0, 50k 27.3, 60k 27.8, 70k 29.4, 80k 26.8, 90k 27.6 (70k is at an oscillation peak).
+- [Claude, 2026-10-09] SWING DECAY (scratchpad swing.py): heel sd per 10k, sigma0 4318312: 1.38 1.16 1.31 0.81 1.31 1.64 0.61 0.79
+  (20k..100k; envelope e-folding ~1.4e5 steps, poorly defined); sigma/10: 3.14 -> 0.72 (e-fold 5.3e4); nominal 2.92 -> 0.38 (3.2e4).
+  Heel dominant periods 11.7k-17.6k steps = roll eigenperiod (dry estimate 2 pi sqrt(I/k) = 11.8k with k = 2.375/rad at 26.565,
+  I = 8.39e6; added inertia lengthens it). Basin level still oscillates with ~5000-5800 steps (= wavelength-192 gravity wave at
+  depth 60), sd 0.025 (20-40k) -> 0.033 (80-100k), no decay: nu = 2.14e-4 gives a wave e-folding 1/(2 nu k^2) = 2.2e6 steps.
+  Bogner's floating-cube test used tau 0.526 (nu 8.7e-3, 40x ours) in a 130x40x40 basin. => a longer run alone converges slowly.
+
+- [Claude, 2026-10-09] VISCOSITY RUNS (sigma 0, rho 0.75 cuboid, 100k, --time 02:00:00; prms from gen_bogner3_eqfull_vtk_prms.py
+  block _sigma0_tau{0526,051}[_half]_100k, diff to the sigma0_100k prm = relaxationRateOverride line (+ position for _half)):
+  4320452 (~/mt-dennys-mirror)  tau 0.526 (omega 1.90114, Bogner), start z_c 52.085 (equilibrium height at the 2.86 deg seed)
+  4320453 (~/mt-dennys-mirror2) tau 0.526, start z_c 60.0746 (centre on the initial surface = 50 % submerged, 8 LU above eq.)
+  4320454 (~/mt-dennys-eq4)     tau 0.51  (omega 1.96078, nu 3.33e-3), start z_c 52.085
+  Question: does the heel settle at 26.565 with a small swing once the basin waves are damped, independent of the start height?
+  Reference: 4318312 (tau 0.50064) 27.6 +- 1.2 deg over 50-100k. Earlier omega scans (4255530-32, 2026-09-22) used the pinned
+  s=16 rig with nominal sigma and never left upright; not comparable.
+- [Claude, 2026-10-09] RESULT viscosity runs 4320452/53/54 (all exit 0, log confirms omega/nu/sigma 0; VTK archived under
+  antidunes-bogner3-eqfull-vtk_20261008/<job>_.../vtk-out.tar). Heel 50-100k mean / sd / range of the 10k-window means:
+  tau 0.50064 (4318312) 27.58 / 1.22 / 26.55-27.91; tau 0.51 27.06 / 1.06 / 25.55-27.92; tau 0.526 26.62 / 0.91 / 25.92-27.14;
+  tau 0.526 half-submerged start 26.41 / 0.90 / 25.45-27.52; analytic 26.565. => at Bogner's viscosity the mean heel matches the
+  analytic value within 0.2 deg from both start heights. Not at rest: slow wander of the window means by ~+-0.8 deg remains, basin
+  level sd does not decay (tau 0.526: 0.014 -> 0.017 between 20-40k and 80-100k), so the residual motion is not only the free
+  basin wave. CORRECTION of the earlier draft argument: dz is +0.04..+0.08 in all four runs while the mean heel differs by 1.2 deg,
+  so the ~1 deg excess at tau 0.50064 is NOT explained by the excess height. Momentum: with sigma 0 the total x momentum still
+  rises during the heel-up (0-20k) to +31 (tau 0.51), +63 (0.526), +120 (half start), then slowly falls (floor friction is a guess,
+  not checked); body drift +6..+23 cells over 100k (vx 5e-5..1.5e-4). Half start: level 61.49 instead of 60.51 (more water
+  initialised below the higher body, +16384 cells / 17280 = +0.95 LU), dz relative to its own level.
+  Heel at VTK steps, 4320452: 50k 25.6, 60k 28.4, 70k 25.8, 80k 27.6, 90k 26.9; 4320453: 50k 26.0, 60k 26.3, 70k 27.1, 80k 25.9, 90k 26.1.
+- [Claude, 2026-10-09] RUNS 4320573 (rho 0.25, ~/mt-dennys-mirror) and 4320574 (rho 0.5, ~/mt-dennys-mirror2), --time 02:00:00, per
+  "Only rerun only the cuboid 0.25 and the 0.5, tau 0.526, start 50% submerged": prms bogner3_r{025,050}_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_gas.prm
+  (gen_bogner3_eqfull_vtk_prms.py), identical to the rho 0.75 run 4320453 except densityRatio and snapshot folder (checked by diff).
+  Expected: rho 0.25 heel 26.565 deg, rho 0.5 heel 45 deg. Together with 4320453 they form the cuboid row for eq_views3d.
+- [Claude, 2026-10-09] AUTHOR PLAN for the cuboids (per "When the 0.25 and the 0.5 runs are done we will update all the data in
+  equilibrium plots with cuboids with these three runs data ... 4 cols 3 rows grid that shows the evolution ... remove the cuboids
+  from the other figure"): (1) all cuboid data of Section 5.1 (extract_data.py RUNS -> data.json, make_plots.py, table, heel and
+  settling text, eq_states figures) from 4320453 / 4320573 / 4320574; (2) new figure eq_cuboid_evolution.pdf (overleaf
+  scripts/figures/assemble_eq_evolution.py, renders via render_eq_3d.py; local VTK in /run/media/dhuber/data2/eqcub/, snapshot
+  index i = i-th floater step, extracted indices 0 3 4 5 6 7 8 9 10 17 20 = steps 0 1000 2000 4000 8000 12000 16000 20000 24000
+  70000 99999); provisional columns 0 / 2000 / 16000 / 99999; (3) eq_views3d.pdf now spheres + cylinders only (2 x 3, done).
+- 2026-10-10 RESULTS of the sigma0 / tau 0.526 / half-submerged cuboid reruns (strict rule, logMomentumBudget, periodic xy):
+  4320574 r050 (mirror2) exit 0 at 100000 (79 min): heel 44.64 +- 0.88 over 50-100k (80-100k 44.60 +- 0.82), level 60.51-60.53,
+  x drift +32 LU in total (96 -> 128.4), vx decaying 8e-4 -> 1.1e-4, total x momentum +116 (20-30k) -> +87 (90-100k).
+  4320573 r025 (mirror) FAILED exit 1 at step 14500 (abort reynoldsNumber nan, WriteData.h:148). First bad cell at step 14438-14440:
+  STALE-NEARBOUNDARY gas cell, rank 171 local (14,7,14) = world ~(110.5, 52.5, 59.5), next to the lower corner of the rolling cuboid
+  at the waterline (body pos <91.7,45,67.3>, heel -16.7 deg, body motion smooth up to 14250); two steps later the cell is interface with
+  pdf_old NaN, then DEGENERATE-FILL-RECONSTRUCTION (9/26 obstacle neighbours) spreads over the neighbours. Same failure class as
+  4314843 (r025 cuboid, old rule, NaN at 12341 near the waterline). 4316290 (r025, seedSkipObstacleNeighbours, nominal sigma) survived.
+  Root cause of the gas -> interface conversion with NaN PDFs not identified (EquilibriumRefillingSweep would be the first suspect if a
+  freshly converted cell has no valid neighbour). Awaiting author decision how to rerun r025.
+- 2026-10-10 (author: "Yes do 1"): r025 retry with the 2026-10-01 seeding: prms/bogner3_r025_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_newseed_gas.prm
+  (= the 4320573 prm with seedSkipObstacleNeighbours true; generator block appended), job 4320930 on ~/mt-dennys-mirror, 2 h limit.
+  Not checked whether the seeding is reached under strictBognerClassification. ρ 0.5 row of eq_cuboid_evolution.pdf rendered
+  (VTK in /run/media/dhuber/data2/eqcub/4320574_*).
+- 2026-10-10 (author: "start an investigation into the kodam cylinder spike of energy") CAUSE of the round-container energy spike
+  (4292501, step 125000, REV2-I-015 / REV3 R-005) FOUND. The two cylinders are A uid 2882303761517117441 (upright on the floor at
+  the container wall) and B uid 5764607523034234885 (stacked on A, upside down: axes anti-parallel, 0.4-1.8 deg apart, lateral offset
+  0.08). From VTK (rotation rows = R col0, R col2, -R col1) they OVERLAP by 0.45-0.46 LU face-to-face from step <= 118000 on, but the
+  production closed form returns "band-edge", depth ~0.005, horizontal normal with a random azimuth, at every output step 118000-127000.
+  Plain GJK/EPA gives 0.56-0.58 with normal (0,0,-1). Run log: B's contact force ~(0,-0.011,0) (no vertical support), held by wall
+  friction (0.5 x 0.011 ~ weight 0.0057). Probe: tests/showcases_antidunes/KodamRoundSpikeProbeTest.cpp (ANTIDUNES_KodamRoundSpikeProbe;
+  KODAM_SWEEP=1 for the sweep). Mechanism (PaperAnalyticalContacts.h rimVsFaceOrBand): face-edge takes E = lowest point of the probe
+  rim and requires it inside the host's face disc; with equal radii and the small offset E lies just outside r = 4, so face-edge is
+  rejected; special-contact needs delta_a < delta_r at P; so band-edge reports the radial depth at the single point P although most of
+  the rim is 0.46 inside the host face (not a separating translation). Sweep at the 125000 pose (anti-parallel, own spin kept): offset 0
+  -> face-edge correct at all tilts; actual offset 0.085 -> band-edge from 0.01 to 1.78 deg (depth 0.085 -> 0.0056), face-edge 0.63 at
+  2.5 deg; offset x3 -> band-edge up to 5 deg. Any change of tilt/offset across that boundary switches to the true depth ~0.5 with a
+  vertical normal: force ~25x B's weight, stored 0.5 k delta^2 ~ 0.035 vs measured rise 0.031 -> the spike. Not the rim switch at the
+  container wall (REV3 R.md hypothesis). refineCylinderContacts gives 0.581 / normal -z (= GJK) at 125000 -> the refined detection
+  fixes this pair. Same error class as the 1.9 % too-small depths of sec:results-cc-validation.
+- 2026-10-10 4320930 (r025 retry, seedSkipObstacleNeighbours true) FAILED exit 1 after 13:58 min at step 14500, NaN as 4320573;
+  meanVelocity at 14250 identical (5.04437e-06) -> the seeding option has no effect under strictBognerClassification (runs
+  bit-identical). Option 1 exhausted; r025 still open (options: find the cause of the waterline NaN, or use 4316290).
+- 2026-10-10 (author: "Try todo B ... Make the fix a toggle prm fix"; clogging runs not rerun: they use the long rods, no spike)
+  FIX B for the stacked-cylinder misclassification: prm ModelParameters.kodamBandEdgeAxialCheck (default false = unchanged),
+  SimulationParams.h; set as paper_analytical::kodamBandEdgeAxialCheck in the ParticleKernels constructor (Antidunes + DropTest).
+  PaperAnalyticalContacts.h rimVsFaceOrBand: before band-edge is returned, D(n) = detail::cylinderProjectionOverlap(host, probe, n)
+  along the host face normal (towards the probe centre) and along band-edge's radial normal; D <= 0 on either -> no contact from
+  this pairing (separated); D_face < D_rad -> "face-edge" with overlap D_face, normal n_face, point detail::refinedContactPoint.
+  Probe (KODAM_AXIAL=1): pair A/B at all 19 output steps 118000-127000 now 0.2-0.06 % above GJK/EPA (0.5590 vs 0.5587 at 118000,
+  0.5812 vs 0.5809 at 125000), normal = A's axis; band-edge window gone in the tilt/offset sweep (face-normal depth is an upper
+  bound, at most +0.7 % vs GJK/EPA at 3x offset). PaperAnalyticalContactTest: env ANTIDUNES_BANDEDGE_AXIAL (fix on) and
+  ANTIDUNES_REFERENCE_DUMP_ONLY (dump only) added for the validation rerun.
+- 2026-10-10 FIX B REVISED. The first version (face-edge with D along the host face normal whenever it beat the radial D) fixed the
+  stacked pair but over-estimated oblique contacts: full PaperAnalyticalContacts suite with it on, deep-overlap stress worst hybrid
+  relDiff 9.2 (was 0.995), fuzz max overlap diff 0.476 (was 0.073). Reason: D(n_face) is only an upper bound; for 3 of the 4 flagged
+  band-edge contacts of the reference sample the contact normal is oblique and D(n_face) is 7-14x the depth. Version 2 (current):
+  in cylinderCylinderContact, a band-edge result with D(-normal) > kBandEdgeConsistencyFactor (3) x overlap is replaced by
+  refineCylinderContact(ci, cj, result) (support-function refinement); rimVsFaceOrBand itself unchanged. Reference sample (1019
+  contacts, brute-force reference): D(n)/overlap <= 2.06 for correct band-edge depths, 6.8-149 for 4 of the 5 wrong ones.
+  Results with v2 on: reference sample band-edge wrong 5 -> 1, hybrid wrong 19 -> 15 (1.5 %), hybrid max err 0.052 -> 0.026,
+  existence unchanged; suite: band-edge wrong 1 -> 0 of 951, max band-edge overlap diff 0.095 -> 0.0004, continuity largest
+  hybrid depth jump 0.106 -> 0.032 of the smaller radius, deep-overlap stress unchanged, 0 failed checks; with the flag off every
+  output identical to before. Probe: pair A/B = GJK/EPA to ~1e-6 at all 19 steps and over the whole sweep.
+- 2026-10-10 Jobs: r025 NaN bisection (40000 steps) 4320939 _bisW (~/mt-dennys), 4320940 _bisWsig0 (eq4), 4320941 _bisWtau (mirror),
+  4320942 _bisWhalf (mirror2), 4320943 _bisWstrict (eq5); 4320945 _sigma0_tau0526_half_100k_nanscan (new checkout ~/mt-dennys-eq6,
+  rsync of the local tree incl. fix v2): crashing prm + denseNanScan 14430-14445, 14600 steps. Round container with the fix:
+  4320948 (DropTest build, eq6, after 4320945) -> 4320949 kodam_round_axial (prms/DropTest_kodam_round_axial_gas.prm, 16 tasks).
+- 2026-10-10 r025 NaN CAUSE FOUND. Bisection (40000 steps each, all exit 0): 4320939 W (4316290 prm, current code), 4320940 W+sigma0,
+  4320941 W+tau0.526, 4320942 W+half start, 4320943 W+strict -- no single difference crashes. NaN-scan rerun 4320945 (crashing prm,
+  denseNanScan 14430-14445, eq6; reproduced the crash): first NaN at t=14439 after StreamReconstructAdvect in two LIQUID cells,
+  world (110.5,36.5,59.5) f[2] and (110.5,53.5,59.5) f[1], each pulling from its y-neighbour that is GAS (the cell of the
+  STALE-NEARBOUNDARY warning at 14438); OBST at -x (cells just freed by the rolling cuboid). Liquid next to gas breaks the FSLBM
+  invariant; a liquid cell does not reconstruct, so it streams the gas cell's invalid PDFs. Source: strict Bogner Pass 2 decides
+  every freed cell against the pre-pass flags with same-step freed cells counted as obstacle, so two neighbouring freed cells can
+  go opposite ways (Y: no gas in B(x) -> liquid, Z: no liquid -> gas); the [FORMERMO-STRICT] "liquid touching gas after the step"
+  counter (diagnostic only) = 4 in the 14250-14500 window of 4320573, 0 elsewhere; 4320574 (r050) also 4 at ~11250 but survived
+  (gas PDFs evidently finite there); 4320453 (r075) and 4320943 (W+strict) 0. Old rule: unresolved same-step neighbour -> interface,
+  hence never liquid next to gas. FIX (prm ModelParameters.strictBognerNoLiquidAtGas, default false; SimulationParams.h,
+  BuildTimeloop.h setStrictBognerNoLiquidAtGas, PdfReconstructionManager.h Pass 2): after the decisions are applied, an inner freed
+  cell decided liquid that touches non-obstacle gas becomes interface with fill 1; counted in [FORMERMO-STRICT] ("of these made
+  interface"). Flags are communicated right after the sweep, so ghosts follow the owner. BognerStateClassification test passes.
+  Production reruns (100000 steps, VTK): 4320951 r025 (~/mt-dennys), 4320952 r050 (mirror), prms
+  bogner3_r{025,050}_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_noliqgas_gas.prm. r075 4320453 had no such cell, so the fix
+  would not change it (deterministic) -> kept.
+- 2026-10-10 4320949 (round container, kodamBandEdgeAxialCheck true, eq6) COMPLETED exit 0, 4361 s wall (4292501: 4441 s). Archive
+  $HPCVAULT/antidunes-archive/droptest-kodam-round-axial_4320949_20261010_063901, local copy
+  ~/University/Thesis/animations/DropTest_kodam_round_axial_4320949_20261010/kodam_round_axial. prm differs from 4292501 only by the
+  toggle. Energy (droptest_energy.py on both, scratch): the spike is GONE -- largest rise of E between outputs 1.1e-4 (4292501:
+  0.0306 at 125000->125500, the only rise > 0.005); identical to 4292501 up to step 10000, trajectories diverge afterwards (different
+  contacts, chaotic pile). Rest-phase KE after 115000 ~3-1e-4 -> 3-10e-5 (4292501: 3-8e-4). Packing (packing_kodam.analyse, step
+  127000): height map 53.25 mm (53.08), solid fraction 0.622 (0.624), silhouette 57.81 +- 2.00 mm (58.61 +- 2.29), 0.573 (0.565);
+  max speed 2.0e-4 (7.6e-4), 0 cylinders faster than 1e-3, farthest centre 22.34 mm. Packing result unchanged within the spread.
+- 2026-10-10 4320951 (r025 noliqgas) / 4320952 (r050 noliqgas) at ~75k of 100k after 59 min: r025 past the old crash step 14440;
+  the fix converted 4 cells in the 14250-14500 window (r025) and 4 in one window (r050), 0 in every other report.
+- 2026-10-10 (author: "update the thesis for the kodam and also add ... why we extended bogners classification algorithm quoting
+  him") Thesis edits (uncommitted): large-scale-showcases.tex round-container paragraph (cause + band-edge check + rerun 4320949),
+  energy caption; droptest_energy.pdf with the rerun dashed (data/droptest_energy.json kodam_round_axial); cylinder-cylinder.tex
+  "Inaccurate depths" (4 of 5 band-edge errors caught by the check); coupling.tex sec:coupling-classification: Bogner p. 113
+  motivation quote, why same-step freed cells break the rule, the interface extension, the literal variant + strictBognerNoLiquidAtGas.
+- 2026-10-10 (author: "Only use the fixed kodam in the graphs") droptest_energy.pdf shows only 4320949 for the round container
+  (droptest_energy_figure.py SHOW; 4292501 kept in the json), droptest_piles.pdf panel (d) re-rendered from 4320949; captions
+  adjusted. The text keeps the 4292501 description of the spike and its packing numbers.
+- 2026-10-10 4320951 (r025 noliqgas) and 4320952 (r050 noliqgas) COMPLETED exit 0, 100k steps; vtk-out.tar on the vault
+  (antidunes-bogner3-eqfull-vtk_20261008/43209{51,52}_*), result files in scratch eqfull/. Guard fired once per run: 4 cells in the
+  report t=14500 (r025, the window of the old NaN at 14439) and 4 at t=11250 (r050), 0 elsewhere. STALE-NEARBOUNDARY ~400 per run as
+  in 4320453 (382). Heel |tiltY| 50-100k: r025 26.01 +- 0.62 deg (analytic 26.565), r050 44.56 +- 0.78 (45), r075 4320453 26.41 +-
+  0.90 (26.565). r050 guard vs 4320574 (no guard): identical to 10k, then within 0.5 deg window means, x_end 128.74 vs 128.32.
+  Drift x over 100k: r025 94.8 -> 71.9, r050 103.8 -> 128.7, r075 97.7 -> 119.0, |vx| decaying to ~1e-4 (release transient, not the
+  193 LU leak). Swing sd e-folding 1.2e5 / 6.3e5 / 1.7e5 steps.
+- 2026-10-10 (author: "update now the equilibrium graphs and visualizations ... change the viewing angle so it's more of a but not a
+  complete front view") GRAPHS DONE, TEXT NOT YET: extract_data.py cuboid RUNS -> 4320453/4320952/4320951 (files copied to
+  ~/University/Thesis/animations/bogner3_eqfull_cuboids_20261010), make_plots.py heel as |alpha| (r025 rolls to -26 deg), data/*.dat +
+  stats.json regenerated; eq-heave y range +-8.5, eq-fluid-mass -0.2..0.45 (figure not included anywhere); eq_cross_sections.py cuboid
+  runs + ZEQ -> eq_states.pdf, eq_states_row.pdf; render_eq_3d.py camera CAM_POS (-55,-300,125), focal z 50 (was (-120,-260,230), 40),
+  renders in /run/media/dhuber/data2/eqcub/renders_front (VTK of 4320951/52 extracted to data2/eqcub); eq_cuboid_evolution.pdf
+  (4320951/4320952/4320453) and eq_views3d.pdf re-assembled. Old stats: scratch stats_before_cuboidswap.json.
+- 2026-10-10 (author: "Yes, rewrite the passages from the new statistics") Sec 5.1 TEXT SWAPPED to the cuboid reruns (uncommitted):
+  setup.tex (periodic y, sigma 0, tau 0.526 = nu 8.67e-3 = 40x water at dt 50 us, Ga 1.5e2; strict rule + closure; release at
+  z 60.07, cuboid start offsets 8.5/0.5/7.5 LU; level change up to 1.0 LU, mass of all nine runs within 0.15 %), equilibrium-curves.tex
+  (sigma_zeta, 0.75 deviation: cuboid +0.06 LU, buoyancy +0.3 %; table cuboid rows; rerun paragraph incl. old runs' 2.9-4.3 % loss and
+  the 4320573 crash/closure counts; 3D captions), settling-dynamics.tex (cuboid heave periods 5.2-5.6e3, no overshoot, re-excitation by
+  the roll at 0.25, t_s 2.85e4 / - / 1.475e4; x drift 23-33 LU), shape-comparison-highres.tex (heel stats, both in the 26.565 well,
+  residual swing sd 0.6 deg, e-folding 1.2-6.3e5; |alpha| caption), limitations.tex (mass-loss sentence refers to the first runs),
+  05_conclusion (heel within a degree at all three ratios), coupling.tex wording. Scratch build OK (only the 3 old eq:clog-* refs).

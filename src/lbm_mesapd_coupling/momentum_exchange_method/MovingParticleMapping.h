@@ -96,6 +96,9 @@ public:
    // instead).
    using OwnershipHandoffCallback_T =
       std::function< void( IBlock&, cell_idx_t, cell_idx_t, cell_idx_t, walberla::id_t, walberla::id_t ) >;
+   // [Claude, 2026-10-09] diagnostic: fires for an inner domain cell right before the particle (particleIdx) covers it
+   // (block, x, y, z, particleIdx); the cell's PDFs and flags are still the fluid's. No-op by default.
+   using NewlyCoveredCallback_T = std::function< void( IBlock&, cell_idx_t, cell_idx_t, cell_idx_t, size_t ) >;
 
    MovingParticleMapping( const shared_ptr<StructuredBlockStorage> & blockStorage,
                           const BlockDataID & pdfFieldID,
@@ -105,12 +108,13 @@ public:
                           const FlagUID & obstacle, const FlagUID & formerObstacle,
                           const ParticleSelector_T& mappingParticleSelector,
                           bool conserveMomentumWhenMapping, real_t cellCenterTestOffset = real_t(0),
-                          OwnershipHandoffCallback_T onOwnershipHandoff = OwnershipHandoffCallback_T())
+                          OwnershipHandoffCallback_T onOwnershipHandoff = OwnershipHandoffCallback_T(),
+                          NewlyCoveredCallback_T onNewlyCovered = NewlyCoveredCallback_T())
    : blockStorage_( blockStorage ), pdfFieldID_( pdfFieldID ), boundaryHandlingID_( boundaryHandlingID ),
      particleFieldID_( particleFieldID ), ac_( ac ),
      obstacle_( obstacle ), formerObstacle_( formerObstacle ), mappingParticleSelector_( mappingParticleSelector ),
      conserveMomentumWhenMapping_( conserveMomentumWhenMapping ), cellCenterTestOffset_( cellCenterTestOffset ),
-     onOwnershipHandoff_( onOwnershipHandoff )
+     onOwnershipHandoff_( onOwnershipHandoff ), onNewlyCovered_( onNewlyCovered )
    {}
 
    void inline operator()( IBlock * const block )
@@ -185,6 +189,7 @@ private:
                   // cell is currently fluid and now newly occupied by the particle
                   if( boundaryHandling->isDomain(x,y,z))
                   {
+                     if( onNewlyCovered_ && pdfField->isInInnerPart(Cell(x,y,z)) ) onNewlyCovered_( *block, x, y, z, particleIdx );
                      // set obstacle flag
                      boundaryHandling->forceBoundary( obstacle, x, y, z );
                      (*particleField)(x, y, z) = particleUid;
@@ -324,6 +329,7 @@ private:
    bool conserveMomentumWhenMapping_;
    real_t cellCenterTestOffset_;
    OwnershipHandoffCallback_T onOwnershipHandoff_;
+   NewlyCoveredCallback_T onNewlyCovered_;
 
 };
 
@@ -339,10 +345,12 @@ makeMovingParticleMapping( const shared_ptr<StructuredBlockStorage> & blockStora
                            const ParticleSelector_T& mappingParticleSelector,
                            bool conserveMomentumWhenMapping, real_t cellCenterTestOffset = real_t(0),
                            typename MovingParticleMapping<PdfField_T, BoundaryHandling_T, ParticleAccessor_T, ParticleSelector_T>::OwnershipHandoffCallback_T
-                              onOwnershipHandoff = typename MovingParticleMapping<PdfField_T, BoundaryHandling_T, ParticleAccessor_T, ParticleSelector_T>::OwnershipHandoffCallback_T())
+                              onOwnershipHandoff = typename MovingParticleMapping<PdfField_T, BoundaryHandling_T, ParticleAccessor_T, ParticleSelector_T>::OwnershipHandoffCallback_T(),
+                           typename MovingParticleMapping<PdfField_T, BoundaryHandling_T, ParticleAccessor_T, ParticleSelector_T>::NewlyCoveredCallback_T
+                              onNewlyCovered = typename MovingParticleMapping<PdfField_T, BoundaryHandling_T, ParticleAccessor_T, ParticleSelector_T>::NewlyCoveredCallback_T())
 {
    return MovingParticleMapping<PdfField_T, BoundaryHandling_T, ParticleAccessor_T, ParticleSelector_T>
-         (blockStorage, pdfFieldID, boundaryHandlingID, particleFieldID, ac, obstacle, formerObstacle, mappingParticleSelector, conserveMomentumWhenMapping, cellCenterTestOffset, onOwnershipHandoff);
+         (blockStorage, pdfFieldID, boundaryHandlingID, particleFieldID, ac, obstacle, formerObstacle, mappingParticleSelector, conserveMomentumWhenMapping, cellCenterTestOffset, onOwnershipHandoff, onNewlyCovered);
 }
 
 ////////////////////
