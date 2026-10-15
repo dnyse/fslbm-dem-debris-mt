@@ -159,7 +159,9 @@ GjkResult gjkCylCyl(const Vec3& posI, const Rot3& rotI, real_t radiusI, real_t l
    return GjkResult{ contactFound, gjk.getPenetrationDepth(), gjk.getContactNormal(), gjk.getContactPoint() };
 }
 
-GjkResult gjkCylPlane(const Vec3& posCyl, const Rot3& rotCyl, real_t radius, real_t length, const Vec3& planePos,
+//! [Claude, 2026-10-15] NOT GJK/EPA: SolidCylinderContactDetection's Cylinder x HalfSpace overload is the production
+//! support-mapping closed form (ParticleKernels.h), so this checks paperAnalytical against production.
+GjkResult productionCylPlane(const Vec3& posCyl, const Rot3& rotCyl, real_t radius, real_t length, const Vec3& planePos,
                        const Vec3& planeNormal)
 {
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
@@ -182,7 +184,9 @@ GjkResult gjkCylPlane(const Vec3& posCyl, const Rot3& rotCyl, real_t radius, rea
 //! AnalyticContactDetection, or cylinder-cylinder/box-box, overridden in ParticleKernels.h), so this
 //! exercises the generic GJK/EPA template directly -- exactly the ground truth
 //! paper_analytical::sphereCylinderContact is validated against below.
-GjkResult gjkSphereCyl(const Vec3& spherePos, real_t sphereRadius, const Vec3& cylPos, const Rot3& rotCyl,
+//! [Claude, 2026-10-15] NOT GJK/EPA: SolidCylinderContactDetection's Sphere x Cylinder overload is the production closed
+//! form (ParticleKernels.h, mid-overlap contact point). The true GJK/EPA reference is gjkSphereCyl below.
+GjkResult productionSphereCyl(const Vec3& spherePos, real_t sphereRadius, const Vec3& cylPos, const Rot3& rotCyl,
                         real_t cylRadius, real_t cylLength)
 {
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
@@ -197,6 +201,25 @@ GjkResult gjkSphereCyl(const Vec3& spherePos, real_t sphereRadius, const Vec3& c
 
    SolidCylinderContactDetection gjk;
    const bool                    contactFound = gjk(0, 1, sphShape, cylShape, ac);
+   return GjkResult{ contactFound, gjk.getPenetrationDepth(), gjk.getContactNormal(), gjk.getContactPoint() };
+}
+
+//! [Claude, 2026-10-15] True GJK/EPA for a sphere and a cylinder: mesa_pd's GeneralContactDetection itself, whose generic
+//! operator() runs collideGJKEPA for this pair (productionSphereCyl above goes through the production closed form).
+GjkResult gjkSphereCyl(const Vec3& spherePos, real_t sphereRadius, const Vec3& cylPos, const Rot3& rotCyl,
+                        real_t cylRadius, real_t cylLength)
+{
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+   auto body0 = ps->create();
+   body0->setPosition(spherePos);
+   auto body1 = ps->create();
+   body1->setPosition(cylPos);
+   body1->setRotation(rotCyl);
+   const mesa_pd::data::Sphere   sphShape(sphereRadius);
+   const mesa_pd::data::Cylinder cylShape(cylRadius, cylLength);
+   mesa_pd::collision_detection::GeneralContactDetection gjk;
+   const bool contactFound = gjk(0, 1, sphShape, cylShape, ac);
    return GjkResult{ contactFound, gjk.getPenetrationDepth(), gjk.getContactNormal(), gjk.getContactPoint() };
 }
 
@@ -339,6 +362,7 @@ void testBoxBoxSATAsymmetricSizes()
 //! different SAT branch (an edge-cross axis or a face axis depending on exact geometry) than the
 //! flush face-face cases above. Too intricate to fully hand-verify which of the 15 axes wins by
 //! inspection alone, so this relies on the GJK/EPA cross-check as the actual verification.
+//! [Claude, 2026-10-15] It can be hand-verified after all (the x face axis wins), see the checks below.
 void testBoxBoxSATRotatedCornerIntoFace()
 {
    const Vec3 posA(real_t(0), real_t(0), real_t(0));
@@ -352,11 +376,17 @@ void testBoxBoxSATRotatedCornerIntoFace()
    const ContactResult sat = boxBoxSAT(posA, identity, half, posB, rotB.getMatrix(), half);
    const GjkResult      gjk = gjkBoxBox(posA, Rot3(), real_t(2) * half, posB, rotB, real_t(2) * half);
 
+   // [Claude, 2026-10-15] hand-derived: B reaches 0.5 sqrt(2) towards -x, so the x axis overlaps by 0.5 + 0.5 sqrt(2) - 1.15
+   // = 0.0571068; B's face axes at 45 deg overlap by 0.5 sqrt(2) + 0.5 - 1.15/sqrt(2) = 0.394, the cross products
+   // of the z edges coincide with these axes. Confirmed by an independent brute-force minimum translation distance.
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.5) + real_t(0.5) * std::sqrt(real_t(2)) - real_t(1.15), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, Vec3(real_t(-1), real_t(0), real_t(0)), real_t(1e-9));
    WALBERLA_CHECK_EQUAL(sat.contact, gjk.contact);
    if (sat.contact)
    {
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-2));
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(1e-2));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-3));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(1e-3));
       WALBERLA_LOG_INFO_ON_ROOT("Box x Box (rotated corner into face): SAT overlap=" << sat.overlap
                                                                                       << " normal=" << sat.normal
                                                                                       << " (agrees with GJK/EPA)");
@@ -380,11 +410,16 @@ void testBoxBoxSATBothRotatedGeneralOrientation()
    const ContactResult sat = boxBoxSAT(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(), halfB);
    const GjkResult      gjk = gjkBoxBox(posA, rotA, real_t(2) * halfA, posB, rotB, real_t(2) * halfB);
 
+   // [Claude, 2026-10-15] independent brute-force minimum translation distance (overleaf scripts/contact-validation/
+   // verify_hand_cases.py): 0.078618 along -x, so the pair does overlap and the comparison below is not vacuous.
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.078618), real_t(1e-5));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, Vec3(real_t(-1), real_t(0), real_t(0)), real_t(1e-3));
    WALBERLA_CHECK_EQUAL(sat.contact, gjk.contact);
    if (sat.contact)
    {
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-2));
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(1e-2));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-3));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(1e-3));
    }
    WALBERLA_LOG_INFO_ON_ROOT("Box x Box (both rotated, general orientation): contact="
                               << sat.contact << " overlap=" << sat.overlap << " (agrees with GJK/EPA)");
@@ -405,7 +440,7 @@ void testBoxBoxSATDeepOverlap()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.point[0], real_t(0.25), real_t(1e-3));
 
    const GjkResult gjk = gjkBoxBox(posA, Rot3(), real_t(2) * half, posB, Rot3(), real_t(2) * half);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-3));
 }
 
 //! Reconstruction of a REAL fatal collision from job 4131344 (Antidunes, collapsed-spawn 1000-box
@@ -487,8 +522,12 @@ void testBoxBoxSATRealAntidunesLaunchCollision()
       // Loose epsilon deliberately: this is a reconstructed, not bit-exact, real event -- the point is
       // to catch a GROSS divergence (wrong axis picked, sign flip, order-of-magnitude overlap error),
       // not to demand floating-point-identical agreement with an already-approximate setup.
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(0.05));
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(0.05));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-3));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(1e-3));
+      // [Claude, 2026-10-15] this reconstruction does reproduce the logged contact (brute-force minimum
+      // translation distance 0.773241 along the logged normal)
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, realPenetration, real_t(1e-4));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, realNormal, real_t(1e-4));
    }
 }
 
@@ -507,6 +546,10 @@ void testBoxBoxSATRealAntidunesLaunchCollision()
 //! penetration + 3 normal components -- for 6 unknown relative DOF): box A's local Z is rotated onto
 //! the reported normal, box B stays axis-aligned, and the two are separated along that normal by
 //! whatever distance reproduces the reported penetration exactly for these real halfExtents=<6,1,1.5>.
+//! [Claude, 2026-10-15] CORRECTION: it does not -- the separation reproduces the overlap along the logged normal only,
+//! and another axis of the pair overlaps less (2.043 instead of 2.513 for event 1, 1.235 instead of 1.293 for event 2,
+//! independent brute-force minimum translation distance). Both tests remain valid SAT/GJK cross-checks on geometry
+//! derived from the run, but they are not replays of the logged contacts.
 void testBoxBoxSATJob4139454Explosion1()
 {
    const Vec3 half(real_t(6), real_t(1), real_t(1.5)); // real FloatingBox halfExtents, this prm
@@ -555,8 +598,12 @@ void testBoxBoxSATJob4139454Explosion1()
       const real_t overlapDiff = std::abs(sat.overlap - (-gjk.penetrationDepth));
       const real_t normalDiff  = (sat.normal - gjk.normal).length();
       WALBERLA_LOG_INFO_ON_ROOT("  agreement: overlapDiff=" << overlapDiff << " normalDiff=" << normalDiff);
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(0.05));
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(0.05));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-3));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(1e-3));
+      // [Claude, 2026-10-15] this reconstruction does NOT reproduce the logged depth 2.51343: another axis of the pair
+      // overlaps less, and an independent brute-force minimum translation distance gives 2.04333 (normal not the
+      // logged one). The test is therefore a SAT/GJK cross-check on a run-derived geometry, not a replay.
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(2.04333), real_t(1e-4));
    }
 }
 
@@ -610,8 +657,12 @@ void testBoxBoxSATJob4139454Explosion2()
       const real_t overlapDiff = std::abs(sat.overlap - (-gjk.penetrationDepth));
       const real_t normalDiff  = (sat.normal - gjk.normal).length();
       WALBERLA_LOG_INFO_ON_ROOT("  agreement: overlapDiff=" << overlapDiff << " normalDiff=" << normalDiff);
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(0.05));
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(0.05));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-3));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, gjk.normal, real_t(1e-3));
+      // [Claude, 2026-10-15] this reconstruction does NOT reproduce the logged depth 1.29292: another axis of the pair
+      // overlaps less, and an independent brute-force minimum translation distance gives 1.23458 (normal not the
+      // logged one). The test is therefore a SAT/GJK cross-check on a run-derived geometry, not a replay.
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(1.23458), real_t(1e-4));
    }
 }
 
@@ -726,8 +777,8 @@ void testCylinderCylinderBandBandSkewed90Degrees()
 
    const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
    WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (skewed, 90deg): overlap=" << kodam.overlap << " (agree)");
 }
 
@@ -751,11 +802,17 @@ void testCylinderCylinderBandBandSkewed60Degrees()
    const GjkResult      gjk =
       gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
 
+   // [Claude, 2026-10-15] hand-derived: the axes cross at x = 0 with a perpendicular distance of 0.6 along y (both axes lie
+   // in planes y = const), well inside both lengths, so the overlap is 0.4 + 0.4 - 0.6 = 0.2 along -y.
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "band-band-skewed");
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.2), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(0), real_t(-1), real_t(0)), real_t(1e-9));
    WALBERLA_CHECK_EQUAL(kodam.contact, gjk.contact);
    if (kodam.contact)
    {
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
-      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-2));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
    }
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (skewed, 60deg): scenario=" << kodam.scenario << " overlap="
                                                                                << kodam.overlap << " (agrees with GJK/EPA)");
@@ -798,8 +855,8 @@ void testCylinderCylinderFaceBand()
 
    const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
    WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-band, straddling): overlap=" << kodam.overlap
                               << " point=" << kodam.point << " (agree; GJK/EPA point=" << gjk.point
                               << ", informational only -- underdetermined along the band direction)");
@@ -824,7 +881,7 @@ void testCylinderCylinderFaceBandFullyInside()
 
    const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
    WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-band, fully inside): overlap=" << kodam.overlap
                               << " point=" << kodam.point << " (agree)");
 }
@@ -852,7 +909,7 @@ void testCylinderCylinderFaceBandPartiallyInside()
 
    const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
    WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (face-band, partially inside): overlap=" << kodam.overlap
                               << " point=" << kodam.point << " (agree)");
 }
@@ -868,6 +925,12 @@ void testCylinderCylinderFaceBandNoContact()
 
 //! Cylinder j tilted 45 degrees to cylinder i, positioned so j's bottom rim region is near i's flat
 //! face. This test EXISTS TO DOCUMENT A REAL, DISCOVERED LIMITATION, not to demonstrate agreement:
+//! [Claude, 2026-10-15] Cause (independent brute-force minimum translation distance 0.235356, direction
+//! (0.707, 0, -0.707), i.e. perpendicular to j's axis and 45 deg off i's face normal): the deepest rim point E lies at
+//! radius 0.566 on i's face of radius 0.6, close to i's own rim, so moving j sideways across that rim separates the
+//! pair sooner than pushing it back out through the face. Face-edge treats the face as unbounded and returns the
+//! depth of E below it (0.29853). With a host of ten times the probe radius (testCylinderCylinderFaceEdgeClean) E is
+//! far from the host rim and face-edge is exact. The values are pinned below so that a change is noticed.
 //! kodam.overlap=0.299 vs. GJK/EPA's 0.235 (27% off), and GJK/EPA's contact normal comes out
 //! PERPENDICULAR to cylinder j's own axis -- a band-surface signature, not a rim-edge one.
 //!
@@ -892,6 +955,12 @@ void testCylinderCylinderTiltedRimIntoFace()
    const GjkResult      gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
 
    WALBERLA_CHECK_EQUAL(kodam.contact, gjk.contact);
+   WALBERLA_CHECK(kodam.contact);
+   WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-edge");
+   // depth of the lowest rim point below the face: 1 - (1.55 - 0.5 sqrt(2) - 0.2 * 0.5 sqrt(2)) = 0.298528
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(1) - (real_t(1.55) - real_t(0.6) * std::sqrt(real_t(2))),
+                                       real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(-gjk.penetrationDepth, real_t(0.235356), real_t(1e-3)); // brute-force MTD
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (tilted, oblique -- KNOWN LIMITATION CASE): kodam scenario="
                               << kodam.scenario << " overlap=" << kodam.overlap
                               << " vs GJK/EPA penetrationDepth=" << gjk.penetrationDepth
@@ -925,6 +994,10 @@ void testCylinderCylinderTiltedRimIntoFaceNoContact()
 //! et al. search for, not a scenario-boundary classification bug their corrections target. Only
 //! contact existence is logged, not asserted equal, since it's already known and documented to
 //! disagree for this class of geometry.
+//! [Claude, 2026-10-15] CORRECTION: the pair is exactly touching -- an independent brute-force minimum translation
+//! distance gives 0.000000 and GJK/EPA reports a depth of about -1e-10 -- so the closed form's "no contact" is the
+//! boundary of the scenarios, not a missed overlap. Asserted below. A genuine miss (trial 1209 of the reference sample,
+//! depth 0.113) is used in testHybridTier1TriggersOnMissedContact.
 void testCylinderCylinderTiltedRimIntoBand()
 {
    CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.5), real_t(4) };
@@ -939,6 +1012,8 @@ void testCylinderCylinderTiltedRimIntoBand()
                               << kodam.contact << " scenario=" << kodam.scenario
                               << " | gjk.contact=" << gjk.contact
                               << " penetrationDepth=" << gjk.penetrationDepth);
+   WALBERLA_CHECK(!kodam.contact);
+   WALBERLA_CHECK_LESS(std::abs(gjk.penetrationDepth), real_t(1e-6)); // exactly touching
 }
 
 void testCylinderCylinderTiltedRimIntoBandNoContact()
@@ -981,6 +1056,9 @@ void testCylinderCylinderTiltedRimIntoBandNoContact()
 //! plain band-edge would have picked the wrong delta (radial vs axial) entirely -- it was never
 //! validated for MAGNITUDE, and this test is the first place that's been checked. Only existence and
 //! normal direction are asserted below for that reason; overlap is logged, not asserted against GJK.
+//! [Claude, 2026-10-15] SUPERSEDED: the corrected special-contact depth (deepest rim point inside the host,
+//! 0.614334) is now asserted against GJK/EPA (0.609508, brute-force MTD 0.609529) with the fuzz criterion
+//! max(0.01, 5 %); 0.181 was Guo's original depth at P.
 void testCylinderCylinderSpecialContact()
 {
    CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(3.0) };
@@ -1177,7 +1255,8 @@ void testCylinderCylinderEdgeEdge()
 
    WALBERLA_CHECK(kodam.contact);
    WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.05), real_t(1e-9)); // [Claude, 2026-10-15] brute-force MTD 0.05
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (edge-edge-ish, FIXED by Guo et al. corrections): scenario="
                               << kodam.scenario << " overlap=" << kodam.overlap
                               << " (was a false negative before the bidirectional check + corrections)");
@@ -2373,7 +2452,8 @@ void testCylinderCylinderEdgeEdgeGenuine()
    WALBERLA_CHECK(kodam.contact);
    WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "edge-edge");
    WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(5e-3));
+   // [Claude, 2026-10-15] tolerance 5e-3 -> 1e-3 (closed form 0.07830 vs GJK/EPA 0.07868 and brute-force MTD 0.07883)
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
    WALBERLA_LOG_INFO_ON_ROOT("Cylinder x Cylinder (genuine edge-edge, found by search): overlap="
                               << kodam.overlap << " vs GJK/EPA " << -gjk.penetrationDepth
                               << " (0.47% relative -- first dedicated coverage of this scenario)");
@@ -4409,6 +4489,7 @@ void testFraigeEdgeFaceContact()
    const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
    WALBERLA_CHECK(sat.contact);
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(2.2), real_t(1e-9)); // [Claude, 2026-10-15] 2 + 0.2 sideways
    WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
                               << sat.normal << " -- matches GJK's true global minimum exactly, unlike "
                               << "Fraige's own per-point local overlap (1.8)");
@@ -4417,6 +4498,8 @@ void testFraigeEdgeFaceContact()
 //! Fig. 5a: two long thin boxes crossing like an "X" / "plus" sign, each edge of one crossing an edge of
 //! the other at a shared central region, with NO vertex of either box embedded in the other one. Also a
 //! case boxBoxMultiPointContacts (vertex-only) cannot detect.
+//! [Claude, 2026-10-15] Both boxes have the same half-width 0.2 in y, so their y faces are coplanar and the overlap is
+//! a 0.4 x 0.4 x 0.4 cube: the minimum translation is 0.4 along y (face axis), asserted below.
 void testFraigeEdgeEdgeContact()
 {
    const Vec3 halfA(real_t(0.2), real_t(0.2), real_t(5)); // long along its own local Z
@@ -4442,6 +4525,8 @@ void testFraigeEdgeEdgeContact()
    const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
    WALBERLA_CHECK(sat.contact);
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.4), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(sat.normal[1]), real_t(1), real_t(1e-9));
    WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
                               << sat.normal << " -- matches GJK's true global minimum exactly");
 }
@@ -4458,20 +4543,34 @@ void testFraigeEdgeEdgeContact()
 //! close enough to warrant a GJK/EPA double-check, and the fallback should recover the correct answer.
 void testHybridTier1TriggersOnMissedContact()
 {
-   CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.5), real_t(4) };
-   Rot3          rotJ;
-   rotJ.rotate(Vec3(real_t(1), real_t(0), real_t(0)), math::pi * real_t(0.3));
-   CylinderState cj{ Vec3(real_t(0.75), real_t(0), real_t(1.2)), rotJ.getMatrix(), real_t(0.25), real_t(1.5) };
-
-   const HybridResult hybrid = cylinderCylinderContactHybrid(ci, Rot3(), cj, rotJ);
-   const GjkResult     gjk    = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
-
+   // [Claude, 2026-10-15] geometry replaced: the former pair (testCylinderCylinderTiltedRimIntoBand) is exactly touching, so it
+   // did not test a missed contact. Trial 1209 of the independent-reference sample (overleaf
+   // scripts/contact-validation/data/cyl_pairs.csv) is a genuine miss: no scenario applies, the end faces meet
+   // corner to corner near both rims (thesis Figure 4.11), and GJK/EPA and the brute-force reference both give 0.113.
+   const Mat3 rotIRows(real_t(0.0903122648821542), real_t(-0.93901787549968108), real_t(0.33179681177479803),
+                       real_t(-0.78472296406621889), real_t(0.13804609137935925), real_t(0.60427903018556672),
+                       real_t(-0.61323206413150244), real_t(-0.31494238544049091), real_t(-0.72440163540267466));
+   const Mat3 rotJRows(real_t(0.42629962306143004), real_t(-0.82827933257245778), real_t(0.3636234021773167),
+                       real_t(0.34357538494322015), real_t(0.52011375867889886), real_t(0.78194477611531255),
+                       real_t(-0.83679423171936407), real_t(-0.20841071293537705), real_t(0.50630068980297382));
+   const Rot3          rotI = rot3FromMatrix(rotIRows);
+   const Rot3          rotJ = rot3FromMatrix(rotJRows);
+   const CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), rotI.getMatrix(), real_t(1.5425930566498214),
+                           real_t(3.1842270146051681) };
+   const CylinderState cj{ Vec3(real_t(1.8193447429136438), real_t(1.1130105298503024), real_t(-2.6016803736233309)),
+                           rotJ.getMatrix(), real_t(1.4789598196015563), real_t(2.1871520227523074) };
+   const ContactResult analytical = cylinderCylinderContact(ci, cj);
+   const HybridResult  hybrid     = cylinderCylinderContactHybrid(ci, rotI, cj, rotJ);
+   const GjkResult     gjk = gjkCylCyl(ci.pos, rotI, ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
+   WALBERLA_CHECK(!analytical.contact);
+   WALBERLA_CHECK_EQUAL(std::string(analytical.scenario), "none");
+   WALBERLA_CHECK(gjk.contact);
    WALBERLA_CHECK(hybrid.usedFallback);
-   WALBERLA_CHECK_EQUAL(hybrid.contact, gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-6));
-   WALBERLA_LOG_INFO_ON_ROOT("Hybrid Tier 1 (missed contact): usedFallback=" << hybrid.usedFallback
-                              << " contact=" << hybrid.contact << " overlap=" << hybrid.overlap
-                              << " -- recovers the contact the pure-analytical path missed");
+   WALBERLA_CHECK(hybrid.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, real_t(0.113098), real_t(1e-4)); // brute-force MTD 0.1131
+   WALBERLA_LOG_INFO_ON_ROOT("Hybrid Tier 1 (missed contact, trial 1209): analytical=none, fallback overlap="
+                             << hybrid.overlap);
 }
 
 //! TIER 1 must NOT fire for a genuinely, unambiguously separated pair -- otherwise the fast path
@@ -4512,7 +4611,7 @@ void testHybridTier1BoundaryCase()
 //! exactly the accepted trade-off: the hybrid no longer falls back here, and legitimately returns the
 //! same wrong raw analytical value as the pure dispatch -- one concrete instance of the ~2.3-2.5%
 //! residual wrong-magnitude rate documented for the current (Tier 1 + special-contact only) design.
-void testHybridTier2TriggersOnWrongMagnitude()
+void testHybridKeepsFaceEdgeMagnitudeWithoutFallback()
 {
    CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.6), real_t(2) };
    Rot3          rotJ;
@@ -4567,7 +4666,7 @@ void testHybridTier2DoesNotTriggerOnVerifiedScenarios()
       WALBERLA_CHECK(!hybrid.usedFallback);
       WALBERLA_CHECK_EQUAL(hybrid.contact, gjk.contact);
       if (hybrid.contact && gjk.contact)
-         WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-2));
+         WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-3));
    }
    {
       CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.5), real_t(2) };
@@ -4579,7 +4678,7 @@ void testHybridTier2DoesNotTriggerOnVerifiedScenarios()
       WALBERLA_CHECK(!hybrid.usedFallback);
       WALBERLA_CHECK_EQUAL(hybrid.contact, gjk.contact);
       if (hybrid.contact && gjk.contact)
-         WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-2));
+         WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-3));
    }
    WALBERLA_LOG_INFO_ON_ROOT("Hybrid (Tier 2 removed): face-face, band-band-parallel, band-band-skewed "
                               "and face-band all now trusted directly (no fallback call at all), and "
@@ -4602,7 +4701,7 @@ void testHybridTier2OnAlreadyCorrectFaceEdgeCase()
    const GjkResult     gjk    = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
 
    WALBERLA_CHECK(hybrid.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-2));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(hybrid.overlap, -gjk.penetrationDepth, real_t(1e-3));
    WALBERLA_LOG_INFO_ON_ROOT("Hybrid (Tier 2 removed) on already-correct face-edge case: usedFallback="
                               << hybrid.usedFallback << " (expected false now -- no longer needed here)");
 }
@@ -4624,7 +4723,7 @@ void testCylinderPlaneFaceMatchesExisting()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(1), real_t(1e-6));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, planeNormal, real_t(1e-6));
 
-   const GjkResult gjk = gjkCylPlane(cyl.pos, Rot3(), cyl.radius, cyl.length, planePos, planeNormal);
+   const GjkResult gjk = productionCylPlane(cyl.pos, Rot3(), cyl.radius, cyl.length, planePos, planeNormal);
    WALBERLA_CHECK(gjk.contact);
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-6));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-6));
@@ -4659,7 +4758,7 @@ void testCylinderPlaneBand()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-3)); // radius 1 - |0.9| = 0.1
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, planeNormal, real_t(1e-3));
 
-   const GjkResult gjk = gjkCylPlane(cyl.pos, rot, cyl.radius, cyl.length, planePos, planeNormal);
+   const GjkResult gjk = productionCylPlane(cyl.pos, rot, cyl.radius, cyl.length, planePos, planeNormal);
    WALBERLA_CHECK(gjk.contact);
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
@@ -4696,7 +4795,7 @@ void testCylinderPlaneEdge()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.416), real_t(2e-3));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, planeNormal, real_t(1e-3));
 
-   const GjkResult gjk = gjkCylPlane(cyl.pos, rot, cyl.radius, cyl.length, planePos, planeNormal);
+   const GjkResult gjk = productionCylPlane(cyl.pos, rot, cyl.radius, cyl.length, planePos, planeNormal);
    WALBERLA_CHECK(gjk.contact);
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(2e-3));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
@@ -4708,6 +4807,8 @@ void testCylinderPlaneEdge()
    // wall-surface witness point) -- but this IS the check that would have caught the eOnPlane
    // double-projection bug (previously (-0.240192, 0, +0.208013): the opposite sign, on the wrong side
    // of the plane) before it shipped, since overlap/normal alone were already correct throughout.
+   // [Claude, 2026-10-15] production places the point on the plane: the deepest rim point projected along n
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(gjk.point, Vec3(real_t(-0.240192), real_t(0), real_t(0)), real_t(1e-5));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point,
       Vec3(real_t(-0.240192), real_t(0), real_t(-0.208013)), real_t(1e-3));
 
@@ -4747,11 +4848,18 @@ void testSphereCylinderBand()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(1), real_t(0), real_t(0)), real_t(1e-6));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(1), real_t(0), real_t(0)), real_t(1e-6));
 
+   const GjkResult prod = productionSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(prod.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -prod.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, prod.normal, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (band): overlap=" << kodam.overlap << " (exact agreement)");
+   // [Claude, 2026-10-15] production contact point: middle of the overlap along the normal (ParticleKernels.h)
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.point, spherePos - (sphereRadius - real_t(0.5) * kodam.overlap) * kodam.normal,
+                                       real_t(1e-6));
    const GjkResult gjk = gjkSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
    WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-6));
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-6));
-   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (band): overlap=" << kodam.overlap << " (exact agreement)");
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
 }
 
 //! Sphere clearly outside, closest feature on a flat CAP (axial clamp fires, radial does not):
@@ -4769,11 +4877,18 @@ void testSphereCylinderCap()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(0), real_t(0), real_t(1)), real_t(1e-6));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0), real_t(0), real_t(1)), real_t(1e-6));
 
+   const GjkResult prod = productionSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(prod.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -prod.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, prod.normal, real_t(1e-6));
+   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (cap): overlap=" << kodam.overlap << " (exact agreement)");
+   // [Claude, 2026-10-15] production contact point: middle of the overlap along the normal (ParticleKernels.h)
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.point, spherePos - (sphereRadius - real_t(0.5) * kodam.overlap) * kodam.normal,
+                                       real_t(1e-6));
    const GjkResult gjk = gjkSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
    WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-6));
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-6));
-   WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (cap): overlap=" << kodam.overlap << " (exact agreement)");
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
 }
 
 //! Sphere near the RIM: both the radial and axial clamp fire simultaneously (rho>R AND |z|>halfL), so
@@ -4793,12 +4908,19 @@ void testSphereCylinderRim()
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.0763932), real_t(1e-6));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(1), real_t(0), real_t(1)), real_t(1e-6));
 
-   const GjkResult gjk = gjkSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
-   WALBERLA_CHECK(gjk.contact);
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-6));
-   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-6));
+   const GjkResult prod = productionSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(prod.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -prod.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, prod.normal, real_t(1e-6));
    WALBERLA_LOG_INFO_ON_ROOT("Sphere x Cylinder (rim, both clamps fire): overlap=" << kodam.overlap
                               << " (exact agreement)");
+   // [Claude, 2026-10-15] production contact point: middle of the overlap along the normal (ParticleKernels.h)
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(prod.point, spherePos - (sphereRadius - real_t(0.5) * kodam.overlap) * kodam.normal,
+                                       real_t(1e-6));
+   const GjkResult gjk = gjkSphereCyl(spherePos, sphereRadius, cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(gjk.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, -gjk.penetrationDepth, real_t(1e-3));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, gjk.normal, real_t(1e-3));
 }
 
 //! Sphere centre embedded INSIDE the cylinder, closer to the curved band than either cap: cylinder
@@ -4840,6 +4962,8 @@ void testSphereCylinderNoContact()
    CylinderState cyl{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(1.0), real_t(4.0) };
    const Vec3    spherePos(real_t(3), real_t(0), real_t(0));
    WALBERLA_CHECK(!sphereCylinderContact(spherePos, real_t(0.3), cyl).contact);
+   const GjkResult prod = productionSphereCyl(spherePos, real_t(0.3), cyl.pos, Rot3(), cyl.radius, cyl.length);
+   WALBERLA_CHECK(!prod.contact);
    const GjkResult gjk = gjkSphereCyl(spherePos, real_t(0.3), cyl.pos, Rot3(), cyl.radius, cyl.length);
    WALBERLA_CHECK(!gjk.contact);
 }
@@ -4859,6 +4983,8 @@ void testSphereCylinderRandomizedFuzz()
    constexpr int numTrials = 10000;
    int           numOverlapping = 0;
    int           numMismatch    = 0;
+   int           numGjkMismatch = 0;   // [Claude, 2026-10-15] against true GJK/EPA
+   real_t        maxGjkOverlapDiff = real_t(0), maxGjkNormalAngleDeg = real_t(0);
    real_t        maxOverlapDiff = real_t(0);
    real_t        maxPointDiff   = real_t(0);
    real_t        maxNormalAngleDeg = real_t(0);
@@ -4874,7 +5000,7 @@ void testSphereCylinderRandomizedFuzz()
       const Vec3   dir       = fuzz.randomUnitVec();
 
       auto contactAtSep = [&](real_t s) {
-         return gjkSphereCyl(cylPos + dir * s, sphR, cylPos, rotCyl, cylR, cylL).contact;
+         return productionSphereCyl(cylPos + dir * s, sphR, cylPos, rotCyl, cylR, cylL).contact;
       };
       const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
                                                               real_t(3) * (circumCyl + sphR), sphR);
@@ -4882,7 +5008,18 @@ void testSphereCylinderRandomizedFuzz()
       const CylinderState cyl{ cylPos, rotCyl.getMatrix(), cylR, cylL };
 
       const ContactResult kodam = sphereCylinderContact(spherePos, sphR, cyl);
-      const GjkResult      gjk  = gjkSphereCyl(spherePos, sphR, cylPos, rotCyl, cylR, cylL);
+      const GjkResult      gjk  = productionSphereCyl(spherePos, sphR, cylPos, rotCyl, cylR, cylL); // production closed form
+      // [Claude, 2026-10-15] independent reference: mesa_pd GJK/EPA (productionSphereCyl is not GJK/EPA)
+      const GjkResult      ref  = gjkSphereCyl(spherePos, sphR, cylPos, rotCyl, cylR, cylL);
+      if (ref.contact != sphereCylinderContact(spherePos, sphR, CylinderState{ cylPos, rotCyl.getMatrix(), cylR, cylL }).contact)
+         ++numGjkMismatch;
+      else if (ref.contact)
+      {
+         const ContactResult k = sphereCylinderContact(spherePos, sphR, CylinderState{ cylPos, rotCyl.getMatrix(), cylR, cylL });
+         maxGjkOverlapDiff    = std::max(maxGjkOverlapDiff, std::abs(k.overlap + ref.penetrationDepth));
+         maxGjkNormalAngleDeg = std::max(maxGjkNormalAngleDeg,
+            std::acos(std::clamp(k.normal * ref.normal, real_t(-1), real_t(1))) * real_t(180) / math::pi);
+      }
 
       if (gjk.contact) ++numOverlapping;
       if (kodam.contact != gjk.contact)
@@ -4911,6 +5048,8 @@ void testSphereCylinderRandomizedFuzz()
       << ", max overlap diff=" << maxOverlapDiff << ", max point diff=" << maxPointDiff
       << ", max normal angle diff=" << maxNormalAngleDeg << " deg");
 
+   // [Claude, 2026-10-15] NOTE: 'gjk' in this test is the production closed form (productionSphereCyl), so the
+   // numbers below compare two closed forms; the true GJK/EPA comparison is the 'ref' block above.
    // Unlike every cylinder-cylinder fuzz test in this file, existence/overlap/normal are asserted
    // strictly, not just logged -- sphereCylinderContact's own closed form is a complete, exact
    // minimum-translation-distance solution (see its header comment), not a named-scenario heuristic,
@@ -4918,6 +5057,15 @@ void testSphereCylinderRandomizedFuzz()
    // 10000 trials, max overlap diff was 2.8e-15 (machine precision) and max normal angle diff was
    // 1.9e-6 degrees -- both already at floating-point noise level.
    WALBERLA_CHECK_EQUAL(numMismatch, 0);
+   WALBERLA_LOG_INFO_ON_ROOT("[fuzz] Sphere x Cylinder vs true GJK/EPA: existence mismatches=" << numGjkMismatch
+                             << ", max overlap diff=" << maxGjkOverlapDiff << ", max normal angle diff="
+                             << maxGjkNormalAngleDeg << " deg");
+   WALBERLA_CHECK_EQUAL(numGjkMismatch, 0);
+   WALBERLA_CHECK_LESS(maxGjkOverlapDiff, real_t(1e-3));
+   // [Claude, 2026-10-15] measured over the 10000 trials: existence 0 mismatches, overlap 3.9e-4, normal up to 2.9 deg.
+   // The normal error is GJK/EPA's (polytope approximation of the curved sphere and band near the boundary; the closed
+   // form is the exact closest point and agrees with the production overload to 1.9e-6 deg), hence the looser bound.
+   WALBERLA_CHECK_LESS(maxGjkNormalAngleDeg, real_t(5));
    WALBERLA_CHECK_LESS(maxOverlapDiff, real_t(1e-5));
    WALBERLA_CHECK_LESS(maxNormalAngleDeg, real_t(0.1));
    // Contact POINT is NOT held to the same standard: sphereCylinderContact places it on the
@@ -6300,7 +6448,7 @@ int main(int argc, char** argv)
    testHybridTier1TriggersOnMissedContact();
    testHybridTier1DoesNotTriggerWhenClearlySeparated();
    testHybridTier1BoundaryCase();
-   testHybridTier2TriggersOnWrongMagnitude();
+   testHybridKeepsFaceEdgeMagnitudeWithoutFallback();
    testHybridTier2DoesNotTriggerOnVerifiedScenarios();
    testHybridTier2OnAlreadyCorrectFaceEdgeCase();
 
