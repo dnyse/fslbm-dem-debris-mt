@@ -8,7 +8,7 @@ DEMValidation{
     poissonsRatio 0.22;
     collisionTime 0.01;
     approachSpeed 1.0;
-    numCollisions 200;
+    numCollisions 100;   // [Claude, 2026-10-16] 100 collisions (88 completed) give the thesis values of tab:contact-behaviour; was 200
     toleranceRelError 0.02;
     seed 4242;
 }
