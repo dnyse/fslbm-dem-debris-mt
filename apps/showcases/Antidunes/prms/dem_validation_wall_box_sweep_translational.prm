@@ -1,0 +1,33 @@
+// [Claude, 2026-10-28] New: data source for the thesis's Kodam-style cuboid-wall-impact result figures (Section 5.2,
+// "Cuboid: Oblique Impact on a Wall"). Same geometry/protocol as dem_validation_wall_box.prm's already-established
+// frictionless variant (frictionCoefficient 0, toleranceRelError 0.02, author: "why don't we only do frictionless
+// like kodam" -- see wall-impact.tex's own 2026-10-22 comment) but widened from the 5-40deg/step-10 sweep to the
+// FULL 0-90deg range at step-5deg (19 points), author: "add additional test if necessary ... for both cuboid and
+// cylinder". useRotationalEffectiveMass left at its default (false) -- TRANSLATIONAL-effective-mass series.
+// [Claude, 2026-10-29] tangentialSpeedFraction 0.0 added: this file's own outputBaseName and surrounding comments
+// already called this the "Kodam-style" sweep, but wallImpactBox had no such parameter until now (it always used
+// the hardcoded oblique Vec3(speed,0,-speed)) -- so despite the name, every run of this file to date was actually
+// oblique, not normal. Fixed per the author's own decision ("we will only use the drop test not the oblique test
+// in both cases cylinder and cuboid"), now mirroring dem_validation_wall_cylinder_kodam_sweep_translational.prm's
+// tangentialSpeedFraction 0.0 exactly. See DEMValidationScenarios.h's runWallImpactBox for the new parameter.
+DEMValidation{
+    testCase wallImpactBox;
+    useRotationalEffectiveMass false;
+
+    boxHalfExtents < 1.0, 2.0, 2.0 >;
+    density 1.0;
+    restitutionCoefficient 0.6;
+    frictionCoefficient 0.0;
+    poissonsRatio 0.22;
+    collisionTime 0.01;
+
+    impactSpeed 1.0;
+    tangentialSpeedFraction 0.0;
+    tiltStartDeg 0.0;
+    tiltEndDeg 90.0;
+    tiltStepDeg 5.0;
+
+    toleranceRelError 0.02;
+    vtkSpacing 0;
+    outputBaseName wall_impact_box_kodam_sweep_translational;
+}

@@ -841,6 +841,11 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
    const real_t dt            = b.getParameter< real_t >("dt", collisionTime / real_t(50));
    const real_t tolerance     = b.getParameter< real_t >("toleranceRelError", real_t(0.2));
    const real_t speed         = b.getParameter< real_t >("impactSpeed", real_t(1));
+   // [Claude, 2026-10-29] Mirrors wallImpactCylinder's own tangentialSpeedFraction (above): default 1.0 keeps
+   // every existing prm's exact prior behaviour (equal tangential/normal, this app's own general oblique-impact
+   // sweep); set to 0.0 for a Kodam-et-al.-Test-1-style purely normal impact, now available for the box the same
+   // way it already was for the cylinder (author: "can you recreate the kodam version for the cuboids").
+   const real_t tangentialFraction = b.getParameter< real_t >("tangentialSpeedFraction", real_t(1));
    const real_t tiltStartDeg  = b.getParameter< real_t >("tiltStartDeg", real_t(5));
    const real_t tiltEndDeg    = b.getParameter< real_t >("tiltEndDeg", real_t(40));
    const real_t tiltStepDeg   = b.getParameter< real_t >("tiltStepDeg", real_t(10));
@@ -886,8 +891,9 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
       // Horizontal velocity component aimed so the leading (lowest) corner strikes squarely, matching
       // Housner's planar rocking-block assumption (velocity, spin axis and contact point all in the
       // X-Z plane -- tilt is about world Y, so no Y motion is introduced).
-      const size_t boxIdx =
-         engine.addBox(Vec3(0, 0, reach + gap), Vec3(speed, 0, -speed), yrot.rot, edgeLength, density);
+      const size_t boxIdx = engine.addBox(Vec3(0, 0, reach + gap),
+                                            Vec3(tangentialFraction * speed, 0, -speed), yrot.rot, edgeLength,
+                                            density);
       const size_t wallIdx = engine.addWall(wallPos, wallNormal);
       engine.finalizeSetup();
 
