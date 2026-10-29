@@ -83,7 +83,12 @@ int main(int argc, char** argv)
    setupSurfaceGeometryFields (simParams, simObjs);   // curvature + normal + obstacleNormal + smoothFill
    setupParticles             (simParams, simObjs);   // particleStorage + particleField
 
-   // TEMPORARY DIAGNOSTIC (THESIS_PLAN.md item 1a, checkpoint-resume STALE-PARTICLE-IDX abort) --
+   // [Claude, 2026-10-29] TEMPORARY DIAGNOSTIC (THESIS_PLAN.md item 1a, checkpoint-resume
+   // STALE-PARTICLE-IDX abort, job 4245028) commented out -- that investigation is closed (the
+   // underlying ghost-sync gap was fixed in SetupStages.h's own 4-round syncCall()), and this was
+   // the only genuinely unconditional debug print left in the production codebase after a survey
+   // (per explicit request to find/clean up leftover debugging prints). Kept for reference below.
+#if 0
    // per-rank dump of what the particle accessor actually knows right after setupParticles() (i.e.
    // after loadBlockData + syncCall()), to see which ranks have a ghost/local copy of each floater
    // and which don't, cross-referenced against the block's own AABB (extended by
@@ -118,6 +123,7 @@ int main(int argc, char** argv)
       WALBERLA_LOG_WARNING("[GHOST-SYNC-DIAG] rank=" << rank << " totalKnownParticles=" << totalKnown
          << " boxes-known=[ " << uidList.str() << "] blocks=[ " << blockAABBs.str() << "]");
    }
+#endif
 
    // Boundary handling and flags
    // ----------------------------------------------------------------------------------------------------------------------------------

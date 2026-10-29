@@ -68,7 +68,6 @@
 #include "SimulationParams.h"
 #include "SetupStages_drop_test.h"
 
-#include <chrono>
 #include <filesystem>
 
 namespace walberla {
@@ -330,39 +329,26 @@ int main(int argc, char** argv)
    WcTimingPool timingPool;
 
    WALBERLA_LOG_INFO_ON_ROOT("beginTimeStep: " << simObjs->beginTimeStep << " / " << simParams->physics.timesteps);
-   // Per-step wall-clock timing breakdown (release / DEM sub-cycles / VTK) -- added to diagnose an
-   // observed multi-rank slowdown (72-process cluster and 12-process local runs both took many
-   // minutes to clear even step 1000 for a 1000-cuboid config, vs. 5.4s single-process for 48
-   // cuboids) that the existing every-evaluationFrequency-steps progress log was too coarse to see
-   // at all (it never even fired before the slow runs were cancelled). Logged every step,
-   // unconditionally -- this is a diagnostic instrumentation pass, not meant to stay this verbose
-   // once the bottleneck is identified.
-   auto stepTimerStart = std::chrono::steady_clock::now();
+   // [Claude, 2026-10-29] Per-step [StepTiming] wall-clock breakdown (release / DEM sub-cycles / VTK)
+   // commented out -- it was added to diagnose a multi-rank slowdown (72-process cluster and
+   // 12-process local runs both took many minutes to clear even step 1000 for a 1000-cuboid config,
+   // vs. 5.4s single-process for 48 cuboids) and, by its own original comment, was "logged every
+   // step, unconditionally... not meant to stay this verbose once the bottleneck is identified."
+   // That investigation is closed; this was the highest-volume genuinely-unconditional debug print
+   // left in the production codebase after a survey (per explicit request to find/clean up leftover
+   // debugging prints).
    for (uint_t t = simObjs->beginTimeStep; t != simParams->physics.timesteps; ++t)
    {
       *simObjs->currentMainStep = t;
 
-      const auto tStepStart = std::chrono::steady_clock::now();
-
       releaseSettledFloatingSpheres(simParams, simObjs, t);
-      const auto tAfterRelease = std::chrono::steady_clock::now();
 
       particleKernels.doDEMSubCycles(timingPool, simParams->particle.numSubCycles);
-      const auto tAfterDEM = std::chrono::steady_clock::now();
 
       writeFloaterBoxVtk();
       writeFloaterCylinderVtk();
       writeFloaterSphereVtk();
       writeFloaterCapsuleVtk();
-      const auto tAfterVtk = std::chrono::steady_clock::now();
-
-      const double releaseMs = std::chrono::duration< double, std::milli >(tAfterRelease - tStepStart).count();
-      const double demMs     = std::chrono::duration< double, std::milli >(tAfterDEM - tAfterRelease).count();
-      const double vtkMs     = std::chrono::duration< double, std::milli >(tAfterVtk - tAfterDEM).count();
-      const double totalMs   = std::chrono::duration< double, std::milli >(tAfterVtk - tStepStart).count();
-      const double sinceStartS = std::chrono::duration< double >(tAfterVtk - stepTimerStart).count();
-      WALBERLA_LOG_INFO_ON_ROOT("[StepTiming] step=" << t << " wallSinceStart=" << sinceStartS << "s"
-         << " release=" << releaseMs << "ms dem=" << demMs << "ms vtk=" << vtkMs << "ms total=" << totalMs << "ms");
 
       if (t % simParams->evaluation.evaluationFrequency == uint_c(0) && t > uint_c(0))
       {
