@@ -1,4 +1,4 @@
-# Numerical Simulation of Floating Debris Clogging at Bridge Piers
+# Numerical Simulation of Floating Debris Transport and Clogging
 
 **Master's Thesis — Dennys Huber, Friedrich-Alexander-Universität Erlangen-Nürnberg, Lehrstuhl für Informatik 10 (Systemsimulation)**
 Supervisor: Prof. Dr.-Ing. Harald Köstler · Advisor: Behzad Safaei
