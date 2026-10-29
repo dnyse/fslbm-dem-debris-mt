@@ -1266,37 +1266,8 @@ struct ModelParams {
    // false → (DEFAULT) exact pre-existing behaviour: plain translational effectiveMass, unchanged.
    bool        useRotationalEffectiveMass;
 
-   // true  → Box x Box contact is resolved as a genuine "rounded box" (spherosimplex): the Minkowski
-   //         sum of the SHARP box (its true faces/edges/vertices) with a sphere of radius
-   //         spheroBoxRadius. Unlike useRoundedBoxCorners (which patches boxBoxSAT's discrete 15-axis
-   //         dispatch, only fixing the normal for the ONE case where the winning axis is edge x edge)
-   //         or useMultiPointBoxContact (which resolves the SHARP corner discontinuity via multiple
-   //         simultaneous points), this replaces the whole detection path with mesa_pd's own GJK/EPA
-   //         (the SAME general-purpose convex-convex algorithm this project already trusts as its
-   //         fallback for every other shape pair), called with margin=spheroBoxRadius on each of the
-   //         two SHARP boxes (mesa_pd::collision_detection::GJK::doGJKmargin/EPA::doEPAmargin already
-   //         implement exactly this "core shape + margin" construction -- the identical mechanism real
-   //         physics engines use for collision margins). Because GJK/EPA computes the TRUE closest
-   //         points (or true penetration via EPA) between the two sharp skeletons across EVERY feature
-   //         pair (vertex-vertex, vertex-edge, vertex-face, edge-edge, edge-face, face-face) through
-   //         ONE unified algorithm, the reported normal is continuous through every possible feature
-   //         transition, not just the edge-edge one useRoundedBoxCorners special-cases -- the literature
-   //         analogue is Galindo-Torres & Pedroso (2010, Phys. Rev. E 81, 061303)'s Voronoi-based
-   //         spheropolyhedra, cited in Lu, Third & Müller (2015) Section 2.2.5 as the general-polyhedron
-   //         version of this same "minimum distance between skeletons, dilated by spheroradius" idea --
-   //         our case is the box-specialised instance, using mesa_pd's own already-tested GJK/EPA
-   //         instead of re-deriving a closed-form OBB-OBB distance routine from scratch.
-   //         MUTUALLY EXCLUSIVE with useRoundedBoxCorners/useMultiPointBoxContact/useBoxOverlapCap/
-   //         useAxisHysteresis/useContactManifold -- when true, this option's detection path is used
-   //         INSTEAD of all of those (they only apply to the boxBoxSAT dispatch this bypasses
-   //         entirely). Still composable with useRotationalEffectiveMass, which only changes the force
-   //         law's calibration, independent of how the (point,normal,overlap) triplet was obtained.
-   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
-   bool        useSpheroBoxContact;
-   // Rounding radius for useSpheroBoxContact, applied identically to both boxes in a pair (combined
-   // Minkowski dilation = 2*spheroBoxRadius, matching two equally-rounded bodies). DEFAULT 0.05 matches
-   // boxRoundingRadius's own default for the SAT-patch approach, for a like-for-like comparison.
-   real_t      spheroBoxRadius;
+   // [Claude, 2026-10-29] useSpheroBoxContact/spheroBoxRadius (spherosimplex box contact) removed
+   // entirely -- unused by any thesis-cited result; archived at archive/unused_contact_methods/.
 
    // [Claude, 2026-09-30] cylinderContactSkin (DEFAULT 0 = off): contact skin of the cylindrical floaters (type 4),
    // in lattice units. For contact detection only, every floating cylinder is replaced by an inflated cylinder with
@@ -1336,35 +1307,8 @@ struct ModelParams {
    // to Box x Sphere / Box x Cylinder (no such pairs in the box-hopper scenarios this was built for).
    real_t      boxContactSkin;
 
-   // Only meaningful when useSpheroBoxContact is true -- selects WHICH algorithm computes the
-   // spherosimplex (point,normal,overlap) triplet:
-   // false → (DEFAULT) mesa_pd's own GJK/EPA run with margin=spheroBoxRadius on the two sharp
-   //         boxes (paper_analytical::boxBoxSAT's sibling comment describes the mechanism).
-   // true  → a closed-form, non-iterative analytical distance between the two sharp boxes
-   //         instead (paper_analytical::boxBoxSpheroAnalytical / eberly_box_distance namespace,
-   //         PaperAnalyticalContacts.h) -- ported from David Eberly's GeometricTools library
-   //         (github.com/davideberly/GeometricTools), whose line-vs-box case dispatch is
-   //         documented there as Section 10.9.4 "Linear Component to Oriented Bounding Box" of
-   //         Schneider, P.J. & Eberly, D.H. (2002) "Geometric Tools for Computer Graphics",
-   //         Morgan Kaufmann. Unlike GJK/EPA (an iterative simplex refinement with its own
-   //         convergence tolerance), this is a deterministic finite case dispatch -- added
-   //         specifically to A/B-test against the GJK/EPA path on the exact same test batteries.
-   bool        useSpheroBoxAnalytical;
-
-   // true  → Box x Box's multi-point contact list (see useMultiPointBoxContact above) is computed by
-   //         paper_analytical::boxBoxFraigeMultiPointContacts INSTEAD OF boxBoxMultiPointContacts --
-   //         a fuller, more literal replica of Fraige, Langston & Chen (2008, Powder Technology
-   //         186(3):224-240, Section 3.3)'s own method, adding the two contact modes
-   //         boxBoxMultiPointContacts omits (their Fig. 5 edge-edge and edge-face cases -- two boxes
-   //         overlapping with NEITHER having a vertex embedded in the other, e.g. crossing like an
-   //         "X") plus their own near-corner normal blend (Fig. 4b). Takes precedence over
-   //         useMultiPointBoxContact if both are set (see ComputeContacts' own Box x Box operator()
-   //         for the exact dispatch) -- kept as a fully separate flag/function pair specifically so
-   //         enabling it can never change useMultiPointBoxContact's own already-validated behaviour.
-   //         Composable with useContactManifold/useBoxOverlapCap/useRotationalEffectiveMass exactly
-   //         like useMultiPointBoxContact is.
-   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
-   bool        useFraigeBoxContactModel;
+   // [Claude, 2026-10-29] useSpheroBoxAnalytical and useFraigeBoxContactModel removed entirely --
+   // unused by any thesis-cited result; archived at archive/unused_contact_methods/.
 
    // true  → every rank writes its own CSV file under floaterHistoryBaseFolder/ (rank_<N>.csv,
    //         truncated at simulation start), one row per contact/lubrication pair it actually computed
@@ -1706,12 +1650,8 @@ struct ModelParams {
       , useContactManifold          { b.getParameter< bool >       ("useContactManifold", false) }
       , manifoldFadeRate            { b.getParameter< real_t >     ("manifoldFadeRate", real_t(0.25)) }
       , useRotationalEffectiveMass  { b.getParameter< bool >       ("useRotationalEffectiveMass", false) }
-      , useSpheroBoxContact         { b.getParameter< bool >       ("useSpheroBoxContact", false) }
-      , spheroBoxRadius             { b.getParameter< real_t >     ("spheroBoxRadius", real_t(0.05)) }
       , cylinderContactSkin         { b.getParameter< real_t >     ("cylinderContactSkin", real_t(0)) }
       , boxContactSkin               { b.getParameter< real_t >     ("boxContactSkin", real_t(0)) }
-      , useSpheroBoxAnalytical      { b.getParameter< bool >       ("useSpheroBoxAnalytical", false) }
-      , useFraigeBoxContactModel    { b.getParameter< bool >       ("useFraigeBoxContactModel", false) }
       , logFloaterHistory           { b.getParameter< bool >       ("logFloaterHistory", false) }
       , floaterHistoryBaseFolder    { b.getParameter< std::string >("floaterHistoryBaseFolder", "floater-history") }
       , logFloaterHistoryReleaseStepFilter{ b.getParameter< uint_t >("logFloaterHistoryReleaseStepFilter", uint_t(0)) }

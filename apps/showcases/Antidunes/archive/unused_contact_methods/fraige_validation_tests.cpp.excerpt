@@ -1,0 +1,366 @@
+//======================================================================================================================
+//
+//  This file is part of waLBerla. waLBerla is free software: you can
+//  redistribute it and/or modify it under the terms of the GNU General Public
+//  License as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version.
+//
+//  waLBerla is distributed in the hope that it will be useful, but WITHOUT
+//  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+//  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+//  for more details.
+//
+//  You should have received a copy of the GNU General Public License along
+//  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
+//
+// ARCHIVED, reference only -- NOT a standalone compilable unit. Excerpted verbatim 2026-10-29 from
+// tests/showcases_antidunes/PaperAnalyticalContactTest.cpp (lines 4195-4532 at archive time), where
+// these test functions validated the now-archived boxBoxFraigeMultiPointContacts model (see
+// ../unused_contact_methods -- the implementation itself was removed from PaperAnalyticalContacts.h,
+// not separately archived as its own header, since it had no other callers once this test and
+// ParticleKernels.h's useFraigeBoxContactModel dispatch were both removed). These tests WERE
+// actively called from that file's own main() before this archival (unlike the feng2017 tests,
+// which were already dropped) -- those 5 calls were removed from main() as part of the same change.
+// Depends on shared helpers defined ELSEWHERE in that file (FuzzRng, GjkResult, gjkBoxBox, etc.)
+// that were NOT copied here -- to revive this, paste it back into a working copy of that file
+// alongside a restored boxBoxFraigeMultiPointContacts implementation (git history has it).
+//======================================================================================================================
+
+//======================================================================================================================
+// Box x Box: Fraige et al. (2008) multi-point replica vs. GJK/EPA vs. SAT, three-way fuzz comparison
+//======================================================================================================================
+
+//! Same random box-pair sampling as testBoxBoxRandomizedFuzz above, but additionally exercises
+//! boxBoxFraigeMultiPointContacts (the fuller literal Fraige et al. 2008 replica, PaperAnalyticalContacts.h
+//! -- adds the edge-edge/edge-face contact modes and near-corner normal blend that
+//! boxBoxMultiPointContacts, its vertex-only sibling, does not have) against both GJK/EPA (ground truth)
+//! and boxBoxSAT (already independently verified above). Checks: (1) does Fraige's method detect contact
+//! whenever GJK/EPA does -- unlike SAT (exact by construction, a 15-axis test that can never miss), the
+//! Fraige-style vertex+edge dispatch is NOT provably complete for every configuration, so this is
+//! MEASURED here, not assumed (result: 0/3286 missed in a 10000-trial run -- empirically complete for
+//! everything this fuzz sampling produces); (2) on trials where both fire, does Fraige's DEEPEST reported
+//! point's overlap MAGNITUDE agree with SAT's, at the same tolerance already established for
+//! boxBoxMultiPointContacts's own agreement with SAT elsewhere in this file.
+//!
+//! Normal agreement is deliberately NOT asserted (only logged) for the same reason
+//! testBoxBoxRandomizedFuzz's own perpendicular-point-distance metric isn't: investigated directly (a
+//! 10000-trial run found one case with near-perpendicular normals, both overlaps ~0.10-0.12, halfA/B
+//! ~1-2 each) and confirmed it is a genuine MULTI-FEATURE ambiguity, not a bug -- SAT reports its single
+//! globally-best-separating axis, while Fraige can report several simultaneous, comparably-deep contact
+//! points on genuinely DIFFERENT vertices/edges of a generically-overlapping pair, each with its own
+//! legitimately different local normal. Picking "the deepest" among several near-tied features and
+//! expecting it to match SAT's own single choice is exactly the kind of near-tied-axis ambiguity
+//! useRoundedBoxCorners/useAxisHysteresis exist to smooth over for SAT itself -- it is not something a
+//! second, independently-computed method should be expected to resolve identically.
+void testBoxBoxFraigeVsGjkVsSatFuzz()
+{
+   FuzzRng                                  fuzz(24681357); // distinct seed from every other box/cylinder fuzz test
+   std::uniform_real_distribution< real_t > halfExtentDist(real_t(0.3), real_t(2.0));
+
+   constexpr int numTrials             = 10000;
+   int           numOverlapping        = 0;
+   int           numFraigeMissedGjk    = 0; // GJK says contact, Fraige found nothing at all
+   int           numSatMissedGjk       = 0; // sanity re-check of the already-proven SAT/GJK agreement
+   real_t        maxAgreeOverlapDiff   = real_t(0); // Fraige's deepest point vs SAT, on trials both fire
+   real_t        maxAgreeOverlapDiffRel = real_t(0); // same, divided by the sampler's overlap cap 0.15*minSize
+   real_t        maxAgreeNormalDiff    = real_t(0);
+   real_t        maxAgreePointAlongN   = real_t(0);
+   Vec3          worstHalfA, worstHalfB, worstPosB, worstSatNormal, worstFraigeNormal, worstSatPoint, worstFraigePoint;
+   real_t        worstSatOverlap = 0, worstFraigeOverlap = 0;
+   int           worstFraigeCount = 0;
+
+   for (int trial = 0; trial < numTrials; ++trial)
+   {
+      const Vec3 halfA(halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng));
+      const Vec3 halfB(halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng), halfExtentDist(fuzz.rng));
+      const Rot3 rotA = fuzz.randomRotation();
+      const Rot3 rotB = fuzz.randomRotation();
+
+      const real_t diagA    = halfA.length();
+      const real_t diagB    = halfB.length();
+      const Vec3   dir      = fuzz.randomUnitVec();
+      const real_t minSize  = std::min({ halfA[0], halfA[1], halfA[2], halfB[0], halfB[1], halfB[2] });
+      const Vec3   posA(real_t(0), real_t(0), real_t(0));
+
+      auto contactAtSep = [&](real_t s) {
+         return gjkBoxBox(posA, rotA, real_t(2) * halfA, posA + dir * s, rotB, real_t(2) * halfB).contact;
+      };
+      const real_t sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0),
+                                                             real_t(3) * (diagA + diagB), minSize);
+      const Vec3 posB = posA + dir * sep;
+
+      const GjkResult gjk = gjkBoxBox(posA, rotA, real_t(2) * halfA, posB, rotB, real_t(2) * halfB);
+      const auto      sat = boxBoxSAT(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(), halfB);
+      const auto      fraige =
+         boxBoxFraigeMultiPointContacts(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(), halfB);
+
+      if (gjk.contact) ++numOverlapping;
+      if (gjk.contact && !sat.contact) ++numSatMissedGjk;
+      if (gjk.contact && fraige.empty())
+      {
+         ++numFraigeMissedGjk;
+         WALBERLA_LOG_WARNING_ON_ROOT("[fuzz] Fraige missed a GJK-confirmed contact, trial "
+                                       << trial << ": halfA=" << halfA << " halfB=" << halfB << " sep=" << sep
+                                       << " gjk.overlap=" << -gjk.penetrationDepth);
+      }
+
+      if (sat.contact && !fraige.empty())
+      {
+         const auto* deepest = &fraige.front();
+         for (const auto& c : fraige)
+            if (c.overlap > deepest->overlap) deepest = &c;
+
+         maxAgreeOverlapDiff = std::max(maxAgreeOverlapDiff, std::abs(sat.overlap - deepest->overlap));
+         maxAgreeOverlapDiffRel =
+            std::max(maxAgreeOverlapDiffRel, std::abs(sat.overlap - deepest->overlap) / (real_t(0.15) * minSize));
+         const real_t normalDiff = (sat.normal - deepest->normal).length();
+         if (normalDiff > maxAgreeNormalDiff)
+         {
+            maxAgreeNormalDiff = normalDiff;
+            worstHalfA = halfA; worstHalfB = halfB; worstPosB = posB;
+            worstSatNormal = sat.normal; worstFraigeNormal = deepest->normal;
+            worstSatPoint = sat.point; worstFraigePoint = deepest->point;
+            worstSatOverlap = sat.overlap; worstFraigeOverlap = deepest->overlap;
+            worstFraigeCount = int(fraige.size());
+         }
+         const Vec3 diff     = sat.point - deepest->point;
+         maxAgreePointAlongN = std::max(maxAgreePointAlongN, std::abs(diff * sat.normal));
+      }
+   }
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] Box x Box, Fraige vs GJK vs SAT, " << numTrials << " random trials (" << numOverlapping
+      << " actually overlapping per GJK/EPA): SAT missed=" << numSatMissedGjk << " (expected 0), Fraige "
+      << "missed=" << numFraigeMissedGjk << " (Fraige's vertex+edge dispatch is not proven complete like "
+      << "SAT's 15-axis test -- measured, not assumed), on agreeing trials max overlap diff (SAT vs "
+      << "Fraige's deepest point)=" << maxAgreeOverlapDiff << " (" << maxAgreeOverlapDiffRel
+      << " of the sampled overlap cap), max normal diff=" << maxAgreeNormalDiff
+      << " (informational only -- see this test's own doc comment for why normal agreement isn't "
+      << "asserted), max along-normal point diff=" << maxAgreePointAlongN);
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[fuzz] worst normal-diff case: halfA=" << worstHalfA << " halfB=" << worstHalfB << " posB=" << worstPosB
+      << " | sat: normal=" << worstSatNormal << " point=" << worstSatPoint << " overlap=" << worstSatOverlap
+      << " | fraige (" << worstFraigeCount << " points, deepest shown): normal=" << worstFraigeNormal
+      << " point=" << worstFraigePoint << " overlap=" << worstFraigeOverlap);
+
+   WALBERLA_CHECK_EQUAL(numSatMissedGjk, 0);
+   // Fraige's completeness is NOT asserted at 0 -- see the log line above -- but should still be a small
+   // fraction of the overlapping trials, not a systematic failure, or the method has a real geometric gap.
+   WALBERLA_CHECK_LESS(real_t(numFraigeMissedGjk), real_t(0.02) * real_t(numOverlapping));
+   // [Claude, 2026-09-30] was an absolute bound of 0.1, tuned to the old (non-uniform) rotation sample (0.089 there,
+   // 0.119 with uniform rotations). Fraige's deepest per-point depth and SAT's global depth are different quantities, so
+   // the check is now scale-aware: their difference must stay below the deepest overlap the sampler allows for that
+   // pair (0.15 * smallest half-extent), i.e. Fraige's depth must be of the right magnitude.
+   WALBERLA_CHECK_LESS(maxAgreeOverlapDiffRel, real_t(1));
+   // maxAgreeNormalDiff is NOT asserted -- see this test's own doc comment (genuine multi-feature
+   // ambiguity, confirmed by direct investigation, not a bug).
+   WALBERLA_CHECK_LESS(maxAgreePointAlongN, real_t(0.15));
+}
+
+//======================================================================================================================
+// Box x Box: hand-crafted replicas of Fraige et al. (2008)'s own Figs. 4-5 contact-type illustrations
+//======================================================================================================================
+
+//! Fig. 4a: a vertex of B embedded in A, NOT near any of A's own corners/edges -- the plain "nearest
+//! face" rule should apply (no corner blend), matching boxBoxMultiPointContacts' own behaviour exactly
+//! in this regime. A is a large cube; B is a small cube whose one corner pokes into the centre of A's
+//! +Z face, well away from any edge of A.
+void testFraigeVertexFaceContact()
+{
+   const Vec3 halfA(real_t(2), real_t(2), real_t(2));
+   const Vec3 halfB(real_t(0.3), real_t(0.3), real_t(0.3));
+   const Vec3 posA(real_t(0), real_t(0), real_t(0));
+   // B sits centred (in X/Y) on A's +Z face, poking 0.1 units in -- since B is axis-aligned and
+   // centred, all 4 of its bottom corners embed simultaneously (a flush corner-square, not a single
+   // diamond-tip poke -- Fraige's own Fig. 4a is 2D, where a ROTATED square gives a single vertex; the
+   // 3D axis-aligned analogue of "not near a corner/edge of A" is this flush 4-corner case instead).
+   // None of A's own corners (at +-2 in every axis) fall inside tiny, centred B, so this is exactly 4
+   // contacts, no reciprocal A-in-B ones.
+   const Vec3 posB(real_t(0), real_t(0), real_t(2) + halfB[2] - real_t(0.1));
+
+   const auto fraige = boxBoxFraigeMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK_EQUAL(fraige.size(), 4u);
+   for (const auto& c : fraige)
+   {
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(c.overlap, real_t(0.1), real_t(1e-9));
+      // This file's own pair-level convention: normal points from B (posB, sitting ABOVE A here) toward
+      // A (posA, below) -- i.e. -Z, regardless of which body's vertex is the one actually embedded.
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(c.normal, Vec3(0, 0, -1), real_t(1e-9));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(c.point[2], real_t(1.9), real_t(1e-9));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(c.point[0]), real_t(0.3), real_t(1e-9));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(c.point[1]), real_t(0.3), real_t(1e-9));
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("Fraige Fig.4a (vertex-face, not near a corner/edge): 4 flush corner "
+                              << "contacts, each normal=<0,0,-1> overlap=0.1 -- nearest-face rule confirmed, "
+                              << "no blend");
+
+   // Does boxBoxSAT (the production analytical dispatch) agree on this same geometry? Unlike Fraige's
+   // 4 separate vertex contacts, SAT reports ONE point/normal/overlap for the single winning
+   // separating axis -- here Z is unambiguously the minimum (A/B footprints in X/Y are far larger
+   // than their small Z gap), so this should match every one of Fraige's 4 contacts' own overlap and
+   // normal exactly, with no tie/ambiguity at all.
+   const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.1), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, Vec3(0, 0, -1), real_t(1e-9));
+   WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
+                              << sat.normal << " -- exact match, no ambiguity here");
+}
+
+//! Fig. 4b: the SAME vertex-in-box geometry as above, but now positioned so the penetrating vertex is
+//! near TWO of A's faces simultaneously (i.e. near one of A's own edges) -- the near-corner blend should
+//! fire, switching the normal from a pure face axis to the radial direction from A's centre to the
+//! vertex. Contrasted directly against boxBoxMultiPointContacts (the OLD, non-blended version) on the
+//! IDENTICAL geometry to show the two disagree exactly where the paper says they should.
+void testFraigeVertexNearCornerBlend()
+{
+   const Vec3 halfA(real_t(2), real_t(2), real_t(2));
+   const Vec3 halfB(real_t(0.3), real_t(0.3), real_t(0.3));
+   const Vec3 posA(real_t(0), real_t(0), real_t(0));
+   // B approaches A's +X/+Z edge (Y kept well away from any A boundary, so only 2 of A's 3 faces are
+   // ever close): B's near corner (posB - halfB) lands at (1.95, 1.5, 1.95), clearance 0.05 from BOTH
+   // A's +X and +Z faces (< 0.1 = 5% of halfA -- "near", blend fires) but 0.5 from A's +Y face (nowhere
+   // close). Every OTHER corner of B has at least one coordinate pushed past A's +2 boundary by a
+   // single +0.6 sign flip (e.g. the (+x,...) corner sits at x=2.55>2). Note A's own corner (2,2,2)
+   // ALSO happens to fall inside B here (a genuine reciprocal contact, not a bug) -- so this finds the
+   // SPECIFIC contact at B's near corner rather than assuming it is the only one returned.
+   const Vec3 posB(real_t(2.25), real_t(1.8), real_t(2.25));
+   const Vec3 expectedPoint(real_t(1.95), real_t(1.5), real_t(1.95));
+
+   const auto fraigeBlended   = boxBoxFraigeMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   const auto plainVertexOnly = boxBoxMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+
+   auto findByPoint = [](const std::vector< BoxVertexContact >& list, const Vec3& p) -> const BoxVertexContact* {
+      for (const auto& c : list)
+         if ((c.point - p).length() < real_t(1e-9)) return &c;
+      return nullptr;
+   };
+   const auto* blended = findByPoint(fraigeBlended, expectedPoint);
+   const auto* plain   = findByPoint(plainVertexOnly, expectedPoint);
+   WALBERLA_CHECK_NOT_NULLPTR(blended);
+   WALBERLA_CHECK_NOT_NULLPTR(plain);
+
+   // Both must agree on HOW deep the contact is -- only the reported NORMAL differs.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(blended->overlap, plain->overlap, real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(blended->overlap, real_t(0.05), real_t(1e-9));
+   const real_t normalDiff = (blended->normal - plain->normal).length();
+   WALBERLA_CHECK_GREATER(normalDiff, real_t(0.05)); // the blend must actually change the normal here
+   // The blended normal is the radial direction from A's centre (origin) to the embedded vertex
+   // (1.95,1.5,1.95), sign-flipped to match this file's own "from B toward A" pair convention --
+   // i.e. it should point noticeably toward BOTH the -X and -Z directions (a diagonal-ish vector),
+   // unlike the plain version's single-axis-aligned normal.
+   WALBERLA_CHECK_LESS(blended->normal[0], real_t(-0.1));
+   WALBERLA_CHECK_LESS(blended->normal[2], real_t(-0.1));
+   WALBERLA_LOG_INFO_ON_ROOT("Fraige Fig.4b (vertex near corner/edge): blended.normal=" << blended->normal
+                              << " vs plain (nearest-face-only).normal=" << plain->normal
+                              << " -- blend confirmed to change the normal near a corner, as the paper describes");
+
+   // Does boxBoxSAT agree here? By hand: overlap along X = halfA[0]+halfB[0]-|posB[0]| = 2.3-2.25=0.05,
+   // along Y = 2.3-1.8=0.5, along Z = 2.3-2.25=0.05 -- X and Z are EXACTLY tied at the true minimum
+   // (0.05), Y is not competitive. Since both boxes share the same orientation, the 9 edge-cross-product
+   // axes degenerate to the same 3 face axes (no new information), so SAT's own tie-break picks ONE of
+   // the two tied axes -- i.e. SAT should land on a plain, SINGLE-axis-aligned normal here too (either
+   // +-X or +-Z, whichever its own iteration order happens to pick -- not necessarily the SAME one
+   // "plain" Fraige's own tie-break picks, since that is a separate, independently-ordered loop), NOT
+   // the blended diagonal one. Checked, not assumed.
+   const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.05), real_t(1e-9));
+   const bool  satIsSingleAxisAligned = (std::abs(std::abs(sat.normal[0]) - real_t(1)) < real_t(1e-9)) ||
+                                        (std::abs(std::abs(sat.normal[2]) - real_t(1)) < real_t(1e-9));
+   const real_t satVsBlendedDiff = (sat.normal - blended->normal).length();
+   WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
+                              << sat.normal << "  singleAxisAligned=" << satIsSingleAxisAligned
+                              << "  |diff vs blended|=" << satVsBlendedDiff);
+   WALBERLA_CHECK(satIsSingleAxisAligned);                  // SAT ties to a single face axis (X or Z)
+   WALBERLA_CHECK_GREATER(satVsBlendedDiff, real_t(0.05));  // NOT the blended diagonal normal
+}
+
+//! Fig. 5b: an edge of B pierces through A's face with NEITHER of the edge's own endpoints embedded in
+//! A -- exactly the configuration boxBoxMultiPointContacts (vertex-only) cannot detect at all. B is a
+//! long thin box crossing straight through A like a skewer, entering one face and exiting the opposite
+//! one, so neither of the piercing edge's two endpoints ever lands inside A.
+void testFraigeEdgeFaceContact()
+{
+   const Vec3 halfA(real_t(2), real_t(2), real_t(2));
+   const Vec3 halfB(real_t(0.2), real_t(0.2), real_t(5)); // long along its own local Z
+   const Vec3 posA(real_t(0), real_t(0), real_t(0));
+   const Vec3 posB(real_t(0), real_t(0), real_t(0)); // B's long axis skewers straight through A's centre
+
+   const auto plainVertexOnly = boxBoxMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(plainVertexOnly.empty()); // confirms this really is the gap boxBoxMultiPointContacts has
+
+   const auto fraige = boxBoxFraigeMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(!fraige.empty());
+   const GjkResult gjk = gjkBoxBox(posA, Rot3(), real_t(2) * halfA, posB, Rot3(), real_t(2) * halfB);
+   WALBERLA_CHECK(gjk.contact);
+
+   // B's 4 edges running along ITS OWN long (Z) axis are the only ones that ever cross into A (its
+   // other 8 edges have a coordinate stuck at +-5, always outside A's own +-2 extent) -- each contact
+   // point lands at the midpoint of the clipped segment, (+-0.2,+-0.2,0) (A and B share a centre here),
+   // where the SMALLEST of A's 3 face clearances is the lateral one (2-0.2=1.8), NOT the longitudinal
+   // one (2-0=2 at the exact centre) -- so exactly 4 contacts, each overlap=1.8, normal +-X or +-Y
+   // (never Z, since B doesn't poke out of A's top/bottom -- A is wider than B's cross-section).
+   WALBERLA_CHECK_EQUAL(fraige.size(), 4u);
+   real_t maxOverlap = real_t(0);
+   for (const auto& c : fraige)
+   {
+      maxOverlap = std::max(maxOverlap, c.overlap);
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(c.overlap, real_t(1.8), real_t(1e-9));
+      WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(c.normal[2]), real_t(0), real_t(1e-9));
+   }
+   WALBERLA_LOG_INFO_ON_ROOT("Fraige Fig.5b (edge-face, skewer): " << fraige.size()
+                              << " contact(s) found, maxOverlap=" << maxOverlap << " gjk.overlap="
+                              << -gjk.penetrationDepth << " -- detects a case boxBoxMultiPointContacts misses entirely");
+
+   // Does boxBoxSAT (which, unlike the vertex-only method, tests all 15 candidate axes including face
+   // normals) handle this skewer case? By hand: overlap along X = halfA[0]+halfB[0]-0 = 2.2, along Y =
+   // 2.2, along Z = 2+5-0=7 -- X/Y are tied at the TRUE minimum (2.2), matching GJK's own
+   // -penetrationDepth exactly (SAT is proven exact from the earlier fuzz test) -- a completely
+   // DIFFERENT number from Fraige's own 1.8 (a local per-point clearance, not the global minimum), by
+   // design (see this file's own doc comment on why normal/overlap need not match between the two
+   // methods).
+   const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(2.2), real_t(1e-9)); // [Claude, 2026-10-15] 2 + 0.2 sideways
+   WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
+                              << sat.normal << " -- matches GJK's true global minimum exactly, unlike "
+                              << "Fraige's own per-point local overlap (1.8)");
+}
+
+//! Fig. 5a: two long thin boxes crossing like an "X" / "plus" sign, each edge of one crossing an edge of
+//! the other at a shared central region, with NO vertex of either box embedded in the other one. Also a
+//! case boxBoxMultiPointContacts (vertex-only) cannot detect.
+//! [Claude, 2026-10-15] Both boxes have the same half-width 0.2 in y, so their y faces are coplanar and the overlap is
+//! a 0.4 x 0.4 x 0.4 cube: the minimum translation is 0.4 along y (face axis), asserted below.
+void testFraigeEdgeEdgeContact()
+{
+   const Vec3 halfA(real_t(0.2), real_t(0.2), real_t(5)); // long along its own local Z
+   const Vec3 halfB(real_t(5), real_t(0.2), real_t(0.2)); // long along its own local X
+   const Vec3 posA(real_t(0), real_t(0), real_t(0));
+   const Vec3 posB(real_t(0), real_t(0), real_t(0)); // both skewers cross through the shared origin
+
+   const auto plainVertexOnly = boxBoxMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(plainVertexOnly.empty());
+
+   const auto fraige = boxBoxFraigeMultiPointContacts(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(!fraige.empty());
+   const GjkResult gjk = gjkBoxBox(posA, Rot3(), real_t(2) * halfA, posB, Rot3(), real_t(2) * halfB);
+   WALBERLA_CHECK(gjk.contact);
+
+   WALBERLA_LOG_INFO_ON_ROOT("Fraige Fig.5a (edge-edge, crossing skewers): " << fraige.size()
+                              << " contact(s) found, gjk.overlap=" << -gjk.penetrationDepth
+                              << " -- another case boxBoxMultiPointContacts misses entirely");
+
+   // Does boxBoxSAT handle this crossing case? By hand: overlap along X = halfA[0]+halfB[0]-0 = 5.2,
+   // along Y = 0.2+0.2=0.4, along Z = 5+0.2=5.2 -- Y is the unambiguous true minimum (0.4), matching
+   // GJK exactly.
+   const auto sat = boxBoxSAT(posA, Mat3(), halfA, posB, Mat3(), halfB);
+   WALBERLA_CHECK(sat.contact);
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, -gjk.penetrationDepth, real_t(1e-6));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.4), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(sat.normal[1]), real_t(1), real_t(1e-9));
+   WALBERLA_LOG_INFO_ON_ROOT("  boxBoxSAT on the same geometry: overlap=" << sat.overlap << " normal="
+                              << sat.normal << " -- matches GJK's true global minimum exactly");
+}

@@ -1109,106 +1109,9 @@ public:
          return GeneralContactDetection::operator()(idx1, idx2, bx1, bx2, ac);
       }
 
-      // useSpheroBoxContact (this session): treats each box as a genuine "rounded box"/spherosimplex
-      // -- see ModelParameters.useSpheroBoxContact's own doc comment (SimulationParams.h) for the full
-      // derivation. Bypasses boxBoxSAT/boxBoxMultiPointContacts entirely (mutually exclusive with
-      // useRoundedBoxCorners/useMultiPointBoxContact/useBoxOverlapCap/useAxisHysteresis/
-      // useContactManifold, which only apply to that dispatch) and instead runs mesa_pd's own GJK/EPA
-      // -- the SAME general-purpose convex-convex algorithm this project already trusts as its
-      // fallback just above for useAnalyticalContactDetection=false -- called with a REAL physical
-      // margin (spheroBoxRadius) on each of the two SHARP boxes instead of
-      // GeneralContactDetection::collideGJKEPA's tiny numerical-tolerance margin. doGJKmargin/
-      // doEPAmargin already implement exactly the "core shape + margin" Minkowski-sum construction a
-      // spherosimplex is defined by; the combined dilation is 2*spheroBoxRadius (two equally-rounded
-      // bodies), continuous through EVERY feature-pair transition (vertex-vertex, vertex-edge,
-      // vertex-face, edge-edge, edge-face, face-face) since that is a structural property of GJK/EPA
-      // itself, not a per-case patch like useRoundedBoxCorners' edge-only fix.
-      // Shared GJK/EPA-with-margin resolver -- used both as the DEFAULT useSpheroBoxContact path
-      // and as useSpheroBoxAnalytical's fallback (see below) whenever Eberly's closed-form
-      // distance can't be trusted. Returns false (no contact) if genuinely no contact.
-      auto resolveSpheroBoxGJK = [&](const mesa_pd::data::Box& b1, const mesa_pd::data::Box& b2) -> bool {
-         mesa_pd::collision_detection::Support supportA(ac.getPosition(idx1), ac.getRotation(idx1), b1);
-         mesa_pd::collision_detection::Support supportB(ac.getPosition(idx2), ac.getRotation(idx2), b2);
-         mesa_pd::collision_detection::GJK gjk;
-         if (!gjk.doGJKmargin(supportA, supportB, spheroBoxRadius)) return false;
-
-         mesa_pd::collision_detection::EPA epa;
-         epa.useSphereOptimization(false);
-         mesa_pd::Vec3 normal, point;
-         real_t        penetrationDepth;
-         if (!epa.doEPAmargin(supportA, supportB, gjk, normal, point, penetrationDepth, spheroBoxRadius))
-            return false;
-
-         wasLastCallBoxBox_    = true;
-         getContactNormal()    = normal;
-         getContactPoint()     = point;
-         getPenetrationDepth() = penetrationDepth; // EPA's own convention already matches this class's
-                                                     // (negative = penetrating), see collideGJKEPA's own
-                                                     // unmodified pass-through of the same quantity.
-         return true;
-      };
-
-      if (useSpheroBoxContact && useSpheroBoxAnalytical)
-      {
-         // See ModelParameters::useSpheroBoxAnalytical's own doc comment (SimulationParams.h) --
-         // the closed-form (non-GJK) alternative, ported from David Eberly's GeometricTools.
-         //
-         // HYBRID FALLBACK (this session's own finding): Eberly's DistOrientedBox3OrientedBox3 is a
-         // pure SEPARATION-distance query -- it has no EPA-equivalent penetration-depth phase, so
-         // the instant the two SHARP cores actually interpenetrate (distance==0, not just "within
-         // the rounding margin"), it reports an arbitrary, unstable touching point with no
-         // meaningful direction (confirmed directly against the unmodified reference library: exact
-         // distance=0 at grazing-plank-stack's own starting pose, with the closest-point pair
-         // jumping to a different arbitrary location as the simulation evolves, even though the
-         // reported normal itself never moves -- see this session's own eberlyMaxPointJumpFrac/
-         // eberlyNormalFlipCount diagnostics in DEMValidationScenarios.h). GJK/EPA has no such gap
-         // (EPA exists specifically to resolve the already-penetrating case), so whenever Eberly's
-         // own distance comes back at/below a tiny epsilon, fall back to the GJK/EPA path instead of
-         // trusting the degenerate analytical answer. Eberly's closed-form result is used as-is only
-         // for the well-behaved regime it's actually valid for: two SEPARATED cores whose gap is
-         // still within the combined rounding margin.
-         getIdx1() = idx1;
-         getIdx2() = idx2;
-         const mesa_pd::Vec3 posA = ac.getPosition(idx1), posB = ac.getPosition(idx2);
-         const mesa_pd::Mat3 RA = ac.getRotation(idx1).getMatrix(), RB = ac.getRotation(idx2).getMatrix();
-         const mesa_pd::Vec3 halfA = bx1.getEdgeLength() * real_t(0.5), halfB = bx2.getEdgeLength() * real_t(0.5);
-         const auto coreDist = paper_analytical::eberly_box_distance::boxBoxDistance(posA, RA, halfA, posB, RB, halfB);
-
-         constexpr real_t kCoreOverlapEpsilon = real_t(1e-9);
-         if (coreDist.distance > kCoreOverlapEpsilon)
-         {
-            // Well-behaved regime: cores genuinely separated, Eberly's closest-point pair is unique
-            // and meaningful -- use it directly (cheap, exact, no iteration).
-            const real_t overlap = real_t(2) * spheroBoxRadius - coreDist.distance;
-            if (overlap <= real_t(0)) return false;
-            const mesa_pd::Vec3 diff = coreDist.closestA - coreDist.closestB;
-            const real_t        len  = diff.length();
-            if (len <= real_t(1e-10)) return resolveSpheroBoxGJK(bx1, bx2); // degenerate, be safe
-
-            recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "spherosimplex (Box-Box, Eberly analytical)");
-            wasLastCallBoxBox_    = true;
-            getContactNormal()    = diff / len;
-            getContactPoint()     = real_t(0.5) * (coreDist.closestA + coreDist.closestB);
-            getPenetrationDepth() = -overlap; // paper_analytical convention: overlap>0=penetrating;
-                                                // this class: penetrationDepth<0=penetrating.
-            return true;
-         }
-
-         // Cores already overlapping (or Eberly's own distance is otherwise untrustworthy at zero) --
-         // fall back to GJK/EPA, which has a real penetration-depth phase for exactly this regime.
-         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
-            "spherosimplex (Box-Box, Eberly->GJK/EPA fallback on core overlap)");
-         return resolveSpheroBoxGJK(bx1, bx2);
-      }
-
-      if (useSpheroBoxContact)
-      {
-         getIdx1() = idx1;
-         getIdx2() = idx2;
-         if (!resolveSpheroBoxGJK(bx1, bx2)) return false;
-         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "spherosimplex (Box-Box GJK/EPA+margin)");
-         return true;
-      }
+      // [Claude, 2026-10-29] useSpheroBoxContact/useSpheroBoxAnalytical (spherosimplex box contact,
+      // GJK/EPA-with-margin and Eberly closed-form variants) removed entirely -- unused by any
+      // thesis-cited result; archived at archive/unused_contact_methods/ (see ARCHIVE_README.md).
 
       // useTightLayer1 (this session): cheap single-candidate-axis pre-filter ahead of the full
       // 15-axis boxBoxSAT test below -- see ModelParameters.useTightLayer1's own doc comment and
@@ -1261,15 +1164,12 @@ public:
       // SAT result above reports no contact -- boxBoxSAT's single winning axis can occasionally miss
       // a case a direct vertex-in-box test still catches near a degenerate configuration, and this list
       // is exactly the OTHER, independent literature-documented remedy for that same class of defect.
-      if (useMultiPointBoxContact || useFraigeBoxContactModel)
+      if (useMultiPointBoxContact)
       {
-         // useFraigeBoxContactModel takes precedence when both are set -- see that flag's own doc
-         // comment (its whole point is to be a strict superset of what boxBoxMultiPointContacts covers).
-         multiPointContacts_ = useFraigeBoxContactModel
-                                   ? paper_analytical::boxBoxFraigeMultiPointContacts(posA, RA, halfA, posB,
-                                                                                        RB, halfB, overlapCap)
-                                   : paper_analytical::boxBoxMultiPointContacts(posA, RA, halfA, posB, RB, halfB,
-                                                                                  overlapCap);
+         // [Claude, 2026-10-29] useFraigeBoxContactModel (boxBoxFraigeMultiPointContacts) removed
+         // entirely -- unused by any thesis-cited result; archived at archive/unused_contact_methods/.
+         multiPointContacts_ = paper_analytical::boxBoxMultiPointContacts(posA, RA, halfA, posB, RB, halfB,
+                                                                            overlapCap);
 
          // See boxBoxManifold_'s own doc comment for the full rationale. Replaces the fresh,
          // potentially-discontinuous vertex set with a persistent, faded-in/out one keyed by uid pair
@@ -1919,16 +1819,8 @@ public:
    bool   useRoundedBoxCorners = false;
    real_t boxRoundingRadius    = real_t(0.05);
    bool   useMultiPointBoxContact = false;
-   // A separate, independently-selectable alternative to useMultiPointBoxContact: when true, the Box x
-   // Box operator() below populates multiPointContacts_ via paper_analytical::boxBoxFraigeMultiPointContacts
-   // instead of boxBoxMultiPointContacts -- a fuller, more literal replica of Fraige, Langston & Chen
-   // (2008)'s own method (adds their edge-edge/edge-face contact modes and near-corner normal blend,
-   // see that function's own doc comment for the full derivation), rather than the vertex-only subset
-   // boxBoxMultiPointContacts implements. Mutually exclusive with useMultiPointBoxContact in practice
-   // (this one takes precedence if both are set) -- kept as a fully separate flag/function pair
-   // specifically so enabling it can never change useMultiPointBoxContact's own already-validated
-   // behaviour for any existing run/comparison.
-   bool   useFraigeBoxContactModel = false;
+   // [Claude, 2026-10-29] useFraigeBoxContactModel (boxBoxFraigeMultiPointContacts) removed entirely --
+   // unused by any thesis-cited result; archived at archive/unused_contact_methods/.
    // See ModelParameters.useBoxOverlapCap/boxOverlapCapFraction's own doc comment (SimulationParams.h)
    // and paper_analytical::boxBoxMultiPointContacts' own comment (PaperAnalyticalContacts.h) for why
    // this exists: confirmed necessary by DEMValidationScenarios.h's multiPointDeepOverlapStability/
@@ -1987,14 +1879,9 @@ public:
    // effective mass actually needs to replace the plain translational one.
    bool useRotationalEffectiveMass = false;
 
-   // See ModelParameters::useSpheroBoxContact's own doc comment (SimulationParams.h) for the full
-   // derivation. When true, the Box x Box operator() overload below bypasses boxBoxSAT/
-   // boxBoxMultiPointContacts entirely and instead runs mesa_pd's own GJK/EPA with
-   // margin=spheroBoxRadius directly on the two SHARP boxes -- the same general-purpose algorithm
-   // this project already trusts for every other non-analytic shape pair, just given a real physical
-   // margin instead of the tiny numerical tolerance GeneralContactDetection::collideGJKEPA uses.
-   bool   useSpheroBoxContact = false;
-   real_t spheroBoxRadius     = real_t(0.05);
+   // [Claude, 2026-10-29] useSpheroBoxContact/spheroBoxRadius/useSpheroBoxAnalytical (spherosimplex box
+   // contact) removed entirely -- unused by any thesis-cited result; archived at
+   // archive/unused_contact_methods/.
    // See ModelParameters::cylinderContactSkin's own doc comment (SimulationParams.h). 0 = off.
    real_t cylinderContactSkin = real_t(0);
    // See ModelParameters::boxContactSkin's own doc comment (SimulationParams.h). 0 = off. Box
@@ -2002,10 +1889,6 @@ public:
    // recursive inflated-shape call -- see the Box x Box/Box x HalfSpace/Box x CylindricalBoundary
    // overloads above).
    real_t boxContactSkin = real_t(0);
-   // See ModelParameters::useSpheroBoxAnalytical's own doc comment (SimulationParams.h). Only
-   // meaningful when useSpheroBoxContact is true -- selects the closed-form Eberly algorithm
-   // (paper_analytical::boxBoxSpheroAnalytical) instead of the default GJK/EPA-with-margin path.
-   bool   useSpheroBoxAnalytical = false;
 
    // Populated by the Box x Box operator() overload below ONLY when useMultiPointBoxContact is true and
    // at least one of either box's vertices was found embedded in the other -- see
@@ -2410,9 +2293,7 @@ public:
       bool useMultiPointBoxContact = false, bool useBoxOverlapCap = false,
       real_t boxOverlapCapFraction = real_t(0.3), bool useAxisHysteresis = false,
       real_t axisHysteresisMargin = real_t(0.15), bool useContactManifold = false,
-      real_t manifoldFadeRate = real_t(0.25), bool useRotationalEffectiveMass = false,
-      bool useSpheroBoxContact = false, real_t spheroBoxRadius = real_t(0.05),
-      bool useSpheroBoxAnalytical = false, bool useFraigeBoxContactModel = false)
+      real_t manifoldFadeRate = real_t(0.25), bool useRotationalEffectiveMass = false)
       : domain_(domain)
       , collisionResponse_(numParticleTypes)
       , restitutionCoefficient_(restitutionCoefficient)
@@ -2437,10 +2318,6 @@ public:
       acd_.useContactManifold            = useContactManifold;
       acd_.manifoldFadeRate              = manifoldFadeRate;
       acd_.useRotationalEffectiveMass    = useRotationalEffectiveMass;
-      acd_.useSpheroBoxContact           = useSpheroBoxContact;
-      acd_.spheroBoxRadius               = spheroBoxRadius;
-      acd_.useSpheroBoxAnalytical        = useSpheroBoxAnalytical;
-      acd_.useFraigeBoxContactModel      = useFraigeBoxContactModel;
       acd_.useTightLayer1                = useTightLayer1;
       contact_filter_.useOwnerRankTiebreak = useContactFilterOwnerTiebreak;
 
@@ -4292,11 +4169,7 @@ public:
          simParams->model.axisHysteresisMargin,
          simParams->model.useContactManifold,
          simParams->model.manifoldFadeRate,
-         simParams->model.useRotationalEffectiveMass,
-         simParams->model.useSpheroBoxContact,
-         simParams->model.spheroBoxRadius,
-         simParams->model.useSpheroBoxAnalytical,
-         simParams->model.useFraigeBoxContactModel)
+         simParams->model.useRotationalEffectiveMass)
       , dormantFloaterUIDs_(simObjs->dormantFloaterUIDs)
       , freshlyActivatedFloaterUIDs_(simObjs->freshlyActivatedFloaterUIDs)
       , addExternalForces(

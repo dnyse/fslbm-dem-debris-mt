@@ -10,13 +10,6 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
            walberla::domain_decomposition walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
            walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk AntidunesLatticeModelGeneration )
 
-   # Separate executable (never replaces Antidunes) recreating Watanabe et al. 2023's dry-domain
-   # dam-break tsunami test case -- see tsunami.cpp's own header comment. Reuses every Antidunes setup/
-   # timeloop/DEM function unchanged except its own initial-condition file (TsunamiDataInitialization.h).
-   add_executable ( tsunami tsunami.cpp PIDController.cpp )
-   target_link_libraries ( tsunami walberla::blockforest walberla::boundary walberla::core
-           walberla::domain_decomposition walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
-           walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk AntidunesLatticeModelGeneration )
 endif ()
 
 add_executable ( BedGeneration BedGeneration.cpp )

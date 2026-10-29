@@ -109,9 +109,7 @@ public:
              bool useBoxOverlapCap = false, real_t boxOverlapCapFraction = real_t(0.3),
              bool useAxisHysteresis = false, real_t axisHysteresisMargin = real_t(0.15),
              bool useContactManifold = false, real_t manifoldFadeRate = real_t(0.25),
-             bool useRotationalEffectiveMass = false, bool useSpheroBoxContact = false,
-             real_t spheroBoxRadius = real_t(0.05), bool useSpheroBoxAnalytical = false,
-             bool useFraigeBoxContactModel = false)
+             bool useRotationalEffectiveMass = false)
       : dt_(dt)
       , gravityZ_(-gravityMagnitude)
       , restitutionCoefficient_(restitutionCoefficient)
@@ -139,8 +137,7 @@ public:
          /*useContactFilterOwnerTiebreak=*/false, /*useTightTier1=*/false, /*useTightLayer1=*/false,
          /*skipTier1=*/false, useRoundedBoxCorners, boxRoundingRadius, useMultiPointBoxContact,
          useBoxOverlapCap, boxOverlapCapFraction, useAxisHysteresis, axisHysteresisMargin,
-         useContactManifold, manifoldFadeRate, useRotationalEffectiveMass, useSpheroBoxContact,
-         spheroBoxRadius, useSpheroBoxAnalytical, useFraigeBoxContactModel);
+         useContactManifold, manifoldFadeRate, useRotationalEffectiveMass);
    }
 
    //! [Claude, 2026-09-30] direct access to the production contact functor (detection-mode switches)
@@ -1433,13 +1430,13 @@ inline bool runCuboidPairEnergyFuzz(const config::Config::BlockHandle& b)
    {
       for (const auto& in : inits)
       {
-         // modes: gjk (GJK/EPA), sat (plain SAT, as in the drop tests), multipoint (useMultiPointBoxContact),
-         // fraige (useFraigeBoxContactModel)
+         // modes: gjk (GJK/EPA), sat (plain SAT, as in the drop tests), multipoint (useMultiPointBoxContact).
+         // [Claude, 2026-10-29] "fraige" mode (useFraigeBoxContactModel) removed -- see
+         // archive/unused_contact_methods/ (fraige_multipoint_box_contact.h + fraige_validation_tests.cpp.excerpt).
          DEMEngine engine(dt, real_t(1), real_t(0), poisson, collisionTime, real_t(0), real_t(10) * reach,
                           /*useAnalyticalContactDetection=*/mode != "gjk", /*useRoundedBoxCorners=*/false,
                           /*boxRoundingRadius=*/real_t(0.05), /*useMultiPointBoxContact=*/mode == "multipoint",
-                          false, real_t(0.3), false, real_t(0.15), false, real_t(0.25), false, false, real_t(0.05), false,
-                          /*useFraigeBoxContactModel=*/mode == "fraige");
+                          false, real_t(0.3), false, real_t(0.15), false, real_t(0.25), false);
          const size_t A = engine.addBox(Vec3(-sep0 / 2, 0, 0) - in.offset * real_t(0.5), Vec3(speed / 2, 0, 0), in.rotA,
                                         real_t(2) * halfExt, density);
          const size_t B = engine.addBox(Vec3(sep0 / 2, 0, 0) + in.offset * real_t(0.5), Vec3(-speed / 2, 0, 0), in.rotB,
@@ -1718,9 +1715,6 @@ struct CornerScenarioParams
    bool   useContactManifold     = false;
    real_t manifoldFadeRate       = real_t(0.25);
    bool   useRotationalEffectiveMass = false;
-   bool   useSpheroBoxContact    = false;
-   real_t spheroBoxRadius        = real_t(0.05);
-   bool   useSpheroBoxAnalytical = false;
 };
 
 struct CornerScenarioResult
@@ -1747,19 +1741,9 @@ struct CornerScenarioResult
    uint_t pointJumpCount              = uint_t(0);  // steps where that jump exceeded pointJumpThreshold
    bool   everContacted   = false;
    bool   pass            = false; // keGainRel < tolerance (no anomalous energy gain observed)
-
-   // Same four diagnostics as above, but tracking paper_analytical::boxBoxSpheroAnalytical's OWN
-   // reported normal/point (not raw SAT's) -- only populated when
-   // useSpheroBoxContact+useSpheroBoxAnalytical is active. Exists to test directly whether the
-   // Eberly closed-form box-box distance's own argmin-over-12-face-pairs selection is itself
-   // flipping/chattering for a given geometry (analogous to SAT's axis-tie problem, one level
-   // down), as opposed to some other bug -- see this session's own 200k-case fuzz confirming the
-   // ported distance ALGORITHM matches the real GeometricTools library exactly, which narrowed the
-   // remaining discrepancy vs. GJK down to either this tie/chatter mechanism or the dynamics.
-   uint_t eberlyNormalFlipCount            = uint_t(0);
-   real_t eberlyCumulativeNormalRotationDeg = real_t(0);
-   real_t eberlyMaxPointJumpFrac           = real_t(0);
-   uint_t eberlyPointJumpCount             = uint_t(0);
+   // [Claude, 2026-10-29] the four "eberly*" diagnostics that used to live here (tracking
+   // paper_analytical::boxBoxSpheroAnalytical's own reported normal/point) were removed along with
+   // useSpheroBoxContact/useSpheroBoxAnalytical -- see archive/unused_contact_methods/.
 };
 
 // The "no energy from nowhere" bound every scenario in this file checks is: total mechanical energy at
@@ -1803,8 +1787,7 @@ inline real_t computeInitialElasticPE(const Vec3& posA, const Rot3& rotA, const 
                                        real_t restitution, real_t collisionTime, bool useRoundedBoxCorners,
                                        real_t boxRoundingRadius, bool useMultiPointBoxContact,
                                        bool useBoxOverlapCap = false, real_t boxOverlapCapFraction = real_t(0.3),
-                                       bool useRotationalEffectiveMass = false,
-                                       bool useSpheroBoxContact = false, real_t spheroBoxRadius = real_t(0.05))
+                                       bool useRotationalEffectiveMass = false)
 {
    const real_t massA = densityA * real_t(8) * halfA[0] * halfA[1] * halfA[2];
    const real_t massB = densityB * real_t(8) * halfB[0] * halfB[1] * halfB[2];
@@ -1851,27 +1834,7 @@ inline real_t computeInitialElasticPE(const Vec3& posA, const Rot3& rotA, const 
       ? boxOverlapCapFraction * std::min({ halfA[0], halfA[1], halfA[2], halfB[0], halfB[1], halfB[2] })
       : std::numeric_limits< real_t >::max();
 
-   // useSpheroBoxContact: mutually exclusive with the SAT-based paths below -- see
-   // ModelParameters::useSpheroBoxContact's own doc comment (SimulationParams.h). Same GJK/EPA-with-
-   // margin call ParticleKernels.h's Box x Box operator() makes, run here on temporary (never-added-to-
-   // any-ParticleStorage) FloatingBox shapes purely to get the INITIAL overlap for the PE ceiling.
-   if (useSpheroBoxContact)
-   {
-      FloatingBox boxA(real_t(2) * halfA);
-      FloatingBox boxB(real_t(2) * halfB);
-      mesa_pd::collision_detection::Support supportA(posA, rotA, boxA);
-      mesa_pd::collision_detection::Support supportB(posB, rotB, boxB);
-      mesa_pd::collision_detection::GJK gjk;
-      if (!gjk.doGJKmargin(supportA, supportB, spheroBoxRadius)) return real_t(0);
-      mesa_pd::collision_detection::EPA epa;
-      epa.useSphereOptimization(false);
-      Vec3   normal, point;
-      real_t penetrationDepth;
-      if (!epa.doEPAmargin(supportA, supportB, gjk, normal, point, penetrationDepth, spheroBoxRadius))
-         return real_t(0);
-      if (penetrationDepth >= real_t(0)) return real_t(0); // not actually penetrating
-      return pointPE(stiffnessAtPrimary(point, normal), -penetrationDepth, overlapCap);
-   }
+   // [Claude, 2026-10-29] useSpheroBoxContact branch removed -- see archive/unused_contact_methods/.
 
    if (useMultiPointBoxContact)
    {
@@ -1919,8 +1882,7 @@ inline CornerScenarioResult runCornerScenarioOnce(const CornerScenarioParams& p)
                      p.useRoundedBoxCorners, p.boxRoundingRadius, p.useMultiPointBoxContact,
                      p.useBoxOverlapCap, p.boxOverlapCapFraction, p.useAxisHysteresis,
                      p.axisHysteresisMargin, p.useContactManifold, p.manifoldFadeRate,
-                     p.useRotationalEffectiveMass, p.useSpheroBoxContact, p.spheroBoxRadius,
-                     p.useSpheroBoxAnalytical);
+                     p.useRotationalEffectiveMass);
 
    const Rot3 rotA(Vec3(0, 0, 1), p.tiltDegreesA * math::pi / real_t(180));
    const Rot3 rotB(Vec3(0, 0, 1), p.tiltDegreesB * math::pi / real_t(180));
@@ -1952,17 +1914,13 @@ inline CornerScenarioResult runCornerScenarioOnce(const CornerScenarioParams& p)
       Vec3(-p.separation / 2, 0, 0), rotA, p.halfExtents, p.density,
       Vec3(p.separation / 2, p.lateralOffsetY, p.lateralOffsetZ), rotB, p.halfExtents, p.density,
       p.restitution, p.collisionTime, p.useRoundedBoxCorners, p.boxRoundingRadius, p.useMultiPointBoxContact,
-      p.useBoxOverlapCap, p.boxOverlapCapFraction, p.useRotationalEffectiveMass, p.useSpheroBoxContact,
-      p.spheroBoxRadius);
+      p.useBoxOverlapCap, p.boxOverlapCapFraction, p.useRotationalEffectiveMass);
    result.keMax    = result.keBefore;
 
    real_t penetration = real_t(0);
    Vec3   lastNormal;
    Vec3   lastPoint;
    bool   haveLastNormal = false;
-   Vec3   lastEberlyNormal;
-   Vec3   lastEberlyPoint;
-   bool   haveLastEberlyNormal = false;
    const real_t pointJumpThreshold = real_t(0.15); // fraction of halfExtents.length(), see doc comment above
 
    for (uint_t s = 0; s < p.maxSteps; ++s)
@@ -2001,30 +1959,8 @@ inline CornerScenarioResult runCornerScenarioOnce(const CornerScenarioParams& p)
             lastPoint      = res.point;
             haveLastNormal = true;
          }
-
-         if (p.useSpheroBoxContact && p.useSpheroBoxAnalytical)
-         {
-            const auto eres = paper_analytical::boxBoxSpheroAnalytical(
-               engine.ac().getPosition(idxA), engine.ac().getRotation(idxA).getMatrix(), p.halfExtents,
-               engine.ac().getPosition(idxB), engine.ac().getRotation(idxB).getMatrix(), p.halfExtents,
-               p.spheroBoxRadius);
-            if (eres.contact)
-            {
-               if (haveLastEberlyNormal)
-               {
-                  const real_t cosAngle = std::max(real_t(-1), std::min(real_t(1), eres.normal * lastEberlyNormal));
-                  if (cosAngle < p.flipCosThreshold) ++result.eberlyNormalFlipCount;
-                  result.eberlyCumulativeNormalRotationDeg += std::acos(cosAngle) * real_t(180) / math::pi;
-
-                  const real_t pointJumpFrac = (eres.point - lastEberlyPoint).length() / p.halfExtents.length();
-                  if (pointJumpFrac > result.eberlyMaxPointJumpFrac) result.eberlyMaxPointJumpFrac = pointJumpFrac;
-                  if (pointJumpFrac > pointJumpThreshold) ++result.eberlyPointJumpCount;
-               }
-               lastEberlyNormal     = eres.normal;
-               lastEberlyPoint      = eres.point;
-               haveLastEberlyNormal = true;
-            }
-         }
+         // [Claude, 2026-10-29] the useSpheroBoxContact+useSpheroBoxAnalytical Eberly-diagnostic
+         // block that used to live here was removed -- see archive/unused_contact_methods/.
       }
       engine.step();
       engine.writeCsvRow();
@@ -2656,21 +2592,19 @@ inline bool runMultiPointEdgeCases(const config::Config::BlockHandle& b)
       bool        hysteresis;
       bool        manifold;
       bool        rotationalEffMass = false;
-      bool        spheroBox = false;
-      bool        spheroBoxAnalytical = false;
    };
+   // [Claude, 2026-10-29] two "useSpheroBoxContact (GJK/Eberly analytical)" rows removed -- see
+   // archive/unused_contact_methods/.
    const Config configs[] = {
-      { "baseline (both OFF)", false, false, false, false, false, false, false, false },
-      { "useRoundedBoxCorners", true, false, false, false, false, false, false, false },
-      { "useMultiPointBoxContact", false, true, false, false, false, false, false, false },
-      { "both", true, true, false, false, false, false, false, false },
-      { "useMultiPointBoxContact+overlapCap", false, true, true, false, false, false, false, false },
-      { "useAxisHysteresis", false, false, false, true, false, false, false, false },
-      { "useMultiPointBoxContact+manifold", false, true, false, false, true, false, false, false },
-      { "useRotationalEffectiveMass", false, false, false, false, false, true, false, false },
-      { "useMultiPointBoxContact+rotationalEffMass", false, true, false, false, false, true, false, false },
-      { "useSpheroBoxContact (GJK)", false, false, false, false, false, false, true, false },
-      { "useSpheroBoxContact (Eberly analytical)", false, false, false, false, false, false, true, true },
+      { "baseline (both OFF)", false, false, false, false, false, false },
+      { "useRoundedBoxCorners", true, false, false, false, false, false },
+      { "useMultiPointBoxContact", false, true, false, false, false, false },
+      { "both", true, true, false, false, false, false },
+      { "useMultiPointBoxContact+overlapCap", false, true, true, false, false, false },
+      { "useAxisHysteresis", false, false, false, true, false, false },
+      { "useMultiPointBoxContact+manifold", false, true, false, false, true, false },
+      { "useRotationalEffectiveMass", false, false, false, false, false, true },
+      { "useMultiPointBoxContact+rotationalEffMass", false, true, false, false, false, true },
    };
 
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] multiPointEdgeCases -- " << cases.size()
@@ -2721,8 +2655,6 @@ inline bool runMultiPointEdgeCases(const config::Config::BlockHandle& b)
             p.useAxisHysteresis       = cfg.hysteresis;
             p.useContactManifold      = cfg.manifold;
             p.useRotationalEffectiveMass = cfg.rotationalEffMass;
-            p.useSpheroBoxContact     = cfg.spheroBox;
-            p.useSpheroBoxAnalytical  = cfg.spheroBoxAnalytical;
             r = detail::runCornerScenarioOnce(p);
          }
          else
@@ -2732,8 +2664,7 @@ inline bool runMultiPointEdgeCases(const config::Config::BlockHandle& b)
             DEMEngine engine(real_t(0.05), restitutionOverride, real_t(0), real_t(0.22), real_t(32.0078), real_t(0),
                               real_t(200), /*useAnalyticalContactDetection=*/true, cfg.rounded, real_t(0.05),
                               cfg.multiPoint, cfg.overlapCap, real_t(0.3), cfg.hysteresis, real_t(0.15),
-                              cfg.manifold, real_t(0.25), cfg.rotationalEffMass, cfg.spheroBox, real_t(0.05),
-                              cfg.spheroBoxAnalytical);
+                              cfg.manifold, real_t(0.25), cfg.rotationalEffMass);
             const Rot3 rotA(Vec3(0, 0, 1), ec.tiltA * math::pi / real_t(180));
             const Rot3 rotB(Vec3(0, 0, 1), ec.tiltB * math::pi / real_t(180));
             const size_t idxA = engine.addBox(Vec3(-ec.separation / 2, 0, 0), Vec3(0, 0, 0), rotA,
@@ -2747,7 +2678,7 @@ inline bool runMultiPointEdgeCases(const config::Config::BlockHandle& b)
                Vec3(-ec.separation / 2, 0, 0), rotA, ec.halfExtentsA, real_t(0.6),
                Vec3(ec.separation / 2, ec.offY, ec.offZ), rotB, ec.halfExtentsB, real_t(0.6),
                restitutionOverride, real_t(32.0078), cfg.rounded, real_t(0.05), cfg.multiPoint, cfg.overlapCap,
-               real_t(0.3), cfg.rotationalEffMass, cfg.spheroBox, real_t(0.05));
+               real_t(0.3), cfg.rotationalEffMass);
             r.keMax    = r.keBefore;
             for (uint_t s = 0; s < uint_t(6000); ++s)
             {
@@ -2776,11 +2707,7 @@ inline bool runMultiPointEdgeCases(const config::Config::BlockHandle& b)
             << " maxPointJumpFrac=" << r.maxPointJumpFrac << " pointJumpCount=" << r.pointJumpCount
             << (sameSize ? "" : " (N/A, asymmetric-size branch)")
             << " everContacted=" << r.everContacted
-            << "  " << (r.pass ? "PASS" : "FAIL")
-            << " | eberlyNormalFlipCount=" << r.eberlyNormalFlipCount
-            << " eberlyCumulativeNormalRotationDeg=" << r.eberlyCumulativeNormalRotationDeg
-            << " eberlyMaxPointJumpFrac=" << r.eberlyMaxPointJumpFrac
-            << " eberlyPointJumpCount=" << r.eberlyPointJumpCount);
+            << "  " << (r.pass ? "PASS" : "FAIL"));
       }
    }
 
@@ -3049,19 +2976,18 @@ inline bool runFallOntoPileStability(const config::Config::BlockHandle& b)
       bool        hysteresis;
       bool        manifold;
       bool        rotationalEffMass = false;
-      bool        spheroBox = false;
    };
+   // [Claude, 2026-10-29] "useSpheroBoxContact" row removed -- see archive/unused_contact_methods/.
    const Config configs[] = {
-      { "baseline (both OFF)", false, false, false, false, false, false, false },
-      { "useRoundedBoxCorners", true, false, false, false, false, false, false },
-      { "useMultiPointBoxContact", false, true, false, false, false, false, false },
-      { "both", true, true, false, false, false, false, false },
-      { "useMultiPointBoxContact+overlapCap", false, true, true, false, false, false, false },
-      { "useAxisHysteresis", false, false, false, true, false, false, false },
-      { "useMultiPointBoxContact+manifold", false, true, false, false, true, false, false },
-      { "useRotationalEffectiveMass", false, false, false, false, false, true, false },
-      { "useMultiPointBoxContact+rotationalEffMass", false, true, false, false, false, true, false },
-      { "useSpheroBoxContact", false, false, false, false, false, false, true },
+      { "baseline (both OFF)", false, false, false, false, false, false },
+      { "useRoundedBoxCorners", true, false, false, false, false, false },
+      { "useMultiPointBoxContact", false, true, false, false, false, false },
+      { "both", true, true, false, false, false, false },
+      { "useMultiPointBoxContact+overlapCap", false, true, true, false, false, false },
+      { "useAxisHysteresis", false, false, false, true, false, false },
+      { "useMultiPointBoxContact+manifold", false, true, false, false, true, false },
+      { "useRotationalEffectiveMass", false, false, false, false, false, true },
+      { "useMultiPointBoxContact+rotationalEffMass", false, true, false, false, false, true },
    };
 
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] fallOntoPileStability -- a STATIONARY just-released "
@@ -3094,7 +3020,7 @@ inline bool runFallOntoPileStability(const config::Config::BlockHandle& b)
                               /*domainHalfExtent=*/real_t(500), /*useAnalyticalContactDetection=*/true,
                               cfg.rounded, real_t(0.05), cfg.multiPoint, cfg.overlapCap, real_t(0.3),
                               cfg.hysteresis, real_t(0.15), cfg.manifold, real_t(0.25),
-                              cfg.rotationalEffMass, cfg.spheroBox, real_t(0.05));
+                              cfg.rotationalEffMass);
             engine.addWall(Vec3(0, 0, 0), Vec3(0, 0, 1)); // floor
 
             std::vector< size_t > pileIdx;
@@ -3417,19 +3343,18 @@ inline bool runProductionCollisionReplay(const config::Config::BlockHandle& b)
       bool        hysteresis;
       bool        manifold;
       bool        rotationalEffMass = false;
-      bool        spheroBox = false;
    };
+   // [Claude, 2026-10-29] "useSpheroBoxContact" row removed -- see archive/unused_contact_methods/.
    const Config configs[] = {
-      { "baseline (both OFF)", false, false, false, false, false, false, false },
-      { "useRoundedBoxCorners", true, false, false, false, false, false, false },
-      { "useMultiPointBoxContact", false, true, false, false, false, false, false },
-      { "both", true, true, false, false, false, false, false },
-      { "useMultiPointBoxContact+overlapCap", false, true, true, false, false, false, false },
-      { "useAxisHysteresis", false, false, false, true, false, false, false },
-      { "useMultiPointBoxContact+manifold", false, true, false, false, true, false, false },
-      { "useRotationalEffectiveMass", false, false, false, false, false, true, false },
-      { "useMultiPointBoxContact+rotationalEffMass", false, true, false, false, false, true, false },
-      { "useSpheroBoxContact", false, false, false, false, false, false, true },
+      { "baseline (both OFF)", false, false, false, false, false, false },
+      { "useRoundedBoxCorners", true, false, false, false, false, false },
+      { "useMultiPointBoxContact", false, true, false, false, false, false },
+      { "both", true, true, false, false, false, false },
+      { "useMultiPointBoxContact+overlapCap", false, true, true, false, false, false },
+      { "useAxisHysteresis", false, false, false, true, false, false },
+      { "useMultiPointBoxContact+manifold", false, true, false, false, true, false },
+      { "useRotationalEffectiveMass", false, false, false, false, false, true },
+      { "useMultiPointBoxContact+rotationalEffMass", false, true, false, false, false, true },
    };
 
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] productionCollisionReplay -- real incident from job 4199585 "
@@ -3443,7 +3368,7 @@ inline bool runProductionCollisionReplay(const config::Config::BlockHandle& b)
       DEMEngine engine(dt, restitution, friction, poisson, collisionTime, gravity, real_t(200),
                         /*useAnalyticalContactDetection=*/true, cfg.rounded, real_t(0.05), cfg.multiPoint,
                         cfg.overlapCap, real_t(0.3), cfg.hysteresis, real_t(0.15), cfg.manifold, real_t(0.25),
-                        cfg.rotationalEffMass, cfg.spheroBox, real_t(0.05));
+                        cfg.rotationalEffMass);
 
       const size_t idxA = engine.addBox(posA, velA, rotA, real_t(2) * halfExtents, density);
       const size_t idxB = engine.addBox(posB, velB, rotB, real_t(2) * halfExtents, density);
