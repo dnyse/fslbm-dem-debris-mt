@@ -380,6 +380,7 @@ void testBoxBoxSATRotatedCornerIntoFace()
    // = 0.0571068; B's face axes at 45 deg overlap by 0.5 sqrt(2) + 0.5 - 1.15/sqrt(2) = 0.394, the cross products
    // of the z edges coincide with these axes. Confirmed by an independent brute-force minimum translation distance.
    WALBERLA_CHECK(sat.contact);
+   // overlap = 0.5 + 0.5*sqrt(2) - 1.15 = 0.0571068 (x-face axis wins over the 45deg face axes, 0.394)
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.overlap, real_t(0.5) + real_t(0.5) * std::sqrt(real_t(2)) - real_t(1.15), real_t(1e-9));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(sat.normal, Vec3(real_t(-1), real_t(0), real_t(0)), real_t(1e-9));
    WALBERLA_CHECK_EQUAL(sat.contact, gjk.contact);
@@ -851,6 +852,7 @@ void testCylinderCylinderFaceBand()
    WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-band");
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-3));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(0), real_t(0), real_t(-1)), real_t(1e-3));
+   // point = AB's midpoint projected onto i's face plane = (0, 0.45, 0.95) (Kodam et al. 2010 eq. 40-41)
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0), real_t(0.45), real_t(0.95)), real_t(1e-3));
 
    const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
@@ -904,6 +906,7 @@ void testCylinderCylinderFaceBandPartiallyInside()
    WALBERLA_CHECK(kodam.contact);
    WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-band");
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-3));
+   // point = midpoint of B and the disc-crossing nearer A, t=(-1+0.453939)/2 -> (0.226970, 0.3) (Kodam et al. 2010 eq. 44)
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0.226970), real_t(0.3), real_t(0.95)),
                                        real_t(1e-3));
 
