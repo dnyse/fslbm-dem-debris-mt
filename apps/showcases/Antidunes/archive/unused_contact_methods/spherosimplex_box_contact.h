@@ -20,13 +20,13 @@
 //! SimulationParams.h's flags removed too). See archive/ARCHIVE_README.md.
 #pragma once
 
-#include "../../PaperAnalyticalContacts.h"
+#include "../../ClosedFormContacts.h"
 
 namespace walberla
 {
 namespace antidunes
 {
-namespace paper_analytical
+namespace closed_form_contacts
 {
 namespace eberly_box_distance
 {
@@ -590,6 +590,6 @@ inline ContactResult boxBoxSpheroAnalytical(const Vec3& posA, const Mat3& RA, co
    result.point    = real_t(0.5) * (d.closestA + d.closestB);
    return result;
 }
-} // namespace paper_analytical
+} // namespace closed_form_contacts
 } // namespace antidunes
 } // namespace walberla

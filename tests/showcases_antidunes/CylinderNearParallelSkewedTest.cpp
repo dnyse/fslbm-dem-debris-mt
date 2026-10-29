@@ -14,7 +14,7 @@
 //! to R_i+R_j = 6 LU. This test
 //!   (1) implements Kodam Eqs. 55-66 literally (with the exact l* of Eq. 59, no guard) as an independent reference,
 //!   (2) shows the reference rejects the separated near-parallel pairs (so the PAPER is fine, the guard was the bug),
-//!   (3) requires paper_analytical::cylinderCylinderContact and the production dispatch (analytic on, tight layer-1 on/off) to agree,
+//!   (3) requires closed_form_contacts::cylinderCylinderContact and the production dispatch (analytic on, tight layer-1 on/off) to agree,
 //!   (4) requires genuinely overlapping near-parallel pairs to still be detected with the right overlap,
 //!   (5) requires the dispatch's capsule bound (a contact is impossible if the axis SEGMENTS are farther apart than R_i+R_j).
 //======================================================================================================================
@@ -52,9 +52,9 @@ mesa_pd::Rot3 rotToAxis(const Vec3& axis)
 
 struct Rod { Vec3 pos; Vec3 axis; };  // axis = unit vector (world) of the cylinder's symmetry axis
 
-paper_analytical::CylinderState state(const Rod& r)
+closed_form_contacts::CylinderState state(const Rod& r)
 {
-   return paper_analytical::CylinderState{ r.pos, rotToAxis(r.axis).getMatrix(), kR, kL };
+   return closed_form_contacts::CylinderState{ r.pos, rotToAxis(r.axis).getMatrix(), kR, kL };
 }
 
 //! Kodam et al. (2010) Eqs. 55-66, literal, in world vectors; NO guard on the 1-(e_i.e_j)^2 denominator.
@@ -89,7 +89,7 @@ Outcome evaluate(const Rod& a, const Rod& b)
    double li, lj, d;
    o.kodamOverlap = kodamBandBandSkewed(a, b, li, lj, d);
    o.kodam = o.kodamOverlap >= 0;
-   const auto res = paper_analytical::cylinderCylinderContact(state(a), state(b));
+   const auto res = closed_form_contacts::cylinderCylinderContact(state(a), state(b));
    o.paper = res.contact; o.paperOverlap = res.contact ? double(res.overlap) : -1.0; o.scenario = res.scenario;
 
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10); mesa_pd::data::ParticleAccessor ac(ps);
@@ -124,10 +124,10 @@ int main(int argc, char** argv)
          const auto o = evaluate(a, b);
          std::ostringstream tag; tag << "A tilt=" << tilt << " gap=" << gap;
          if (tilt == 2e-6 && gap == 0.1)
-            std::cout << "reproducer (tilt 2e-6 about Z, gap 0.1): Kodam literal contact=" << o.kodam << "  paper_analytical contact=" << o.paper << " (" << o.scenario << ", overlap " << o.paperOverlap
+            std::cout << "reproducer (tilt 2e-6 about Z, gap 0.1): Kodam literal contact=" << o.kodam << "  closed_form_contacts contact=" << o.paper << " (" << o.scenario << ", overlap " << o.paperOverlap
                       << ")  dispatch=" << o.dispatch << " dispatch(tightLayer1)=" << o.dispatchTight << std::endl;
          check(!o.kodam,          tag.str() + ": Kodam Eq. 63 with the exact l* must REJECT (rods are separated)");
-         check(!o.paper,          tag.str() + ": paper_analytical::cylinderCylinderContact reports a contact between SEPARATED rods (" + o.scenario + ", overlap " + std::to_string(o.paperOverlap) + ")");
+         check(!o.paper,          tag.str() + ": closed_form_contacts::cylinderCylinderContact reports a contact between SEPARATED rods (" + o.scenario + ", overlap " + std::to_string(o.paperOverlap) + ")");
          check(!o.dispatch,       tag.str() + ": production dispatch (analytic) reports a contact between SEPARATED rods");
          check(!o.dispatchTight,  tag.str() + ": production dispatch (analytic + useTightLayer1) reports a contact between SEPARATED rods");
       }

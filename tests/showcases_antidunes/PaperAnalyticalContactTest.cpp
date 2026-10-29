@@ -42,7 +42,7 @@
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
 #include "ParticleKernels.h"
-#include "PaperAnalyticalContacts.h"
+#include "ClosedFormContacts.h"
 
 #include <sstream>
 #include <mesa_pd/collision_detection/GeneralContactDetection.h>
@@ -70,7 +70,7 @@ namespace walberla
 {
 namespace antidunes
 {
-namespace paper_analytical
+namespace closed_form_contacts
 {
 namespace test
 {
@@ -183,7 +183,7 @@ GjkResult productionCylPlane(const Vec3& posCyl, const Rot3& rotCyl, real_t radi
 //! GeneralContactDetection hierarchy (unlike sphere-sphere/sphere-box, inherited from
 //! AnalyticContactDetection, or cylinder-cylinder/box-box, overridden in ParticleKernels.h), so this
 //! exercises the generic GJK/EPA template directly -- exactly the ground truth
-//! paper_analytical::sphereCylinderContact is validated against below.
+//! closed_form_contacts::sphereCylinderContact is validated against below.
 //! [Claude, 2026-10-15] NOT GJK/EPA: SolidCylinderContactDetection's Sphere x Cylinder overload is the production closed
 //! form (ParticleKernels.h, mid-overlap contact point). The true GJK/EPA reference is gjkSphereCyl below.
 GjkResult productionSphereCyl(const Vec3& spherePos, real_t sphereRadius, const Vec3& cylPos, const Rot3& rotCyl,
@@ -5761,7 +5761,7 @@ void evaluateRefineDump()
 
 
 } // namespace test
-} // namespace paper_analytical
+} // namespace closed_form_contacts
 } // namespace antidunes
 } // namespace walberla
 
@@ -5772,15 +5772,15 @@ int main(int argc, char** argv)
    WALBERLA_UNUSED(env);
    walberla::mpi::MPIManager::instance()->useWorldComm();
 
-   using namespace walberla::antidunes::paper_analytical::test;
+   using namespace walberla::antidunes::closed_form_contacts::test;
 
    // Debug output (cylinder-mismatch VTK/CSV) goes next to the executable in the build tree,
    // regardless of the process's current working directory at launch.
    g_outputDir = std::filesystem::weakly_canonical(std::filesystem::path(argv[0])).parent_path();
 
-   // [Claude, 2026-10-10] ANTIDUNES_BANDEDGE_AXIAL: run with paper_analytical::kodamBandEdgeAxialCheck on (prm
+   // [Claude, 2026-10-10] ANTIDUNES_BANDEDGE_AXIAL: run with closed_form_contacts::kodamBandEdgeAxialCheck on (prm
    // kodamBandEdgeAxialCheck); ANTIDUNES_REFERENCE_DUMP_ONLY: write only the independent-reference dump and exit.
-   walberla::antidunes::paper_analytical::kodamBandEdgeAxialCheck = (std::getenv("ANTIDUNES_BANDEDGE_AXIAL") != nullptr);
+   walberla::antidunes::closed_form_contacts::kodamBandEdgeAxialCheck = (std::getenv("ANTIDUNES_BANDEDGE_AXIAL") != nullptr);
    if (std::getenv("ANTIDUNES_REFERENCE_DUMP_ONLY")) { testIndependentReferenceDump(); return EXIT_SUCCESS; }
    if (std::getenv("ANTIDUNES_PILLAR_REPLAY")) { replayPillarConfigurations(); return EXIT_SUCCESS; } // [Claude, 2026-10-11]
    if (std::getenv("ANTIDUNES_NEARPARALLEL_ONLY")) // [Claude, 2026-10-20] only the nearly parallel rod tests

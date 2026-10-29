@@ -47,7 +47,7 @@
 //! solveQuarticDurandKerner should ever be replaced.
 //======================================================================================================================
 
-#include "PaperAnalyticalContacts.h"
+#include "ClosedFormContacts.h"
 
 #include <core/Environment.h>
 #include <core/logging/Logging.h>
@@ -66,7 +66,7 @@ namespace walberla
 {
 namespace antidunes
 {
-namespace paper_analytical
+namespace closed_form_contacts
 {
 namespace quartic_compare
 {
@@ -215,7 +215,7 @@ double timeItNs(uint64_t iterations, Fn&& fn)
 }
 
 } // namespace quartic_compare
-} // namespace paper_analytical
+} // namespace closed_form_contacts
 } // namespace antidunes
 } // namespace walberla
 
@@ -229,8 +229,8 @@ int main(int argc, char** argv)
    walberla::mpi::MPIManager::instance()->useWorldComm();
 
    using namespace walberla;
-   using namespace walberla::antidunes::paper_analytical;
-   using namespace walberla::antidunes::paper_analytical::quartic_compare;
+   using namespace walberla::antidunes::closed_form_contacts;
+   using namespace walberla::antidunes::closed_form_contacts::quartic_compare;
 
    //===================================================================================================================
    // Phase 1: accuracy, against known ground-truth roots, across 5 root-configuration categories.

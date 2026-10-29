@@ -1212,7 +1212,7 @@ real_t containerSampledOverlap(const Vec3& pos, const mesa_pd::Rot3& rot, real_t
    // farthest radial distance (from the z axis through the origin) over a dense sampling of both rims
    const mesa_pd::Vec3 a = rot.getMatrix() * Vec3(0, 0, 1);
    mesa_pd::Vec3       u, v;
-   paper_analytical::detail::perpendicularBasis(a, u, v);
+   closed_form_contacts::detail::perpendicularBasis(a, u, v);
    real_t best = 0;
    for (const real_t sgn : { real_t(-1), real_t(1) })
       for (int k = 0; k < 200000; ++k)

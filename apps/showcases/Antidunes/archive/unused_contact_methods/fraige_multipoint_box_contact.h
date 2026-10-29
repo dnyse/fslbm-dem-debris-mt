@@ -19,13 +19,13 @@
 // useFraigeBoxContactModel dispatch and SimulationParams.h's flag removed too). See archive/ARCHIVE_README.md.
 #pragma once
 
-#include "../../PaperAnalyticalContacts.h"
+#include "../../ClosedFormContacts.h"
 
 namespace walberla
 {
 namespace antidunes
 {
-namespace paper_analytical
+namespace closed_form_contacts
 {
 namespace detail
 {
@@ -287,6 +287,6 @@ inline std::vector< BoxVertexContact > boxBoxFraigeMultiPointContacts(
 
    return out;
 }
-} // namespace paper_analytical
+} // namespace closed_form_contacts
 } // namespace antidunes
 } // namespace walberla

@@ -94,7 +94,7 @@ public:
    // modes and a bug specific to one is not reproduced by running the other.
    // useRoundedBoxCorners/boxRoundingRadius/useMultiPointBoxContact: the two togglable Box x Box
    // corner/edge contact-normal-discontinuity mitigations (see SimulationParams.h's own doc comments
-   // and paper_analytical::boxBoxSAT/boxBoxMultiPointContacts) -- threaded straight through to
+   // and closed_form_contacts::boxBoxSAT/boxBoxMultiPointContacts) -- threaded straight through to
    // ComputeContacts so runCornerNormalDiscontinuity/runCornerFixComparison below can A/B/C/D-test them
    // against the exact same production contact-response code path production runs use.
    DEMEngine(real_t dt, real_t restitutionCoefficient, real_t frictionCoefficient, real_t poissonsRatio,

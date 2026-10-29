@@ -171,7 +171,7 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
       const Vec3   simAngVel = engine.ac().getAngularVelocity(cylIdx);
       const real_t keAfter   = engine.kineticEnergy(cylIdx);
 
-      const paper_analytical::CylinderState cylState{ Vec3(0, 0, reach + gap), yrot.mat, radius, length };
+      const closed_form_contacts::CylinderState cylState{ Vec3(0, 0, reach + gap), yrot.mat, radius, length };
       const Mat3 invInertiaWorld = math::transformMatrixRART(yrot.mat, refShape.getInvInertiaBF());
       const auto analytic = analytical::cylinderWallImpact(cylState, refShape.getMass(), invInertiaWorld, preVel,
                                                              Vec3(0), wallPos, wallNormal, e, mu);
@@ -217,7 +217,7 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
 //! result -- a self-consistency check between two of OUR OWN geometric methods): does mesa_pd's
 //! generic iterative GJK/EPA solver agree with the exact closed-form Cylinder x HalfSpace contact
 //! geometry that production actually uses (SolidCylinderContactDetection's cyl.support()-based
-//! formula, ParticleKernels.h:338 -- algebraically identical to paper_analytical::rimPointTowardPlane,
+//! formula, ParticleKernels.h:338 -- algebraically identical to closed_form_contacts::rimPointTowardPlane,
 //! PaperAnalyticalContacts.h:1980, the formula AnalyticalSolutions.h::cylinderWallImpact uses as
 //! wallImpactCylinder's own analytical reference)?
 //!

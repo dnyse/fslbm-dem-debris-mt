@@ -1,6 +1,6 @@
 //======================================================================================================================
 //! \file CylinderClosedFormRangeTest.cpp
-//! Characterisation test: for which overlap depths is the closed-form Kodam+Guo Cylinder x Cylinder result (paper_analytical::cylinderCylinderContact) a correct penetration depth?
+//! Characterisation test: for which overlap depths is the closed-form Kodam+Guo Cylinder x Cylinder result (closed_form_contacts::cylinderCylinderContact) a correct penetration depth?
 //!
 //! Background (THESIS_PLAN.md 2026-09-20): in the cylinder hopper rods pile up and interpenetrate by 30-90 % of their volume. There the closed-form dispatch returns e.g. face-edge overlap 0.001 LU or edge-edge
 //! overlap 18 LU for a pair whose true penetration depth is ~5.9 LU (GJK/EPA agrees with the truth). Claim to prove here:
@@ -109,7 +109,7 @@ Eval evaluate(const Pair& p, bool withGjk)
    Eval e{};
    const Vec3 a1 = p.ra.getMatrix() * Vec3(0, 0, 1), a2 = p.rb.getMatrix() * Vec3(0, 0, 1), d = p.pb - p.pa;
    e.exact = exactPenetrationDepth(a1, a2, d);
-   const auto res = paper_analytical::cylinderCylinderContact({ p.pa, p.ra.getMatrix(), real_t(kR), real_t(kL) }, { p.pb, p.rb.getMatrix(), real_t(kR), real_t(kL) });
+   const auto res = closed_form_contacts::cylinderCylinderContact({ p.pa, p.ra.getMatrix(), real_t(kR), real_t(kL) }, { p.pb, p.rb.getMatrix(), real_t(kR), real_t(kL) });
    e.contact = res.contact; e.overlap = res.contact ? double(res.overlap) : 0.0; e.scenario = res.scenario;
    if (res.contact)
    {
@@ -136,7 +136,7 @@ int main(int argc, char** argv)
    walberla::mpi::MPIManager::instance()->useWorldComm();
    using namespace walberla::antidunes;
    int failures = 0;
-   if (std::getenv("CYL_CENTRE_CAP") != nullptr) { paper_analytical::kodamCapSelectionByAxisDistance = false; std::cout << "[using the OLD 3D centre-distance cap selection instead of Kodam Eq. 68-70]\n"; }
+   if (std::getenv("CYL_CENTRE_CAP") != nullptr) { closed_form_contacts::kodamCapSelectionByAxisDistance = false; std::cout << "[using the OLD 3D centre-distance cap selection instead of Kodam Eq. 68-70]\n"; }
    auto check = [&](bool ok, const std::string& what) { if (!ok) { ++failures; std::cout << "FAIL: " << what << std::endl; } };
    const double tol = 0.05 * kR;   // verifier tolerance: 5 % of the radius
 

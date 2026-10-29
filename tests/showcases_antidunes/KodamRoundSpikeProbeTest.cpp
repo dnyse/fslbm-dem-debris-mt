@@ -63,11 +63,11 @@ void probe(const Sample& s)
    const real_t axial = std::abs(d * axA), lateral = (d - (d * axA) * axA).length();
    std::cout << "step " << s.step << ": axis angle " << std::acos(std::min(real_t(1), std::abs(axA * axB))) * real_t(180) / math::pi
              << " deg, centre distance along A's axis " << axial << " (face-face overlap ~ " << L - axial << "), lateral " << lateral << "\n";
-   const auto ci = paper_analytical::CylinderState{ Vec3(s.a.x, s.a.y, s.a.z), Ra, r, L };
-   const auto cj = paper_analytical::CylinderState{ Vec3(s.b.x, s.b.y, s.b.z), Rb, r, L };
-   const auto raw = paper_analytical::cylinderCylinderContact(ci, cj);
+   const auto ci = closed_form_contacts::CylinderState{ Vec3(s.a.x, s.a.y, s.a.z), Ra, r, L };
+   const auto cj = closed_form_contacts::CylinderState{ Vec3(s.b.x, s.b.y, s.b.z), Rb, r, L };
+   const auto raw = closed_form_contacts::cylinderCylinderContact(ci, cj);
    std::cout << "   raw closed form: contact=" << raw.contact << " scenario=" << raw.scenario << " overlap=" << raw.overlap << " normal=" << raw.normal << "\n";
-   const auto ref = paper_analytical::cylinderCylinderContactRefined(ci, cj);
+   const auto ref = closed_form_contacts::cylinderCylinderContactRefined(ci, cj);
    std::cout << "   refined (refineCylinderContacts): contact=" << ref.contact << " scenario=" << ref.scenario << " overlap=" << ref.overlap << " normal=" << ref.normal << "\n";
    for (int mode = 0; mode < 2; ++mode)
    {
@@ -124,8 +124,8 @@ void sweep()
             auto c0 = ps->create(); c0->setPosition(pA); c0->setRotation(rotA);
             auto c1 = ps->create(); c1->setPosition(pB); c1->setRotation(mesa_pd::Rot3(qBf));
             const auto RbF = mesa_pd::Rot3(qBf).getMatrix();
-            const auto raw = paper_analytical::cylinderCylinderContact(paper_analytical::CylinderState{ pA, Ra, r, L },
-                                                                      paper_analytical::CylinderState{ pB, RbF, r, L });
+            const auto raw = closed_form_contacts::cylinderCylinderContact(closed_form_contacts::CylinderState{ pA, Ra, r, L },
+                                                                      closed_form_contacts::CylinderState{ pB, RbF, r, L });
             real_t depth[2] = { 0, 0 }; Vec3 n[2]; bool hit[2];
             for (int mode = 0; mode < 2; ++mode)
             {
@@ -145,8 +145,8 @@ int main(int argc, char** argv)
 {
    walberla::Environment env(argc, argv); WALBERLA_UNUSED(env);
    walberla::mpi::MPIManager::instance()->useWorldComm();
-   walberla::antidunes::paper_analytical::kodamBandEdgeAxialCheck = (std::getenv("KODAM_AXIAL") != nullptr); // [Claude, 2026-10-10] the fix
-   std::cout << "kodamBandEdgeAxialCheck = " << walberla::antidunes::paper_analytical::kodamBandEdgeAxialCheck << "\n";
+   walberla::antidunes::closed_form_contacts::kodamBandEdgeAxialCheck = (std::getenv("KODAM_AXIAL") != nullptr); // [Claude, 2026-10-10] the fix
+   std::cout << "kodamBandEdgeAxialCheck = " << walberla::antidunes::closed_form_contacts::kodamBandEdgeAxialCheck << "\n";
    if (std::getenv("KODAM_SWEEP")) { walberla::antidunes::sweep(); return EXIT_SUCCESS; }
    for (const auto& s : walberla::antidunes::samples) walberla::antidunes::probe(s);
    return EXIT_SUCCESS;

@@ -56,7 +56,7 @@
 #include "mesa_pd/data/shape/HalfSpace.h"
 #include "mesa_pd/data/shape/Sphere.h"
 
-#include "PaperAnalyticalContacts.h"
+#include "ClosedFormContacts.h"
 #include "SimulationParams.h"
 #include "SimulationObjects.h"
 
@@ -117,7 +117,7 @@ inline CircleFarthestResult circleFarthestFromAxisClipped(
       return !hasClip || (P - clipOrigin) * clipNormal >= real_t(0);
    };
 
-   const real_t thetaBest = paper_analytical::detail::farthestThetaOnCircleToLine(
+   const real_t thetaBest = closed_form_contacts::detail::farthestThetaOnCircleToLine(
       circleCenter, u, v, circleRadius, axisPoint, axisDir);
    const mesa_pd::Vec3 candidate = pointAt(thetaBest);
 
@@ -213,7 +213,7 @@ public:
          }
 
          mesa_pd::Vec3 u, v;
-         paper_analytical::detail::perpendicularBasis(axis, u, v);
+         closed_form_contacts::detail::perpendicularBasis(axis, u, v);
          const auto far = containment_detail::circleFarthestFromAxisClipped(
             posSphere, u, v, s.getRadius(), posCyl, axis, posCyl, cb.getHalfClipNormal());
          if (!far.valid) return false; // sphere entirely on the non-solid (clipped-away) side
@@ -777,7 +777,7 @@ public:
          // the half-clip, if any) and keep whichever rim reaches farther.
          const mesa_pd::Vec3 logAxis = R * mesa_pd::Vec3(real_t(0), real_t(0), real_t(1));
          mesa_pd::Vec3 uB, vB;
-         paper_analytical::detail::perpendicularBasis(logAxis, uB, vB);
+         closed_form_contacts::detail::perpendicularBasis(logAxis, uB, vB);
 
          real_t        farthestRadialSq = real_t(-1);
          mesa_pd::Vec3 worstPoint;
@@ -878,9 +878,9 @@ public:
          e1 = e1.getNormalized();
          const mesa_pd::Vec3 e2 = ap % e1;
          const mesa_pd::Mat3 Rp(e1[0], e2[0], ap[0], e1[1], e2[1], ap[1], e1[2], e2[2], ap[2]); // columns e1, e2, axis
-         const paper_analytical::CylinderState rodS{ c, R, rc, real_t(2) * hh };
-         const paper_analytical::CylinderState pilS{ foot, Rp, cb.getRadius(), real_t(2) * halfLen };
-         const auto res = paper_analytical::cylinderCylinderContactRefined(rodS, pilS);
+         const closed_form_contacts::CylinderState rodS{ c, R, rc, real_t(2) * hh };
+         const closed_form_contacts::CylinderState pilS{ foot, Rp, cb.getRadius(), real_t(2) * halfLen };
+         const auto res = closed_form_contacts::cylinderCylinderContactRefined(rodS, pilS);
          if (!res.contact) return false;
          real_t penetrationDepth = -res.overlap;
          const real_t maxOverlap = real_t(1.0); // same envelop safety clamp as the legacy path below
@@ -1115,14 +1115,14 @@ public:
 
       // useTightLayer1 (this session): cheap single-candidate-axis pre-filter ahead of the full
       // 15-axis boxBoxSAT test below -- see ModelParameters.useTightLayer1's own doc comment and
-      // paper_analytical::detail::boxesDefinitelySeparatedAlongCenterLine's comment for the full
+      // closed_form_contacts::detail::boxesDefinitelySeparatedAlongCenterLine's comment for the full
       // derivation (one legitimate separating axis -- the line between the two centres -- tested
       // instead of all 15, so it can reject but never positively confirm contact). Unlike Cylinder x
       // Cylinder's equivalent gate above, boxBoxSAT itself is already cheap and exact (no GJK/EPA
       // fallback needed for boxes at all), so this saves the cost of a full SAT call, not a GJK/EPA
       // one -- a smaller win than the cylinder case, but still a real one for obviously-separated pairs.
       if (useTightLayer1 &&
-          paper_analytical::detail::boxesDefinitelySeparatedAlongCenterLine(
+          closed_form_contacts::detail::boxesDefinitelySeparatedAlongCenterLine(
              ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(), bx1.getEdgeLength() * real_t(0.5),
              ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(), bx2.getEdgeLength() * real_t(0.5)))
       {
@@ -1154,12 +1154,12 @@ public:
                                                      : boxBoxHysteresisNormal_.end();
       const mesa_pd::Vec3* previousNormal = (hysteresisIt != boxBoxHysteresisNormal_.end()) ? &hysteresisIt->second : nullptr;
 
-      const auto result = paper_analytical::boxBoxSAT(posA, RA, halfA, posB, RB, halfB,
+      const auto result = closed_form_contacts::boxBoxSAT(posA, RA, halfA, posB, RB, halfB,
                                                         useRoundedBoxCorners, boxRoundingRadius, overlapCap,
                                                         previousNormal, axisHysteresisMargin);
       if (useAxisHysteresis && result.contact) boxBoxHysteresisNormal_[hysteresisKey] = result.normal;
 
-      // useMultiPointBoxContact: see paper_analytical::boxBoxMultiPointContacts' and
+      // useMultiPointBoxContact: see closed_form_contacts::boxBoxMultiPointContacts' and
       // getMultiPointContacts()'s own doc comments. Computed independently of (and even when) the raw
       // SAT result above reports no contact -- boxBoxSAT's single winning axis can occasionally miss
       // a case a direct vertex-in-box test still catches near a degenerate configuration, and this list
@@ -1168,7 +1168,7 @@ public:
       {
          // [Claude, 2026-10-29] useFraigeBoxContactModel (boxBoxFraigeMultiPointContacts) removed
          // entirely -- unused by any thesis-cited result; archived at archive/unused_contact_methods/.
-         multiPointContacts_ = paper_analytical::boxBoxMultiPointContacts(posA, RA, halfA, posB, RB, halfB,
+         multiPointContacts_ = closed_form_contacts::boxBoxMultiPointContacts(posA, RA, halfA, posB, RB, halfB,
                                                                             overlapCap);
 
          // See boxBoxManifold_'s own doc comment for the full rationale. Replaces the fresh,
@@ -1204,7 +1204,7 @@ public:
             multiPointContacts_.clear();
             for (const auto& kv : manifold)
             {
-               paper_analytical::BoxVertexContact c;
+               closed_form_contacts::BoxVertexContact c;
                c.point    = kv.second.point;
                c.normal   = kv.second.normal;
                c.overlap  = kv.second.trueOverlap * kv.second.fade; // fade scales overlap, see doc comment
@@ -1226,7 +1226,7 @@ public:
       {
          ++contactStats.boxBoxSAT;
          recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "closed-form analytical (Box-Box SAT)");
-         // paper_analytical convention: overlap > 0 = penetrating. This class: penetrationDepth < 0.
+         // closed_form_contacts convention: overlap > 0 = penetrating. This class: penetrationDepth < 0.
          getPenetrationDepth() = -result.overlap;
          getContactNormal()    = result.normal;
          getContactPoint()     = result.point;
@@ -1310,24 +1310,24 @@ public:
       // rejecting every pair.
       //
       // useTightLayer1 (this session): replaces the sphere-sum bound above with
-      // paper_analytical::detail::closestDistanceSqBetweenSegments -- each cylinder's own axis
+      // closed_form_contacts::detail::closestDistanceSqBetweenSegments -- each cylinder's own axis
       // SEGMENT (not a worst-case circumscribing sphere) vs. the sum of their radii. Same
       // conservativeness guarantee (see that function's own comment), just orientation-aware instead
       // of orientation-blind, so it resolves far more genuinely-separated pairs at this cheap stage,
       // BEFORE they'd otherwise reach the (now more expensive to enter at all) analytical dispatch
       // below -- not merely before GJK/EPA, as cylinderCylinderResultIsUncertain's useTightTier1 does
       // one level deeper. CylinderState built here (moved up from below) so both branches can use it.
-      const paper_analytical::CylinderState ci{ ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(),
+      const closed_form_contacts::CylinderState ci{ ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(),
                                                  cyl1.getRadius(), cyl1.getHeight() };
-      const paper_analytical::CylinderState cj{ ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(),
+      const closed_form_contacts::CylinderState cj{ ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(),
                                                  cyl2.getRadius(), cyl2.getHeight() };
       if (useTightLayer1)
       {
          mesa_pd::Vec3 p0i, p1i, p0j, p1j;
-         paper_analytical::detail::cylinderAxisEndpoints(ci, p0i, p1i);
-         paper_analytical::detail::cylinderAxisEndpoints(cj, p0j, p1j);
+         closed_form_contacts::detail::cylinderAxisEndpoints(ci, p0i, p1i);
+         closed_form_contacts::detail::cylinderAxisEndpoints(cj, p0j, p1j);
          const real_t reach = ci.radius + cj.radius;
-         if (paper_analytical::detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) > reach * reach)
+         if (closed_form_contacts::detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) > reach * reach)
             return false;
       }
       else
@@ -1345,7 +1345,7 @@ public:
          return gjkHit;
       }
 
-      auto result = paper_analytical::cylinderCylinderContact(ci, cj);
+      auto result = closed_form_contacts::cylinderCylinderContact(ci, cj);
 
       // Capsule-bound safety net (always on, independent of useTightLayer1): a cylinder is a subset of
       // the capsule of the same radius around its axis SEGMENT, so two cylinders can only touch if their
@@ -1358,10 +1358,10 @@ public:
       if (result.contact)
       {
          mesa_pd::Vec3 p0i, p1i, p0j, p1j;
-         paper_analytical::detail::cylinderAxisEndpoints(ci, p0i, p1i);
-         paper_analytical::detail::cylinderAxisEndpoints(cj, p0j, p1j);
+         closed_form_contacts::detail::cylinderAxisEndpoints(ci, p0i, p1i);
+         closed_form_contacts::detail::cylinderAxisEndpoints(cj, p0j, p1j);
          const real_t reach = (ci.radius + cj.radius) * (real_t(1) + real_t(1e-9));
-         if (paper_analytical::detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) > reach * reach)
+         if (closed_form_contacts::detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) > reach * reach)
          {
             ++contactStats.cylCapsuleRejected;
             return false;
@@ -1369,7 +1369,7 @@ public:
       }
 
       // [Claude, 2026-09-30] refineCylinderContacts (opt-in): the closed-form result is refined by minimising the
-      // projection overlap over directions (paper_analytical::refineCylinderContact) -- exact scenarios unchanged,
+      // projection overlap over directions (closed_form_contacts::refineCylinderContact) -- exact scenarios unchanged,
       // inexact ones (edge-edge, band-edge, face-edge, special contact) get the minimising depth and normal, and
       // "no scenario" pairs are decided by the same descent (separation proven if a negative overlap is found).
       // No GJK/EPA call at all; GJK/EPA remains the verification reference in PaperAnalyticalContactTest.cpp.
@@ -1380,9 +1380,9 @@ public:
          {
             // outputs written by the shadow GJK/EPA call are overwritten below before any contact is returned
             const auto s0 = std::chrono::steady_clock::now();
-            const auto rawAgain = paper_analytical::cylinderCylinderContact(ci, cj);
+            const auto rawAgain = closed_form_contacts::cylinderCylinderContact(ci, cj);
             const auto s1 = std::chrono::steady_clock::now();
-            if (paper_analytical::cylinderCylinderResultIsUncertain(ci, cj, rawAgain, useTightTier1, skipTier1))
+            if (closed_form_contacts::cylinderCylinderResultIsUncertain(ci, cj, rawAgain, useTightTier1, skipTier1))
             {
                ++contactStats.shadowFallbackCalls;
                (void) GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
@@ -1391,19 +1391,19 @@ public:
             contactStats.shadowClosedFormSeconds += std::chrono::duration< double >(s1 - s0).count();
             contactStats.shadowFallbackSeconds += std::chrono::duration< double >(s2 - s1).count();
          }
-         paper_analytical::RefineTrace trace;
+         closed_form_contacts::RefineTrace trace;
          const std::string rawScenario = result.contact ? std::string(result.scenario) : std::string();
          const real_t      rawOverlap  = result.overlap;
          const auto        t0          = std::chrono::steady_clock::now();
-         result = paper_analytical::refineCylinderContact(ci, cj, result, &trace);
+         result = closed_form_contacts::refineCylinderContact(ci, cj, result, &trace);
          const double dt = std::chrono::duration< double >(std::chrono::steady_clock::now() - t0).count();
          ++contactStats.cylRefinePath[int(trace.path)];
          contactStats.cylRefinePathSeconds[int(trace.path)] += dt;
          ++contactStats.cylRefineFastReject[int(trace.fastReject)];
          contactStats.cylRefineKinks += trace.kinks ? 1 : 0;
          contactStats.cylRefineConvex += trace.convex ? 1 : 0;
-         if (trace.path == paper_analytical::RefinePath::ContactDescended ||
-             trace.path == paper_analytical::RefinePath::ContactDescendedSeparated)
+         if (trace.path == closed_form_contacts::RefinePath::ContactDescended ||
+             trace.path == closed_form_contacts::RefinePath::ContactDescendedSeparated)
          {
             // [Claude, 2026-10-01] profiling dump (ANTIDUNES_REFINE_DUMP=<prefix>): the re-descended pairs, every 499th, at most 20000
             // per rank, to <prefix>_rank<r>.csv, for offline analysis of the fast-path rejections
@@ -1450,7 +1450,7 @@ public:
          return true;
       }
 
-      if (paper_analytical::cylinderCylinderResultIsUncertain(ci, cj, result, useTightTier1, skipTier1))
+      if (closed_form_contacts::cylinderCylinderResultIsUncertain(ci, cj, result, useTightTier1, skipTier1))
       {
          // Tier 1 (analytical found nothing at all) vs special-contact (analytical DID find a
          // contact, but that ONE scenario is unconditionally distrusted) -- see
@@ -1565,8 +1565,8 @@ public:
    // directly compare what each one got -- the same physical pair should always produce the same
    // scenario/point/overlap regardless of which rank asks, if this class of bug is really fixed.
    void logCylComputation(walberla::id_t uidA, walberla::id_t uidB, const std::string& path,
-                           const paper_analytical::CylinderState& ci, const paper_analytical::CylinderState& cj,
-                           const paper_analytical::ContactResult& result)
+                           const closed_form_contacts::CylinderState& ci, const closed_form_contacts::CylinderState& cj,
+                           const closed_form_contacts::ContactResult& result)
    {
       static uint_t logCount = uint_t(0);
       if (logCount >= uint_t(20000)) return; // generous cap; this scenario is expected to crash in <1000 steps
@@ -1641,16 +1641,16 @@ public:
       // positive; a nonzero value in the logs is a red flag worth investigating.
       uint64_t cylCapsuleRejected = 0;
       // [Claude, 2026-09-30] refineCylinderContacts: pairs the support-function refinement reported as touching / as
-      // separated (no GJK/EPA call in either case, see paper_analytical::refineCylinderContact).
+      // separated (no GJK/EPA call in either case, see closed_form_contacts::refineCylinderContact).
       uint64_t cylRefinedContact   = 0;
       uint64_t cylRefinedSeparated = 0;
-      // [Claude, 2026-10-01] profiling of refineCylinderContact: pairs and wall time per exit (paper_analytical::RefinePath),
+      // [Claude, 2026-10-01] profiling of refineCylinderContact: pairs and wall time per exit (closed_form_contacts::RefinePath),
       // why the fast path rejected a closed-form contact (FastReject), how often the kink search / convex check ran, and
       // the closed-form scenario of the contacts that had to be re-descended (index as in shadow mode, 0..7).
-      static constexpr int kRefinePaths = int(paper_analytical::RefinePath::Count);
+      static constexpr int kRefinePaths = int(closed_form_contacts::RefinePath::Count);
       uint64_t cylRefinePath[kRefinePaths]        = {};
       double   cylRefinePathSeconds[kRefinePaths] = {};
-      uint64_t cylRefineFastReject[int(paper_analytical::FastReject::Count)] = {};
+      uint64_t cylRefineFastReject[int(closed_form_contacts::FastReject::Count)] = {};
       uint64_t cylRefineKinks = 0, cylRefineConvex = 0;
       uint64_t cylRefineDescendedScenario[8] = {};
       // [Claude, 2026-10-01] shadow timing (ANTIDUNES_REFINE_SHADOW_TIMING set, refined mode only): on the same pairs, the
@@ -1707,7 +1707,7 @@ public:
       return halfLength * c + radius * std::sqrt(std::max(0.0, 1.0 - c * c));
    }
    //! distance B must move along +-n (the smaller of the two orientations) to separate from A
-   static double shadowNeeded(const mesa_pd::Vec3& n, const paper_analytical::CylinderState& a, const paper_analytical::CylinderState& b)
+   static double shadowNeeded(const mesa_pd::Vec3& n, const closed_form_contacts::CylinderState& a, const closed_form_contacts::CylinderState& b)
    {
       const mesa_pd::Vec3 d = b.pos - a.pos, ea = a.axis(), eb = b.axis();
       auto f = [&](const mesa_pd::Vec3& m) {
@@ -1715,7 +1715,7 @@ public:
       return std::min(f(n), f(-n));
    }
    //! upper bound of the exact penetration depth: min of shadowNeeded over a few canonical directions
-   static double shadowUpperBound(const mesa_pd::Vec3& reported, const paper_analytical::CylinderState& a, const paper_analytical::CylinderState& b)
+   static double shadowUpperBound(const mesa_pd::Vec3& reported, const closed_form_contacts::CylinderState& a, const closed_form_contacts::CylinderState& b)
    {
       const mesa_pd::Vec3 d = b.pos - a.pos, ea = a.axis(), eb = b.axis();
       std::array< mesa_pd::Vec3, 6 > cand{ reported, ea, eb, d, ea % eb, d - ea * (d * ea) };
@@ -1729,9 +1729,9 @@ public:
 
    //! Called right after the GJK/EPA result (the one actually used) is known; reads it from getPenetrationDepth()/getContactNormal() if gjkHit.
    template< typename Accessor >
-   void shadowCompare(const size_t idx1, const size_t idx2, const paper_analytical::CylinderState& ci, const paper_analytical::CylinderState& cj, const bool gjkHit, Accessor& ac)
+   void shadowCompare(const size_t idx1, const size_t idx2, const closed_form_contacts::CylinderState& ci, const closed_form_contacts::CylinderState& cj, const bool gjkHit, Accessor& ac)
    {
-      const auto res = paper_analytical::cylinderCylinderContact(ci, cj);
+      const auto res = closed_form_contacts::cylinderCylinderContact(ci, cj);
       if (!gjkHit && !res.contact) return;
       const double tol = 0.05 * double(std::min(ci.radius, cj.radius));
       const double gjkOverlap = gjkHit ? -double(getPenetrationDepth()) : 0.0;
@@ -1813,8 +1813,8 @@ public:
    // useMultiPointBoxContact's own doc comments (SimulationParams.h) -- both are togglable mitigations
    // for the corner/edge contact-normal discontinuity documented for polyhedral DEM and reproduced
    // directly against this project's own boxBoxSAT by DEMValidationScenarios.h's
-   // runCornerNormalDiscontinuity. Threaded straight through to paper_analytical::boxBoxSAT
-   // (useRoundedBoxCorners/boxRoundingRadius) and paper_analytical::boxBoxMultiPointContacts
+   // runCornerNormalDiscontinuity. Threaded straight through to closed_form_contacts::boxBoxSAT
+   // (useRoundedBoxCorners/boxRoundingRadius) and closed_form_contacts::boxBoxMultiPointContacts
    // (useMultiPointBoxContact) from the Box x Box operator() overload below.
    bool   useRoundedBoxCorners = false;
    real_t boxRoundingRadius    = real_t(0.05);
@@ -1822,7 +1822,7 @@ public:
    // [Claude, 2026-10-29] useFraigeBoxContactModel (boxBoxFraigeMultiPointContacts) removed entirely --
    // unused by any thesis-cited result; archived at archive/unused_contact_methods/.
    // See ModelParameters.useBoxOverlapCap/boxOverlapCapFraction's own doc comment (SimulationParams.h)
-   // and paper_analytical::boxBoxMultiPointContacts' own comment (PaperAnalyticalContacts.h) for why
+   // and closed_form_contacts::boxBoxMultiPointContacts' own comment (PaperAnalyticalContacts.h) for why
    // this exists: confirmed necessary by DEMValidationScenarios.h's multiPointDeepOverlapStability/
    // Fuzz/EdgeCases scenarios (uncapped, useMultiPointBoxContact can inject MORE spurious energy than
    // doing nothing under deep interpenetration). Threaded to BOTH boxBoxSAT and
@@ -1832,10 +1832,10 @@ public:
    real_t boxOverlapCapFraction = real_t(0.3);
 
    // "Sticky" SAT axis selection -- the OTHER candidate fix for the axis-flip discontinuity
-   // useRoundedBoxCorners targets, see paper_analytical::boxBoxSAT's own doc comment
+   // useRoundedBoxCorners targets, see closed_form_contacts::boxBoxSAT's own doc comment
    // (PaperAnalyticalContacts.h) for the full rationale and why it doesn't share useRoundedBoxCorners'
    // deep-overlap side effect. boxBoxHysteresisNormal_ is the per-uid-pair persistent state
-   // paper_analytical::boxBoxSAT itself has no memory of (it's a pure function) -- keyed the same way
+   // closed_form_contacts::boxBoxSAT itself has no memory of (it's a pure function) -- keyed the same way
    // as this class's other per-pair maps (see wasLastCallBoxBox_'s sibling members below), read/written
    // ONLY from the Box x Box operator() overload, independent of useRoundedBoxCorners/
    // useMultiPointBoxContact/useBoxOverlapCap (any combination is meaningful).
@@ -1892,11 +1892,11 @@ public:
 
    // Populated by the Box x Box operator() overload below ONLY when useMultiPointBoxContact is true and
    // at least one of either box's vertices was found embedded in the other -- see
-   // paper_analytical::boxBoxMultiPointContacts' own doc comment. ComputeContacts reads this (alongside
+   // closed_form_contacts::boxBoxMultiPointContacts' own doc comment. ComputeContacts reads this (alongside
    // the normal single point/normal/penetration this class already returns for the DEEPEST vertex) to
    // apply a history-free spring-dashpot force at every OTHER point too, each scaled by 1/N -- see that
    // call site's own comment.
-   const std::vector< paper_analytical::BoxVertexContact >& getMultiPointContacts() const
+   const std::vector< closed_form_contacts::BoxVertexContact >& getMultiPointContacts() const
    {
       return multiPointContacts_;
    }
@@ -1948,7 +1948,7 @@ private:
    std::map<std::pair<walberla::id_t, walberla::id_t>, std::string> pairDetectionPath;
 
    // Backing storage for getMultiPointContacts()/wasLastCallBoxBox() above.
-   std::vector< paper_analytical::BoxVertexContact > multiPointContacts_;
+   std::vector< closed_form_contacts::BoxVertexContact > multiPointContacts_;
    bool wasLastCallBoxBox_ = false;
 
    // Backing storage for the secondary-contact getters above.
@@ -2742,7 +2742,7 @@ public:
             // own doc comments): resolve EVERY vertex-overlap point independently instead of routing
             // only the single deepest one through collisionResponse_ (LinearSpringDashpot) -- exactly
             // the "multi-point contact concept" Fraige et al. 2008a/2008b describe as the fix for the
-            // sudden-normal-shift defect (see paper_analytical::boxBoxMultiPointContacts' own comment).
+            // sudden-normal-shift defect (see closed_form_contacts::boxBoxMultiPointContacts' own comment).
             //
             // Gated on acd_.wasLastCallBoxBox(), NOT on getMultiPointContacts() being non-empty: a
             // pair-by-pair mix of "some sub-cycles have an embedded vertex, some don't" (routine for
@@ -2775,11 +2775,11 @@ public:
                const real_t muDynamic  = collisionResponse_.getFrictionCoefficientDynamic(t1, t2);
 
                const auto& mpList = acd_.getMultiPointContacts();
-               const paper_analytical::BoxVertexContact fallbackSingle{ acd_.getContactPoint(),
+               const closed_form_contacts::BoxVertexContact fallbackSingle{ acd_.getContactPoint(),
                                                                           acd_.getContactNormal(),
                                                                           -acd_.getPenetrationDepth() };
                const auto& points = mpList.empty()
-                  ? std::vector< paper_analytical::BoxVertexContact >{ fallbackSingle }
+                  ? std::vector< closed_form_contacts::BoxVertexContact >{ fallbackSingle }
                   : mpList;
                const real_t invN = real_t(1) / real_t(points.size());
 
@@ -3308,7 +3308,7 @@ public:
                // before extremizing over angle too.
                //
                // Each rim is then its OWN circle-vs-line farthest-point problem
-               // (paper_analytical::detail::farthestThetaOnCircleToLine, the maximizing counterpart
+               // (closed_form_contacts::detail::farthestThetaOnCircleToLine, the maximizing counterpart
                // of the closest-point search already used elsewhere in this file), restricted to the
                // springing-line arc the same way the sphere fix is: if the rim's unconstrained
                // farthest point already satisfies Z >= springing line, it's exact and unchanged; if
@@ -3366,7 +3366,7 @@ public:
                      return ddy * ddy + ddz * ddz;
                   };
 
-                  real_t thetaBest = paper_analytical::detail::farthestThetaOnCircleToLine(
+                  real_t thetaBest = closed_form_contacts::detail::farthestThetaOnCircleToLine(
                      rimC, uB, vB, cylR, tLinePos, tLineDir);
                   mesa_pd::Vec3 candidate = pointAt(thetaBest);
 
@@ -4224,7 +4224,7 @@ public:
       computeContacts.setRefineCylinderContacts(simParams->model.refineCylinderContacts);
       // [Claude, 2026-10-10] ModelParameters.kodamBandEdgeAxialCheck: a switch of the closed form itself (free functions in
       // PaperAnalyticalContacts.h), hence a namespace-level flag like kodamCapSelectionByAxisDistance
-      paper_analytical::kodamBandEdgeAxialCheck = simParams->model.kodamBandEdgeAxialCheck;
+      closed_form_contacts::kodamBandEdgeAxialCheck = simParams->model.kodamBandEdgeAxialCheck;
       WALBERLA_LOG_INFO_ON_ROOT("kodamBandEdgeAxialCheck = " << (simParams->model.kodamBandEdgeAxialCheck ? "true" : "false"));
       if (simParams->model.cylinderContactSkin > real_t(0))
          WALBERLA_LOG_INFO_ON_ROOT("cylinderContactSkin = " << simParams->model.cylinderContactSkin

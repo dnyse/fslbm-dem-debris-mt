@@ -29,9 +29,9 @@ void probe(const char* name, const Pose& a, const Pose& b)
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10); mesa_pd::data::ParticleAccessor ac(ps);
    for (const Pose* p : { &a, &b }) { auto c = ps->create(); c->setPosition(Vec3(p->x, p->y, p->z)); c->setRotation(rotFrom(*p)); }
    const mesa_pd::data::Cylinder shape(real_t(3), real_t(18));
-   const auto ci = paper_analytical::CylinderState{ Vec3(a.x, a.y, a.z), rotFrom(a).getMatrix(), real_t(3), real_t(18) };
-   const auto cj = paper_analytical::CylinderState{ Vec3(b.x, b.y, b.z), rotFrom(b).getMatrix(), real_t(3), real_t(18) };
-   const auto raw = paper_analytical::cylinderCylinderContact(ci, cj);
+   const auto ci = closed_form_contacts::CylinderState{ Vec3(a.x, a.y, a.z), rotFrom(a).getMatrix(), real_t(3), real_t(18) };
+   const auto cj = closed_form_contacts::CylinderState{ Vec3(b.x, b.y, b.z), rotFrom(b).getMatrix(), real_t(3), real_t(18) };
+   const auto raw = closed_form_contacts::cylinderCylinderContact(ci, cj);
    std::cout << name << ": centre distance " << (Vec3(a.x, a.y, a.z) - Vec3(b.x, b.y, b.z)).length() << "\n   raw closed-form: contact=" << raw.contact << " scenario=" << raw.scenario << " overlap=" << raw.overlap << " normal=" << raw.normal << "\n";
    for (int mode = 0; mode < 2; ++mode)
    {

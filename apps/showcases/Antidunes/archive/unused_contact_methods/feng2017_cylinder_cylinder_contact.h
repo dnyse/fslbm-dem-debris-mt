@@ -18,7 +18,7 @@
 //! scenario. Moved out of PaperAnalyticalContacts.h 2026-10-29; see archive/ARCHIVE_README.md.
 #pragma once
 
-#include "../../PaperAnalyticalContacts.h"
+#include "../../ClosedFormContacts.h"
 
 namespace walberla
 {
@@ -29,7 +29,7 @@ namespace antidunes
 // contact detection framework for cylindrical particles in discrete element modelling." Computer
 // Methods in Applied Mechanics and Engineering, 315, 632-651.
 //
-// Unlike paper_analytical::cylinderCylinderContact (Kodam et al. 2010 / Guo et al. 2012), which
+// Unlike closed_form_contacts::cylinderCylinderContact (Kodam et al. 2010 / Guo et al. 2012), which
 // enumerates 7 named scenarios and searches specific rim/edge candidate points for each, this method
 // never enumerates scenarios at all: it builds a 4-parameter local frame from the shortest line
 // segment between the two cylinder AXES (Sec. 2), then reduces "does cylinder j's rim get within
@@ -65,11 +65,11 @@ namespace feng2017
 {
 using mesa_pd::Mat3;
 using mesa_pd::Vec3;
-using paper_analytical::ContactResult;
-using paper_analytical::CylinderState;
-using paper_analytical::detail::closestThetaOnEllipseToOrigin;
-using paper_analytical::detail::closestThetaOnEllipseWithinAxialRange;
-using paper_analytical::detail::intersectEllipseWithCircle;
+using closed_form_contacts::ContactResult;
+using closed_form_contacts::CylinderState;
+using closed_form_contacts::detail::closestThetaOnEllipseToOrigin;
+using closed_form_contacts::detail::closestThetaOnEllipseWithinAxialRange;
+using closed_form_contacts::detail::intersectEllipseWithCircle;
 
 //! Theorem 1 (Contact Normal Theorem), re-derived from the paper's own physical statement rather
 //! than its eq. (23) (see the namespace-level comment for why): the normal line through contact

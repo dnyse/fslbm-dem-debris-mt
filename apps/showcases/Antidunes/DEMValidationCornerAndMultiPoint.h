@@ -150,7 +150,7 @@ struct CornerScenarioResult
    bool   everContacted   = false;
    bool   pass            = false; // keGainRel < tolerance (no anomalous energy gain observed)
    // [Claude, 2026-10-29] the four "eberly*" diagnostics that used to live here (tracking
-   // paper_analytical::boxBoxSpheroAnalytical's own reported normal/point) were removed along with
+   // closed_form_contacts::boxBoxSpheroAnalytical's own reported normal/point) were removed along with
    // useSpheroBoxContact/useSpheroBoxAnalytical -- see archive/unused_contact_methods/.
 };
 
@@ -248,9 +248,9 @@ inline real_t computeInitialElasticPE(const Vec3& posA, const Rot3& rotA, const 
    {
       // Uncapped on purpose -- need the TRUE overlap at each point for pointPE below, not whatever a
       // cap would have clipped it to.
-      auto points = paper_analytical::boxBoxMultiPointContacts(posA, rotA.getMatrix(), halfA, posB,
+      auto points = closed_form_contacts::boxBoxMultiPointContacts(posA, rotA.getMatrix(), halfA, posB,
                                                                  rotB.getMatrix(), halfB);
-      const auto sat = paper_analytical::boxBoxSAT(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(),
+      const auto sat = closed_form_contacts::boxBoxSAT(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(),
                                                      halfB, useRoundedBoxCorners, boxRoundingRadius);
       if (points.empty())
       {
@@ -275,7 +275,7 @@ inline real_t computeInitialElasticPE(const Vec3& posA, const Rot3& rotA, const 
       return sum;
    }
 
-   const auto sat = paper_analytical::boxBoxSAT(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(), halfB,
+   const auto sat = closed_form_contacts::boxBoxSAT(posA, rotA.getMatrix(), halfA, posB, rotB.getMatrix(), halfB,
                                                  useRoundedBoxCorners, boxRoundingRadius);
    if (!sat.contact) return real_t(0);
    return pointPE(stiffnessAtPrimary(sat.point, sat.normal), sat.overlap, overlapCap);
@@ -342,7 +342,7 @@ inline CornerScenarioResult runCornerScenarioOnce(const CornerScenarioParams& p)
          // different code path. Deliberately does NOT pass p.useRoundedBoxCorners here: this
          // diagnostic exists to characterize the RAW SAT axis's own discontinuity regardless of which
          // mitigation (if any) is actually resolving the dynamics this run.
-         const auto res = paper_analytical::boxBoxSAT(engine.ac().getPosition(idxA),
+         const auto res = closed_form_contacts::boxBoxSAT(engine.ac().getPosition(idxA),
                                                         engine.ac().getRotation(idxA).getMatrix(), p.halfExtents,
                                                         engine.ac().getPosition(idxB),
                                                         engine.ac().getRotation(idxB).getMatrix(), p.halfExtents);
@@ -692,7 +692,7 @@ inline bool runMultiPointDeepOverlapStability(const config::Config::BlockHandle&
 // continuous, multi-dimensional space (box aspect ratio, tilt on each body, lateral offset, starting
 // overlap depth) -- this sweeps that space randomly, looking for the worst-case combination rather
 // than trusting five samples to be representative. Every trial:
-//   (1) GEOMETRY, direct on paper_analytical::boxBoxMultiPointContacts (same sanity checks as
+//   (1) GEOMETRY, direct on closed_form_contacts::boxBoxMultiPointContacts (same sanity checks as
 //       runMultiPointBoxContactFuzz's own geometry pass: finite, unit normals, non-negative overlap)
 //       PLUS the new check this whole investigation exists for: records the WORST (largest) single
 //       vertex overlap seen across all trials, and separately counts how many trials produce at least
@@ -780,7 +780,7 @@ inline bool runMultiPointDeepOverlapFuzz(const config::Config::BlockHandle& b)
          const Rot3 rotB(Vec3(0, 0, 1), tiltB * math::pi / real_t(180));
 
          ++geometryChecked;
-         const auto points = paper_analytical::boxBoxMultiPointContacts(posA, rotA.getMatrix(), halfExtents,
+         const auto points = closed_form_contacts::boxBoxMultiPointContacts(posA, rotA.getMatrix(), halfExtents,
                                                                           posB, rotB.getMatrix(), halfExtents);
          const real_t smallerRad = real_t(2) * halfExtents.length() * real_t(0.5); // bounding-sphere radius (both bodies identical this trial)
          bool anyExceedsThreshold = false;
@@ -1519,7 +1519,7 @@ inline bool runFallOntoPileStability(const config::Config::BlockHandle& b)
 // configuration -- this scenario sweeps many randomized ones (box aspect ratio, tilt about a random
 // axis on EACH body, lateral offset, approach speed, spin) to check the mitigation holds broadly, not
 // just for the one case it was validated against. Two independent checks per trial:
-//   (1) GEOMETRY sanity, direct on paper_analytical::boxBoxMultiPointContacts: no NaN/Inf in any
+//   (1) GEOMETRY sanity, direct on closed_form_contacts::boxBoxMultiPointContacts: no NaN/Inf in any
 //       returned point/normal/overlap, every normal is a unit vector, every overlap is >= 0, and --
 //       the key cross-check against boxBoxSAT -- whenever SAT proves the pair definitely SEPARATED
 //       (result.contact == false), the vertex-embedding test must ALSO find nothing (a genuinely
@@ -1580,9 +1580,9 @@ inline bool runMultiPointBoxContactFuzz(const config::Config::BlockHandle& b)
                          math::realRandom< real_t >(real_t(0), real_t(2) * math::pi));
 
          ++geometryChecked;
-         const auto satResult = paper_analytical::boxBoxSAT(posA, rotA.getMatrix(), halfExtents, posB,
+         const auto satResult = closed_form_contacts::boxBoxSAT(posA, rotA.getMatrix(), halfExtents, posB,
                                                               rotB.getMatrix(), halfExtents);
-         const auto points = paper_analytical::boxBoxMultiPointContacts(posA, rotA.getMatrix(), halfExtents,
+         const auto points = closed_form_contacts::boxBoxMultiPointContacts(posA, rotA.getMatrix(), halfExtents,
                                                                           posB, rotB.getMatrix(), halfExtents);
 
          if (!satResult.contact && !points.empty()) ++geometrySatDisagreementCount;

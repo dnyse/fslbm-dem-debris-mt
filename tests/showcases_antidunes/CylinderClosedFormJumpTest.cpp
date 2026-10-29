@@ -36,7 +36,7 @@ mesa_pd::Rot3 rotOf(const Pose& p)
    const double n = std::sqrt(p.q[0] * p.q[0] + p.q[1] * p.q[1] + p.q[2] * p.q[2] + p.q[3] * p.q[3]);
    return mesa_pd::Rot3(mesa_pd::Quat(real_t(p.q[0] / n), real_t(p.q[1] / n), real_t(p.q[2] / n), real_t(p.q[3] / n)));
 }
-paper_analytical::CylinderState stateOf(const Pose& p) { return paper_analytical::CylinderState{ p.p, rotOf(p).getMatrix(), real_t(kR), real_t(kL) }; }
+closed_form_contacts::CylinderState stateOf(const Pose& p) { return closed_form_contacts::CylinderState{ p.p, rotOf(p).getMatrix(), real_t(kR), real_t(kL) }; }
 
 double support(const Vec3& n, const Vec3& a) { const double c = std::abs(double(n * a)); return kH * c + kR * std::sqrt(std::max(0.0, 1.0 - c * c)); }
 double exactPD(const Vec3& a1, const Vec3& a2, const Vec3& d)
@@ -59,10 +59,10 @@ double gjkDepth(const Pose& a, const Pose& b)
    return scd(0, 1, shape, shape, ac) ? -double(scd.getPenetrationDepth()) : 0.0;
 }
 //! Radial distance from the HOST's axis line of the closest point of one of the PROBE's two rim circles (brute-force over the angle): overlap the band-edge branch would report for that circle.
-double rimOverlap(const paper_analytical::CylinderState& host, const paper_analytical::CylinderState& probe, int cap)
+double rimOverlap(const closed_form_contacts::CylinderState& host, const closed_form_contacts::CylinderState& probe, int cap)
 {
    const Vec3 e = probe.axis(), eh = host.axis();
-   Vec3 u, v; paper_analytical::detail::perpendicularBasis(e, u, v);
+   Vec3 u, v; closed_form_contacts::detail::perpendicularBasis(e, u, v);
    const Vec3 centre = probe.pos + real_t(cap == 0 ? 0.5 : -0.5) * probe.length * e;
    double best = 1e300;
    for (int k = 0; k < 36000; ++k)
@@ -75,7 +75,7 @@ double rimOverlap(const paper_analytical::CylinderState& host, const paper_analy
    return kR - best;
 }
 //! which of the probe's caps rimVsFaceOrBand examines: the cap centre closer to the host's centre (0 = +axis end, 1 = -axis end)
-int chosenCap(const paper_analytical::CylinderState& host, const paper_analytical::CylinderState& probe)
+int chosenCap(const closed_form_contacts::CylinderState& host, const closed_form_contacts::CylinderState& probe)
 {
    const Vec3 e = probe.axis(); const Vec3 top = probe.pos + real_t(0.5) * probe.length * e, bot = probe.pos - real_t(0.5) * probe.length * e;
    return ((top - host.pos).length() < (bot - host.pos).length()) ? 0 : 1;
@@ -95,7 +95,7 @@ int main(int argc, char** argv)
    walberla::mpi::MPIManager::instance()->useWorldComm();
    using namespace walberla::antidunes;
    int failures = 0;
-   paper_analytical::kodamCapSelectionByAxisDistance = false;   // parts (1)-(3) reproduce the behaviour at the time of the crash (3D centre-distance cap choice, deviation from Kodam Eq. 68-70)
+   closed_form_contacts::kodamCapSelectionByAxisDistance = false;   // parts (1)-(3) reproduce the behaviour at the time of the crash (3D centre-distance cap choice, deviation from Kodam Eq. 68-70)
    auto check = [&](bool ok, const std::string& what) { if (!ok) { ++failures; std::cout << "FAIL: " << what << std::endl; } };
    constexpr size_t N = sizeof(kLoggedRows) / sizeof(kLoggedRows[0]);
 
@@ -106,7 +106,7 @@ int main(int argc, char** argv)
       const auto& r = kLoggedRows[k];
       const Pose a = fromRow(r.a), b = fromRow(r.b);
       const auto ca = stateOf(a), cb = stateOf(b);
-      const auto res = paper_analytical::cylinderCylinderContact(ca, cb);
+      const auto res = closed_form_contacts::cylinderCylinderContact(ca, cb);
       const double gjk = gjkDepth(a, b), ex = exactPD(ca.axis(), cb.axis(), cb.pos - ca.pos);
       const bool same = res.contact && std::string(res.scenario) == r.scenario && std::abs(double(res.overlap) - r.overlap) < 0.05 * std::max(1.0, r.overlap);
       reproduced += same;
@@ -121,7 +121,7 @@ int main(int argc, char** argv)
       for (size_t k = 0; k < N; ++k)
       {
          const auto& r = kLoggedRows[k]; const Pose a = fromRow(r.a), b = fromRow(r.b); const auto ca = stateOf(a), cb = stateOf(b);
-         const auto res = paper_analytical::cylinderCylinderContact(ca, cb); const double ov = res.contact ? double(res.overlap) : 0.0;
+         const auto res = closed_form_contacts::cylinderCylinderContact(ca, cb); const double ov = res.contact ? double(res.overlap) : 0.0;
          const double gjk = gjkDepth(a, b), ex = exactPD(ca.axis(), cb.axis(), cb.pos - ca.pos);
          std::printf("TABLE %d.%d | %s | %.4f | %.4f | %.4f | %+.4f | %s\n", r.step, r.sub, res.contact ? res.scenario : "none", ov, gjk, ex, ov - gjk, (prev >= 0 && std::abs(ov - prev) > 0.5) ? "JUMP" : "");
          prev = ov;
@@ -143,7 +143,7 @@ int main(int argc, char** argv)
    {
       const double t = i / 50.0; const Pose a = lerp(a0, a1, t), b = lerp(b0, b1, t);
       const auto ca = stateOf(a), cb = stateOf(b);
-      const auto res = paper_analytical::cylinderCylinderContact(ca, cb);
+      const auto res = closed_form_contacts::cylinderCylinderContact(ca, cb);
       const double ov = res.contact ? double(res.overlap) : 0.0;
       const int capA = chosenCap(ca, cb), capB = chosenCap(cb, ca);
       const double gjk = gjkDepth(a, b), ex = exactPD(ca.axis(), cb.axis(), cb.pos - ca.pos);
@@ -167,9 +167,9 @@ int main(int argc, char** argv)
       for (size_t k = 0; k < N; ++k)
       {
          const auto& r = kLoggedRows[k]; const Pose a = fromRow(r.a), b = fromRow(r.b); const auto ca = stateOf(a), cb = stateOf(b);
-         paper_analytical::kodamCapSelectionByAxisDistance = false; const auto r3 = paper_analytical::cylinderCylinderContact(ca, cb);
-         paper_analytical::kodamCapSelectionByAxisDistance = true;  const auto rk = paper_analytical::cylinderCylinderContact(ca, cb);
-         paper_analytical::kodamCapSelectionByAxisDistance = false;
+         closed_form_contacts::kodamCapSelectionByAxisDistance = false; const auto r3 = closed_form_contacts::cylinderCylinderContact(ca, cb);
+         closed_form_contacts::kodamCapSelectionByAxisDistance = true;  const auto rk = closed_form_contacts::cylinderCylinderContact(ca, cb);
+         closed_form_contacts::kodamCapSelectionByAxisDistance = false;
          std::printf("TABLE2 %d.%d | %s %.4f | %s %.4f | %.4f\n", r.step, r.sub, r3.contact ? r3.scenario : "none", r3.contact ? double(r3.overlap) : 0.0, rk.contact ? rk.scenario : "none", rk.contact ? double(rk.overlap) : 0.0, gjkDepth(a, b));
       }
    }
@@ -182,9 +182,9 @@ int main(int argc, char** argv)
          const Pose a = fromRow(r.a), b = fromRow(r.b); const auto ca = stateOf(a), cb = stateOf(b);
          for (int rule = 0; rule < 2; ++rule)
          {
-            paper_analytical::kodamCapSelectionByAxisDistance = (rule == 1);
-            const auto res = paper_analytical::cylinderCylinderContact(ca, cb);
-            paper_analytical::kodamCapSelectionByAxisDistance = false;
+            closed_form_contacts::kodamCapSelectionByAxisDistance = (rule == 1);
+            const auto res = closed_form_contacts::cylinderCylinderContact(ca, cb);
+            closed_form_contacts::kodamCapSelectionByAxisDistance = false;
             const Vec3 d = cb.pos - ca.pos; const Vec3 n = res.normal;
             auto need = [&](const Vec3& m) { return support(m, ca.axis()) + support(m, cb.axis()) - double(d * m); };
             const double s_n = std::min(need(n), need(-n));
@@ -195,12 +195,12 @@ int main(int argc, char** argv)
    }
    // ---------------- (5) with the paper's cap rule (now the default) the jump between the two logged poses is gone, and the early rows report the deep circle ----------------
    {
-      paper_analytical::kodamCapSelectionByAxisDistance = true;
+      closed_form_contacts::kodamCapSelectionByAxisDistance = true;
       double maxStep = 0, prevOv = -1;
       for (int i = 0; i <= 50; ++i)
       {
          const double t = i / 50.0; const auto ca = stateOf(lerp(a0, a1, t)), cb = stateOf(lerp(b0, b1, t));
-         const auto res = paper_analytical::cylinderCylinderContact(ca, cb); const double ov = res.contact ? double(res.overlap) : 0.0;
+         const auto res = closed_form_contacts::cylinderCylinderContact(ca, cb); const double ov = res.contact ? double(res.overlap) : 0.0;
          if (prevOv >= 0) maxStep = std::max(maxStep, std::abs(ov - prevOv));
          prevOv = ov;
       }
@@ -210,28 +210,28 @@ int main(int argc, char** argv)
       for (size_t k = 0; k < N; ++k)
       {
          const auto& r = kLoggedRows[k]; if (r.step == 3485 && r.sub > 6) break;
-         const auto res = paper_analytical::cylinderCylinderContact(stateOf(fromRow(r.a)), stateOf(fromRow(r.b)));
+         const auto res = closed_form_contacts::cylinderCylinderContact(stateOf(fromRow(r.a)), stateOf(fromRow(r.b)));
          deepRows += (res.contact && double(res.overlap) > 2.0);
       }
       check(deepRows == 17, "with Kodam's cap selection all 17 early rows (3484.0-3485.6) report the deep rim circle (overlap > 2 LU) instead of ~0.003");
-      paper_analytical::kodamCapSelectionByAxisDistance = false;
+      closed_form_contacts::kodamCapSelectionByAxisDistance = false;
    }
    if (std::getenv("CYL_JUMP_TABLE") != nullptr)
    {
       std::cout << "TABLE4 step.sub | normal of the closed form . normal of GJK/EPA (+1 same direction, -1 exactly opposite: the closed-form force would push the rods DEEPER) | closed form scenario, overlap\n";
-      paper_analytical::kodamCapSelectionByAxisDistance = true;
+      closed_form_contacts::kodamCapSelectionByAxisDistance = true;
       for (size_t k = 0; k < N; ++k)
       {
          const auto& r = kLoggedRows[k]; if (r.sub % 3 != 0 && !(r.step == 3485 && r.sub == 7)) continue;
          const Pose a = fromRow(r.a), b = fromRow(r.b); const auto ca = stateOf(a), cb = stateOf(b);
-         const auto res = paper_analytical::cylinderCylinderContact(ca, cb);
+         const auto res = closed_form_contacts::cylinderCylinderContact(ca, cb);
          auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10); mesa_pd::data::ParticleAccessor ac(ps);
          auto c0 = ps->create(); c0->setPosition(a.p); c0->setRotation(rotOf(a)); auto c1 = ps->create(); c1->setPosition(b.p); c1->setRotation(rotOf(b));
          const mesa_pd::data::Cylinder shape{ real_t(kR), real_t(kL) };
          SolidCylinderContactDetection scd; scd.useAnalyticalContactDetection = false; scd(0, 1, shape, shape, ac);
          std::printf("TABLE4 %d.%d | %+.3f | %s %.3f\n", r.step, r.sub, double(res.normal * scd.getContactNormal()), res.contact ? res.scenario : "none", double(res.overlap));
       }
-      paper_analytical::kodamCapSelectionByAxisDistance = false;
+      closed_form_contacts::kodamCapSelectionByAxisDistance = false;
    }
    std::cout << (failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED") << " (" << failures << " failures)" << std::endl;
    return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

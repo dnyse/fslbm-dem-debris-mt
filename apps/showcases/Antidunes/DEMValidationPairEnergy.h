@@ -248,10 +248,10 @@ inline bool runCylinderPairEnergyFuzz(const config::Config::BlockHandle& b)
             if (mode == "refined" && std::getenv("ANTIDUNES_ENERGY_DEBUG") &&
                 int(&in - &inits[0]) == std::atoi(std::getenv("ANTIDUNES_ENERGY_DEBUG")))
             {
-               const paper_analytical::CylinderState ci{ engine.ac().getPosition(A), engine.ac().getRotation(A).getMatrix(), radius, length };
-               const paper_analytical::CylinderState cj{ engine.ac().getPosition(B), engine.ac().getRotation(B).getMatrix(), radius, length };
-               const auto raw = paper_analytical::cylinderCylinderContact(ci, cj);
-               const auto rf  = paper_analytical::refineCylinderContact(ci, cj, raw);
+               const closed_form_contacts::CylinderState ci{ engine.ac().getPosition(A), engine.ac().getRotation(A).getMatrix(), radius, length };
+               const closed_form_contacts::CylinderState cj{ engine.ac().getPosition(B), engine.ac().getRotation(B).getMatrix(), radius, length };
+               const auto raw = closed_form_contacts::cylinderCylinderContact(ci, cj);
+               const auto rf  = closed_form_contacts::refineCylinderContact(ci, cj, raw);
                if (c || rf.contact || raw.contact)
                WALBERLA_LOG_INFO_ON_ROOT("[energy-debug] step " << s << " gjkContact=" << c << " gjkPen=" << -penetration << " raw=" << raw.scenario
                   << " " << raw.overlap << " refined=" << rf.scenario << " " << rf.overlap << " n=" << rf.normal << " p=" << rf.point
@@ -373,7 +373,7 @@ inline bool runCuboidPairEnergyFuzz(const config::Config::BlockHandle& b)
             const bool c = engine.queryContact(A, B, penetration) && penetration < real_t(0);
             if (std::getenv("ANTIDUNES_ENERGY_DEBUG") && int(&in - &inits[0]) == std::atoi(std::getenv("ANTIDUNES_ENERGY_DEBUG")))
             {
-               const auto r = paper_analytical::boxBoxSAT(engine.ac().getPosition(A), engine.ac().getRotation(A).getMatrix(),
+               const auto r = closed_form_contacts::boxBoxSAT(engine.ac().getPosition(A), engine.ac().getRotation(A).getMatrix(),
                                                           halfExt, engine.ac().getPosition(B),
                                                           engine.ac().getRotation(B).getMatrix(), halfExt);
                if (c || r.contact)
@@ -490,23 +490,23 @@ inline bool runEnergyConservation(const config::Config::BlockHandle& b)
                real_t paperOverlap = real_t(0);
                if (pr.first == "box")
                {
-                  const auto res = paper_analytical::boxBoxSAT(
+                  const auto res = closed_form_contacts::boxBoxSAT(
                      engine.ac().getPosition(idxA), engine.ac().getRotation(idxA).getMatrix(), boxHalfExtents,
                      engine.ac().getPosition(idxB), engine.ac().getRotation(idxB).getMatrix(), boxHalfExtents);
                   if (res.contact) paperOverlap = res.overlap;
                }
                else
                {
-                  const paper_analytical::CylinderState csA{ engine.ac().getPosition(idxA),
+                  const closed_form_contacts::CylinderState csA{ engine.ac().getPosition(idxA),
                                                                engine.ac().getRotation(idxA).getMatrix(), cylRadius,
                                                                cylLength };
-                  const paper_analytical::CylinderState csB{ engine.ac().getPosition(idxB),
+                  const closed_form_contacts::CylinderState csB{ engine.ac().getPosition(idxB),
                                                                engine.ac().getRotation(idxB).getMatrix(), cylRadius,
                                                                cylLength };
-                  const auto res = paper_analytical::cylinderCylinderContact(csA, csB);
+                  const auto res = closed_form_contacts::cylinderCylinderContact(csA, csB);
                   if (res.contact) paperOverlap = res.overlap;
                }
-               // paper_analytical uses the OPPOSITE overlap sign convention (positive = penetrating);
+               // closed_form_contacts uses the OPPOSITE overlap sign convention (positive = penetrating);
                // SolidCylinderContactDetection's penetrationDepth is negative = penetrating.
                maxOverlapDeltaSeen = std::max(maxOverlapDeltaSeen, std::abs(paperOverlap - (-penetration)));
             }

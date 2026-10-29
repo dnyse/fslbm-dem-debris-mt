@@ -108,7 +108,7 @@ Row evaluate(const Vec3& axisA, const Vec3& axisB, const Vec3& pa, const Vec3& p
    row.exact = exactPenetrationDepth(axisA, axisB, d);
 
    const auto ra = rotToAxis(axisA), rb = rotToAxis(axisB);
-   const auto res = paper_analytical::cylinderCylinderContact({ pa, ra.getMatrix(), real_t(kR), real_t(kL) },
+   const auto res = closed_form_contacts::cylinderCylinderContact({ pa, ra.getMatrix(), real_t(kR), real_t(kL) },
                                                                 { pb, rb.getMatrix(), real_t(kR), real_t(kL) });
    row.closedContact = res.contact; row.closedForm = res.contact ? double(res.overlap) : 0.0; row.scenario = res.scenario;
 

@@ -48,7 +48,7 @@
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
 #include "ParticleKernels.h"
-#include "PaperAnalyticalContacts.h"
+#include "ClosedFormContacts.h"
 
 #include <mesa_pd/data/ParticleAccessor.h>
 #include <mesa_pd/data/ParticleStorage.h>
@@ -70,7 +70,7 @@ namespace walberla
 {
 namespace antidunes
 {
-namespace paper_analytical
+namespace closed_form_contacts
 {
 namespace benchmark
 {
@@ -177,7 +177,7 @@ void printSortedResults(std::vector< TimingResult > results)
 }
 
 } // namespace benchmark
-} // namespace paper_analytical
+} // namespace closed_form_contacts
 } // namespace antidunes
 } // namespace walberla
 
@@ -190,8 +190,8 @@ int main(int argc, char** argv)
    WALBERLA_UNUSED(env);
    walberla::mpi::MPIManager::instance()->useWorldComm();
 
-   using namespace walberla::antidunes::paper_analytical;
-   using namespace walberla::antidunes::paper_analytical::benchmark;
+   using namespace walberla::antidunes::closed_form_contacts;
+   using namespace walberla::antidunes::closed_form_contacts::benchmark;
 
    constexpr uint64_t N = 500000;
    std::vector< TimingResult > results;

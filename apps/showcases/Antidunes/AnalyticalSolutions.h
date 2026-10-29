@@ -25,7 +25,7 @@
 //!    validation." Chemical Engineering Science, 65(22), 5863-5871. Their Test 1 (single cylinder
 //!    dropped onto a flat wall at a prescribed tilt angle, compared to a closed-form analytical
 //!    rebound) is exactly rigidBodyImpact() evaluated at the rim contact point their own Part I paper
-//!    derives (reused here directly via paper_analytical::rimPointTowardPlane, PaperAnalyticalContacts.h).
+//!    derives (reused here directly via closed_form_contacts::rimPointTowardPlane, PaperAnalyticalContacts.h).
 //!  - Housner, G.W. (1963). "The behavior of inverted pendulum structures during earthquakes." Bulletin
 //!    of the Seismological Society of America, 53(2), 403-417. The rocking-block restitution
 //!    r = (omega_after/omega_before)^2 = (1 - 1.5*sin^2(alpha))^2 is the special case of rigidBodyImpact()
@@ -47,7 +47,7 @@
 
 #pragma once
 
-#include "PaperAnalyticalContacts.h"
+#include "ClosedFormContacts.h"
 
 #include <mesa_pd/data/DataTypes.h>
 
@@ -273,7 +273,7 @@ inline ImpactResult sphereWallImpact(real_t radius, real_t mass, const Vec3& vel
 }
 
 //! Cylinder-wall impact, replicating Kodam et al. (2010) Part II Test 1: the contact point is the
-//! point on the cylinder's rim closest to the wall plane, from paper_analytical::rimPointTowardPlane
+//! point on the cylinder's rim closest to the wall plane, from closed_form_contacts::rimPointTowardPlane
 //! (PaperAnalyticalContacts.h) -- reusing the not-yet-simulation-wired Kodam/Guo closed forms directly
 //! as the reference geometry, exactly as that file's own header comment anticipates ("so a dedicated
 //! test can compare these closed forms ... for identical geometry").
@@ -285,10 +285,10 @@ inline ImpactResult sphereWallImpact(real_t radius, real_t mass, const Vec3& vel
 //! (and hence spurious predicted spin) that the true symmetric, evenly-distributed contact does not
 //! produce (confirmed empirically: DEMValidationScenarios.h's simulated angular velocity at tilt=0/90
 //! is consistent with zero, matching the physically-expected symmetric case, not the nonzero value the
-//! naive rim-point lever arm would predict). Mirrors paper_analytical::cylinderPlaneContact's own
+//! naive rim-point lever arm would predict). Mirrors closed_form_contacts::cylinderPlaneContact's own
 //! face-plane/band-plane branch split, using the same axisDotN thresholds -- but here to pick the
 //! physically-correct ON-AXIS effective contact point (zero net lever arm) instead.
-inline ImpactResult cylinderWallImpact(const paper_analytical::CylinderState& cyl, real_t mass,
+inline ImpactResult cylinderWallImpact(const closed_form_contacts::CylinderState& cyl, real_t mass,
                                         const Mat3& invInertiaWorld, const Vec3& velocity,
                                         const Vec3& angularVelocity, const Vec3& wallPos,
                                         const Vec3& wallNormal, real_t restitution, real_t friction)
@@ -312,7 +312,7 @@ inline ImpactResult cylinderWallImpact(const paper_analytical::CylinderState& cy
    else
    {
       // corner point C at r = sqrt(R^2 + L^2/4) from the centre (Kodam et al. 2010 Eq. 4, Fig. 3)
-      const Vec3 E = paper_analytical::detail::rimPointTowardPlane(cyl, wallPos, wallNormal);
+      const Vec3 E = closed_form_contacts::detail::rimPointTowardPlane(cyl, wallPos, wallNormal);
       contactPoint = E - cyl.pos;
    }
    return rigidBodyWallImpact(mass, invInertiaWorld, contactPoint, velocity, angularVelocity, wallNormal,

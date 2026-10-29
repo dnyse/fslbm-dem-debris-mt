@@ -1049,7 +1049,7 @@ struct ModelParams {
 
    // [Claude, 2026-09-30] true -> (only with useAnalyticalContactDetection=true) Cylinder x Cylinder contacts are
    //         refined by minimising the projection overlap r_i(L) + r_j(L) - L.(x_j - x_i) over directions L
-   //         (paper_analytical::refineCylinderContact): exact closed-form scenarios unchanged, inexact ones get the
+   //         (closed_form_contacts::refineCylinderContact): exact closed-form scenarios unchanged, inexact ones get the
    //         minimising depth/normal, "no scenario" pairs are decided by the same descent. No GJK/EPA call at all.
    //         Validated in PaperAnalyticalContactTest.cpp (testRefinedCylinderContactVsGjk and the independent
    //         brute-force reference): no missed contacts, depth error <= 5e-4; separated pairs closer than ~0.01
@@ -1059,7 +1059,7 @@ struct ModelParams {
 
    // [Claude, 2026-10-10] true -> cylinderCylinderContact (PaperAnalyticalContacts.h) passes a band-edge result to
    //         refineCylinderContact when the projection overlap D(n) along its normal exceeds
-   //         kBandEdgeConsistencyFactor (3) times its depth (see paper_analytical::kodamBandEdgeAxialCheck). Fixes the
+   //         kBandEdgeConsistencyFactor (3) times its depth (see closed_form_contacts::kodamBandEdgeAxialCheck). Fixes the
    //         stacked equal-radius cylinders of the round-container drop test (THESIS_PLAN.md 2026-10-10, "FIX B REVISED").
    // false -> (DEFAULT) unchanged closed-form dispatch.
    bool        kodamBandEdgeAxialCheck;
@@ -1173,7 +1173,7 @@ struct ModelParams {
    // the box's effective size.
    real_t      boxRoundingRadius;
 
-   // true  → Box x Box additionally resolves via paper_analytical::boxBoxMultiPointContacts (the
+   // true  → Box x Box additionally resolves via closed_form_contacts::boxBoxMultiPointContacts (the
    //         OTHER literature-documented remedy for the same defect useRoundedBoxCorners targets --
    //         Fraige et al. 2008a/2008b's "multi-point contact concept", see that function's own doc
    //         comment in PaperAnalyticalContacts.h): every one of both boxes' 8 vertices found embedded
@@ -1186,8 +1186,8 @@ struct ModelParams {
    // false → (DEFAULT) exact pre-existing single-point behaviour, unchanged.
    bool        useMultiPointBoxContact;
 
-   // true  → both paper_analytical::boxBoxSAT's single overlap AND every individual vertex overlap
-   //         paper_analytical::boxBoxMultiPointContacts reports are clamped to at most
+   // true  → both closed_form_contacts::boxBoxSAT's single overlap AND every individual vertex overlap
+   //         closed_form_contacts::boxBoxMultiPointContacts reports are clamped to at most
    //         boxOverlapCapFraction * min(halfExtents over BOTH boxes' 3 components) before being used
    //         for force computation -- see boxBoxMultiPointContacts' own doc comment (PaperAnalyticalContacts.h)
    //         for the full rationale. Confirmed necessary by DEMValidationScenarios.h's
@@ -1210,7 +1210,7 @@ struct ModelParams {
    // true  → Box x Box's boxBoxSAT axis selection becomes "sticky": among all candidate axes within
    //         axisHysteresisMargin (relative) of the true minimum-gap axis, the one whose normal aligns
    //         best with the PREVIOUS sub-cycle's reported normal for this exact uid pair is used, even
-   //         when it is not the strict minimum -- see paper_analytical::boxBoxSAT's own doc comment
+   //         when it is not the strict minimum -- see closed_form_contacts::boxBoxSAT's own doc comment
    //         (PaperAnalyticalContacts.h) for the full derivation. The OTHER candidate fix for the same
    //         axis-flip discontinuity useRoundedBoxCorners targets, without useRoundedBoxCorners' own
    //         deep-overlap side effect (confirmed by this project's own multiPointDeepOverlapStability/
