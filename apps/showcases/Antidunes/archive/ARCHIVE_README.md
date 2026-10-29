@@ -25,6 +25,26 @@ header. Now also archived here (`tests/TsunamiDamBreakTest.cpp`, include path fi
 `../TsunamiDataInitialization.h`); its `ANTIDUNES_TsunamiDamBreak` CMake target removed from
 `tests/showcases_antidunes/CMakeLists.txt`.
 
+## sealed_cell_guard/
+
+`SealedCellGuard.h` (`ModelParameters.closeSealedCellsMinNeighbours`, `CloseSealedCellsSweep`) --
+an experimental guard against sub-cell fluid "channels" sealed between touching rods (introduced
+2026-09-21). Superseded by `cylinderContactSkin`/`boxContactSkin` (implemented 2026-09-30), which
+*prevents* the sealing by keeping a minimum resolvable gap between bodies' DEM contact detection,
+rather than detecting and closing already-sealed cells afterward. Per `THESIS_PLAN.md`
+(2026-09-25): "`closeSealedCellsMinNeighbours=24` delays but does NOT eliminate the sealed-cell
+mechanism -- and reveals the guard is checking the wrong signature" (total enclosure count, not
+specifically "pinched between two separate bodies"). Contact skin became the actual production
+approach from 2026-09-30 onward and is the one used in every thesis-cited run since; the guard was
+never combined with it in any prm. Confirmed: none of the 9 prms that enabled the guard
+(`*_guard21_gas.prm`/`*_guard24_gas.prm`/`*_guard24_rodcap_gas.prm`) are cited in the thesis, and
+none were ever git-tracked. Moved here along with its 6 dedicated sbatch jobs, its own unit test
+(`tests/Job4255679SealedCellTest.cpp`, which specifically validated whether the guard's threshold
+would have caught a real crash -- the one test in the suite that was failing, since the guard
+genuinely doesn't reach the threshold for that real geometry), and its prm generator script
+(`gen_guard_hopper_prm.py`). Removed from production: `BuildTimeloop.h`'s `#include` and sweep
+registration, `SimulationParams.h`'s `closeSealedCellsMinNeighbours` field/parse.
+
 ## unused_contact_methods/feng2017_cylinder_cylinder_contact.h
 
 `feng2017::fengCylinderCylinderContact` -- an alternative cylinder-cylinder contact method (Feng,

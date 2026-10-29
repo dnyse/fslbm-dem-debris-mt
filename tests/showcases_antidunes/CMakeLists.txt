@@ -184,13 +184,12 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
    target_link_libraries ( ANTIDUNES_PinchedFluidCells walberla::core )
    waLBerla_execute_test( NAME ANTIDUNES_PinchedFluidCells )
 
-   # Same voxelization method as ANTIDUNES_PinchedFluidCells, applied to the EXACT real rod positions of job
-   # 4255679's own STALE-PARTICLE-IDX crash (not a random gap sweep): proves the sealed/pinched-cell precondition
-   # was genuinely present there, and that the guard24 threshold used in the rerun (job 4259313) actually applies.
-   waLBerla_add_test_executable ( ANTIDUNES_Job4255679SealedCell Job4255679SealedCellTest.cpp )
-   target_include_directories ( ANTIDUNES_Job4255679SealedCell PRIVATE ${ANTIDUNES_SRC_DIR} )
-   target_link_libraries ( ANTIDUNES_Job4255679SealedCell walberla::core )
-   waLBerla_execute_test( NAME ANTIDUNES_Job4255679SealedCell )
+   # [Claude, 2026-10-29] ANTIDUNES_Job4255679SealedCell removed -- tested the guard24 threshold of
+   # SealedCellGuard.h, which was superseded by cylinderContactSkin/boxContactSkin (THESIS_PLAN.md
+   # 2026-09-25/09-30: the guard "delays but does NOT eliminate the sealed-cell mechanism" and
+   # "checks the wrong signature"; contact skin, implemented next, became the actual production
+   # approach and is the one used in every thesis-cited run since). Test moved alongside the guard
+   # to apps/showcases/Antidunes/archive/sealed_cell_guard/tests/.
 
    # Feng-style energy-consistent (Minkowski-overlap) cylinder contact: reference implementation vs GJK/EPA and the closed-form hybrid (test only, not used by the simulation).
    waLBerla_add_test_executable ( ANTIDUNES_EnergyConsistentContact EnergyConsistentContactTest.cpp )

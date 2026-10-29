@@ -48,7 +48,6 @@
 #include "lbm/free_surface/surface_geometry/Utility.h"
 
 #include "lbm_mesapd_coupling/momentum_exchange_method/MovingParticleMapping.h"
-#include "SealedCellGuard.h"
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/PdfReconstructionManager.h"
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/Reconstructor.h"
 
@@ -1478,28 +1477,12 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
             [simObjs]() { trackWatchCells(simObjs, "AFTER-RECONSTRUCTION-COMM", *simObjs->currentMainStep, couplingProbeCells); },
             "Probe: after PdfReconstructionManager's own communication");
 
-   // experimental: close sub-cell fluid channels between touching bodies (ModelParameters.closeSealedCellsMinNeighbours,
-   // 0 = off; see SealedCellGuard.h). CORRECTNESS FIX (2026-09-22): moved to run AFTER PdfReconstructionManager (was
-   // before it) and its own communication above, so every cell this sweep ever closes has ALREADY been resolved to a
-   // fully consistent liquid/gas/interface state this step (either freshly reconstructed just now, or unchanged from a
-   // previous step) -- there is no longer a 'formerObstacle, still sealed -> slam back to obstacle, skipping
-   // reconstruction entirely' path, which left that cell's PDF/fill/excess-mass state permanently stale and was traced
-   // (job 4253834, THESIS_PLAN.md 2026-09-22) to [MEM-GARBAGE-LINK]/NaN failures on a real rod hopper. Its own
-   // communication follows so neighbouring ranks see the same closures before the next step's mapping/reconstruction.
-   if (simParams->model.closeSealedCellsMinNeighbours > uint_c(0))
-   {
-      WALBERLA_LOG_WARNING_ON_ROOT("[SealedCellGuard] ACTIVE: fluid cells with >= "
-                                   << simParams->model.closeSealedCellsMinNeighbours
-                                   << " of 26 obstacle neighbours are turned into obstacle cells every step (post-reconstruction)");
-      timeloop->add() << Sweep(
-         CloseSealedCellsSweep< AntidunesBoundaryHandling_T::BoundaryHandling_T >(
-            simObjs->antidunesBoundaryHandling->getHandlingID(), simObjs->particleFieldID,
-            AntidunesBoundaryHandling_T::movingObstacleFlagID, AntidunesBoundaryHandling_T::noSlipFlagID,
-            walberla::free_surface::flagIDs::gasFlagID, simParams->model.closeSealedCellsMinNeighbours),
-         "Sweep (coupling): CloseSealedCells")
-      << AfterFunction(Communication_T(simObjs->blockForest, simObjs->flagFieldID, simObjs->particleFieldID),
-                       "Communication (coupling): after CloseSealedCells (flagField + particleField)");
-   }
+   // [Claude, 2026-10-29] SealedCellGuard.h (ModelParameters.closeSealedCellsMinNeighbours) removed
+   // entirely -- superseded by cylinderContactSkin/boxContactSkin (THESIS_PLAN.md 2026-09-25/09-30:
+   // the guard "delays but does NOT eliminate the sealed-cell mechanism" and "checks the wrong
+   // signature"; contact skin, implemented next, prevents the sealing from occurring at all rather
+   // than detecting and closing it afterward, and is the approach used in every thesis-cited run
+   // since). Archived at archive/sealed_cell_guard/.
 }
 
 void addAfterTimeStepPerformanceLogger(const std::shared_ptr< const SimulationParams >& simParams,

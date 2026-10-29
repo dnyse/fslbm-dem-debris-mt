@@ -832,10 +832,8 @@ struct ModelParams {
    //         (exact wall distance from a ray-particle intersection; second-order wall placement for curved/tilted bodies); other links fall back to simple bounce-back (see SimpleBB.h).
    // false → (DEFAULT) plain simple bounce-back = the published Antidunes/Bogner behaviour (wall halfway on every cut link, stair-case surface).
    bool        useInterpolatedBounceBack;
-   // Experimental (SealedCellGuard.h): fluid cells with at least this many of their 26 D3Q27 neighbours covered by a
-   // moving obstacle / no-slip wall (and >= 1 moving obstacle) are turned into obstacle cells right after the particle
-   // mapping ("close sub-cell channels between touching bodies"). 0 = off (default), typical 24.
-   uint_t      closeSealedCellsMinNeighbours;
+   // [Claude, 2026-10-29] closeSealedCellsMinNeighbours (SealedCellGuard.h) removed entirely --
+   // superseded by cylinderContactSkin/boxContactSkin. Archived at archive/sealed_cell_guard/.
 
    // Experimental (MovingParticleMapping.h, 'cellCenterTestOffset'): the cell-centre containment test is done at the cell
    // centre plus mappingTieOffset*(dx, 1.3 dy, 1.7 dz) so that a body face plane through cell centres (axis-aligned box on
@@ -1599,7 +1597,6 @@ struct ModelParams {
       , useBognerReconstruction     { b.getParameter< bool >       ("useBognerReconstruction", true) }
       , useFillWeighting            { b.getParameter< bool >       ("useFillWeighting", true) }
       , useInterpolatedBounceBack   { b.getParameter< bool >       ("useInterpolatedBounceBack", false) }
-      , closeSealedCellsMinNeighbours { b.getParameter< uint_t >    ("closeSealedCellsMinNeighbours", uint_c(0)) }
       , mappingTieOffset          { b.getParameter< real_t >    ("mappingTieOffset", real_c(0)) }
       , useBognerThreePhaseMEM      { b.getParameter< bool >       ("useBognerThreePhaseMEM", true) }
       , useMemOnlyBuoyancy          { b.getParameter< bool >       ("useMemOnlyBuoyancy", true) }
