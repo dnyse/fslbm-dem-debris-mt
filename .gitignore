@@ -105,3 +105,11 @@ cmake-workflows.json
 # Claude Code
 CLAUDE.md
 .claude/
+
+# [Claude, 2026-10-29] Antidunes exploratory run configs/jobs not cited in the thesis (hundreds of
+# .prm/.sbatch files accumulated across months of exploratory simulation work) -- kept on disk, just
+# untracked going forward so they don't clutter the public GitHub view. The ~57 prms + ~27 sbatch
+# files actually used by thesis-cited results are force-added (git add -f) and stay tracked despite
+# these patterns. This does NOT scrub them from existing git history (see commit message).
+apps/showcases/Antidunes/prms/*.prm
+apps/showcases/Antidunes/jobs/*.sbatch

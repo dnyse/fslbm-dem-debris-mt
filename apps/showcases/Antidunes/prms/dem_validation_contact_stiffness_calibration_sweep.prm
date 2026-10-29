@@ -1,2 +1,0 @@
-// See DEMValidationScenarios.h::runContactStiffnessCalibrationSweep for what this checks.
-DEMValidation{ testCase contactStiffnessCalibrationSweep; }

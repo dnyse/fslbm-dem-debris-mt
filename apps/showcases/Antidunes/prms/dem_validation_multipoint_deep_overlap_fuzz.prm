@@ -1,2 +1,0 @@
-// See DEMValidationScenarios.h::runMultiPointDeepOverlapFuzz for what this checks.
-DEMValidation{ testCase multiPointDeepOverlapFuzz; }

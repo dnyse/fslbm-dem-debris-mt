@@ -1,6 +1,0 @@
-// See DEMValidationScenarios.h::runFallOntoPileStability for what this checks. quickMode collapses the
-// full 3x2x2x1 geometry sweep to the single most representative combo (dropHeight=-0.71,
-// flyingSpeed=0.015, pileSize=6 -- the actual measured release-overlap magnitude and flying-neighbour
-// speed) so all 9 mitigation configs can be compared without the full 108-run sweep's [DEM-WATCH]/
-// [STRONG-CONTACT-FORCE] log volume making it impractically slow.
-DEMValidation{ testCase fallOntoPileStability; quickMode true; maxSteps 2000; }

@@ -1,3 +1,0 @@
-// See DEMValidationScenarios.h::runCornerFixComparison for what this checks (runs the corner-normal-
-// discontinuity geometry 4x, varying useRoundedBoxCorners/useMultiPointBoxContact).
-DEMValidation{ testCase cornerFixComparison; }

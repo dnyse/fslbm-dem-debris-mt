@@ -1,0 +1,28 @@
+// [Claude, 2026-10-28] New: ROTATIONAL-effective-mass counterpart of
+// dem_validation_wall_cylinder_kodam_sweep_translational.prm -- same geometry/protocol, same widened 0-90deg,
+// step-5deg sweep, but useRotationalEffectiveMass true and dt = collisionTime/500 (matching the already-checked-in
+// dem_validation_wall_cylinder_kodam_test1_rotmass.prm's calibration, which the thesis already established gives
+// 32/32 PASS on the original 10-point sweep). Data source for the thesis's Kodam-style result figures (Section 5.2).
+DEMValidation{
+    testCase wallImpactCylinder;
+    useRotationalEffectiveMass true;
+    dt 0.00002;
+
+    cylinderRadius 4.0;
+    cylinderLength 5.3;
+    density 1.0;
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.0;
+    poissonsRatio 0.35;
+    collisionTime 0.01;
+
+    impactSpeed 1.0;
+    tangentialSpeedFraction 0.0;
+    tiltStartDeg 0.0;
+    tiltEndDeg 90.0;
+    tiltStepDeg 5.0;
+
+    toleranceRelError 0.02;
+    vtkSpacing 0;
+    outputBaseName wall_impact_cylinder_kodam_sweep_rotational;
+}

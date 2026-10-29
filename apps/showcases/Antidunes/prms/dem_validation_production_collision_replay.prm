@@ -1,6 +1,0 @@
-// See DEMValidationScenarios.h::runProductionCollisionReplay for what this checks. Runs the real
-// incident (job 4199585) through the standard 9-way mitigation config set, 10000 sub-cycles each
-// (past the ~4072 sub-cycle peak baseline shows), tracking the COMBINED (both bodies) kinetic energy.
-DEMValidation{
-    testCase productionCollisionReplay;
-}

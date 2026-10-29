@@ -1,0 +1,30 @@
+// [Claude, 2026-10-28] New: source of the smooth ANALYTICAL curve (not the DEM markers) for the thesis's Kodam-style
+// cylinder-wall-impact figures (Section 5.2). Same geometry/protocol as the _translational/_rotational sweeps, but
+// step-1deg (91 points, 0-90) -- the per-tilt "analyticVel"/"analyticAngVel" logged by DEMValidationScenarios.h is
+// independent of useRotationalEffectiveMass (it is the rigid-body-impact reference, not the simulated result), so
+// only ONE fine sweep is needed to harvest a dense analytical curve; useRotationalEffectiveMass is left true here
+// purely so the (unused, for this purpose) simulated points also happen to be the more accurate ones, not because it
+// affects the analytical values plotted.
+DEMValidation{
+    testCase wallImpactCylinder;
+    useRotationalEffectiveMass true;
+    dt 0.00002;
+
+    cylinderRadius 4.0;
+    cylinderLength 5.3;
+    density 1.0;
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.0;
+    poissonsRatio 0.35;
+    collisionTime 0.01;
+
+    impactSpeed 1.0;
+    tangentialSpeedFraction 0.0;
+    tiltStartDeg 0.0;
+    tiltEndDeg 90.0;
+    tiltStepDeg 1.0;
+
+    toleranceRelError 0.02;
+    vtkSpacing 0;
+    outputBaseName wall_impact_cylinder_kodam_sweep_fine;
+}

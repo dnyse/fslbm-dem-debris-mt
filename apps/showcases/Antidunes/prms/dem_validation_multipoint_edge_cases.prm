@@ -1,2 +1,0 @@
-// See DEMValidationScenarios.h::runMultiPointEdgeCases for what this checks.
-DEMValidation{ testCase multiPointEdgeCases; }

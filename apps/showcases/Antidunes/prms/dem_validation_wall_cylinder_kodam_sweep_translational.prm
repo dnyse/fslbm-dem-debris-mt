@@ -1,0 +1,34 @@
+// [Claude, 2026-10-28] New: data source for the thesis's Kodam-style result figures (Section 5.2, "Dynamics of a
+// Single Contact" -- the dimensionless-rebound-speed and dimensionless-angular-speed plots against impact angle,
+// matching Kodam, Bharadwaj, Curtis, Hancock & Wassgren (2010) Chemical Engineering Science 65(22), 5863-5871, Part
+// II, Figs. 4-5). Identical physical setup to dem_validation_wall_cylinder_kodam_test1.prm (their Table 1 geometry,
+// their Sec. 3.1 protocol) but widened from the original 10-point, step-10deg sweep to a 19-point, step-5deg sweep
+// covering the full 0-90deg range, to give enough DEM markers for a continuous-looking curve. Author request: "for
+// the Cylinder-wall impact can we have ... the presentation of the results similar to this [Kodam Fig. 4-5] instead
+// of tables ... add additional test if necessary". useRotationalEffectiveMass left at its default (false) --
+// this is the TRANSLATIONAL-effective-mass series (deliberately shown failing away from tilt 0/56.5/90 to make the
+// same point Table~tab:wall-cyl-sweep made, now as a scatter series against the analytical curve instead of a table
+// row). Paired with the _rotational and _fine variants of this file for the same figure.
+DEMValidation{
+    testCase wallImpactCylinder;
+    useRotationalEffectiveMass false;
+    dt 0.0002;
+
+    cylinderRadius 4.0;
+    cylinderLength 5.3;
+    density 1.0;
+    restitutionCoefficient 0.85;
+    frictionCoefficient 0.0;
+    poissonsRatio 0.35;
+    collisionTime 0.01;
+
+    impactSpeed 1.0;
+    tangentialSpeedFraction 0.0;
+    tiltStartDeg 0.0;
+    tiltEndDeg 90.0;
+    tiltStepDeg 5.0;
+
+    toleranceRelError 0.02;
+    vtkSpacing 0;
+    outputBaseName wall_impact_cylinder_kodam_sweep_translational;
+}

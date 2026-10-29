@@ -1,2 +1,0 @@
-// See DEMValidationScenarios.h::runFallOntoPileStability for what this checks.
-DEMValidation{ testCase fallOntoPileStability; }

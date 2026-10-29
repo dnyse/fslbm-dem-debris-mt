@@ -1,3 +1,0 @@
-// See DEMValidationScenarios.h::runCornerNormalDiscontinuity for what this checks. All parameters
-// default to the reproduction case (production FloatingBox size/physics, corner/tilt geometry).
-DEMValidation{ testCase cornerNormalDiscontinuity; }
