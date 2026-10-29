@@ -65,6 +65,25 @@ including `ParticleKernels.h`'s dispatch (collapsed to always call `boxBoxMultiP
 `SimulationParams.h`'s flag. `DropTest_fraige_gas.prm`/`DropTest_fraige_250_gas.prm` and their sbatch
 jobs moved alongside this file.
 
+## arch_tunnel_containment/
+
+`runArchTunnelContainment` (DEM-validation scenario `archTunnelContainment`) -- a fluid-free
+geometric-containment check for `ComputeTunnelContacts` (`ParticleKernels.h`), the production code
+path for the real-scale Pont Ferroviere bridge case study (`chapters/03_implementation/case-study/`,
+`chapters/04_results/case-study/` -- intentionally excluded from the thesis per `CLAUDE.md`). Per
+this showcase's own `FINAL_THESIS_DEM_VALIDATION.md` (line 120), this test already **FAILED 1/2**
+and was explicitly noted there as "out of this plan's cylinder/cuboid-contact-detection focus... not
+investigated further." Moved out of `DEMValidationScenarios.h`/`DEMValidation.cpp` 2026-10-29, along
+with its 2 dedicated prms (`dem_validation_arch_tunnel.prm`, `dem_validation_arch_tunnel_box.prm` --
+neither was referenced by any sbatch job).
+
+**NOT archived**: `ComputeTunnelContacts` itself (`ParticleKernels.h`) is untouched -- it is still
+live, working production code, used by a much larger family of `test_bridge_v1_*` prms (dozens of
+files) and supporting code in `SetupStages.h`/`SimulationObjects.h`/`Utility.h`. That whole bridge
+case-study code/config set is a separate, much bigger decision than this one DEM-validation test and
+was deliberately left out of this archival pass -- flag to the author if a fuller cleanup of it is
+wanted.
+
 ## unused_contact_methods/fraige_validation_tests.cpp.excerpt
 
 `testBoxBoxFraigeVsGjkVsSatFuzz`/`testFraigeVertexFaceContact`/`testFraigeVertexNearCornerBlend`/
