@@ -275,18 +275,10 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
          AntidunesLatticeModelGeneration )
    waLBerla_execute_test( NAME ANTIDUNES_QuarticSolverComparison )
 
-   # Pure analytic box-overlap fill-level math for the tsunami executable's dry-domain dam-break
-   # initial condition (TsunamiDataInitialization.h) -- see that file's own header. Requires codegen
-   # (transitively pulls in the generated LBM lattice model via SimulationParams.h/SimulationObjects.h),
-   # same reason as the other tests in this file despite not touching LBM directly.
-   waLBerla_add_test_executable ( ANTIDUNES_TsunamiDamBreak TsunamiDamBreakTest.cpp )
-   target_include_directories ( ANTIDUNES_TsunamiDamBreak PRIVATE ${ANTIDUNES_SRC_DIR} )
-   target_link_libraries ( ANTIDUNES_TsunamiDamBreak
-         walberla::blockforest walberla::boundary walberla::core walberla::domain_decomposition
-         walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
-         walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk
-         AntidunesLatticeModelGeneration )
-   waLBerla_execute_test( NAME ANTIDUNES_TsunamiDamBreak )
+   # [Claude, 2026-10-29] ANTIDUNES_TsunamiDamBreak removed -- tested TsunamiDataInitialization.h,
+   # which was archived (unused by any thesis-cited result; see
+   # apps/showcases/Antidunes/archive/ARCHIVE_README.md). Test moved alongside it to
+   # apps/showcases/Antidunes/archive/tsunami_pole_forest_driftwood/tests/.
 
 endif ()
 

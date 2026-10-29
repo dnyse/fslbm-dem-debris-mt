@@ -25,7 +25,7 @@
 //! need a live ScalarField_T/blockforest) -- only the pure functions those call.
 //======================================================================================================================
 
-#include "TsunamiDataInitialization.h"
+#include "../TsunamiDataInitialization.h"
 
 #include <core/Environment.h>
 #include <core/logging/Logging.h>

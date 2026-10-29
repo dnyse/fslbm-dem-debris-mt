@@ -18,8 +18,12 @@ cited elsewhere in the thesis only for its driftwood DEM contact parameters (res
 used by the unrelated, already-in-the-thesis 250-floater drop test (`DropTest.cpp`).
 
 [Claude, 2026-10-29] Archived at the author's request. `CMakeLists.txt`'s `tsunami` executable target
-was removed; `tsunami.cpp`/`TsunamiDataInitialization.h` are not `#include`d by anything else in this
-directory, so nothing else needed updating.
+was removed. CORRECTION: initially stated "not `#include`d by anything else" -- missed
+`tests/showcases_antidunes/TsunamiDamBreakTest.cpp`, a dedicated unit test for
+`TsunamiDataInitialization.h`'s pure geometry functions, which broke when this archival moved that
+header. Now also archived here (`tests/TsunamiDamBreakTest.cpp`, include path fixed to
+`../TsunamiDataInitialization.h`); its `ANTIDUNES_TsunamiDamBreak` CMake target removed from
+`tests/showcases_antidunes/CMakeLists.txt`.
 
 ## unused_contact_methods/feng2017_cylinder_cylinder_contact.h
 
