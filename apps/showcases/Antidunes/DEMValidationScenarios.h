@@ -116,7 +116,11 @@ public:
       , gravityZ_(-gravityMagnitude)
       , restitutionCoefficient_(restitutionCoefficient)
       , collisionTime_(collisionTime)
-      , kappa_(real_t(2) * (real_t(1) - poissonsRatio) / (real_t(2) - poissonsRatio)) // Thornton et al.
+      // kappa = kT/kN = 2(1-nu)/(2-nu), Mindlin (1949)/Thornton's no-slip single-contact stiffness
+      // ratio -- exact primary Thornton paper/year not locally verified (no copy in cld_kbase/, no
+      // single matching reference found by web search as of 2026-10-29); treat the attribution as
+      // "Thornton-type no-slip model" rather than a pinned citation until checked against a source.
+      , kappa_(real_t(2) * (real_t(1) - poissonsRatio) / (real_t(2) - poissonsRatio))
       , preVV_(dt)
       , postVV_(dt)
    {
@@ -994,6 +998,7 @@ inline bool runBoxFaceDropRestitution(const config::Config::BlockHandle& b)
 
       // Trivial by symmetry (flush, zero tangential velocity): normal velocity flips and scales by e,
       // angular velocity stays exactly zero -- no AnalyticalSolutions.h call needed for this case.
+      // v_z^+ = -e*v_z^-, e=0.54 (Mack et al. 2011, Table 2)
       const Vec3 analyticVel(0, 0, -e * preVel[2]);
       const Vec3 analyticAngVel(0, 0, 0);
 
@@ -3622,10 +3627,15 @@ inline bool runPacking(const config::Config::BlockHandle& b)
       maxTop = std::max(maxTop, engine.ac().getPosition(i)[2] + engine.ac().getInteractionRadius(i));
    }
 
+   // solid fraction = totalVolume / (containerX*containerY*maxTop), checked against the band below
    const real_t bulkSolidFraction = totalVolume / (containerX * containerY * std::max(maxTop, real_t(1e-6)));
-   // Literature ordering for random-packed basic 3D shapes (Jiao, Y., Stillinger, F.H. & Torquato, S.
-   // (2010), "Maximum packing densities of basic 3D objects," Science Bulletin 55(2), 114-119): the
-   // MAXIMALLY-JAMMED upper bounds are sphere~0.64, cylinder~0.72, cube~0.78. A gravity-poured bed
+   // Literature ordering for random-packed basic 3D shapes (Li, S., Zhao, J., Lu, P., & Xie, Y. (2010),
+   // "Maximum packing densities of basic 3D objects," Chinese Science Bulletin 55(2), 114-119,
+   // doi:10.1007/s11434-009-0650-0 -- [Claude, 2026-10-29] CORRECTED author attribution: this was
+   // previously misattributed to "Jiao, Y., Stillinger, F.H. & Torquato, S." in this comment, a
+   // different, unrelated set of packing-density researchers who did not write this particular paper;
+   // verified via web search against the DOI/journal/volume/pages, which all match Li et al. instead):
+   // the MAXIMALLY-JAMMED upper bounds are sphere~0.64, cylinder~0.72, cube~0.78. A gravity-poured bed
    // settles BELOW these maxima, so the pass band below is a broad plausibility check ("not obviously
    // broken"), not an exact-match test.
    // NOT gated on step < maxSteps: a nonzero-restitution mixed-shape bed settles into a persistent
@@ -3805,6 +3815,8 @@ inline bool runAngleOfRepose(const config::Config::BlockHandle& b)
                               << maxR << "] zRange=[" << minZ << "," << maxZ << "]");
    const real_t denom = real_t(n) * sumRR - sumR * sumR;
    const real_t slope = (std::abs(denom) > real_t(1e-9)) ? (real_t(n) * sumRZ - sumR * sumZ) / denom : real_t(0);
+   // repose angle = atan(|slope|) of the pile's r-vs-z least-squares fit; checked against the
+   // plausibility band below, anchored by Kodam et al. 2010 Part II's 39.6deg sim / 43.9deg experiment
    const real_t reposeAngleDeg = std::atan(std::abs(slope)) * real_t(180) / math::pi;
 
    // Plausibility band only (~15-55 deg spans essentially all real granular materials); Kodam et al.
@@ -3924,7 +3936,9 @@ inline void updateDrumWalls(DEMEngine& engine, const std::vector< size_t >& wall
 //! far below 1000/s specifically so drop rate itself doesn't bias the packing (Macrae & Gray, 1961; Zhang
 //! et al., 2001, both cited in the paper); one-at-a-time is the limiting case of that. Measures fill
 //! height and bulk solid fraction (their Eq. (7)) against shape-specific plausibility bands anchored to
-//! the random-close-packing literature (Jiao, Stillinger & Torquato, 2010) and Kodam's own measured
+//! the random-close-packing literature (Li, Zhao, Lu & Xie, 2010, Chinese Science Bulletin 55(2):114-119;
+//! NOT "Jiao, Stillinger & Torquato" as an earlier version of this file misattributed it, see runPacking's
+//! own comment) and Kodam's own measured
 //! cylinder values (Table 2: 0.617 experiment / 0.589 true-cylinder-DEM sim).
 inline bool runPackingSingleShape(const config::Config::BlockHandle& b)
 {
@@ -4032,15 +4046,20 @@ inline bool runPackingSingleShape(const config::Config::BlockHandle& b)
       maxTop = std::max(maxTop, engine.ac().getPosition(i)[2] + engine.ac().getInteractionRadius(i));
    }
 
+   // solid fraction = N*V_particle / (pi*R_container^2*maxTop), checked against the band below
    const real_t bulkSolidFraction = real_t(created) * particleVolume /
                                      (math::pi * containerRadius * containerRadius * std::max(maxTop, real_t(1e-6)));
 
-   // Shape-specific plausibility bands, anchored to the literature RCP upper bounds (Jiao, Stillinger &
-   // Torquato, 2010: sphere~0.64, cylinder~0.72, cube~0.78 maximally jammed) and Kodam et al.'s own
-   // measured cylinder result (0.617 experiment / 0.589 true-cylinder-DEM sim, Table 2) as a concrete
-   // anchor -- a gravity-poured bed sits below the jammed maxima, so these are broad "not obviously
-   // broken" bands, not exact-match tests: this dry run's contact parameters are not calibrated to
-   // Kodam's Plexiglas-on-Plexiglas values, so exact numeric reproduction isn't the goal.
+   // Shape-specific plausibility bands, anchored to the literature RCP upper bounds (Li, Zhao, Lu & Xie,
+   // 2010, Chinese Science Bulletin 55(2):114-119, doi:10.1007/s11434-009-0650-0 -- see runPacking's own
+   // comment for the attribution correction: NOT "Jiao, Stillinger & Torquato" as an earlier version of
+   // this comment claimed -- sphere~0.64, cylinder~0.72, cube~0.78 maximally jammed; no copy in
+   // cld_kbase/, so treat as a soft, non-gating ceiling only) and Kodam et al.'s own measured cylinder
+   // result (0.617 experiment / 0.589 true-cylinder-DEM sim,
+   // Table 2, verified against kodam_cylindrical_2010b.txt) as a concrete anchor -- a gravity-poured
+   // bed sits below the jammed maxima, so these are broad "not obviously broken" bands, not
+   // exact-match tests: this dry run's contact parameters are not calibrated to Kodam's
+   // Plexiglas-on-Plexiglas values, so exact numeric reproduction isn't the goal.
    real_t bandHi = real_t(0.64);
    if (shape == "cylinder") bandHi = real_t(0.72);
    else if (shape == "box") bandHi = real_t(0.78);
@@ -4273,6 +4292,8 @@ inline bool runRotatingDrum(const config::Config::BlockHandle& b)
    }
    const real_t denom          = real_t(n) * sumXX - sumX * sumX;
    const real_t slope          = (std::abs(denom) > real_t(1e-9)) ? (real_t(n) * sumXZ - sumX * sumZ) / denom : real_t(0);
+   // repose angle = atan(|slope|) of the pooled free-surface points' least-squares fit; checked against
+   // the plausibility band below, anchored by Kodam et al. 2010 Part II's 39.6deg sim / 43.9deg experiment
    const real_t reposeAngleDeg = std::atan(std::abs(slope)) * real_t(180) / math::pi;
 
    // Plausibility band only (~5-60deg spans essentially all real granular materials in a rotating drum);

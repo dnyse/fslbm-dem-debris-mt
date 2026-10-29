@@ -146,7 +146,9 @@ inline ImpactResult rigidBodyImpact(const BodyState& A, const BodyState& B, cons
    if (vt < real_t(1e-12) || friction <= real_t(0))
    {
       // No tangential slip (or frictionless): pure normal impulse.
+      // nKn = 1/m + r^2*cos^2(alpha+theta)/Iyy  (Kodam et al. 2010 Eq. 3 denominator, cylinder-wall case)
       const real_t nKn = n * (K * n);
+      // Jn = -(1+e)*vn / nKn  =>  omega_y^+ = m*Vz,CM^-*(1+e)*r*cos(alpha+theta) / (Iyy + m*r^2*cos^2(alpha+theta))  (Eq. 3)
       const real_t Jn  = -(real_t(1) + restitution) * vn / nKn;
       J                = Jn * n;
    }
@@ -309,6 +311,7 @@ inline ImpactResult cylinderWallImpact(const paper_analytical::CylinderState& cy
    }
    else
    {
+      // corner point C at r = sqrt(R^2 + L^2/4) from the centre (Kodam et al. 2010 Eq. 4, Fig. 3)
       const Vec3 E = paper_analytical::detail::rimPointTowardPlane(cyl, wallPos, wallNormal);
       contactPoint = E - cyl.pos;
    }

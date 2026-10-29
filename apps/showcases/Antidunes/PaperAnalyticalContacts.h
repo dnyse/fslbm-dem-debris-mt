@@ -2845,6 +2845,7 @@ inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& 
    ContactResult result;
 
    // --- Face-plane (eq. 2): axis parallel to the plane normal -----------------------------------
+   // overlap = halfL - |zCyl|  (Kodam et al. 2010 Part I, eq. 4-6)
    if (std::abs(std::abs(axisDotN) - real_t(1)) < real_t(1e-8) && std::abs(zCyl) < halfL)
    {
       result.contact  = true;
@@ -2856,6 +2857,7 @@ inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& 
    }
 
    // --- Band-plane (eq. 9): axis perpendicular to the plane normal ------------------------------
+   // overlap = R - |zCyl|  (Kodam et al. 2010 Part I, eq. 10-12)
    if (std::abs(axisDotN) < real_t(1e-8) && std::abs(zCyl) < cyl.radius)
    {
       result.contact  = true;
@@ -2866,7 +2868,7 @@ inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& 
       return result;
    }
 
-   // --- Edge-plane (eq. 13-21): general (tilted) orientation ------------------------------------
+   // --- Edge-plane (eq. 13-21): general (tilted) orientation, Kodam et al. 2010 Part I -----------
    // Point E, the point on the cylinder's rim closest to the plane (eq. 15-17), via the shared
    // detail::rimPointTowardPlane (see its comment for the corrected-formula derivation).
    const Vec3   E  = detail::rimPointTowardPlane(cyl, planePos, nHat);
@@ -3166,6 +3168,8 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
    // is dropped entirely (their Fig. 7 shows a genuine band-edge contact where it doesn't hold); the
    // "NOT face-edge" and "NOT special-contact" exclusions above (via the early returns) take its place.
    result.contact  = true;
+   // overlap = delta_r(P), radial depth at the rim point closest to the host axis (Kodam et al. 2010
+   // Part I, eq. 79-81), reached via Guo et al. (2012) Powder Technology 228:193-198's corrected dispatch
    result.overlap  = deltaRp;
    const Vec3 nHat = host.R * ((rhoP > real_t(1e-10)) ? Vec3(relP[0], relP[1], real_t(0)) / rhoP
                                                        : Vec3(real_t(1), real_t(0), real_t(0)));
@@ -3220,6 +3224,7 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
    ContactResult result;
 
    // --- Face-face / band-band (parallel) precondition (eq. 22) ----------------------------------
+   // deltaAxial = (Li/2+Lj/2) - |zIJ|, deltaRadial = (Ri+Rj) - rhoIJ  (Kodam et al. 2010 Part I, eq. 26-27/53)
    if (std::abs(std::abs(parallelDot) - real_t(1)) < real_t(1e-8) && std::abs(zIJ) < (halfLi + halfLj) &&
        rhoIJ < (ci.radius + cj.radius))
    {
