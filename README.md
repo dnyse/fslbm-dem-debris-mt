@@ -1,7 +1,7 @@
-# Numerical Simulation of Floating Debris Transport and Clogging at Flow Obstructions
+# Numerical Simulation of Floating Debris Transport and Clogging
 
 **Master's Thesis — Dennys Huber, Friedrich-Alexander-Universität Erlangen-Nürnberg, Lehrstuhl für Informatik 10 (Systemsimulation)**
-Supervisor: Prof. Dr.-Ing. Harald Köstler · Advisor: Behzad Safaei
+Supervisor: Prof. Dr.-Ing. Harald Köstler · Advisor: M.Sc. Behzad Safaei
 
 Floating debris that accumulates at bridge piers during floods raises the upstream water level and can cause a bridge to fail. This thesis tests whether a particle-resolved simulation — one that resolves every floater and the flow around it — can reproduce how such a jam forms from the interactions of the floaters with each other and with the flow. It builds on a coupled simulation in the **waLBerla** framework that combines a free-surface lattice Boltzmann method (FSLBM) with the discrete element method (DEM) and a momentum exchange method (MEM), extending it from fully submerged spheres to floating cylinders and cuboids, fixed pillars, and a measurement of the clog in the simulated flow. The headline results compare two synthetic obstruction layouts at the same scale — a **centred pillar** (a single-body geometric blockage) and a **hopper gap** (a narrow opening that drifting rods jam by themselves through multi-body interlocking) — plus a two-pillar layout where the rods form only a porous, non-jamming accumulation. The clogging results are purely numerical methodology demonstrations; they are not yet validated against flume experiments and do not predict the clogging of any particular real bridge.
 
