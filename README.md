@@ -6,19 +6,22 @@ Supervisor: Prof. Dr.-Ing. Harald Köstler · Advisor: M.Sc. Behzad Safaei
 Floating debris that accumulates at bridge piers during floods raises the upstream water level and can cause a bridge to fail. This thesis tests whether a particle-resolved simulation — one that resolves every floater and the flow around it — can reproduce how such a jam forms from the interactions of the floaters with each other and with the flow. It builds on a coupled simulation in the **waLBerla** framework that combines a free-surface lattice Boltzmann method (FSLBM) with the discrete element method (DEM) and a momentum exchange method (MEM), extending it from fully submerged spheres to floating cylinders and cuboids, fixed pillars, and a measurement of the clog in the simulated flow. The headline results compare two synthetic obstruction layouts at the same scale — a **centred pillar** (a single-body geometric blockage) and a **hopper gap** (a narrow opening that drifting rods jam by themselves through multi-body interlocking) — plus a two-pillar layout where the rods form only a porous, non-jamming accumulation. The clogging results are purely numerical methodology demonstrations; they are not yet validated against flume experiments and do not predict the clogging of any particular real bridge.
 
 <p align="center">
-  <img src="apps/showcases/Antidunes/docs/thesis_readme_figures/twopillar_jam_3d.png" width="85%" alt="3D render of a debris jam forming at a two-pillar obstruction">
+  <video src="apps/showcases/Antidunes/docs/clogging-animations/eq-cuboid-compact-1fps.mp4" width="85%" controls muted loop></video>
 </p>
-<p align="center"><em>Figure 1 — Simulated jam of floating rods, cuboids and spheres piling up against a two-pillar obstruction in the periodic open-channel flow (coupled FSLBM-DEM-MEM, Antidunes showcase). Colours denote particle shape/type.</em></p>
+<p align="center"><em>Figure 1 — Cuboid floating equilibrium at density ratios 0.25, 0.50 and 0.75 (left to right), released at the nominal water level and settling to the analytical draft; the cuboid rolls to its stable heel since upright is unstable at all three ratios.</em></p>
 
 <p align="center">
-  <img src="apps/showcases/Antidunes/docs/thesis_readme_figures/hopper_gap_jam_side.png" width="85%" alt="Side view of rods self-jamming in a narrow hopper gap, versus clear flow downstream">
+  <video src="apps/showcases/Antidunes/docs/clogging-animations/clog-mixed-compact-1fps.mp4" width="85%" controls muted loop></video>
 </p>
-<p align="center"><em>Figure 2 — The "hopper gap" layout: rods drifting in from upstream (left) jam a gap wide enough for a single rod, while the channel downstream of the obstruction (right) stays essentially clear.</em></p>
+<p align="center"><em>Figure 2 — A mixture of rods, cuboids and spheres jams the hopper gap.</em></p>
 
 <p align="center">
-  <img src="apps/showcases/Antidunes/docs/thesis_readme_figures/twopillar_backwater_side.png" width="85%" alt="Side profile showing the backwater rise upstream of a jammed pillar compared to the lower water level downstream">
+  <video src="apps/showcases/Antidunes/docs/clogging-animations/clog-twopillar-compact-1fps.mp4" width="85%" controls muted loop></video>
 </p>
-<p align="center"><em>Figure 3 — Backwater Rise: the free surface sits visibly higher upstream of the jammed obstruction (left) than in the clear channel downstream (right), consistent with the discharge reduction reported in the thesis.</em></p>
+<p align="center"><em>Figure 3 — The two-pillar layout: 812 rods form only a porous, non-jamming accumulation rather than a clog.</em></p>
+
+More clips (per-shape equilibrium demos, the 406-rod/406-cuboid hopper-gap jams) are in
+[`apps/showcases/Antidunes/docs/clogging-animations/`](apps/showcases/Antidunes/docs/clogging-animations/).
 
 ## Thesis implementation
 
