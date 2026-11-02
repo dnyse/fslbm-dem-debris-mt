@@ -7,6 +7,18 @@ for 1 second of playback). `*-compact-*` are a cropped/scaled layout for
 embedding (web pages, slides); the plain `*-1fps.mp4` files (where present)
 are the full-resolution multi-view renders.
 
+Three of the compact clips (`eq-cuboid`, `clog-mixed`, `clog-twopillar`) also
+have a `.gif` twin, used by the top-level README instead of the `.mp4`: GitHub
+only renders `<video>`/`![]()` pointing at a file in the repo if it was
+uploaded through the web editor's drag-and-drop (producing a `github.com/.../
+assets/...` URL stored outside the repo), so a repo-relative video tag just
+shows as a dead link there. A GIF embeds as a normal `<img>`/`![]()` and
+autoplays on both GitHub and GitLab with no such restriction. Built from the
+same source frames (`ffmpeg ... fps=1,scale=...,palettegen` /
+`paletteuse=dither=bayer`, one GIF frame per simulated snapshot, `-loop 0`),
+so the two formats look and time identically; the GIF is the lossier, larger
+(1.5 MB vs. 1.0 MB for `eq-cuboid`) of the two, kept only for the embed.
+
 | file | run | source (final_anim/) |
 |------|-----|------------------------|
 | `eq-sphere-{,compact-}1fps.mp4`   | sphere equilibrium, ρ=0.25/0.50/0.75 side by side | `eq_runs/spheres/` (strict-Bogner-classification runs 4408737/4408739/4408741) |
