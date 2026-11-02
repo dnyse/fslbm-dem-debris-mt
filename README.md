@@ -49,12 +49,18 @@ Full run instructions (MPI process-count constraints, the two-stage bed-generati
 
 ## Key References
 
-- Schwarzmeier, C., Rettinger, C., Kemmler, S., Plewinski, J., Núñez-González, F., Köstler, H., Rüde, U., & Vowinckel, B. (2023). *Particle-resolved simulation of antidunes in free-surface flows*. Journal of Fluid Mechanics, 961, R1. https://doi.org/10.1017/jfm.2023.262 — the base FSLBM-DEM coupling that the Antidunes showcase (and this thesis) builds on.
-- Kodam, M., Bharadwaj, R., Curtis, J., Hancock, B., & Wassgren, C. (2010). *Cylindrical object contact detection for use in discrete element method simulations. Part I — Contact detection algorithms*. Chemical Engineering Science, 65(22), 5852–5862. https://doi.org/10.1016/j.ces.2010.08.006
-- Kodam, M., Bharadwaj, R., Curtis, J., Hancock, B., & Wassgren, C. (2010). *Cylindrical object contact detection for use in discrete element method simulations, Part II — Experimental validation*. Chemical Engineering Science, 65(22), 5863–5871. https://doi.org/10.1016/j.ces.2010.08.007
-- De Cicco, P. N., Paris, E., Solari, L., & Ruiz-Villanueva, V. (2020). *Bridge pier shape influence on wood accumulation: Outcomes from flume experiments and numerical modelling*. Journal of Flood Risk Management, 13(2), e12599. https://doi.org/10.1111/jfr3.12599
-- Erpicum, S., Poppema, D., Burghardt, L., Benet, L., Wüthrich, D., Klopries, E.-M., & Dewals, B. (2024). *A dataset of floating debris accumulation at bridges after July 2021 flood in Germany and Belgium*. Scientific Data, 11, 1092. https://doi.org/10.1038/s41597-024-03907-8
-- Marin, A., & Souzy, M. (2025). *Clogging of Noncohesive Suspension Flows*. Annual Review of Fluid Mechanics, 57, 89–116. https://doi.org/10.1146/annurev-fluid-030124-112742
+Selected by actual weight in the thesis (citation count in the submitted text, in
+parentheses), not just topical relevance — see `bibliography/sources.bib` in the
+`overleaf` repo for the full ~100-entry list.
+
+- Krüger, T., Kusumaatmaja, H., Kuzmin, A., Shardt, O., Silva, G., & Viggen, E. M. (2017). *The Lattice Boltzmann Method: Principles and Practice*. Springer. https://doi.org/10.1007/978-3-319-44649-3 — the standard LBM reference underlying the fluid solver (34 citations).
+- Bogner, S. (2017). *Direct Numerical Simulation of Liquid-Gas-Solid Flows Based on the Lattice Boltzmann Method* (Doctoral dissertation, Friedrich-Alexander-Universität Erlangen-Nürnberg). https://www10.cs.fau.de/publications/dissertations/Diss_2017-Bogner.pdf — the momentum-exchange buoyancy method and floating-body test cases this thesis's equilibrium validation directly follows (41 citations, the single most-cited source).
+- Rettinger, C. (2023). *Fully Resolved Simulation of Particulate Flows with a Parallel Coupled Lattice Boltzmann and Discrete Element Method* (Doctoral dissertation, Friedrich-Alexander-Universität Erlangen-Nürnberg). https://open.fau.de/handle/openfau/22561 — the coupled LBM-DEM framework in waLBerla that this thesis's implementation builds on (24 citations).
+- Schwarzmeier, C., Rettinger, C., Kemmler, S., Plewinski, J., Núñez-González, F., Köstler, H., Rüde, U., & Vowinckel, B. (2023). *Particle-resolved simulation of antidunes in free-surface flows*. Journal of Fluid Mechanics, 961, R1. https://doi.org/10.1017/jfm.2023.262 — the Antidunes showcase this thesis extends from fully submerged spheres to floating cylinders, cuboids and clogging (11 citations).
+- Kodam, M., Bharadwaj, R., Curtis, J., Hancock, B., & Wassgren, C. (2010). *Cylindrical object contact detection for use in discrete element method simulations. Part I — Contact detection algorithms*. Chemical Engineering Science, 65(22), 5852–5862. https://doi.org/10.1016/j.ces.2010.08.006 — the cylinder contact-detection scenarios implemented and benchmarked against (35 citations).
+- Guo, Y., Wassgren, C., Ketterhagen, W., Hancock, B., & Curtis, J. (2012). *Some computational considerations associated with discrete element modeling of cylindrical particles*. Powder Technology, 228, 193–198. https://doi.org/10.1016/j.powtec.2012.05.015 — corrections to Kodam's scenario classification, used for the cylinder contact special cases (21 citations).
+- Erpicum, S., Poppema, D., Burghardt, L., Benet, L., Wüthrich, D., Klopries, E.-M., & Dewals, B. (2024). *A dataset of floating debris accumulation at bridges after July 2021 flood in Germany and Belgium*. Scientific Data, 11, 1092. https://doi.org/10.1038/s41597-024-03907-8 — real-world motivation for the clogging layouts studied (8 citations).
+- Marin, A., & Souzy, M. (2025). *Clogging of Noncohesive Suspension Flows*. Annual Review of Fluid Mechanics, 57, 89–116. https://doi.org/10.1146/annurev-fluid-030124-112742 — review of the clogging physics this thesis's jamming results connect to (4 citations).
 
 ---
 
