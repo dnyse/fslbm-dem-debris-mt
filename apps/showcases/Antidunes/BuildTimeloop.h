@@ -1442,6 +1442,11 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    WALBERLA_LOG_INFO_ON_ROOT("FormerMO classification: "
                              << (simParams->model.strictBognerClassification ? "strict Bogner rule (same-step freed cells not in B(x))"
                                                                              : "same-step interface fallback"));
+   // [Claude, 2026-11-06] usePass3Reresolution is no longer an independent prm key: it is now derived as
+   // !strictBognerClassification (SimulationParams.h), so this just reports the resulting state rather than an
+   // author-chosen setting -- non-strict classification always runs with Pass-3, to avoid the classification-
+   // cascade dome a non-strict run without it can develop on a floater's dry surface.
+   WALBERLA_LOG_INFO_ON_ROOT("Pass-3 local re-resolution: " << (simParams->model.usePass3Reresolution ? "on (automatic with non-strict classification)" : "off (not needed under strict classification)"));
 
    const uint_t convLogFreq = simParams->evaluation.evaluationFrequency;
 

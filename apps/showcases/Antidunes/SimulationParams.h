@@ -904,13 +904,23 @@ struct ModelParams {
    //         upward lift. Robust to negative contact-line fill drift (uses no φ). Off by default.
    bool        useHydrostaticReconstruction;
 
+   // [Claude, 2026-11-06] NO LONGER an independent prm option (author: "make sure in the code that when not
+   //         using the strict bogner, it has also to use the pass3 bogner and remove pass 3 as its option from
+   //         the prm file it should be automatically included when running the bogner option which is not
+   //         strict"). Derived below as !strictBognerClassification: non-strict classification reproduces the
+   //         classification-cascade liquid/interface dome on a floater's dry surface without it (confirmed by
+   //         direct VTK inspection of job 4314848 and its sphere/cylinder family); job 4450094 (sphere,
+   //         non-strict + Pass-3) confirmed the dome absent across its full 0..99999-step schedule once Pass-3
+   //         runs alongside non-strict classification. Strict classification (strictBognerClassification true)
+   //         already fixes the dome by itself and does not need Pass-3; the two are mutually exclusive here.
+   //         Any "usePass3Reresolution" key still present in an old prm file is no longer read and has no effect.
    // true  → after Pass 2 of FormerMO reconstruction (PdfReconstructionManager) has given every
    //         freshly-uncovered cell in the block a final state, re-examine cells that fell back to
    //         interface purely because of same-pass ambiguity (an unresolved FormerMO neighbour at
    //         the moment they were classified) and resolve them directly against the now-fully-known
    //         neighbourhood. A cheap, purely local second sweep -- no flood fill, no block-wide scan.
-   // false → plain Pass-2-only fallback (default; every such cell stays interface, as before).
-   bool        usePass3Reresolution;
+   // false → plain Pass-2-only fallback (every such cell stays interface, as before).
+   const bool  usePass3Reresolution;
 
    // [Claude, 2026-10-01] true  -> a freshly uncovered cell that becomes INTERFACE gets the mean volume fraction of ALL its
    //         resolved neighbours (gas 0, liquid 1, interface its fill) as fill level (PdfReconstructionManager.h,
@@ -1603,7 +1613,12 @@ struct ModelParams {
       , driveFloatersByMass         { b.getParameter< bool >       ("driveFloatersByMass", false) }
       , useFullVolumeAnalyticBuoyancy { b.getParameter< bool >     ("useFullVolumeAnalyticBuoyancy", false) }
       , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
-      , usePass3Reresolution        { b.getParameter< bool >       ("usePass3Reresolution", false) }
+      // [Claude, 2026-11-06] derived, not read from the prm (see the member comment above): automatically on
+      // whenever strict Bogner classification is off, since non-strict classification needs Pass-3 to avoid the
+      // classification-cascade dome; re-reads the raw prm key here rather than the already-initialised
+      // strictBognerClassification member below, since usePass3Reresolution is declared earlier in this struct
+      // and C++ initialises members in declaration order regardless of initializer-list order.
+      , usePass3Reresolution        { !b.getParameter< bool >      ("strictBognerClassification", false) }
       , seedFillFromAllNeighbours   { b.getParameter< bool >       ("seedFillFromAllNeighbours", false) }
       , seedSkipObstacleNeighbours  { b.getParameter< bool >       ("seedSkipObstacleNeighbours", true) }
       , strictBognerClassification  { b.getParameter< bool >       ("strictBognerClassification", false) }

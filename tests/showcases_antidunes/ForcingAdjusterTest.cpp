@@ -32,6 +32,13 @@
 #include "timeloop/all.h"
 
 #include "BuildTimeloop.h"
+// [Claude, 2026-11-06] added: BuildTimeloop.h only forward-declares trackWatchCells, checkPdfNaN,
+// logFluidBoxHistory, logDensityColumn and logWaterHeights; their definitions live in SetupStages.h, which
+// Antidunes.cpp includes separately right after BuildTimeloop.h (see its own include block) but this test never
+// did. Without it, every addSweep*/addAfterTimeStepDiagnosticSweep lambda this test pulls in from
+// BuildTimeloop.h left those five symbols unresolved at link time (confirmed pre-existing on the unmodified
+// debris-clogging branch too, unrelated to any other change in this commit).
+#include "SetupStages.h"
 
 #include <cmath>
 #include <map>
