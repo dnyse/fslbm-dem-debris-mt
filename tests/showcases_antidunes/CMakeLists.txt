@@ -261,6 +261,19 @@ if ( WALBERLA_BUILD_WITH_CODEGEN )
          AntidunesLatticeModelGeneration )
    waLBerla_execute_test( NAME ANTIDUNES_CylinderCylinderContactBenchmark )
 
+   # Microbenchmark (not a correctness test): closed form vs. GJK/EPA, averaged over the SAME
+   # 100000-trial random box_pairs.csv/cyl_pairs.csv dump already used for the accuracy validation in
+   # Section 5.2.1 of the thesis -- unlike CylinderCylinderContactBenchmark.cpp's single fixed
+   # geometry repeated many times, this gives one average over a realistic mix of easy and hard cases.
+   # See ContactSpeed100kBenchmark.cpp's own file header for what is and isn't included in the timing.
+   waLBerla_add_test_executable ( ANTIDUNES_ContactSpeed100kBenchmark ContactSpeed100kBenchmark.cpp )
+   target_include_directories ( ANTIDUNES_ContactSpeed100kBenchmark PRIVATE ${ANTIDUNES_SRC_DIR} )
+   target_link_libraries ( ANTIDUNES_ContactSpeed100kBenchmark
+         walberla::blockforest walberla::boundary walberla::core walberla::domain_decomposition
+         walberla::field walberla::lbm walberla::mesa_pd walberla::lbm_mesapd_coupling
+         walberla::postprocessing walberla::sqlite walberla::timeloop walberla::vtk
+         AntidunesLatticeModelGeneration )
+
    # Standalone time/accuracy comparison of the three quartic-root solvers available in
    # PaperAnalyticalContacts.h::detail (Durand-Kerner, Ferrari closed-form, Aberth-Ehrlich) against
    # KNOWN synthetic roots -- not a correctness test of any production path (this header is unused by
