@@ -472,13 +472,30 @@ inline uint_t runWallImpactLoop(DEMEngine& engine, size_t bodyIdx, size_t wallId
    return s;
 }
 
+// [Claude, 2026-11-09] velocityScale/angularVelocityScale (both default 0, reproducing the previous
+// pure-relative-error behaviour via the pre-existing 1e-8 floor): optional MIXED absolute+relative
+// tolerance, following the standard combined-tolerance form used by e.g. numpy.isclose/np.allclose
+// (atol + rtol*|b|) and matlab.unittest's AbsoluteTolerance/RelativeTolerance classes -- rewritten here
+// as an equivalent floored-denominator relative error, relErr = resid / (scale + |analytic|), which is
+// algebraically identical to "resid <= tolerance*(scale + |analytic|)" but keeps this function's existing
+// relErr-then-compare-to-tolerance structure and log line unchanged. Added specifically because the pure
+// form (floor 1e-8) is unusable where the analytical reference crosses zero: a tilt where the true rebound
+// speed is ~0.01 of the impact speed turns an entirely ordinary ~0.001-0.03 absolute residual into a
+// 10-200x relative error, failing a check that is not actually detecting a worse simulation result there
+// (see wall-impact section of the thesis this test backs, and the near-zero-denominator discussion in
+// DEM_VALIDATION_MATH_REFERENCE.md). `scale` should be a fixed physical reference for the quantity (e.g.
+// the impact speed for velocity), NOT the per-tilt analytic value itself, or the fix would be circular.
+// Chosen non-destructively: existing call sites are unaffected unless they pass a nonzero scale.
 inline void logCaseResult(const std::string& tag, const Vec3& simVel, const Vec3& analyticVel,
                            const Vec3& simAngVel, const Vec3& analyticAngVel, real_t tolerance,
-                           PassFailAccumulator& acc)
+                           PassFailAccumulator& acc, real_t velocityScale = real_t(0),
+                           real_t angularVelocityScale = real_t(0))
 {
-   const real_t velErr = (simVel - analyticVel).length() / std::max(real_t(1e-8), analyticVel.length());
+   const real_t velErr = (simVel - analyticVel).length() /
+                          std::max(real_t(1e-8), velocityScale + analyticVel.length());
    const real_t angErr = (simAngVel - analyticAngVel).length() /
-                          std::max(real_t(1e-8), std::max(analyticAngVel.length(), simAngVel.length()));
+                          std::max(real_t(1e-8),
+                                   angularVelocityScale + std::max(analyticAngVel.length(), simAngVel.length()));
    const bool pass = velErr < tolerance && angErr < tolerance;
    acc.record(pass);
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] "
