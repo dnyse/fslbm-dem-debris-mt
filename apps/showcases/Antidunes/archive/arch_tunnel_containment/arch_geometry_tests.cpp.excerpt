@@ -1,0 +1,186 @@
+//======================================================================================================================
+//
+//  This file is part of waLBerla. waLBerla is free software: you can
+//  redistribute it and/or modify it under the terms of the GNU General Public
+//  License as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version.
+//
+//  waLBerla is distributed in the hope that it will be useful, but WITHOUT
+//  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+//  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+//  for more details.
+//
+//  You should have received a copy of the GNU General Public License along
+//  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
+//! \file arch_geometry_tests.cpp.excerpt
+//! \brief testArchDeckFillBoxGeometryRealBridge / testArchDeckFillBoxGeometryDefaultIsNoOp /
+//! testArchBlockParamsDimsConversionMatchesRealBridge / testArchHaunchBoxGeometryRealBridgeIsDegenerate
+//! / testArchHaunchBoxGeometryWidenedAbutment / testArchDeckFillBoxCollidesSphereAboveCrown /
+//! testArchDeckFillBoxNoContactInsideOpenBore, excerpted verbatim from
+//! tests/showcases_antidunes/ContactDetectionTest.cpp (lines 1416-1575 at archive time,
+//! 2026-11-16), along with their 7 call sites in that file's own main(). Reference only, not
+//! standalone-compilable -- depends on ArchTunnelParams/ArchSolidBox/archDeckFillBoxGeometry/
+//! archBlockParams/ArchHaunchSide/archHaunchBoxGeometry (now ComputeTunnelContacts.h, this same
+//! archive directory) and SolidCylinderContactDetection (ParticleKernels.h, still live). See
+//! archive/ARCHIVE_README.md.
+
+// ---------------------------------------------------------------------------------------------
+// Arch deck-fill / haunch solid geometry (SimulationParams.h: archDeckFillBoxGeometry,
+// archHaunchBoxGeometry). These are pure center/edgeLength math with no mesa_pd particle involved
+// -- SetupStages.h::createArchSolidElements is the only caller that turns the result into a real
+// FixedBox via createBox(). Covers: (1) the real bridge's own three arches produce the exact
+// deck-fill box the prm files' `deckTopZ 76;` was chosen to match, (2) the pre-existing "no opt-in"
+// default stays a no-op (backward compatibility), (3) this bridge's own haunch boxes are correctly
+// degenerate (its BodyBC abutments have zero width beyond the circular opening), (4) a synthetic
+// wider abutment produces real, correctly-placed haunch boxes, and (5) the resulting box actually
+// collides with a floater above the crown, and does NOT collide with one still inside the open bore.
+// ---------------------------------------------------------------------------------------------
+
+void testArchDeckFillBoxGeometryRealBridge()
+{
+   // Left/central/right arches, exactly as defined in prms/test_bridge_v1_*_gas.prm's ArchTunnels
+   // block, all with deckTopZ 76 (matching the BodyBC arch boxes' own max Z -- see the artifact's
+   // own derivation). yMin/yMax left at their defaults (center.y -+ radius) for all three.
+   const ArchTunnelParams left(Vector3< real_t >(0, 5, 56), real_t(5), real_t(61), real_t(67),
+                                std::numeric_limits< real_t >::quiet_NaN(), std::numeric_limits< real_t >::quiet_NaN(), real_t(76));
+   const ArchTunnelParams central(Vector3< real_t >(0, 30, 56), real_t(10), real_t(61), real_t(67),
+                                   std::numeric_limits< real_t >::quiet_NaN(), std::numeric_limits< real_t >::quiet_NaN(), real_t(76));
+   const ArchTunnelParams right(Vector3< real_t >(0, 55, 56), real_t(5), real_t(61), real_t(67),
+                                 std::numeric_limits< real_t >::quiet_NaN(), std::numeric_limits< real_t >::quiet_NaN(), real_t(76));
+
+   const auto leftBox = archDeckFillBoxGeometry(left);
+   WALBERLA_CHECK(leftBox.has_value());
+   // crownZ = 56+5 = 61; center Z = (61+76)/2 = 68.5; edgeLength Z = 76-61 = 15.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(leftBox->center, Vec3(real_t(64), real_t(5), real_t(68.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(leftBox->edgeLength, Vec3(real_t(6), real_t(10), real_t(15)), real_t(1e-9));
+
+   const auto centralBox = archDeckFillBoxGeometry(central);
+   WALBERLA_CHECK(centralBox.has_value());
+   // crownZ = 56+10 = 66; center Z = (66+76)/2 = 71; edgeLength Z = 76-66 = 10.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(centralBox->center, Vec3(real_t(64), real_t(30), real_t(71)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(centralBox->edgeLength, Vec3(real_t(6), real_t(20), real_t(10)), real_t(1e-9));
+
+   const auto rightBox = archDeckFillBoxGeometry(right);
+   WALBERLA_CHECK(rightBox.has_value());
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(rightBox->center, Vec3(real_t(64), real_t(55), real_t(68.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(rightBox->edgeLength, Vec3(real_t(6), real_t(10), real_t(15)), real_t(1e-9));
+}
+
+void testArchDeckFillBoxGeometryDefaultIsNoOp()
+{
+   // The 4-arg constructor (no deckTopZ given) is exactly what every ArchTunnels block that hasn't
+   // opted into deck-fill still uses -- deckTopZ defaults to the crown itself, so the box would have
+   // zero height. Confirms every pre-existing scenario keeps its exact prior behaviour (no box at all).
+   const ArchTunnelParams tunnel(Vector3< real_t >(0, 5, 56), real_t(5), real_t(61), real_t(67));
+   WALBERLA_CHECK(!archDeckFillBoxGeometry(tunnel).has_value());
+}
+
+void testArchBlockParamsDimsConversionMatchesRealBridge()
+{
+   // createArchBlock's dimension-based builder (SetupStages.h) takes base/xDim/yDim/zDim/radius
+   // instead of xMin/xMax/yMin/yMax/deckTopZ -- archBlockParams (SimulationParams.h) is the pure
+   // conversion between the two, checked here against the left arch's own real numbers: springing
+   // line at Z=56 (base), deck at Z=76 -> zDim=20 (NOT 15 -- zDim is measured from the springing
+   // line, not the crown, unlike deckTopZ which IS measured from world zero the same way center.z
+   // is), full opening width yDim=10 (2*radius, matching this bridge's own zero-haunch geometry),
+   // block thickness xDim=6 (61 to 67).
+   const auto tunnel = archBlockParams(Vector3< real_t >(64, 5, 56), real_t(6), real_t(10), real_t(20), real_t(5));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(tunnel.center, Vector3< real_t >(64, 5, 56), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.radius, real_t(5));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.xMin, real_t(61));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.xMax, real_t(67));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.yMin, real_t(0));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.yMax, real_t(10));
+   WALBERLA_CHECK_FLOAT_EQUAL(tunnel.deckTopZ, real_t(76));
+
+   // Feeding this straight into the already-tested deck-fill geometry function must reproduce
+   // exactly the same box as testArchDeckFillBoxGeometryRealBridge's own left-arch case -- confirms
+   // the dims-based builder and the prm-based path agree, not just that each half works alone.
+   const auto deckFill = archDeckFillBoxGeometry(tunnel);
+   WALBERLA_CHECK(deckFill.has_value());
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(deckFill->center, Vec3(real_t(64), real_t(5), real_t(68.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(deckFill->edgeLength, Vec3(real_t(6), real_t(10), real_t(15)), real_t(1e-9));
+}
+
+void testArchHaunchBoxGeometryRealBridgeIsDegenerate()
+{
+   // This bridge's own BodyBC arch boxes have Y-span EXACTLY equal to each arch's own diameter (no
+   // separate flat haunch wall beside the curve) -- confirmed directly against the BodyBC coordinates
+   // in prms/test_bridge_v1_*_gas.prm. yMin/yMax at their defaults must therefore make BOTH haunch
+   // sides degenerate for all three arches, for every one of this bridge's scenario prms.
+   const ArchTunnelParams left(Vector3< real_t >(0, 5, 56), real_t(5), real_t(61), real_t(67));
+   const ArchTunnelParams central(Vector3< real_t >(0, 30, 56), real_t(10), real_t(61), real_t(67));
+   const ArchTunnelParams right(Vector3< real_t >(0, 55, 56), real_t(5), real_t(61), real_t(67));
+
+   for (const auto& tunnel : { left, central, right })
+   {
+      WALBERLA_CHECK(!archHaunchBoxGeometry(tunnel, ArchHaunchSide::Left).has_value());
+      WALBERLA_CHECK(!archHaunchBoxGeometry(tunnel, ArchHaunchSide::Right).has_value());
+   }
+}
+
+void testArchHaunchBoxGeometryWidenedAbutment()
+{
+   // Synthetic scenario for an abutment wider than its own opening (not true of today's bridge, but
+   // a real future case per ArchTunnelParams's own comment) -- radius 5 opening at Y=5, abutment
+   // running Y=[-2,12] (3 LU wider on each side than the circular opening's own Y=[0,10] span).
+   const ArchTunnelParams tunnel(Vector3< real_t >(0, 5, 56), real_t(5), real_t(61), real_t(67), real_t(-2), real_t(12));
+
+   const auto leftHaunch = archHaunchBoxGeometry(tunnel, ArchHaunchSide::Left);
+   WALBERLA_CHECK(leftHaunch.has_value());
+   // width = (5-5) - (-2) = 2; center Y = -2 + 2/2 = -1; center Z = 56 + 5/2 = 58.5.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(leftHaunch->center, Vec3(real_t(64), real_t(-1), real_t(58.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(leftHaunch->edgeLength, Vec3(real_t(6), real_t(2), real_t(5)), real_t(1e-9));
+
+   const auto rightHaunch = archHaunchBoxGeometry(tunnel, ArchHaunchSide::Right);
+   WALBERLA_CHECK(rightHaunch.has_value());
+   // width = 12 - (5+5) = 2; center Y = 12 - 2/2 = 11.
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(rightHaunch->center, Vec3(real_t(64), real_t(11), real_t(58.5)), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(rightHaunch->edgeLength, Vec3(real_t(6), real_t(2), real_t(5)), real_t(1e-9));
+}
+
+void testArchDeckFillBoxCollidesSphereAboveCrown()
+{
+   // Left arch's own deck-fill box (see testArchDeckFillBoxGeometryRealBridge): center (64,5,68.5),
+   // edgeLength (6,10,15) -> half-extents (3,5,7.5) -> Z in [61,76]. A sphere centred just below the
+   // crown (Z=60.5, radius 1) reaches up to Z=61.5 -- 0.5 LU into the deck-fill box. This is exactly
+   // the case SetupStages.h::createArchSolidElements exists to catch: a floater kicked hard enough to
+   // reach above the crown while still inside the arch's own axial/Y span.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(64), real_t(5), real_t(60.5)));
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(64), real_t(5), real_t(68.5)));
+   box->setRotation(mesa_pd::Rot3());
+
+   const mesa_pd::data::Sphere sphereShape(real_t(1));
+   const mesa_pd::data::Box    boxShape(Vec3(real_t(6), real_t(10), real_t(15)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(scd(0, 1, sphereShape, boxShape, ac));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), real_t(-0.5), real_t(1e-9));
+   WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(-1)), real_t(1e-9));
+}
+
+void testArchDeckFillBoxNoContactInsideOpenBore()
+{
+   // Same deck-fill box as above; sphere safely below the crown (top of sphere at Z=60.5 < crownZ=61)
+   // -- must NOT register a contact against the deck-fill slab while merely passing through the open
+   // tunnel bore below it.
+   auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
+   mesa_pd::data::ParticleAccessor ac(ps);
+
+   auto sphere = ps->create();
+   sphere->setPosition(Vec3(real_t(64), real_t(5), real_t(60)));
+   auto box = ps->create();
+   box->setPosition(Vec3(real_t(64), real_t(5), real_t(68.5)));
+   box->setRotation(mesa_pd::Rot3());
+
+   const mesa_pd::data::Sphere sphereShape(real_t(0.5));
+   const mesa_pd::data::Box    boxShape(Vec3(real_t(6), real_t(10), real_t(15)));
+
+   SolidCylinderContactDetection scd;
+   WALBERLA_CHECK(!scd(0, 1, sphereShape, boxShape, ac));
+}

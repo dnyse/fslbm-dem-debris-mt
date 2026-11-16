@@ -1,0 +1,329 @@
+// test_bridge_v1_toy_trunk_first_staggered_gas.prm
+// ─────────────────────────────────────────────────────────────────────────────
+// TOY-SCALE VALIDATION of a "main trunk released first, then rest staggered" release scheme, before
+// applying the same scheme to the real-scale pont_ferroviere debris scenarios. Built on
+// test_bridge_v1_raisedwater_bigjam_mixed_level3_DEBUG_widerstacks_nogjk_lowwater_gas.prm's validated
+// geometry/physics (liquidHeightFactor=2.0, job 4167764 COMPLETED cleanly at 100000 steps) -- ONLY
+// the floater set changed (see FloatingCylinders/FloatingBoxes' own header) and
+// useContactFilterOwnerTiebreak added to ModelParameters (the mesa_pd::mpi::ContactFilter owner-rank
+// tiebreak fix -- see src/mesa_pd/mpi/ContactFilter.h's own doc comment). Needed here because a
+// FloatingBox x FloatingCylinder pair (the trunk vs. any box) has NO analytic contact overload in
+// this codebase and unconditionally falls through to GJK/EPA (confirmed earlier this session) --
+// so this scenario genuinely exercises the same GJK/ghost-sync-disagreement risk the fix addresses,
+// even though liquidHeightFactor=2.0 keeps everything analytically-safe on the box-only side.
+// timesteps 100000 -> 65000 -> 150000: the 65000-step validation (job 4176072) COMPLETED cleanly,
+// zero RELEASE-OVERLAP/STALE-PARTICLE-IDX/WALBERLA_ABORT -- confirming the trunk-first, size-scaled
+// staggering scheme itself works. Bumped to 150000 for a longer observation window (105000 steps
+// after the last release at t=45000, vs. the validation's ~20000) to see whether the jam holds,
+// evolves, or breaks up over a much longer horizon, before applying this scheme to the real-scale
+// pont_ferroviere scenarios.
+// ─────────────────────────────────────────────────────────────────────────────
+
+BlockForestParameters
+{
+   cellsPerBlock                 < 32, 20, 15 >;
+   periodicity                   < 1, 0, 0 >;
+   loadSnapshot                  false;
+   storeSnapshot                 true;
+   snapshotFrequency             10000;
+   snapshotBaseFolder            snapshots;
+}
+
+DomainParameters
+{
+   domainSize         <128, 60, 90>;
+   wavePeriods        1;
+   liquidHeightFactor 2.0;  // LOW-WATER variant -- see this file's own header; absoluteLiquidHeight~49.1, below the springing line (56)
+   floorHeightFactor  4.1393;
+   initialAmplitude   0;
+}
+
+PIDParameters
+{
+   targetMeanVelocityMagnitude 0.01;
+   proportionalGain            2e-4;
+   derivativeGain              1e-6;
+   integralGain                2e-4;
+   maxRamp                     1e-4;
+   minActuatingVariable        0;
+   maxActuatingVariable        1e-3;
+}
+
+PhysicsParameters
+{
+   enableWetting     false;
+   timesteps         150000;
+   Re                3100;
+   Fr                1.31;
+   We                15.6188;
+   useHardcodedUnits true;
+   // no gravityOverride -- dynamically computed gravity
+}
+
+ParticleParameters
+{
+   inFileName spheres_out.dat;
+   bedCopiesInX 1;
+   bedCopiesInY 1;
+   densityRatio 2.55;
+   fixingHeightFactor 1.5;
+   frictionCoefficient 0.5;
+   restitutionCoefficient 0.3; // wet/waterlogged wood-wood -- these are floating logs, soaked, not dry timber
+   numSubCycles 40; // unchanged from the base widerstacks file -- see that file's own header for the
+                     // 10->20->30->40 history.
+   useLubricationCorrection true;
+   useNoSlipParticles false;
+   useParticleBed false;
+}
+
+// DEM bodies matching the BodyBC piers exactly (BodyBC is LBM-only -- floaters need a real mesa_pd
+// body to collide with, and nothing else creates one). 4 cylinders (the piers' round end-caps,
+// radius 5) + 2 boxes (the connecting box between them, halfExtents = half of X=61-67/Y=10-20-or-
+// 40-50/Z=0-76). center Z is cosmetic (CylindricalBoundary is infinite along its axis).
+CylinderPillars
+{
+   CylinderPillar { center < 61, 15, 38 >; radius 5; }
+   CylinderPillar { center < 67, 15, 38 >; radius 5; }
+   CylinderPillar { center < 61, 45, 38 >; radius 5; }
+   CylinderPillar { center < 67, 45, 38 >; radius 5; }
+}
+
+Pillars
+{
+   Pillar { center < 64, 15, 38 >; halfExtents < 3, 5, 38 >; }
+   Pillar { center < 64, 45, 38 >; halfExtents < 3, 5, 38 >; }
+}
+
+// One entry per arch, matching the BodyBC arch cylinders below exactly (center Y/Z, radius).
+// xMin/xMax DELIBERATELY set to the piers' own straight-box span (61..67).
+ArchTunnels
+{
+   ArchTunnel { center < 0, 5, 56 >;  radius 5;  xMin 61; xMax 67; deckTopZ 76; }  // left arch
+   ArchTunnel { center < 0, 30, 56 >; radius 10; xMin 61; xMax 67; deckTopZ 76; }  // central arch
+   ArchTunnel { center < 0, 55, 56 >; radius 5;  xMin 61; xMax 67; deckTopZ 76; }  // right arch
+}
+
+// Log-jam debris: 9 upstream aim points (2 rows: X=15/X=40), 6 stacked "logs" per point per
+// shape, staggered release (startInactive + settlingSteps). Identical to the nogjk file's
+// FloatingBoxes/FloatingSpheres blocks -- only liquidHeightFactor changed (see header).
+// Trunk-first staggered-release VALIDATION: 3 aim points (one per arch), each spawns its own
+// "main trunk" (large FloatingCylinder) FIRST (settlingSteps=2000), then 10 smaller secondary
+// pieces (5 cylinders + 5 boxes, alternating) staggered every 4000 steps starting at t=9000 --
+// a 7000-step head start for the trunk before ANY secondary piece shares its spawn point. Gaps
+// sized against this domain's own targetMeanVelocityMagnitude=0.01 LU/step: the largest common
+// piece (12 LU box/cylinder) needs >=1200 steps to clear at that speed even at full instantaneous
+// speed (optimistic) -- 4000 steps gives >3x margin for spin-up lag. The trunk (22 LU) needs
+// >=2200 steps naive; its 7000-step head start gives >3x margin too. See conversation for the
+// derivation (this directly tests the fix for job 4175745/4175896's RELEASE-OVERLAP crashes,
+// which used a flat 400-9000-step gap not scaled to piece size).
+FloatingCylinders
+{
+   // left arch (Y=5): trunk released FIRST, then 10 secondary pieces staggered
+   FloatingCylinder { position < 15, 5, 86 >; radius 2; length 22; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  2000; startInactive true; }  // main trunk
+   FloatingCylinder { position < 15, 5, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps   9000; startInactive true; }
+   FloatingCylinder { position < 15, 5, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingCylinder { position < 15, 5, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  25000; startInactive true; }
+   FloatingCylinder { position < 15, 5, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  33000; startInactive true; }
+   FloatingCylinder { position < 15, 5, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  41000; startInactive true; }
+
+   // central arch (Y=30): trunk released FIRST, then 10 secondary pieces staggered
+   FloatingCylinder { position < 15, 30, 86 >; radius 2; length 22; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  2000; startInactive true; }  // main trunk
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps   9000; startInactive true; }
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  25000; startInactive true; }
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  33000; startInactive true; }
+   FloatingCylinder { position < 15, 30, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  41000; startInactive true; }
+
+   // right arch (Y=55): trunk released FIRST, then 10 secondary pieces staggered
+   FloatingCylinder { position < 15, 55, 86 >; radius 2; length 22; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  2000; startInactive true; }  // main trunk
+   FloatingCylinder { position < 15, 55, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps   9000; startInactive true; }
+   FloatingCylinder { position < 15, 55, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  17000; startInactive true; }
+   FloatingCylinder { position < 15, 55, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  25000; startInactive true; }
+   FloatingCylinder { position < 15, 55, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  33000; startInactive true; }
+   FloatingCylinder { position < 15, 55, 86 >; radius 1.38; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps  41000; startInactive true; }
+}
+
+FloatingBoxes
+{
+   FloatingBox { position < 15, 5, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  13000; startInactive true; }
+   FloatingBox { position < 15, 5, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  21000; startInactive true; }
+   FloatingBox { position < 15, 5, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  29000; startInactive true; }
+   FloatingBox { position < 15, 5, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  37000; startInactive true; }
+   FloatingBox { position < 15, 5, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  45000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  13000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  21000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  29000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  37000; startInactive true; }
+   FloatingBox { position < 15, 30, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  45000; startInactive true; }
+   FloatingBox { position < 15, 55, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  13000; startInactive true; }
+   FloatingBox { position < 15, 55, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  21000; startInactive true; }
+   FloatingBox { position < 15, 55, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  29000; startInactive true; }
+   FloatingBox { position < 15, 55, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  37000; startInactive true; }
+   FloatingBox { position < 15, 55, 86 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps  45000; startInactive true; }
+}
+
+ModelParameters
+{
+   useAnalyticalContactDetection true;  // Box x Box -> boxBoxSAT (analytic), same as the base file.
+   useArchTunnelAsMesaPDObject   true;  // arches as real mesa_pd CylindricalBoundary containment
+                                        // bodies -- Sphere/Box x CylindricalBoundary is analytic
+                                        // regardless (this showcase's own SolidCylinderContactDetection
+                                        // override), same as the base file.
+   useContactFilterOwnerTiebreak true;  // see this file's own header -- GJK involved via box x cylinder pairs
+   pdfReconstructionModel        OnlyMissing;
+   pdfRefillingModel             EquilibriumRefilling;
+   excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;
+   curvatureModel                FiniteDifferenceMethod;
+   useSimpleMassExchange         false;
+   cellConversionThreshold       1e-2;
+   cellConversionForceThreshold  1e-1;
+   useBognerReconstruction       true;
+   usePass3Reresolution          true;
+   useBognerThreePhaseMEM        true;
+   useMemOnlyBuoyancy            true;
+   logFloaterHistory              false;
+}
+
+EvaluationParameters
+{
+   performanceLogFrequency 5000;
+   evaluationFrequency     1000;
+   baseFolderName          eval;
+}
+
+StabilityChecker
+{
+   checkFrequency 0;
+   streamOutput   false;
+   vtkOutput      true;
+}
+
+BoundaryParameters
+{
+   Border { direction T;  walldistance -1; NoSlip{} }
+   Border { direction B;  walldistance -1; NoSlip{} }
+   Border { direction N;  walldistance -1; NoSlip{} }
+   Border { direction S;  walldistance -1; NoSlip{} }
+
+   // Pier 1 (Y-centre 15): stadium shape = two round end-caps + a connecting box. Capped at Z=76
+   // (the deck top), NOT the full domain height -- piers stop flush with the top of the bridge
+   // instead of poking up into the open air above it.
+   BodyBC
+   {
+      shape LogicalOR;
+      first
+      {
+         shape LogicalOR;
+         first  { shape Cylinder; min < 61, 15, 0 >; max < 61, 15, 76 >; radius 5; }
+         second { shape Cylinder; min < 67, 15, 0 >; max < 67, 15, 76 >; radius 5; }
+      }
+      second { shape Box; min < 61, 10, 0 >; max < 67, 20, 76 >; }
+      NoSlip{}
+   }
+
+   // Pier 2 (Y-centre 45): same stadium shape, same Z=76 cap
+   BodyBC
+   {
+      shape LogicalOR;
+      first
+      {
+         shape LogicalOR;
+         first  { shape Cylinder; min < 61, 45, 0 >; max < 61, 45, 76 >; radius 5; }
+         second { shape Cylinder; min < 67, 45, 0 >; max < 67, 45, 76 >; radius 5; }
+      }
+      second { shape Box; min < 61, 40, 0 >; max < 67, 50, 76 >; }
+      NoSlip{}
+   }
+
+   // Left arch (wall-to-pier1 span, Y=0..10, width 10 -> radius 5): same construction as
+   // the central arch, sized to its own span so the opening is a true semicircular
+   // half-pipe (full width at the springing line Z=56, point at the crown Z=61).
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 61, 0, 56 >; max < 67, 10, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 61, 5, 56 >; max < 67, 5, 56 >; radius 5; }
+      }
+      NoSlip{}
+   }
+
+   // Central arch (pier1-to-pier2 span, Y=20..40, width 20 -> radius 10): full width at
+   // Z=56, crown at Z=66.
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 61, 20, 56 >; max < 67, 40, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 61, 30, 56 >; max < 67, 30, 56 >; radius 10; }
+      }
+      NoSlip{}
+   }
+
+   // Right arch (pier2-to-wall span, Y=50..60, width 10 -> radius 5): mirrors the left arch.
+   BodyBC
+   {
+      shape LogicalAND;
+      first { shape Box; min < 61, 50, 56 >; max < 67, 60, 76 >; }
+      second
+      {
+         shape LogicalNOT;
+         first { shape Cylinder; min < 61, 55, 56 >; max < 67, 55, 56 >; radius 5; }
+      }
+      NoSlip{}
+   }
+}
+
+MeshOutputParameters
+{
+   writeFrequency 0;
+   baseFolder     mesh-out;
+}
+
+VTK
+{
+   fluid_field
+   {
+      writeFrequency       1000;
+      ghostLayers          0;
+      baseFolder           vtk-out;
+      samplingResolution   1;
+      useMPIIO false;
+
+      writers
+      {
+         velocity;
+         fill_level;
+         mapped_flag;  // cell type per timestep: 1=liquid 2=interface 3=gas 4=noSlip 6=freeSlip/UBB
+                       // 7=UBB-inflow 8=pressure 9=pressure-outflow 10=outlet (VtkWriter.h) -- lets
+                       // the bridge geometry (piers/deck/arches, all NoSlip=4) be isolated directly
+                       // in ParaView (Threshold filter on mapped_flag == 4), independent of the water.
+      }
+
+      // Z bound tightened from 150 to 90 to match this file's own reduced domainSize.z (was
+      // harmlessly stale/oversized before, just clipped at the actual domain boundary).
+      CellBB_filter_0 { min < 0, 29, 0 >;  max < 128, 30, 90 >; }
+      CellBB_filter_1 { min < 0, 0, 0 >;   max < 1, 60, 90 >; }
+      CellBB_filter_2 { min < 0, 0, 0 >;   max < 128, 60, 90 >; }
+
+      inclusion_filters
+      {
+         CellBB_filter_0;
+         CellBB_filter_1;
+         CellBB_filter_2;
+      }
+
+      before_functions { gas_cell_zero_setter; }
+   }
+
+   domain_decomposition
+   {
+      writeFrequency             10000000000;
+      baseFolder                 vtk-out;
+      outputDomainDecomposition  true;
+   }
+}

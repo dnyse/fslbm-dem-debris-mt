@@ -101,12 +101,72 @@ investigated further." Moved out of `DEMValidationScenarios.h`/`DEMValidation.cp
 with its 2 dedicated prms (`dem_validation_arch_tunnel.prm`, `dem_validation_arch_tunnel_box.prm` --
 neither was referenced by any sbatch job).
 
-**NOT archived**: `ComputeTunnelContacts` itself (`ParticleKernels.h`) is untouched -- it is still
-live, working production code, used by a much larger family of `test_bridge_v1_*` prms (dozens of
-files) and supporting code in `SetupStages.h`/`SimulationObjects.h`/`Utility.h`. That whole bridge
-case-study code/config set is a separate, much bigger decision than this one DEM-validation test and
-was deliberately left out of this archival pass -- flag to the author if a fuller cleanup of it is
-wanted.
+**[Claude, 2026-11-16] Fuller cleanup completed at the author's request** -- the whole bridge
+case-study code/config set flagged above as a separate decision is now archived too, completing
+this entry. Grepped the entire repo root (not just this directory) for every symbol below before
+removing anything.
+
+Moved into this same directory:
+- `ComputeTunnelContacts.h`: the full feature, self-contained -- `ArchTunnelParams`/`ArchSolidBox`/
+  `archDeckFillBoxGeometry`/`archBlockParams`/`ArchHaunchSide`/`archHaunchBoxGeometry`/
+  `parseArchTunnels` (all originally `SimulationParams.h`), `createArchTunnel` (originally
+  `Utility.h`), and the `ComputeTunnelContacts` class itself (originally `ParticleKernels.h`,
+  ~400 lines). Stays compilable by hand: includes `ParticleKernels.h` (for `FloaterHistoryLogger`
+  and `closed_form_contacts::detail::farthestThetaOnCircleToLine`) and `Utility.h`.
+- `DEMEngine_addArchTunnel.h.excerpt`: `DEMEngine::addArchTunnel` and its two private members
+  (`DEMValidationInfra.h`) -- confirmed zero callers anywhere except `arch_tunnel_containment_test.h`
+  (this directory), which now needs this excerpt re-added by hand to recompile. Note added to that
+  test's own header documenting the dependency.
+- `arch_tunnel_box_tests.cpp.excerpt`: `testArchTunnelBoxContainmentHandDerived`/
+  `testArchTunnelBoxContainmentNoContact`, excerpted verbatim from
+  `tests/showcases_antidunes/PaperAnalyticalContactTest.cpp` (lines 4256-4407 at archive time),
+  their 2 call sites removed from that file's `main()`.
+- `arch_geometry_tests.cpp.excerpt`: the 7 `testArch*Geometry*`/`testArchDeckFillBox*` functions,
+  excerpted verbatim from `tests/showcases_antidunes/ContactDetectionTest.cpp` (lines 1416-1575 at
+  archive time), their 7 call sites removed from that file's own `main()`.
+- `prms/test_bridge_v1*.prm` (46 files) and `jobs/run_*test_bridge_v1*.sbatch` (48 files), alongside
+  the 2 `dem_validation_arch_tunnel*.prm` already here from the first pass.
+- `bridge_layout_optimizer.py`, `bridge_voxel_build.py`, `bridge_voxel_render_full.py`,
+  `bridge_voxel_view.py`, and their generated outputs (`bridge_layout.html`, `bridge_layout.png`,
+  `bridge_voxels_full.npz`, `bridge_voxels_full.png`, `bridge_voxels.png`). Compiled `__pycache__`
+  for these scripts was deleted outright, not archived (regeneratable, not source).
+
+Removed from production (verified via repo-wide grep before and after, both targeted symbol
+searches and a full rebuild of `Antidunes`/`DEMValidation`/`DropTest`/`BedGeneration`, clean):
+- `SimulationParams.h`: the `ArchTunnelParams` struct family and `parseArchTunnels` (moved whole,
+  see above), the `archTunnels` field + its constructor init, and the `useArchTunnelAsMesaPDObject`
+  field + its constructor init and doc comment.
+- `ParticleKernels.h`: the `ComputeTunnelContacts` class (moved, see above) and every wiring site --
+  the `computeTunnelContacts_` member, its lazy construction in the `ParticleKernels` constructor
+  (gated on `useArchTunnelAsMesaPDObject`), `setHistoryLogger`/`setStepInfo` forwarding, and the
+  `forEachParticle` invocation in the main DEM sub-cycle. `FloaterHistoryLogger::logTunnelContact`
+  was deliberately left in place -- the archived `ComputeTunnelContacts` still calls back into it,
+  same pattern as `feng2017_cylinder_cylinder_contact.h`'s continued use of `ClosedFormContacts.h`.
+  Several comments elsewhere in this file compare a *different*, still-live algorithm to
+  `ComputeTunnelContacts' own gate/bound/formula` as design precedent -- left untouched, still
+  accurate (the comparison doesn't depend on where `ComputeTunnelContacts` physically lives).
+- `Utility.h`: the `createArchTunnel` helper (moved, see above). `createContainerCylinder`'s own
+  doc comment ("same flags as `createArchTunnel` below") was left as an accurate historical
+  reference, not updated.
+- `SetupStages.h` and `SetupStages_drop_test.h` (identically duplicated in both): `createArchSolidElements`/
+  `createArchBlock` (both overloads) and the `useArchTunnelAsMesaPDObject`-gated construction loop
+  in `setupParticles`.
+- `DEMValidationInfra.h`: `DEMEngine::addArchTunnel` (excerpted, see above), its two private
+  members, and its `if (computeTunnelContacts_) ...` call in `DEMEngine::step()`.
+- `DEMValidation.cpp`: corrected the `archTunnelContainment` removal note (first pass) to stop
+  claiming `ComputeTunnelContacts` and the `test_bridge_v1_*` family are still live -- they're
+  archived now too.
+- Two generic prm-template comment strings (`gen_kodam_round_prm.py`, `gen_kodam_packing_prm.py`:
+  `"// No Pillars / CylinderPillars / ArchTunnels -- ..."`) were deliberately left alone -- they
+  describe the *absence* of these obstruction types in a generated prm, not a dependency on the
+  feature, and remain accurate either way.
+
+Left untouched, confirmed NOT part of this feature despite mentioning it by name: two comments in
+`tests/showcases_antidunes/ContactDetectionTest.cpp` comparing an unrelated, still-live cylinder
+contact gate to "`ComputeTunnelContacts`' own X-extent gate" (still accurate); three comments in
+`DEMValidationCornerAndMultiPoint.h` attributing a real, generic corner-contact bug to production
+job 4196224, which happened to be a bridge "widerstacks" scenario (the test itself is a generic
+box-corner regression check, unrelated to arch tunnels).
 
 ## unused_contact_methods/fraige_validation_tests.cpp.excerpt
 

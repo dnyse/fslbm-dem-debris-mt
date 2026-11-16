@@ -1,0 +1,45 @@
+//======================================================================================================================
+//
+//  This file is part of waLBerla. waLBerla is free software: you can
+//  redistribute it and/or modify it under the terms of the GNU General Public
+//  License as published by the Free Software Foundation, either version 3 of
+//  the License, or (at your option) any later version.
+//
+//  waLBerla is distributed in the hope that it will be useful, but WITHOUT
+//  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+//  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+//  for more details.
+//
+//  You should have received a copy of the GNU General Public License along
+//  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
+//! \file DEMEngine_addArchTunnel.h.excerpt
+//! \brief ARCHIVED: DEMEngine::addArchTunnel (DEMValidationInfra.h) and its two private members,
+//! excerpted verbatim at archive time (2026-11-16). Zero remaining callers in the live showcase --
+//! only arch_tunnel_containment_test.h (this same archive directory) ever called it. Reference
+//! only, NOT standalone-compilable: to recompile that archived test by hand, re-add this method
+//! and these two members to DEMEngine (DEMValidationInfra.h), and make ComputeTunnelContacts
+//! (ComputeTunnelContacts.h, this directory) visible to that file (e.g. via an #include). See
+//! archive/ARCHIVE_README.md.
+//
+// --- private members (DEMEngine class, DEMValidationInfra.h) ---
+//
+//    std::vector< ArchTunnelParams >                        tunnels_;
+//    std::unique_ptr< ComputeTunnelContacts >                computeTunnelContacts_;
+//
+// --- public method (DEMEngine class, DEMValidationInfra.h) ---
+//
+   //! Register one arch tunnel (see ParticleKernels.h::ComputeTunnelContacts for the full mechanism --
+   //! this is not a mesa_pd particle, just an entry in a small list ComputeTunnelContacts iterates
+   //! active floaters against directly). Lazily constructs computeTunnelContacts_ on first call.
+   void addArchTunnel(const Vec3& center, real_t radius, real_t xMin, real_t xMax, real_t frictionCoefficient)
+   {
+      tunnels_.emplace_back(center, radius, xMin, xMax);
+      computeTunnelContacts_ = std::make_unique< ComputeTunnelContacts >(
+         tunnels_, restitutionCoefficient_, kappa_, collisionTime_, frictionCoefficient);
+   }
+//
+// --- call site inside DEMEngine::step() (DEMValidationInfra.h), right after the main
+//     ComputeContacts pairwise sweep ---
+//
+//    if (computeTunnelContacts_)
+//       ps_->forEachParticle(false, kernel::SelectLocal(), *ac_, *computeTunnelContacts_, *ac_);

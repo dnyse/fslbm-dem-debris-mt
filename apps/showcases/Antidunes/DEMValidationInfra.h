@@ -184,16 +184,6 @@ public:
 
    size_t addWall(const Vec3& pos, const Vec3& normal) { return createPlane(*ps_, pos, normal).getIdx(); }
 
-   //! Register one arch tunnel (see ParticleKernels.h::ComputeTunnelContacts for the full mechanism --
-   //! this is not a mesa_pd particle, just an entry in a small list ComputeTunnelContacts iterates
-   //! active floaters against directly). Lazily constructs computeTunnelContacts_ on first call.
-   void addArchTunnel(const Vec3& center, real_t radius, real_t xMin, real_t xMax, real_t frictionCoefficient)
-   {
-      tunnels_.emplace_back(center, radius, xMin, xMax);
-      computeTunnelContacts_ = std::make_unique< ComputeTunnelContacts >(
-         tunnels_, restitutionCoefficient_, kappa_, collisionTime_, frictionCoefficient);
-   }
-
    //! Re-poses an existing wall (from addWall) in place -- HalfSpace's normal is immutable after
    //! construction (mesa_pd/data/shape/HalfSpace.h has no setter), so "rotating" a wall means replacing
    //! its baseShape with a freshly-built HalfSpace(newNormal) alongside setPosition. Used to animate a
@@ -251,9 +241,6 @@ public:
       linkedCells.forEachParticlePairHalf(
          false, kernel::ExcludeInfiniteInfinite(), *ac_,
          [this](const size_t idx1, const size_t idx2, auto& ac) { (*computeContacts_)(idx1, idx2, ac); }, *ac_);
-
-      if (computeTunnelContacts_)
-         ps_->forEachParticle(false, kernel::SelectLocal(), *ac_, *computeTunnelContacts_, *ac_);
 
       if (std::abs(gravityZ_) > real_t(0))
       {
@@ -398,8 +385,6 @@ private:
    std::unique_ptr< data::ParticleAccessorWithBaseShape > ac_;
    std::unique_ptr< kernel::AssocToBlock >                assoc_;
    std::unique_ptr< ComputeContacts >                     computeContacts_;
-   std::vector< ArchTunnelParams >                        tunnels_;
-   std::unique_ptr< ComputeTunnelContacts >                computeTunnelContacts_;
 
    kernel::VelocityVerletPreForceUpdate       preVV_;
    kernel::VelocityVerletPostForceUpdate      postVV_;

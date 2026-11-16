@@ -75,10 +75,10 @@ int main(int argc, char** argv)
    else if (testCase == "angleOfRepose") pass = dem_validation::runAngleOfRepose(block);
    else if (testCase == "packingSingleShape") pass = dem_validation::runPackingSingleShape(block);
    else if (testCase == "rotatingDrum") pass = dem_validation::runRotatingDrum(block);
-   // "archTunnelContainment" removed -- validates ComputeTunnelContacts for the real-scale bridge
-   // case study, intentionally excluded from the thesis (CLAUDE.md). Archived at
-   // archive/arch_tunnel_containment/ (ComputeTunnelContacts itself is untouched and still used by
-   // the test_bridge_v1_* prm family).
+   // "archTunnelContainment" removed -- validated ComputeTunnelContacts for the real-scale bridge
+   // case study, intentionally excluded from the thesis (CLAUDE.md). The whole bridge case study,
+   // including ComputeTunnelContacts itself and the test_bridge_v1_* prm family, is now archived at
+   // archive/arch_tunnel_containment/.
    else WALBERLA_ABORT("Unknown testCase '" << testCase
                                              << "'. Valid values: wallImpactSphere, wallImpactCylinder, "
                                                 "wallImpactBox, boxFaceDropRestitution, "

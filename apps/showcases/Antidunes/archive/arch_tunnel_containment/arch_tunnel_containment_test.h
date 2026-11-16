@@ -13,13 +13,17 @@
 //  You should have received a copy of the GNU General Public License along
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //! \file arch_tunnel_containment_test.h
-//! \brief ARCHIVED DEM-validation scenario for ComputeTunnelContacts (ParticleKernels.h) -- the
-//! arch/tunnel pillar-containment check for the real-scale Pont Ferroviere bridge case study
+//! \brief ARCHIVED DEM-validation scenario for ComputeTunnelContacts -- the arch/tunnel
+//! pillar-containment check for the real-scale Pont Ferroviere bridge case study
 //! (chapters/03_implementation/case-study/, chapters/04_results/case-study/ -- intentionally
 //! excluded from the thesis, see CLAUDE.md). Moved out of DEMValidationScenarios.h 2026-10-29;
-//! see archive/ARCHIVE_README.md. NOTE: ComputeTunnelContacts itself is NOT archived -- it is
-//! still live production code in ParticleKernels.h, used by the much larger test_bridge_v1_*
-//! prm family (also not archived); only this one DEM-validation test moved.
+//! see archive/ARCHIVE_README.md.
+//! UPDATE [2026-11-16]: ComputeTunnelContacts itself, and the rest of the bridge case study, is
+//! now ALSO archived (see ComputeTunnelContacts.h, this same directory) -- the note below that it
+//! was "still live production code" no longer holds. This test is therefore reference only, no
+//! longer standalone-compilable: it calls engine.addArchTunnel(), which was removed from
+//! DEMEngine (DEMValidationInfra.h) in the same pass -- see DEMEngine_addArchTunnel.h.excerpt
+//! (this directory) to restore it by hand.
 #pragma once
 
 #include "../../DEMValidationScenarios.h"
