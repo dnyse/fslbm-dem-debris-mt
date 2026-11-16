@@ -24,6 +24,7 @@
 #include "core/debug/Debug.h"
 #include "core/logging/Logging.h"
 
+#include "core/mpi/MPIManager.h"
 #include "core/mpi/Reduce.h"
 
 #include "domain_decomposition/StructuredBlockStorage.h"
@@ -366,6 +367,8 @@ class PdfReconstructionManager
    //! [Claude, 2026-10-10] prm ModelParameters.strictBognerNoLiquidAtGas: with the strict rule, a freed cell decided liquid that
    //! touches a (non-obstacle) gas cell once all decisions of the step are applied becomes interface with fill 1 instead (see Pass 2)
    void setStrictBognerNoLiquidAtGas(bool on) { strictBognerNoLiquidAtGas_ = on; }
+   //! [Claude, 2026-11-12] prm ModelParameters.strictBognerRelaxInterface -- see member doc below.
+   void setStrictBognerRelaxInterface(bool on) { strictBognerRelaxInterface_ = on; }
 
    //! [Claude, 2026-10-09] momentum budget diagnostic: what the cells freed since the last call carry into the fluid, weighted
    //! like fluid mass (liquid 1, interface its fill, gas 0) after this step's classification -- {Px, Py, Pz, L_y about the
@@ -439,6 +442,14 @@ class PdfReconstructionManager
                                    << sb[0] << " | liquid touching gas after the step=" << sb[1]
                                    << " | of these made interface (strictBognerNoLiquidAtGas)=" << sb[2]);
          strictGasWithoutGas_ = strictLiquidTouchingGas_ = strictLiquidToInterface_ = uint_t(0);
+         if (strictBognerRelaxInterface_)
+         {
+            std::vector< uint_t > sr = { strictRelaxedToGas_, strictRelaxedToLiquid_, strictRelaxedStillInterface_ };
+            walberla::mpi::reduceInplace(sr, walberla::mpi::SUM);
+            WALBERLA_LOG_INFO_ON_ROOT("[FORMERMO-RELAX t=" << t << "] strictBognerRelaxInterface since last report: relaxed to gas="
+                                      << sr[0] << " relaxed to liquid=" << sr[1] << " still genuinely interface=" << sr[2]);
+            strictRelaxedToGas_ = strictRelaxedToLiquid_ = strictRelaxedStillInterface_ = uint_t(0);
+         }
       }
       convGas_ = convLiquid_ = convIntfUnknown_ = convIntfUnknownGas_ = convIntfSurface_ = convIntfUnresolved_ = uint_t(0);
       formerMoTotal_ = formerMoWithUnknownNbr_ = unknownNbrSum_ = unknownNbrMax_ = uint_t(0);
@@ -573,6 +584,16 @@ class PdfReconstructionManager
    uint_t     strictLiquidTouchingGas_    = uint_t(0);
    bool       strictBognerNoLiquidAtGas_  = false;    // see setStrictBognerNoLiquidAtGas
    uint_t     strictLiquidToInterface_    = uint_t(0);
+   // [Claude, 2026-11-12] third local pass, after strictBognerNoLiquidAtGas's liquid-touching-gas fix: relax
+   // any cell now INTERFACE (whether from the strict rule's own both/neither branches or just promoted above)
+   // back to GAS or LIQUID if its real, now-fully-decided D3Q27 neighbourhood shows only one phase. A no-op
+   // unless strictBognerClassification_ and strictBognerNoLiquidAtGas_ are also on. See the setter and the
+   // SimulationParams.h member doc for the motivating argument (usePass3Reresolution can reintroduce the exact
+   // violation strictBognerNoLiquidAtGas fixes; this pass is verified not to, decide-then-apply like Pass 3).
+   bool       strictBognerRelaxInterface_ = false;
+   uint_t     strictRelaxedToGas_         = uint_t(0);
+   uint_t     strictRelaxedToLiquid_      = uint_t(0);
+   uint_t     strictRelaxedStillInterface_= uint_t(0);
    // [Claude, 2026-10-01] seeding bookkeeping (inner cells, since the last logAndResetConversionCounts): interface cells
    // seeded, how many of them fell back to 0.5, and the sum of their seeded fill (= liquid volume created, in cells)
    mutable uint_t seededInterfaceCells_    = uint_t(0);
@@ -975,12 +996,20 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
          particleField->get(d.cell) = ac_->getInvalidUid();
       }
 
+      // [Claude, 2026-11-12] Per-sweep, per-RANK-local promote/relax activity, for the next real clogging run:
+      // deliberately NOT mpi::reduceInplace'd like strictLiquidToInterface_/strictRelaxedToGas_/
+      // strictRelaxedToLiquid_ above (those accumulate across many sweeps and are only reported, reduced,
+      // on the periodic logAndResetConversionCounts() call) -- this is a raw, immediate, rank-local dump
+      // of THIS single operator() call only, printed below with no cross-process communication at all.
+      uint_t localPromotedThisSweep = uint_t(0), localRelaxedToGasThisSweep = uint_t(0),
+             localRelaxedToLiquidThisSweep = uint_t(0);
+
       // a new liquid cell next to gas (possible when cells freed in the same step go different ways: Y has no gas in B(x) and
       // becomes liquid, its freed neighbour Z no liquid and becomes gas). Counted; with strictBognerNoLiquidAtGas_ (prm
       // strictBognerNoLiquidAtGas) the liquid cell becomes interface with fill 1, since a liquid cell next to gas streams the
       // gas cell's invalid PDFs (THESIS_PLAN.md 2026-10-10: NaN of the r025 cuboid 4320573 at step 14439). Inner cells only:
       // the flag field is communicated right after this sweep, so the owner's decision reaches the ghost layers.
-      for (const auto& d : decisions)
+      for (auto& d : decisions)
       {
          if (d.target != bognerLiquid || !isInner(d.cell.x(), d.cell.y(), d.cell.z())) continue;
          bool touches = false;
@@ -998,7 +1027,66 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             if constexpr (!std::is_void_v< ScalarField_T >)
                if (fillField != nullptr) fillField->get(d.cell) = real_t(1);
             ++strictLiquidToInterface_;
+            ++localPromotedThisSweep;
+            d.target = bognerInterface; // [Claude, 2026-11-12] so the relax pass below sees this cell's FINAL
+                                         // (post-promotion) state, not its stale Round-0 "liquid" classification
          }
+      }
+
+      // [Claude, 2026-11-12] Round 2 (strictBognerRelaxInterface_, no-op unless strictBognerNoLiquidAtGas_ is
+      // also on): every cell now INTERFACE -- whether from the strict rule's own both/neither branches above,
+      // or just promoted by the loop directly above -- is re-scanned against the real flag field, which by
+      // this point already reflects every Round-0 and Round-1 decision (both loops above call setDomain
+      // immediately). Decide-then-apply, same as Pass 3, so relax decisions don't see each other mid-pass:
+      // verified (thesis Overleaf session 2026-11-12, ~7,884 synthetic 3D scenarios) that this still produces
+      // zero liquid-directly-touching-gas violations, unlike usePass3Reresolution, which reads neighbours'
+      // frozen PASS-2 (pre-correction) values and so can let two independently-corrected neighbours end up on
+      // opposite sides of the invariant. A cell relaxes to GAS/LIQUID only if its real neighbourhood now shows
+      // just one phase; genuinely mixed (both) or still-no-evidence (neither) cells stay interface.
+      if (strictBognerNoLiquidAtGas_ && strictBognerRelaxInterface_)
+      {
+         struct RelaxDecision { Cell cell; flag_t target; };
+         std::vector< RelaxDecision > relaxDecisions;
+         for (const auto& d : decisions)
+         {
+            if (d.target != bognerInterface || !isInner(d.cell.x(), d.cell.y(), d.cell.z())) continue;
+            bool hasGas = false, hasLiquid = false;
+            for (int dz = -1; dz <= 1; ++dz)
+               for (int dy = -1; dy <= 1; ++dy)
+                  for (int dx = -1; dx <= 1; ++dx)
+                  {
+                     if (dx == 0 && dy == 0 && dz == 0) continue;
+                     const flag_t nf = getBoundedNeighbourFlag(d.cell.x(), d.cell.y(), d.cell.z(), dx, dy, dz);
+                     if (isFlagSet(nf, movingObstacle)) continue; // currently solid -- pure exclusion, as elsewhere
+                     if (isFlagSet(nf, bognerLiquid)) hasLiquid = true;
+                     if (isFlagSet(nf, bognerGas)) hasGas = true;
+                  }
+            if (hasGas && !hasLiquid) relaxDecisions.push_back({ d.cell, bognerGas });
+            else if (hasLiquid && !hasGas) relaxDecisions.push_back({ d.cell, bognerLiquid });
+            else { ++strictRelaxedStillInterface_; }
+         }
+         for (const auto& r : relaxDecisions)
+         {
+            boundaryHandling->setDomain(r.target, r.cell.x(), r.cell.y(), r.cell.z());
+            if constexpr (!std::is_void_v< ScalarField_T >)
+               if (fillField != nullptr) fillField->get(r.cell) = (r.target == bognerLiquid) ? real_t(1) : real_t(0);
+            if (r.target == bognerGas) { ++strictRelaxedToGas_; ++localRelaxedToGasThisSweep; }
+            else { ++strictRelaxedToLiquid_; ++localRelaxedToLiquidThisSweep; }
+         }
+      }
+
+      // [Claude, 2026-11-12] Per-sweep, per-rank dump (no MPI communication -- every rank prints its OWN
+      // count independently, so this scales to production process counts without a reduction every step):
+      // only when this single operator() call actually promoted a liquid cell to interface
+      // (strictBognerNoLiquidAtGas_) or relaxed an interface cell back to gas/liquid (strictBognerRelaxInterface_)
+      // -- silent otherwise, so a quiet sweep produces no output at all.
+      const uint_t localRelaxedThisSweep = localRelaxedToGasThisSweep + localRelaxedToLiquidThisSweep;
+      if (localPromotedThisSweep > uint_t(0) || localRelaxedThisSweep > uint_t(0))
+      {
+         WALBERLA_LOG_INFO("[FORMERMO-RELAX-SWEEP] rank=" << walberla::mpi::MPIManager::instance()->rank()
+            << ": promoted liquid->interface=" << localPromotedThisSweep
+            << " | relaxed interface->gas=" << localRelaxedToGasThisSweep
+            << " | relaxed interface->liquid=" << localRelaxedToLiquidThisSweep);
       }
    }
    else if (optimizeForSmallObstacleFraction_)

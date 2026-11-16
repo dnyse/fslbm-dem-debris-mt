@@ -13,6 +13,20 @@ target_link_libraries ( ANTIDUNES_BognerStateClassification
       walberla::mesa_pd walberla::lbm_mesapd_coupling )
 waLBerla_execute_test( NAME ANTIDUNES_BognerStateClassification )
 
+# [Claude, 2026-11-12] Full-3D-grid stress test (real sphere/cylinder/cuboid floater sizes taken
+# directly from this thesis's own prm files) of the new toggleable strictBognerRelaxInterface
+# ("Round 2" relax) pass in PdfReconstructionManager.h, added this session alongside the existing
+# strictBognerClassification ("Round 0") and strictBognerNoLiquidAtGas ("Round 1") toggles. Also
+# runs pure strict Bogner alone and the legacy non-strict Pass-2+Pass-3 path over the same releases
+# for direct comparison -- demonstrating that both of those can leave a liquid cell directly
+# touching a gas cell, which the new Round-0+1+2 combination never does. Same build-unconditionally
+# convention as ANTIDUNES_BognerStateClassification (exercises the pure classifier functions only).
+waLBerla_add_test_executable ( ANTIDUNES_LiquidPromoteRelaxClassification LiquidPromoteRelaxClassificationTest.cpp )
+target_link_libraries ( ANTIDUNES_LiquidPromoteRelaxClassification
+      walberla::core walberla::domain_decomposition walberla::field walberla::lbm
+      walberla::mesa_pd walberla::lbm_mesapd_coupling )
+waLBerla_execute_test( NAME ANTIDUNES_LiquidPromoteRelaxClassification )
+
 # Follow-up to ANTIDUNES_CylinderTippingRodJam for job 4255679: is the ~171 deg rod flip bracketed by the real
 # [CylForces] log (steps 2700/2900) fast enough, relative to the DEM contact model's own calibrated collision
 # duration (tc = collisionTimeFactor * avgParticleDiameter), to plausibly under-resolve the resulting deep overlap?
