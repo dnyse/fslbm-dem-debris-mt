@@ -88,7 +88,7 @@ inline void closestPointsBetweenSegments(const Vec3& p1, const Vec3& q1, const V
    outC2 = p2 + d2 * t;
 }
 
-// [Claude, 2026-10-01] Contact point of two overlapping boxes for a given contact normal and penetration depth.
+// Contact point of two overlapping boxes for a given contact normal and penetration depth.
 // boxBoxSAT used to place the point on the line between the centres ("midpoint between the extreme points along the
 // winning axis"), which for elongated, rotated boxes can lie several units from the actual contact and outside both
 // bodies; the force then acts with a wrong lever arm, the contact does net work, and elastic collisions gained up to
@@ -103,7 +103,7 @@ inline void closestPointsBetweenSegments(const Vec3& p1, const Vec3& q1, const V
 //     the vertex. If the projections do not intersect (round-off at a feature boundary), the closest pair of points of
 //     the two features is used instead. The patches are bounding boxes and slightly larger than the penetrating parts,
 //     so the point is finally pulled into the intersection by alternating projection (pullIntoBoxIntersection).
-//  [Claude, 2026-10-02] Step 3 is now closed form (placeOnNormalLine): the line through the in-plane point along the
+// Step 3 is now closed form (placeOnNormalLine): the line through the in-plane point along the
 //     normal is clipped against the slabs of both boxes (clipLineToBox) and the point is the midpoint of the common
 //     interval; this moves the point only along the normal, the force's line of action, so the torque is unchanged.
 //     Where the line misses the intersection (wedge-shaped overlaps), the point is first moved in-plane to the nearest
@@ -192,7 +192,7 @@ inline P2 centroid(const std::vector< P2 >& poly, real_t eps)
    return P2{ real_t(0.5) * (lo.x + hi.x), real_t(0.5) * (lo.y + hi.y) };
 }
 
-// [Claude, 2026-10-01, revised] contact patch of a box in direction d (unit): the bounding box (in the body frame) of the
+// contact patch of a box in direction d (unit): the bounding box (in the body frame) of the
 // part of the box that lies within `depth` of its deepest point along d -- along axis i it reaches from the deepest end
 // over L_i = min(2 h_i, f depth / |d.a_i|), f = kPatchDepthFraction. Grows continuously from a vertex (depth -> 0) via an edge strip to a whole
 // face; the earlier yes/no classification (axis free if 2 h_i |d.a_i| <= depth) made the point jump by up to half an
@@ -225,11 +225,11 @@ inline std::vector< Vec3 > supportFeature(const Vec3& pos, const Vec3 axes[3], c
 }
 } // namespace box_contact_point
 
-//! [Claude, 2026-10-02] iteration statistics of pullIntoBoxIntersection (profiling; per thread-unsafe process counter)
+//! iteration statistics of pullIntoBoxIntersection (profiling; per thread-unsafe process counter)
 struct BoxPointIterationStats
 {
    uint64_t calls = 0, iterations = 0, maxIterations = 0, capped = 0;
-   uint64_t lineClipHits = 0;   // [Claude, 2026-10-02] the line through the planned point hit the intersection
+   uint64_t lineClipHits = 0;   // the line through the planned point hit the intersection
    uint64_t polytopeShifts = 0; // missed; moved in-plane onto the projected intersection polytope, then hit
    uint64_t projectionFallbacks = 0; // neither: alternating projection as the last resort
    void record(uint64_t n) { ++calls; iterations += n; maxIterations = std::max(maxIterations, n); if (n >= 2000) ++capped; }
@@ -240,7 +240,7 @@ inline BoxPointIterationStats& boxPointIterationStats()
    return st;
 }
 
-//! [Claude, 2026-10-01] moves a point into the intersection of two boxes by alternating projection (clamping in each
+//! moves a point into the intersection of two boxes by alternating projection (clamping in each
 //! body frame); continuous in the point and the configuration, and exact once the point is inside both
 inline Vec3 pullIntoBoxIntersection(Vec3 x, const Vec3& posA, const Vec3 axesA[3], const Vec3& halfA, const Vec3& posB,
                                     const Vec3 axesB[3], const Vec3& halfB)
@@ -264,7 +264,7 @@ inline Vec3 pullIntoBoxIntersection(Vec3 x, const Vec3& posA, const Vec3 axesA[3
    return x;
 }
 
-//! [Claude, 2026-10-02] clips the line x0 + t*dir against a box (slab test per body axis); narrows [tLo, tHi], which
+//! clips the line x0 + t*dir against a box (slab test per body axis); narrows [tLo, tHi], which
 //! is empty (tLo > tHi) afterwards if the line misses the box
 inline void clipLineToBox(const Vec3& x0, const Vec3& dir, const Vec3& pos, const Vec3 axes[3], const Vec3& half,
                           real_t& tLo, real_t& tHi)
@@ -285,7 +285,7 @@ inline void clipLineToBox(const Vec3& x0, const Vec3& dir, const Vec3& pos, cons
    }
 }
 
-//! [Claude, 2026-10-02] vertices of the intersection polytope of two boxes: the parts of every edge of one box that lie
+//! vertices of the intersection polytope of two boxes: the parts of every edge of one box that lie
 //! inside the other (clipLineToBox on the segment), for both boxes. These are all vertex-in-box points and all
 //! edge-face crossings, i.e. every vertex of the intersection (plus points on its edges, which do not change its hull).
 inline void boxIntersectionVertices(const Vec3& posA, const Vec3 axesA[3], const Vec3& halfA, const Vec3& posB,
@@ -315,7 +315,7 @@ inline void boxIntersectionVertices(const Vec3& posA, const Vec3 axesA[3], const
    clipEdges(posB, axesB, halfB, posA, axesA, halfA);
 }
 
-//! [Claude, 2026-10-02] point of the intersection of both boxes on the line through x0 along `normal`: midpoint of the
+//! point of the intersection of both boxes on the line through x0 along `normal`: midpoint of the
 //! common interval of the two line-box clips. If the line misses the intersection, x0 is first moved perpendicular to
 //! the normal to the closest point of the intersection's projection onto the contact plane (the convex hull of the
 //! projected intersection vertices); the move is continuous across the hit/miss boundary, and as it is perpendicular to
@@ -514,9 +514,9 @@ inline Vec3 boxBoxContactPoint(const Vec3& posA, const Vec3 axesA[3], const Vec3
 //! near-degenerate contact this project's contact model was ever tuned against.
 //!
 //! previousNormal/hysteresisMargin (default: nullptr/no hysteresis, exact pre-existing behaviour):
-//! the OTHER candidate fix for the same axis-flip discontinuity useRoundedCorners targets, requested
-//! directly after this session's own diagnosis of the defect -- a "sticky" axis selection instead of
-//! geometric rounding. Every candidate axis with gap within hysteresisMargin (relative) of the TRUE
+//! the OTHER candidate fix for the same axis-flip discontinuity useRoundedCorners targets -- a "sticky"
+//! axis selection instead of geometric rounding. Every candidate axis with gap within hysteresisMargin
+//! (relative) of the TRUE
 //! minimum gap is treated as "competitive"; among those, the one whose properly-signed normal aligns
 //! best with previousNormal is used, even if it is not the strict argmin. This directly targets the
 //! chatter itself (two nearly-tied axes flip-flopping every sub-cycle) without inflating the overlap
@@ -630,7 +630,7 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
    // Supplementary contact point (NOT from the paper, see class-level comment): midpoint between
    // the two boxes' extreme points along the winning axis. Only the component along `bestAxis` is
    // geometrically well-defined for a flush face-face/edge-edge configuration.
-   // [Claude, 2026-10-01] point from the touching features (detail::boxBoxContactPoint), no longer on the line between
+   // point from the touching features (detail::boxBoxContactPoint), no longer on the line between
    // the centres (former: 0.5 (posA + posB) + 0.5 sign (ra - rb) axis); see that function's comment.
    // ANTIDUNES_SAT_FORMER_POINT (env, any value): the former point, for before/after comparisons in the validation runs only
    static const bool formerPoint = std::getenv("ANTIDUNES_SAT_FORMER_POINT") != nullptr;
@@ -680,7 +680,7 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
    return result;
 }
 
-// [Claude, 2026-10-29] eberly_box_distance (Eberly's closed-form box-box distance, ported for
+// eberly_box_distance (Eberly's closed-form box-box distance, ported for
 // useSpheroBoxAnalytical) and boxBoxSpheroAnalytical removed entirely -- unused by any thesis-cited
 // result. Archived at archive/unused_contact_methods/spherosimplex_box_contact.h (see ARCHIVE_README.md).
 

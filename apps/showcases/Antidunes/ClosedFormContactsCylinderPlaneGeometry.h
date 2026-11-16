@@ -158,10 +158,9 @@ inline real_t solveRealCubicOneRealRoot(real_t a, real_t b, real_t c)
 //! m^3 + p*m^2 + (p^2/4 - r)*m - q^2/8 = 0 for one real root m (solveRealCubicOneRealRoot), then factor
 //! the quartic into two quadratics via that m and solve each in closed form. No iteration at all --
 //! O(1) instead of solveQuarticDurandKerner's fixed 30 sweeps.
-//! [Claude, 2026-09-29] This IS the production solver: every quartic solve in the cylinder-cylinder
+//! This IS the production solver: every quartic solve in the cylinder-cylinder
 //! dispatch defaults to QuarticSolverMethod::Ferrari (closestThetaOnCircleToLine, findRimCrossing,
-//! cylinderCylinderContact). The previous comment here ("not wired into any production call site",
-//! "Durand-Kerner in production") was outdated. No case has been found where it fails. Known
+//! cylinderCylinderContact). No case has been found where it fails. Known
 //! theoretical weak points, kept here as documentation: (1) the resolvent cubic's discriminant sign is a
 //! branch (handled in solveRealCubicOneRealRoot); (2) m = 0 (q = 0, biquadratic quartic) needs the
 //! special handling below to avoid dividing by sqrt(2m); (3) like any closed-form quartic formula it can
@@ -273,10 +272,9 @@ inline void solveQuarticAberthEhrlich(real_t c4, real_t c3, real_t c2, real_t c1
 }
 
 //! Selects which of the three quartic solvers above (see QuarticSolverComparisonTest.cpp for the
-//! time/accuracy comparison). [Claude, 2026-09-29] Ferrari is the production default everywhere
+//! time/accuracy comparison). Ferrari is the production default everywhere
 //! (closestThetaOnCircleToLine / findRimCrossing / cylinderCylinderContact); DurandKerner and
-//! AberthEhrlich are kept only as comparison alternatives. (This comment previously said the opposite,
-//! which was outdated.)
+//! AberthEhrlich are kept only as comparison alternatives.
 enum class QuarticSolverMethod
 {
    DurandKerner,
@@ -777,7 +775,7 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
                                     const Vec3& targetPos, const Vec3& eTarget, real_t targetRadius,
                                     real_t targetHalfLength, bool useFastReference = false,
                                     int maxIterations = 30,
-                                    // [Claude, 2026-09-29] default changed DurandKerner -> Ferrari to match
+                                    // default changed DurandKerner -> Ferrari to match
                                     // every other entry point (production always passed Ferrari explicitly
                                     // via cylinderCylinderContact; the only direct test call passes a solver).
                                     QuarticSolverMethod quarticSolver = QuarticSolverMethod::Ferrari,
@@ -952,7 +950,7 @@ inline Vec3 rimPointTowardPlane(const CylinderState& cyl, const Vec3& planePos, 
           math::sign(zCyl) * math::sign(axisDotN) * halfL * eZ;
 }
 
-//! [Claude, 2026-09-29] ALL crossings of a rim circle (centre C, in-plane basis u/v, radius R) with the
+//! ALL crossings of a rim circle (centre C, in-plane basis u/v, radius R) with the
 //! INFINITE lateral surface of a target cylinder (axis through targetPos along eTarget, radius
 //! targetRadius) -- Kodam et al. (2010) eq. 83, the same quartic findRimCrossing solves for its point A.
 //! findRimCrossing keeps only ONE crossing (tie-broken by a reference angle, as its edge-edge chord

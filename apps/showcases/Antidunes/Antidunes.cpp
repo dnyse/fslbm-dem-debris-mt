@@ -83,48 +83,6 @@ int main(int argc, char** argv)
    setupSurfaceGeometryFields (simParams, simObjs);   // curvature + normal + obstacleNormal + smoothFill
    setupParticles             (simParams, simObjs);   // particleStorage + particleField
 
-   // [Claude, 2026-10-29] TEMPORARY DIAGNOSTIC (THESIS_PLAN.md item 1a, checkpoint-resume
-   // STALE-PARTICLE-IDX abort, job 4245028) commented out -- that investigation is closed (the
-   // underlying ghost-sync gap was fixed in SetupStages.h's own 4-round syncCall()), and this was
-   // the only genuinely unconditional debug print left in the production codebase after a survey
-   // (per explicit request to find/clean up leftover debugging prints). Kept for reference below.
-#if 0
-   // per-rank dump of what the particle accessor actually knows right after setupParticles() (i.e.
-   // after loadBlockData + syncCall()), to see which ranks have a ghost/local copy of each floater
-   // and which don't, cross-referenced against the block's own AABB (extended by
-   // mesapdDomain-relevant margins) to understand the ghost-sync reach.
-   //
-   // [Claude, 2026-09-18]: un-gated from loadSnapshot-only. SetupStages.h's own comment right above
-   // its 4-round syncCall() fix (search "ROOT CAUSE FIX (THESIS_PLAN.md item 1a...") argues a fresh
-   // start "never needs more than one hop yet (freshly-created floaters/beds are local to a handful
-   // of blocks)" -- but SyncGhostOwners is a one-hop-per-call BFS propagation (only reaches ranks in
-   // domain.getNeighborProcesses() of wherever the particle is ALREADY known), and job 4245028's own
-   // box (halfExtents<15,30,15> at <48,67.5,60>, cellsPerBlock<16,45,30>) spans 2x3x2=12 blocks just
-   // axis-aligned -- plausibly more than one hop from whichever single rank owns it, on a FRESH
-   // start too. That run hit the exact same [STALE-PARTICLE-IDX] abort this diagnostic was built for
-   // (job 4245028, rank 13/17/21, t=0, the very first FSLBM sweep -- before any of the 49999 further
-   // per-step syncCall()s the old comment was counting on to eventually converge). Enabling this
-   // unconditionally to check whether the affected ranks show zero knowledge of the box right after
-   // setupParticles()'s single fresh-start syncCall(), confirming (or refuting) that fresh starts can
-   // hit the identical multi-hop gap already fixed for resumes.
-   {
-      const int rank = mpi::MPIManager::instance()->rank();
-      uint_t totalKnown = uint_c(simObjs->particleAccessor->size());
-      std::ostringstream uidList;
-      simObjs->particleStorage->forEachParticle(false, mesa_pd::kernel::SelectAll(), *simObjs->particleAccessor,
-         [&uidList](const size_t idx, auto& ac) {
-            if (ac.getType(idx) == uint_t(3))
-               uidList << ac.getUid(idx) << "(pos=" << ac.getPosition(idx) << ") ";
-         }, *simObjs->particleAccessor);
-      // Print each of this rank's own local blocks' AABB for comparison against the box's own position.
-      std::ostringstream blockAABBs;
-      for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
-         blockAABBs << blockIt->getAABB() << " ";
-      WALBERLA_LOG_WARNING("[GHOST-SYNC-DIAG] rank=" << rank << " totalKnownParticles=" << totalKnown
-         << " boxes-known=[ " << uidList.str() << "] blocks=[ " << blockAABBs.str() << "]");
-   }
-#endif
-
    // Boundary handling and flags
    // ----------------------------------------------------------------------------------------------------------------------------------
    setupBoundaryHandling      (simParams, simObjs);
@@ -133,8 +91,8 @@ int main(int argc, char** argv)
    // Set liquid/interface/gas cells in flagField (must be called after all solid cells are set)
    // ----------------------------------------------------------------------------------------------------------------------------------
    simObjs->antidunesBoundaryHandling->initFlagsFromFillLevel();
-   checkOuterGhostLayerFlags(simObjs, "after initFlagsFromFillLevel"); // [Claude, 2026-10-03] see BuildTimeloop.h
-   if (simParams->model.wallOuterGhostLayer) // [Claude, 2026-10-03] see SimulationParams.h
+   checkOuterGhostLayerFlags(simObjs, "after initFlagsFromFillLevel"); // see BuildTimeloop.h
+   if (simParams->model.wallOuterGhostLayer) // see SimulationParams.h
    {
       uint_t n = wallOuterGhostLayer(simObjs);
       mpi::reduceInplace(n, mpi::SUM);
@@ -152,17 +110,10 @@ int main(int argc, char** argv)
    // Communicate after initialization
    // ----------------------------------------------------------------------------------------------------------------------------------
    // particleFieldID is included here to match BuildTimeloop.h's own per-step communication of it
-   // alongside flagFieldID (see addSweepFluidParticleCoupling's own "Communication (coupling): after
-   // PDF reconstruction (flagField + particleField)" AfterFunction) -- omitting it here left a rank
-   // whose block only sees a floater as a GHOST (not locally mapped) with a correctly-communicated
-   // "obstacle" flag but a stale/never-communicated particleField entry (default invalid UID=0) for
-   // that same cell, until the first per-step coupling sweep runs. On a fresh start this is a
-   // harmless one-step gap (same reasoning as the fillWithDomain() fix in mapParticlesOntoCells());
-   // on a checkpoint resume, if a floater's cross-rank obstacle footprint at load time happens to
-   // include a cell on a rank that only ever sees it as a ghost, the SimpleBB.h MEM force sweep's own
-   // stale-particle-idx guard hard-aborts on that very first post-load step (confirmed directly: job
-   // 4236616, `[STALE-PARTICLE-IDX] ... uid=0` at t=70001, the first step after loading
-   // cuboid_stillwater_realgravity981_3xsphere_hires_d025's own t=70000 checkpoint).
+   // alongside flagFieldID -- omitting it leaves a rank that only sees a floater as a GHOST with a
+   // correctly-communicated "obstacle" flag but a stale/uncommunicated particleField entry, until
+   // the first per-step coupling sweep runs. On a checkpoint resume this can hit the SimpleBB.h MEM
+   // force sweep's stale-particle-idx guard on the very first post-load step.
    WALBERLA_LOG_INFO_ON_ROOT("Initial communication");
    Communication_T(simObjs->blockForest, simObjs->flagFieldID, simObjs->fillFieldID, simObjs->forceDensityFieldID,
                     simObjs->particleFieldID)();
@@ -207,71 +158,31 @@ int main(int argc, char** argv)
 
    WcTimingPool timingPool;
 
-   // [DEBUG — disabled after fix confirmed at t=15027+]
-   // Watch cells used to track PDF/density drift at the contact-circle cells that produced NaN crashes.
-   // All three are at distance 7.9215 from sphere centre (15,30,56), radius=8 — the outermost
-   // sphere-interior layer, uncovered first as the sphere oscillates at the free surface.
-   //   Run 1 (no sweeps):   NaN at t=581 in cells (8.5,29.5,60.5) and (8.5,34.5,56.5)
-   //   Run 2 (with sweeps): NaN at t=577 in cell  (7.5,27.5,56.5)
-   // NaN-trace instrumentation (ENABLED).
-   //   * checkPdfNaN after each PDF-touching phase: locates the first NaN, dumps its 3x3x3
-   //     neighbourhood (flag/rho/fill = the real contact-line config), and aborts cleanly.
-   //   * trackWatchCells: per-step rho/fill/flag history of the watched cells. The coords below are
-   //     a first guess on the giant-sphere contact ring (surface z=56, sphere drifts in x); after
-   //     run 1 reports the exact NaN cell, set watchCells to that world coord and rerun for history.
-   // [Claude, 2026-09-24] Repurposed for the tilt26.565deg/rho=0.7665 step-444 crash: the exact
-   // failing cell was pinned down at world (20.5,8.5,25.5) (checkPdfNaN + denseNanScanEnabled, see
-   // THESIS_PLAN.md) -- a genuine INTF cell (fill=0.5) at the box's own top corner, surrounded by
-   // OBST (the box) and GAS with zero LIQ/INTF neighbours. Watching the full 3x3x3 world-coordinate
-   // cube around it (27 cells) to get a per-step history across the run-up to the crash, to settle
-   // whether this cell's own bognerTargetFlag classification ever ran (it should have resolved to
-   // GAS per classifyFormerObstacleNeighbourhood's hasGas&&!hasLiquid&&!hasUnknown branch) or whether
-   // it is a pre-existing interface cell whose neighbourhood only became fully gas-locked later,
-   // without ever being re-classified (that reclassification path is formerObstacle-only, not a
-   // per-step re-scan of every existing interface cell).
+   // Watch cells for per-step PDF/density/flag tracing at a fragile free-surface contact-line
+   // configuration (checkPdfNaN dumps the first NaN's neighbourhood and aborts; trackWatchCells
+   // logs the watched cells' own history). Sampled every WATCH_FREQ steps; WATCH_DENSE_FROM enables
+   // per-step tracking from a given step on, disabled by default (past any realistic step count).
    std::vector< Vector3< real_t > > watchCells;
    for (real_t dz : { real_t(-1), real_t(0), real_t(1) })
       for (real_t dy : { real_t(-1), real_t(0), real_t(1) })
          for (real_t dx : { real_t(-1), real_t(0), real_t(1) })
             watchCells.emplace_back(real_t(20.5) + dx, real_t(8.5) + dy, real_t(25.5) + dz);
-   constexpr uint_t WATCH_FREQ      = 1000;   // periodic sampling (lightweight) -- unchanged elsewhere
-   // [Claude, 2026-09-25] DISABLED (raised past any realistic timesteps) for the full 60k-step Option-B
-   // validation run -- the Bogner-box step-444 crash this dense per-step tracking was built for is long
-   // since resolved (THESIS_PLAN.md), and per-step tracking from step 425 onward would flood the log
-   // over 60k steps of an unrelated (hopper) scenario. WATCH_FREQ's lightweight periodic sampling above
-   // still runs every 1000 steps.
+   constexpr uint_t WATCH_FREQ      = 1000;   // periodic sampling, cheap enough to run routinely
    constexpr uint_t WATCH_DENSE_FROM = 1000000000;
 
-   // [Claude, 2026-09-25] Hopper-clogging crash region (THESIS_PLAN.md): the FSLBM-internal stages
-   // (boundarySweep..equilibriumRefilling, wired in BuildTimeloop.h's probeHopperCrashRegion) show this
-   // OBST-flagged cell's PDFs completely unchanged by anything except collide -- yet its rho measurably
-   // drifts step-to-step (e.g. 1.007356 at one step's end -> 1.006870 at the very next step's
-   // boundarySweep, with force staying exactly zero throughout). Nothing in the FSLBM timeloop can cause
-   // that: the only code that runs in between is DEM sub-cycling + timeloopAfterDEM (particle mapping +
-   // PDF reconstruction, i.e. MovingParticleMapping.h / PdfReconstructionManager.h) -- never probed at
-   // this exact location before. Same X/Y/Z coverage as probeHopperCrashRegion for direct comparability.
+   // Probe region for the FSLBM/DEM coupling stages around a specific, already-resolved
+   // hopper-clogging crash cell. Disabled by default (FROM > TO), same convention as
+   // WATCH_DENSE_FROM above; re-enable by setting a real step range if that investigation needs
+   // revisiting.
    std::vector< Vector3< real_t > > hopperCrashCells;
    for (real_t y = real_t(5.5); y <= real_t(35.5); y += real_t(1))
       for (real_t z : { real_t(17.5), real_t(18.5), real_t(19.5), real_t(20.5) })
          hopperCrashCells.emplace_back(real_t(267.5), y, z);
-   // [Claude, 2026-09-25] DISABLED (impossible range) for the full 60k-step Option-B validation run --
-   // the mechanism this probe traced is fully characterised and the fix is validated (THESIS_PLAN.md).
    constexpr uint_t HOPPER_PROBE_FROM = 1000000000;
    constexpr uint_t HOPPER_PROBE_TO   = 0;
 
-   // [Claude, 2026-09-26] Per explicit request ("add logs to confirm it rerun from the
-   // checkpoints"): an explicit, unambiguous confirmation that a checkpoint resume actually loaded
-   // real particle/step state, rather than silently starting fresh at step 0 with an empty
-   // particleStorage (which loadSnapshot=true + a missing/misconfigured snapshotBaseFolder could do
-   // without erroring). Counts LOCAL owned (non-ghost) particles and sums across all ranks for a
-   // true global total -- comparing this against the known population size (e.g. 24 for the
-   // giant/small rod doubling-series scenarios, plus 2 pillars) directly confirms the checkpoint's
-   // particleStorage was actually read, not just its step counter.
-   //
-   // Re-enabled, 2026-09-27, per explicit request ("check if the initial checkpoint is clean
-   // everything looks stable"). Was briefly disabled while isolating the gated-guard hang -- its own
-   // mpi::allReduceInplace collective was already confirmed unrelated to that hang (it completed and
-   // printed fine in the hung job 4270904's own log).
+   // Confirms a checkpoint resume actually loaded real particle/step state, rather than silently
+   // starting fresh with an empty particleStorage.
    {
       uint_t localOwnedParticleCount = uint_t(0);
       simObjs->particleStorage->forEachParticle(
@@ -285,16 +196,8 @@ int main(int argc, char** argv)
             "beginTimeStep + a particle count matching the expected population) or started fresh.");
    }
 
-   // [Claude, 2026-09-27] Per explicit request ("check if the initial checkpoint is clean everything
-   // looks stable"): a ONE-TIME domain-wide density/NaN scan of the just-loaded state, BEFORE the
-   // main loop's first iteration touches anything -- i.e. this reports the checkpoint's OWN saved
-   // fields, not state produced by any new physics. Reuses checkPdfNaN entirely (same function the
-   // diagnostic sweep and denseNanScan machinery both call): its raw-PDF and velocity-derived NaN
-   // checks run unconditionally regardless of the threshold args, so this call answers "is there
-   // already a NaN/Inf anywhere in this checkpoint" outright; passing the configured
-   // densityPrecursorLow/High/LiquidOnly additionally flags any cell that's finite but already
-   // suspiciously out of range. localNaN==false plus no [DENSITY-WINDOW]/[NaN-SCAN] output below
-   // means the loaded checkpoint is clean.
+   // One-time domain-wide density/NaN scan of the just-loaded checkpoint, before the main loop's
+   // first iteration touches anything -- reports the checkpoint's own saved fields.
    {
       const bool checkpointHasNaN = checkPdfNaN(simObjs, "CHECKPOINT-LOAD", simObjs->beginTimeStep,
          real_t(0), real_t(0), real_t(0), simParams->physics.densityPrecursorLow,

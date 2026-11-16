@@ -15,10 +15,13 @@
 //
 //! \file SetupStages_drop_test.h
 //! COPY of SetupStages.h for the fluid-free DropTest executable ONLY -- see DropTest.cpp's own
-//! header comment. The sole difference from SetupStages.h is the X-wall block added right after
-//! the existing Y-wall block in setupParticles() (search "create X-wall planes"). Kept as a full
-//! copy rather than modifying SetupStages.h directly so production Antidunes/tsunami/DEMValidation
-//! (which all include the original, untouched file) can never be affected by this change.
+//! header comment. Originally forked off with the X-wall block as its one addition (search "create
+//! X-wall planes" / "ADDED in this DropTest-only copy"); the two files have since drifted further
+//! apart (e.g. no accelerationXOverride handling, no checkpoint-resume guard around floater creation,
+//! no boxContactSkin interaction-radius inflation here) -- diff against SetupStages.h directly rather
+//! than trusting this comment for the current full list. Kept as a full copy rather than modifying
+//! SetupStages.h directly so production Antidunes/tsunami/DEMValidation (which all include the
+//! original, untouched file) can never be affected by this change.
 //! \author Samuel Kemmler <samuel.kemmler@fau.de>
 //! \author Jonas Plewinski <jonas.plewinski@fau.de>
 //! \author Christoph Rettinger <christoph.rettinger@fau.de>
@@ -481,7 +484,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       createCylinder(*simObjs->particleStorage, pillar.center, pillar.radius);
    }
 
-   // [Claude, 2026-10-03] vertical round containers (ContainerCylinders prm block, see ContainerCylinderParams)
+   // vertical round containers (ContainerCylinders prm block, see ContainerCylinderParams)
    for (const auto& container : simParams->containerCylinders)
    {
       createContainerCylinder(*simObjs->particleStorage, container.center, container.radius);
@@ -574,7 +577,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          if (std::abs(fbp.initialTiltAngleDeg) > real_t(1e-10))
          {
             const real_t angle = fbp.initialTiltAngleDeg * math::pi / real_t(180);
-            // Rotate about Y-axis (body axis v in Bogner's diagram) by default; [Claude, 2026-10-01] about
+            // Rotate about Y-axis (body axis v in Bogner's diagram) by default; about
             // FloatingBoxParams::initialTiltAxis if given (randomised drop tests).
             mesa_pd::Vec3 tiltAxis(fbp.initialTiltAxis[0], fbp.initialTiltAxis[1], fbp.initialTiltAxis[2]);
             tiltAxis = (tiltAxis.length() > real_t(1e-12)) ? tiltAxis / tiltAxis.length() : mesa_pd::Vec3(0, 1, 0);
@@ -660,7 +663,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    // (not an approximation): a capsule's farthest point from its own centre, over its WHOLE surface, is
    // always at the tip of a hemispherical cap along the axis (see Capsule::support()'s own derivation),
    // so the circumscribed sphere radius is simply half the full end-to-end length, no sqrt needed.
-   // [Claude, 2026-09-23] NEW SHAPE: no closed-form contact algorithm anywhere in the project for this
+   // NEW SHAPE: no closed-form contact algorithm anywhere in the project for this
    // shape (deliberately, for now) -- every capsule pair goes through GJK/EPA via GeneralContactDetection
    // automatically (see SolidCylinderContactDetection's own comment on why unlisted pairs fall through).
    simObjs->floaterCapsuleUIDs.assign(simParams->floatingCapsules.size(), walberla::id_t(0));
@@ -755,12 +758,12 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    for (const auto& fpp : simParams->floatingCapsules)
       maxParticleDiameter = std::max(maxParticleDiameter, fpp.length);
 
-   // [Claude, 2026-10-01] SyncNextNeighbors only exchanges with neighbouring ranks. Each floater is ghosted to every
+   // SyncNextNeighbors only exchanges with neighbouring ranks. Each floater is ghosted to every
    // block within its circumscribed radius + blockSyncExtension; if that reach exceeds the block width in a direction
    // with at least three blocks, a floater can hold a ghost two blocks away, and after it migrates its new owner sends
-   // to a non-neighbour rank, whose buffer lacks the leading dummy byte ("Received invalid notification type", mixed
-   // drop test job 4282283 at step 8549, reproduced locally). The former test below alone (diameter < 2 * minBlock -
-   // extension) did not catch this; such cases now use SyncGhostOwners.
+   // to a non-neighbour rank, whose buffer lacks the leading dummy byte ("Received invalid notification type",
+   // reproduced locally). The former test below alone (diameter < 2 * minBlock - extension) did not catch this; such
+   // cases now use SyncGhostOwners.
    const real_t particleSyncReach = real_c(0.5) * maxParticleDiameter + blockSyncExtension;
    bool         ghostsStayWithinNeighbours = true;
    for (uint_t d = 0; d < 3; ++d)
@@ -979,157 +982,6 @@ void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams
 
       WALBERLA_LOG_INFO_ON_ROOT("Released floating cylinder uid=" << uid << " (index " << i
                                 << ") from settling phase at step " << currentStep);
-   }
-}
-
-// Debug helper: logs cell-type counts and fill-level / normal statistics in the contact-circle
-// band around the first floating sphere (type 1).  The band is defined by:
-//   |z_world - sphereZ| <= 2  AND  |sqrt((x-sx)²+(y-sy)²) - radius| <= 2
-//
-// Runs every 50 steps normally; every step from step 490 onward (to catch the run-up to the
-// step-581 crash in the surface-start variant).  No-op when there are no floating spheres.
-//
-// Call from the top of the main time loop, AFTER releaseSettledFloatingSpheres().
-void debugContactLine(const std::shared_ptr< const SimulationParams >& simParams,
-                      const std::shared_ptr< SimulationObjects >&       simObjs,
-                      const uint_t t)
-{
-   if (simParams->floatingSpheres.empty()) return;
-
-   // Sparse log: every 50 steps up to step 490, then every step.
-   const bool denseLog = (t >= uint_t(490));
-   if (!denseLog && (t % uint_t(50) != uint_t(0))) return;
-
-   // ---- Gather floating sphere (type 1) position from whichever rank owns it ----
-   Vector3< real_t > spherePos(real_t(0));
-   real_t            sphereRadius = real_t(0);
-
-   simObjs->particleStorage->forEachParticle(
-      false, mesa_pd::kernel::SelectLocal(), *simObjs->particleAccessor,
-      [&spherePos, &sphereRadius](const size_t idx, auto& ac) {
-         if (ac.getType(idx) == uint_t(1))
-         {
-            spherePos    = ac.getPosition(idx);
-            sphereRadius = static_cast< const mesa_pd::data::Sphere* >(ac.getBaseShape(idx).get())->getRadius();
-         }
-      },
-      *simObjs->particleAccessor);
-
-   // allReduceInplace(SUM): non-owning ranks contribute 0; owning rank contributes the real value.
-   mpi::allReduceInplace< real_t >(spherePos[0],    mpi::SUM);
-   mpi::allReduceInplace< real_t >(spherePos[1],    mpi::SUM);
-   mpi::allReduceInplace< real_t >(spherePos[2],    mpi::SUM);
-   mpi::allReduceInplace< real_t >(sphereRadius,    mpi::SUM);
-
-   if (sphereRadius < real_t(1e-6)) return; // sphere not found
-
-   // ---- Count cell types and fill/normal stats in the contact-circle band ----
-   uint_t nLiquid = 0, nInterface = 0, nGas = 0, nObs = 0;
-   real_t fillSum  = real_t(0);
-   real_t fillMin  = real_t(1e10);
-   real_t fillMax  = real_t(-1e10);
-   real_t normalMagMin  = real_t(1e10);
-   uint_t nZeroNormal   = 0;
-   // World coordinates and sphere-relative coords of the locally minimum fill cell
-   real_t minFillWx = real_t(0), minFillWy = real_t(0), minFillWz = real_t(0);
-   real_t minFillDz = real_t(0), minFillDr = real_t(0);
-
-   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
-   {
-      const auto* fillField   = blockIt->getData< ScalarField_T >(simObjs->fillFieldID);
-      const auto* flagField   = blockIt->getData< FlagField_T   >(simObjs->flagFieldID);
-      const auto* normalField = blockIt->getData< VectorField_T >(simObjs->normalFieldID);
-
-      const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
-      const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
-      const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
-      // obstacle flag is a mask (may be multiple bits for static+moving obstacle types)
-      const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
-      const auto& aabb         = blockIt->getAABB();
-
-      for (cell_idx_t iz = 0; iz < cell_idx_c(flagField->zSize()); ++iz)
-      for (cell_idx_t iy = 0; iy < cell_idx_c(flagField->ySize()); ++iy)
-      for (cell_idx_t ix = 0; ix < cell_idx_c(flagField->xSize()); ++ix)
-      {
-         const real_t wx = aabb.xMin() + real_c(ix) + real_t(0.5);
-         const real_t wy = aabb.yMin() + real_c(iy) + real_t(0.5);
-         const real_t wz = aabb.zMin() + real_c(iz) + real_t(0.5);
-
-         const real_t dz  = wz - spherePos[2];
-         const real_t rXY = std::sqrt((wx - spherePos[0]) * (wx - spherePos[0]) +
-                                      (wy - spherePos[1]) * (wy - spherePos[1]));
-         const real_t dr  = rXY - sphereRadius;
-
-         if (std::abs(dz) > real_t(2) || std::abs(dr) > real_t(2)) continue;
-
-         // Check obstacle FIRST: sphere surface cells may have both obstacle AND interface/gas
-         // flags set simultaneously (initFlagsFromFillLevel runs after mapParticlesOntoCells
-         // and can add fluid flags to cells that are already obstacle-mapped).
-         // Use bitwise AND to check if ANY obstacle flag bit is set.
-         if (flagField->get(ix, iy, iz) & obstacleMask)
-         {
-            ++nObs;
-         }
-         else if (flagField->isFlagSet(ix, iy, iz, interfaceFlag))
-         {
-            ++nInterface;
-            const real_t f  = fillField->get(ix, iy, iz);
-            if (f < fillMin) { fillMin = f; minFillWx = wx; minFillWy = wy; minFillWz = wz; minFillDz = dz; minFillDr = dr; }
-            fillMax  = std::max(fillMax, f);
-            fillSum += f;
-            const real_t nm = normalField->get(ix, iy, iz).length();
-            normalMagMin = std::min(normalMagMin, nm);
-            if (nm < real_t(1e-6)) ++nZeroNormal;
-         }
-         else if (flagField->isFlagSet(ix, iy, iz, liquidFlag))    ++nLiquid;
-         else if (flagField->isFlagSet(ix, iy, iz, gasFlag))        ++nGas;
-         // else: unconverted/unknown flag — not counted
-      }
-   }
-
-   // ---- MPI reduce across all blocks / ranks ----
-   mpi::allReduceInplace< uint_t >(nLiquid,      mpi::SUM);
-   mpi::allReduceInplace< uint_t >(nInterface,   mpi::SUM);
-   mpi::allReduceInplace< uint_t >(nGas,         mpi::SUM);
-   mpi::allReduceInplace< uint_t >(nObs,         mpi::SUM);
-   mpi::allReduceInplace< real_t >(fillSum,      mpi::SUM);
-   // Save local fillMin before MIN-reduction so we can identify which rank holds the global min.
-   const real_t fillMinLocal = fillMin;
-   mpi::allReduceInplace< real_t >(fillMin,      mpi::MIN);
-   mpi::allReduceInplace< real_t >(fillMax,      mpi::MAX);
-   mpi::allReduceInplace< real_t >(normalMagMin, mpi::MIN);
-   mpi::allReduceInplace< uint_t >(nZeroNormal,  mpi::SUM);
-
-   // Broadcast position of the global-minimum fill cell: the rank that achieved the local min
-   // equal to the global min contributes its (wx,wy,wz,dz,dr); others contribute 0.
-   // Correct as long as the exact minimum is achieved by only one rank (overwhelmingly the case).
-   const bool hasGlobalMin = (std::abs(fillMinLocal - fillMin) < real_t(1e-12));
-   real_t minFillCellWx = hasGlobalMin ? minFillWx : real_t(0);
-   real_t minFillCellWy = hasGlobalMin ? minFillWy : real_t(0);
-   real_t minFillCellWz = hasGlobalMin ? minFillWz : real_t(0);
-   real_t minFillCellDz = hasGlobalMin ? minFillDz : real_t(0);
-   real_t minFillCellDr = hasGlobalMin ? minFillDr : real_t(0);
-   mpi::allReduceInplace< real_t >(minFillCellWx, mpi::SUM);
-   mpi::allReduceInplace< real_t >(minFillCellWy, mpi::SUM);
-   mpi::allReduceInplace< real_t >(minFillCellWz, mpi::SUM);
-   mpi::allReduceInplace< real_t >(minFillCellDz, mpi::SUM);
-   mpi::allReduceInplace< real_t >(minFillCellDr, mpi::SUM);
-
-   const real_t fillAvg = (nInterface > uint_t(0)) ? fillSum / real_c(nInterface) : real_t(0);
-
-   WALBERLA_LOG_INFO_ON_ROOT("[DBG " << t
-      << "] sphere=(" << spherePos[0] << "," << spherePos[1] << "," << spherePos[2]
-      << ") r=" << sphereRadius
-      << " | contact band: liq=" << nLiquid << " int=" << nInterface
-      << " gas=" << nGas << " obs=" << nObs
-      << " | fill[min=" << fillMin << " avg=" << fillAvg << " max=" << fillMax << "]"
-      << " | normal_min=" << normalMagMin << " zero_normals=" << nZeroNormal);
-   // When fill_min crosses -0.008 log the cell's world position and sphere-relative coords.
-   if (fillMin < real_t(-0.008))
-   {
-      WALBERLA_LOG_INFO_ON_ROOT("[DBG " << t << "] fill_min_cell world=("
-         << minFillCellWx << "," << minFillCellWy << "," << minFillCellWz
-         << ") sphere-rel dz=" << minFillCellDz << " dr=" << minFillCellDr);
    }
 }
 
@@ -1413,119 +1265,6 @@ uint_t checkClosedInterfaceLayer(const std::shared_ptr< SimulationObjects >& sim
       WALBERLA_LOG_WARNING_ON_ROOT("[LAYER-CHECK t=" << t << " after=" << location << "] total holes (liquid–gas adjacencies) = "
                                    << globalHoles);
    return globalHoles;
-}
-
-// Measure the azimuthal asymmetry of each floater's wetted vs. dry surface — the diagnostic for the
-// lateral drift introduced by the SimpleBB dry-link guard.
-//
-// Rationale: the MEM bounce-back integrates the hydrodynamic force only over WET links (fluid-side
-// cell carries a valid PDF). The guard SKIPS dry links (gas / NaN fluid-side cell at the waterline)
-// — both the force contribution AND the bounce-back reflection. For a floating sphere the dry set is
-// the cap above the waterline; if it is azimuthally SYMMETRIC its horizontal components cancel and
-// the net hydrodynamic force is purely vertical. If the dry set is LOPSIDED (because waterline cells
-// collapse to gas asymmetrically — e.g. driven by the streamwise flow under liquid promotion), the
-// wetted-surface force integral acquires a net HORIZONTAL component → the sphere drifts sideways.
-// The all-interface reconstruction never starves cells to gas at the contact line, so its dry set
-// stays symmetric and no drift appears — exactly the difference the user observed.
-//
-// For each floater we scan its obstacle cells (particleField == floater UID) and, over the D3Q27
-// fluid neighbours, accumulate the outward link offsets split into WET (liquid/interface) and DRY
-// (gas) sets. The horizontal magnitude of the DRY-set vector is the lateral-bias signal. Reduced to
-// root and logged; does not abort.
-void logFloaterLinkBalance(const std::shared_ptr< SimulationObjects >& simObjs,
-                           const char* const location, const uint_t t)
-{
-   const uint_t nF = uint_c(simObjs->floaterUIDs.size());
-   if (nF == uint_t(0)) return;
-
-   std::vector< uint_t > nWet(nF, uint_t(0)), nDry(nF, uint_t(0));
-   std::vector< real_t > sumWet(nF * 3, real_t(0)), sumDry(nF * 3, real_t(0));
-   std::vector< real_t > pos(nF * 3, real_t(0)), vel(nF * 3, real_t(0));
-
-   // --- link balance from the fields ---
-   for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
-   {
-      const auto* flagField     = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
-      const auto* particleField = blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(simObjs->particleFieldID);
-      const auto gasFlag = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
-
-      for (cell_idx_t iz = 0; iz < cell_idx_c(flagField->zSize()); ++iz)
-      for (cell_idx_t iy = 0; iy < cell_idx_c(flagField->ySize()); ++iy)
-      for (cell_idx_t ix = 0; ix < cell_idx_c(flagField->xSize()); ++ix)
-      {
-         const walberla::id_t uid = particleField->get(ix, iy, iz);
-         if (uid == simObjs->particleAccessor->getInvalidUid()) continue; // only obstacle cells
-
-         // map this cell's UID to a floater index (skip bed/plane particles)
-         uint_t fi = nF;
-         for (uint_t k = 0; k < nF; ++k) if (simObjs->floaterUIDs[k] == uid) { fi = k; break; }
-         if (fi == nF) continue;
-
-         for (int ddz = -1; ddz <= 1; ++ddz)
-         for (int ddy = -1; ddy <= 1; ++ddy)
-         for (int ddx = -1; ddx <= 1; ++ddx)
-         {
-            if (ddx == 0 && ddy == 0 && ddz == 0) continue;
-            const cell_idx_t jx = ix + cell_idx_c(ddx), jy = iy + cell_idx_c(ddy), jz = iz + cell_idx_c(ddz);
-            // neighbour must be a fluid cell (not another obstacle cell of the same/other body)
-            if (particleField->get(jx, jy, jz) != simObjs->particleAccessor->getInvalidUid()) continue;
-
-            if (flagField->isFlagSet(jx, jy, jz, gasFlag)) // dry link (gas-side; would be skipped by the guard)
-            {
-               ++nDry[fi];
-               sumDry[fi * 3 + 0] += real_c(ddx); sumDry[fi * 3 + 1] += real_c(ddy); sumDry[fi * 3 + 2] += real_c(ddz);
-            }
-            else // wet link (liquid/interface — carries the force)
-            {
-               ++nWet[fi];
-               sumWet[fi * 3 + 0] += real_c(ddx); sumWet[fi * 3 + 1] += real_c(ddy); sumWet[fi * 3 + 2] += real_c(ddz);
-            }
-         }
-      }
-   }
-
-   // --- position / velocity of each floater (owner contributes; ghosts skipped) ---
-   for (uint_t i = uint_t(0); i < simObjs->particleAccessor->size(); ++i)
-   {
-      if (isSet(simObjs->particleAccessor->getFlags(i), mesa_pd::data::particle_flags::GHOST)) continue;
-      const walberla::id_t uid = simObjs->particleAccessor->getUid(i);
-      for (uint_t k = 0; k < nF; ++k)
-         if (simObjs->floaterUIDs[k] == uid)
-         {
-            const auto p = simObjs->particleAccessor->getPosition(i);
-            const auto v = simObjs->particleAccessor->getLinearVelocity(i);
-            for (uint_t c = 0; c < 3; ++c) { pos[k * 3 + c] = p[c]; vel[k * 3 + c] = v[c]; }
-            break;
-         }
-   }
-
-   mpi::reduceInplace< uint_t >(nWet, mpi::SUM);
-   mpi::reduceInplace< uint_t >(nDry, mpi::SUM);
-   mpi::reduceInplace< real_t >(sumWet, mpi::SUM);
-   mpi::reduceInplace< real_t >(sumDry, mpi::SUM);
-   mpi::reduceInplace< real_t >(pos, mpi::SUM);
-   mpi::reduceInplace< real_t >(vel, mpi::SUM);
-
-   WALBERLA_ROOT_SECTION()
-   {
-      for (uint_t k = 0; k < nF; ++k)
-      {
-         const real_t dryH = std::sqrt(sumDry[k * 3] * sumDry[k * 3] + sumDry[k * 3 + 1] * sumDry[k * 3 + 1]);
-         const real_t dryZ = std::abs(sumDry[k * 3 + 2]);
-         // The cap has thousands of links, so the absolute horizontal residual is meaningless; the
-         // tilt of the dry cap is |dryXY| relative to its vertical extent |dryZ|. A symmetric cap
-         // has ratio ~0; a strongly one-sided cap (lateral wetted-force bias) climbs toward 1.
-         const real_t tilt = (dryZ > real_t(0)) ? dryH / dryZ : real_t(0);
-         WALBERLA_LOG_INFO("[LINK-BALANCE t=" << t << " after=" << location << "] floater " << k
-            << " uid=" << simObjs->floaterUIDs[k]
-            << " | pos=(" << pos[k * 3] << "," << pos[k * 3 + 1] << "," << pos[k * 3 + 2] << ")"
-            << " velXY=(" << vel[k * 3] << "," << vel[k * 3 + 1] << ")"
-            << " | wet=" << nWet[k] << " dry=" << nDry[k]
-            << " | dryVec=(" << sumDry[k * 3] << "," << sumDry[k * 3 + 1] << "," << sumDry[k * 3 + 2] << ")"
-            << " tilt(|dryXY|/|dryZ|)=" << tilt
-            << ((tilt > real_t(0.5)) ? "   <-- STRONGLY ONE-SIDED DRY CAP (lateral force bias)" : ""));
-      }
-   }
 }
 
 } // namespace antidunes

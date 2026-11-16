@@ -25,7 +25,8 @@
 //!    validation." Chemical Engineering Science, 65(22), 5863-5871. Their Test 1 (single cylinder
 //!    dropped onto a flat wall at a prescribed tilt angle, compared to a closed-form analytical
 //!    rebound) is exactly rigidBodyImpact() evaluated at the rim contact point their own Part I paper
-//!    derives (reused here directly via closed_form_contacts::rimPointTowardPlane, PaperAnalyticalContacts.h).
+//!    derives (reused here directly via closed_form_contacts::rimPointTowardPlane,
+//!    ClosedFormContactsCylinderPlaneGeometry.h).
 //!  - Housner, G.W. (1963). "The behavior of inverted pendulum structures during earthquakes." Bulletin
 //!    of the Seismological Society of America, 53(2), 403-417. The rocking-block restitution
 //!    r = (omega_after/omega_before)^2 = (1 - 1.5*sin^2(alpha))^2 is the special case of rigidBodyImpact()
@@ -274,9 +275,9 @@ inline ImpactResult sphereWallImpact(real_t radius, real_t mass, const Vec3& vel
 
 //! Cylinder-wall impact, replicating Kodam et al. (2010) Part II Test 1: the contact point is the
 //! point on the cylinder's rim closest to the wall plane, from closed_form_contacts::rimPointTowardPlane
-//! (PaperAnalyticalContacts.h) -- reusing the not-yet-simulation-wired Kodam/Guo closed forms directly
-//! as the reference geometry, exactly as that file's own header comment anticipates ("so a dedicated
-//! test can compare these closed forms ... for identical geometry").
+//! (ClosedFormContactsCylinderPlaneGeometry.h) -- reusing the Kodam/Guo closed forms directly as the
+//! reference geometry, exactly as that file's own header comment anticipates ("so a dedicated test
+//! can compare these closed forms ... for identical geometry").
 //!
 //! FACE-PLANE / BAND-PLANE SPECIAL CASE: near axis-parallel (face-on) or axis-perpendicular (band-on)
 //! orientations, the true contact is a whole flat face or the full band LENGTH touching the wall

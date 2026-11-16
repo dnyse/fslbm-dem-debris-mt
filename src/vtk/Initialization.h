@@ -47,13 +47,19 @@ void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFuncti
                           const std::map< std::string, VTKOutput::CellFilter > & filters,
                           const std::map< std::string, VTKOutput::BeforeFunction > & beforeFunctions );
 
+// vtkOutputsOut: optional out-param, null by default. When non-null, this is additionally filled
+// with the shared_ptr<VTKOutput> constructed for each discovered block (keyed the same way as
+// outputFunctions), for callers that need to bypass OutputFunction's write()-with-internal-counter
+// numbering (e.g. to call VTKOutput::forceWrite() with an externally-known, possibly non-uniform
+// step number -- see free_surface::addVTKOutput in VtkWriter.h). Existing callers are unaffected.
 void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFunctions,
                           const shared_ptr< const StructuredBlockStorage > & storage,
                           const Config::BlockHandle & parentBlockHandle,
                           const std::string & configBlockName,
                           const std::vector< shared_ptr< BlockCellDataWriterInterface > > & writers,
                           const std::map< std::string, VTKOutput::CellFilter > & filters,
-                          const std::map< std::string, VTKOutput::BeforeFunction > & beforeFunctions );
+                          const std::map< std::string, VTKOutput::BeforeFunction > & beforeFunctions,
+                          std::map< std::string, shared_ptr< VTKOutput > > * vtkOutputsOut = nullptr );
 
 void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFunctions,
                           const shared_ptr< const StructuredBlockStorage > & storage,
@@ -75,13 +81,15 @@ void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFuncti
                           const RegisterVTKOutputFunction& registerVTKOutputFunction,
                           const shared_ptr< const StructuredBlockStorage > & storage,
                           const shared_ptr< Config > & config,
-                          const std::string & configBlockName = std::string("VTK") );
+                          const std::string & configBlockName = std::string("VTK"),
+                          std::map< std::string, shared_ptr< VTKOutput > > * vtkOutputsOut = nullptr );
 
 void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFunctions,
                           const RegisterVTKOutputFunction& registerVTKOutputFunction,
                           const shared_ptr< const StructuredBlockStorage > & storage,
                           const Config::BlockHandle & parentBlockHandle,
-                          const std::string & configBlockName = std::string("VTK") );
+                          const std::string & configBlockName = std::string("VTK"),
+                          std::map< std::string, shared_ptr< VTKOutput > > * vtkOutputsOut = nullptr );
 
 
 

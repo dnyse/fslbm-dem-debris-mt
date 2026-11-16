@@ -240,7 +240,7 @@ inline auto createCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Ve
    return p0;
 }
 
-// [Claude, 2026-10-03] Vertical round container (DropTest, SimulationParams.h ContainerCylinderParams): a
+// Vertical round container (DropTest, SimulationParams.h ContainerCylinderParams): a
 // CylindricalBoundary in CONTAINMENT mode with its axis along z, no axial bounds and no half clip, so bodies are kept
 // inside radius `radius` around (center.x, center.y) at every height. Same flags as createArchTunnel below; the
 // containment contact overloads (ParticleKernels.h, SolidCylinderContactDetection) use the shape's own axis.

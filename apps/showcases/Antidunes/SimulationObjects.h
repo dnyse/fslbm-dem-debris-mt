@@ -121,15 +121,14 @@ struct SimulationObjects
    FlagInfo_T flagInfo;
 
    // Diagnostic sweep event collector ---------------------------------------------------------------------------------
-   // [Claude, 2026-09-27] Per explicit request ("collect the data and save them into data structures
-   // ... and then logging them in this extra sweep"): a shared, append-only buffer that any
-   // per-sub-cycle diagnostic in ParticleKernels.h can push a lightweight record into (cheap -- one
-   // push_back, no string formatting) INSTEAD of calling WALBERLA_LOG_WARNING directly at the point
-   // of detection. BuildTimeloop.h's addAfterTimeStepDiagnosticSweep (gated by
-   // ModelParameters::diagnosticSweepEnabled, off by default) drains and logs this buffer once per
-   // main step, then clears it -- so all of this session's diagnostic output funnels through one
-   // togglable place instead of being permanently wired inline. Empty / zero-cost whenever
-   // diagnosticSweepEnabled is false, since every push site itself is gated by that same flag.
+   // A shared, append-only buffer that any per-sub-cycle diagnostic in ParticleKernels.h can push a
+   // lightweight record into (cheap -- one push_back, no string formatting) instead of calling
+   // WALBERLA_LOG_WARNING directly at the point of detection. BuildTimeloop.h's
+   // addAfterTimeStepDiagnosticSweep (gated by ModelParameters::diagnosticSweepEnabled, off by
+   // default) drains and logs this buffer once per main step, then clears it, so all of this
+   // diagnostic output funnels through one togglable place instead of being wired inline. Empty /
+   // zero-cost whenever diagnosticSweepEnabled is false, since every push site is gated by that
+   // same flag.
    struct DiagnosticEvent
    {
       uint_t             mainStep{ uint_t(0) };
@@ -153,8 +152,9 @@ struct SimulationObjects
    uint_t                           beginTimeStep;
    // Live main-loop step counter, updated once per iteration at the top of Antidunes.cpp's timeloop
    // (before timeloopFSLBM->singleStep() runs, so every before-time-step VTK/sweep callback sees the
-   // current step). Lets setup-time code (e.g. BuildTimeloop.h's addVTKOutput windowed-frequency gate)
-   // capture a live, always-current step value without needing the main loop's own local variable.
+   // current step). Lets setup-time code (e.g. BuildTimeloop.h's addBeforeTimeStepVTKOutput windowed-
+   // frequency gate) capture a live, always-current step value without needing the main loop's own
+   // local variable.
    shared_ptr< uint_t >             currentMainStep = std::make_shared< uint_t >(uint_t(0));
    shared_ptr< PIDController >      pidController;
    shared_ptr< Vector3< real_t > >  acceleration;

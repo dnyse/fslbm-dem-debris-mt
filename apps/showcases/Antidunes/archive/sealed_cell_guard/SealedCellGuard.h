@@ -1,8 +1,12 @@
 //======================================================================================================================
 //
+//  ARCHIVED, not compiled into production: this prm (closeSealedCellsMinNeighbours) was removed
+//  entirely from SimulationParams.h 2026-10-29, superseded by cylinderContactSkin/boxContactSkin (see
+//  SimulationParams.h and BuildTimeloop.h). Kept here for reference only.
+//
 //  Experimental guard against sub-cell fluid "channels" between touching bodies.
 //
-//  [Claude, 2026-09-21] Three touching parallel rods of radius r enclose a channel of inscribed radius 0.1547 r
+// Three touching parallel rods of radius r enclose a channel of inscribed radius 0.1547 r
 //  (0.46 LU for r = 3), i.e. less than one cell: the cell-centre mapping (MovingParticleMapping: a cell is obstacle if
 //  its centre lies inside the body) leaves a string of fluid cells whose 26 D3Q27 neighbours are (almost) all obstacle.
 //  Such a cell cannot exchange information with any fluid neighbour, its populations just bounce back and forth
@@ -11,7 +15,7 @@
 //  at least one moving obstacle) is turned into an obstacle cell of the neighbouring body that owns most of its
 //  obstacle neighbours (particle field UID), exactly like the mapping does.
 //
-//  [Claude, 2026-09-22] CORRECTNESS FIX: this sweep now runs AFTER PdfReconstructionManager (BuildTimeloop.h), not
+// CORRECTNESS FIX: this sweep now runs AFTER PdfReconstructionManager (BuildTimeloop.h), not
 //  before it -- the earlier version intercepted 'former moving obstacle' cells that were STILL sealed and slammed
 //  them straight back to obstacle, skipping reconstruction entirely; that cell's PDF/fill/excess-mass state was then
 //  whatever it happened to be before it was ever mapped, frozen and never made consistent again. A cell doing this

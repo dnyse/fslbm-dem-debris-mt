@@ -16,11 +16,11 @@
 //! \file DEMValidationScenarios.h
 //! \brief Fluid-free DEM validation experiments for DEMValidation.cpp.
 //!
-//! [Claude, 2026-10-29] Split into 5 files by scenario family (this header is now a thin aggregator,
+//! Split into 5 files by scenario family (this header is now a thin aggregator,
 //! kept so DEMValidation.cpp's own #include "DEMValidationScenarios.h" needs no change):
 //!   - DEMValidationInfra.h: DEMEngine, PassFailAccumulator, shared logging/loop helpers.
-//!   - DEMValidationWallImpact.h: single-body wall-impact scenarios (1-3).
-//!   - DEMValidationPairEnergy.h: pairwise central head-on restitution/energy scenarios (4-5).
+//!   - DEMValidationWallImpact.h: single-body wall-impact scenarios.
+//!   - DEMValidationPairEnergy.h: pairwise central head-on restitution/energy scenarios.
 //!   - DEMValidationCornerAndMultiPoint.h: corner-discontinuity and multi-point box-contact scenarios.
 //!   - DEMValidationPackingAndDrum.h: packing/angle-of-repose/rotating-drum scenarios, plus the real-
 //!     incident collision replay.

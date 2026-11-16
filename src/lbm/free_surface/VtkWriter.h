@@ -222,33 +222,43 @@ void addVTKOutput(const std::weak_ptr< StructuredBlockForest >& blockForestPtr, 
 
    // add VTK output to timeloop
    std::map< std::string, vtk::OutputFunction > vtkOutputFunctions;
-   vtk::initializeVTKOutput(vtkOutputFunctions, vtkConfigFunc, blockForest, config);
+   std::map< std::string, shared_ptr< vtk::VTKOutput > > vtkOutputObjects;
+   vtk::initializeVTKOutput(vtkOutputFunctions, vtkConfigFunc, blockForest, config, "VTK", &vtkOutputObjects);
    for (auto const &[label, function] : vtkOutputFunctions)
    {
-      // "fluid_field_dense" (see this function's own doc comment) gets its own writeFrequency from
-      // the prm as usual, but its actual invocation is ADDITIONALLY gated to [denseFromStep,
-      // denseToStep) here -- outside that window the wrapped lambda never calls the real write
-      // function at all, so its own internal execution counter simply doesn't advance while
-      // skipped (harmless: it only ever runs within this one contiguous window).
+      // "fluid_field_dense" and "fluid_field_snapshots" (see this function's own doc comment) gate
+      // their actual invocation to a window / a discrete set of steps below, instead of firing on
+      // their own writeFrequency like every other block. [Claude, 2026-11-16, bugfix]: this used to
+      // call the plain wrapped function() (-> VTKOutput::write()) only on the selected steps, and
+      // nowhere else -- which silently broke VTKOutput's own output numbering whenever the selected
+      // steps are not uniformly spaced (fluid_field_snapshots' whole point). write()'s numbering
+      // (with continuousNumbering=false, the default used here) is simply "how many times write()
+      // has been called so far", which only equals the real simulation step if write() is called on
+      // EVERY timeloop step; skipping the call outside the window/set instead numbers outputs
+      // 0,1,2,... in the order they fire, discarding the real, possibly non-uniform step values
+      // entirely (e.g. steps 0,250,500,1000,2000,4000,... were renumbered 0,1,2,3,4,5,...). Fixed by
+      // calling VTKOutput::forceWrite(step) directly with the real simulation step as the explicit
+      // output number: this bypasses write()'s counter-based numbering (and its writeFrequency
+      // gate, already irrelevant here) entirely, and also writes that same number into the
+      // .pvd/.vthb collection's "timestep" attribute, so ParaView plays the sequence back at its
+      // true, non-uniform times instead of assuming uniform spacing.
       if (label == "fluid_field_dense" && denseStepPtr)
       {
+         auto vtkOutput = vtkOutputObjects.at(label);
          timeloop.addFuncBeforeTimeStep(
-            [function, denseStepPtr, denseFromStep, denseToStep]() {
+            [vtkOutput, denseStepPtr, denseFromStep, denseToStep]() {
                const uint_t step = *denseStepPtr;
-               if (step >= denseFromStep && step < denseToStep) function();
+               if (step >= denseFromStep && step < denseToStep) vtkOutput->forceWrite(step);
             },
             std::string("VTK: ") + label);
       }
       else if (label == "fluid_field_snapshots" && snapshotStepPtr)
       {
-         // "fluid_field_snapshots" (see this function's own doc comment) fires ONLY on the discrete
-         // steps in snapshotSteps -- every other step, function() is never called at all, so its own
-         // internal execution counter simply doesn't advance while skipped (same reasoning as the
-         // fluid_field_dense branch above, just a set-membership test instead of a range test).
+         auto vtkOutput = vtkOutputObjects.at(label);
          timeloop.addFuncBeforeTimeStep(
-            [function, snapshotStepPtr, snapshotSteps]() {
+            [vtkOutput, snapshotStepPtr, snapshotSteps]() {
                const uint_t step = *snapshotStepPtr;
-               if (snapshotSteps.count(step) > 0) function();
+               if (snapshotSteps.count(step) > 0) vtkOutput->forceWrite(step);
             },
             std::string("VTK: ") + label);
       }

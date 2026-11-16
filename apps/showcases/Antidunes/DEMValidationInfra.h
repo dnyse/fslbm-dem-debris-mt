@@ -135,7 +135,7 @@ public:
          useContactManifold, manifoldFadeRate, useRotationalEffectiveMass);
    }
 
-   //! [Claude, 2026-09-30] direct access to the production contact functor (detection-mode switches)
+   //! direct access to the production contact functor (detection-mode switches)
    ComputeContacts&                    computeContacts() { return *computeContacts_; }
    data::ParticleStorage&              ps() { return *ps_; }
    data::ParticleAccessorWithBaseShape& ac() { return *ac_; }
@@ -472,20 +472,16 @@ inline uint_t runWallImpactLoop(DEMEngine& engine, size_t bodyIdx, size_t wallId
    return s;
 }
 
-// [Claude, 2026-11-09] velocityScale/angularVelocityScale (both default 0, reproducing the previous
-// pure-relative-error behaviour via the pre-existing 1e-8 floor): optional MIXED absolute+relative
-// tolerance, following the standard combined-tolerance form used by e.g. numpy.isclose/np.allclose
-// (atol + rtol*|b|) and matlab.unittest's AbsoluteTolerance/RelativeTolerance classes -- rewritten here
-// as an equivalent floored-denominator relative error, relErr = resid / (scale + |analytic|), which is
-// algebraically identical to "resid <= tolerance*(scale + |analytic|)" but keeps this function's existing
-// relErr-then-compare-to-tolerance structure and log line unchanged. Added specifically because the pure
-// form (floor 1e-8) is unusable where the analytical reference crosses zero: a tilt where the true rebound
-// speed is ~0.01 of the impact speed turns an entirely ordinary ~0.001-0.03 absolute residual into a
-// 10-200x relative error, failing a check that is not actually detecting a worse simulation result there
-// (see wall-impact section of the thesis this test backs, and the near-zero-denominator discussion in
-// DEM_VALIDATION_MATH_REFERENCE.md). `scale` should be a fixed physical reference for the quantity (e.g.
-// the impact speed for velocity), NOT the per-tilt analytic value itself, or the fix would be circular.
-// Chosen non-destructively: existing call sites are unaffected unless they pass a nonzero scale.
+// velocityScale/angularVelocityScale (both default 0, reproducing the previous pure-relative-error
+// behaviour via the pre-existing 1e-8 floor): optional mixed absolute+relative tolerance, following
+// the standard combined-tolerance form (atol + rtol*|b|), rewritten as an equivalent
+// floored-denominator relative error, relErr = resid / (scale + |analytic|). Needed because the pure
+// relative form is unusable where the analytical reference crosses zero: a tilt where the true
+// rebound speed is ~0.01 of the impact speed turns an ordinary small absolute residual into a
+// 10-200x relative error, failing a check that isn't actually detecting a worse result there (see
+// the thesis's wall-impact section and DEM_VALIDATION_MATH_REFERENCE.md). `scale` should be a fixed
+// physical reference for the quantity (e.g. the impact speed), not the per-tilt analytic value
+// itself, or the fix would be circular.
 inline void logCaseResult(const std::string& tag, const Vec3& simVel, const Vec3& analyticVel,
                            const Vec3& simAngVel, const Vec3& analyticAngVel, real_t tolerance,
                            PassFailAccumulator& acc, real_t velocityScale = real_t(0),

@@ -35,55 +35,17 @@ using namespace mesa_pd;
 // 5b: corner/edge contact-normal discontinuity (Box x Box analytical dispatch) -- REPRODUCTION test
 //======================================================================================================================
 
-// Investigates a real defect spotted visually in production job 4196224 (bridge "widerstacks" box
-// scenario, ParaView output around step 26000-27000): a batch of staggered-release plank floaters
-// lands together and jams, and one plank is subsequently ejected/"flies" out of the pile with no
-// single log line ever showing a force large enough to explain it. Literature on polyhedral DEM (e.g.
-// the "improved common-plane concept" and "energy-conserving contact" papers for arbitrarily-shaped
-// elements) identifies the mechanism directly: near a corner-to-corner or corner-to-edge
-// configuration, a tiny relative positional/rotational change can flip which face/edge/vertex pair the
-// contact solver reports as the separating axis, snapping the contact normal to a different direction
-// between consecutive steps. Because the spring-dashpot force is applied along whatever normal is
-// reported THIS step with no continuity constraint against the PREVIOUS step's normal, that snap can
-// inject kinetic energy with no corresponding physical source -- exactly what turns an ordinary
-// pile-up into a "flying" launch.
-//
-// This reproduces the geometry realistically, not as a contrived worst case: both bodies use this
-// project's own production FloatingBox size/density/Poisson's ratio (test_bridge_v1_..._boxes_..._gas.
-// prm's own FloatingBox halfExtents <6,1,1.5>, densityRatio 0.6, and the scenario's own derived
-// particleCollisionTime/particleTimestepSize/particleKappa from computedParams.txt), the SAME
-// analytical Box x Box dispatch (boxBoxSAT) that scenario actually runs with
-// useAnalyticalContactDetection=true -- NOT the generic GJK/EPA fallback every OTHER DEMValidation
-// scenario in this file defaults to, since GJK/EPA and boxBoxSAT are different code with different
-// failure modes and this defect is specific to the analytical path -- and a realistic approach speed
-// (~0.025 LU/step, matching the ~0.01-0.03 LU/step range actually observed in job 4196224's own
-// STRONG-CONTACT-FORCE log lines, i.e. what free-fall under this scenario's own tiny gravity,
-// 7.03e-6 LU/step^2, produces after a plausible multi-thousand-step drop -- simulating the drop itself
-// would just be a long uneventful prelude, so this starts right at that realistic pre-impact speed).
-//
-// Two identical planks approach roughly along their own long (X) axis -- exactly how two staggered-
-// release logs converging on the same jam location would meet -- but offset slightly in Y/Z and tilted
-// a few degrees (a plausible natural tumble; ParticleKernels.h's own FloaterHistoryLogger comment notes
-// a floater's angular velocity "is often nonzero well before any 'expected' collision"), so their
-// SHORT end-cap CORNERS meet first rather than a clean face-to-face impact -- precisely the
-// near-degenerate configuration the literature identifies as the trigger. e=1 (perfectly elastic,
-// frictionless, no gravity) is used for the PASS/FAIL bound itself -- the strictest, least ambiguous
-// bar: total system kinetic energy can dip during compression (converted to non-negative spring
-// potential energy) but can never legitimately exceed its own pre-contact value at any instant, since
-// there is no other energy source in this system. This is exactly the "ECC" criterion
-// runEnergyConservation above already established for this file, applied here as a running bound
-// across every step instead of only checked once before/after. restitutionCoefficient/
-// frictionCoefficient remain overridable via the prm to rerun under the scenario's literal production
-// damping (0.3 "wet/waterlogged wood", 0.5) instead, if a looser reproduction is wanted -- with e<1,
-// mu>0 the bound is no longer "exactly conserved" but "monotonically non-increasing once separated",
-// so keGainRel is still meaningful as a smoking gun, just not as mathematically clean.
+// Reproduction of a real defect from production job 4196224 (bridge "widerstacks" box scenario): a
+// corner/edge contact-normal discontinuity in the Box x Box analytical dispatch that can inject
+// kinetic energy with no physical source. See runCornerNormalDiscontinuity's own header comment below
+// for the full mechanism, literature background, and realism rationale -- this namespace just factors
+// out its parameters so runCornerFixComparison can reuse the exact same geometry/physics.
 namespace detail
 {
-//! Shared parameters for one run of the corner/edge contact-normal-discontinuity scenario -- see
-//! runCornerNormalDiscontinuity's own (still-present, unchanged) header comment for the full
-//! literature/production-incident background and the realism rationale behind every default value
-//! here. Factored out so runCornerFixComparison below can run the exact SAME geometry/physics several
-//! times, varying only useRoundedBoxCorners/useMultiPointBoxContact.
+//! Shared parameters for one run of the corner/edge contact-normal-discontinuity scenario (see
+//! runCornerNormalDiscontinuity's header comment). Factored out so runCornerFixComparison below can
+//! run the exact same geometry/physics several times, varying only
+//! useRoundedBoxCorners/useMultiPointBoxContact.
 struct CornerScenarioParams
 {
    Vec3   halfExtents      = Vec3(6, 1, 1.5);
@@ -149,7 +111,7 @@ struct CornerScenarioResult
    uint_t pointJumpCount              = uint_t(0);  // steps where that jump exceeded pointJumpThreshold
    bool   everContacted   = false;
    bool   pass            = false; // keGainRel < tolerance (no anomalous energy gain observed)
-   // [Claude, 2026-10-29] the four "eberly*" diagnostics that used to live here (tracking
+   // the four "eberly*" diagnostics that used to live here (tracking
    // closed_form_contacts::boxBoxSpheroAnalytical's own reported normal/point) were removed along with
    // useSpheroBoxContact/useSpheroBoxAnalytical -- see archive/unused_contact_methods/.
 };
@@ -242,7 +204,7 @@ inline real_t computeInitialElasticPE(const Vec3& posA, const Rot3& rotA, const 
       ? boxOverlapCapFraction * std::min({ halfA[0], halfA[1], halfA[2], halfB[0], halfB[1], halfB[2] })
       : std::numeric_limits< real_t >::max();
 
-   // [Claude, 2026-10-29] useSpheroBoxContact branch removed -- see archive/unused_contact_methods/.
+   // useSpheroBoxContact branch removed -- see archive/unused_contact_methods/.
 
    if (useMultiPointBoxContact)
    {
@@ -367,7 +329,7 @@ inline CornerScenarioResult runCornerScenarioOnce(const CornerScenarioParams& p)
             lastPoint      = res.point;
             haveLastNormal = true;
          }
-         // [Claude, 2026-10-29] the useSpheroBoxContact+useSpheroBoxAnalytical Eberly-diagnostic
+         // the useSpheroBoxContact+useSpheroBoxAnalytical Eberly-diagnostic
          // block that used to live here was removed -- see archive/unused_contact_methods/.
       }
       engine.step();
@@ -550,7 +512,7 @@ inline bool runCornerFixComparison(const config::Config::BlockHandle& b)
    // meaningful pass criterion is "the defect is still confirmed present at baseline (otherwise this
    // whole comparison is moot) AND at least one mitigation actually clears it" -- both being true is
    // the direct, minimal evidence that (a) the reproduction still holds and (b) a real fix exists.
-   // [Claude, 2026-10-01] since the SAT contact-point fix (detail::boxBoxContactPoint) the baseline no longer injects energy
+   // since the SAT contact-point fix (detail::boxBoxContactPoint) the baseline no longer injects energy
    // here, so "baseline reproduces the defect" no longer holds; the criterion is now that NO configuration injects
    // energy (with ANTIDUNES_SAT_FORMER_POINT set, the former point and the former outcome are reproduced).
    const bool pass = configsWithoutInjection == uint_t(sizeof(configs) / sizeof(configs[0]));
@@ -565,7 +527,7 @@ inline bool runCornerFixComparison(const config::Config::BlockHandle& b)
 // runMultiPointBoxContactFuzz above: all three of those start the two boxes SEPARATED and let them
 // approach at a slow, realistic speed, so contact only ever begins at a SHALLOW, near-degenerate
 // overlap -- exactly the regime Fraige et al. 2008a's multi-point concept targets. None of them ever
-// exercise what boxBoxMultiPointContacts (PaperAnalyticalContacts.h) does when a vertex is embedded
+// exercise what boxBoxMultiPointContacts (ClosedFormContactsBoxPoint.h) does when a vertex is embedded
 // DEEP inside the other box -- e.g. a jam where several floaters have already compressed hard against
 // each other, or a body released directly into an existing pile (see the RELEASE-OVERLAP diagnostic
 // in ParticleKernels.h). That function's per-vertex overlap is bounded only by
@@ -1001,7 +963,7 @@ inline bool runMultiPointEdgeCases(const config::Config::BlockHandle& b)
       bool        manifold;
       bool        rotationalEffMass = false;
    };
-   // [Claude, 2026-10-29] two "useSpheroBoxContact (GJK/Eberly analytical)" rows removed -- see
+   // two "useSpheroBoxContact (GJK/Eberly analytical)" rows removed -- see
    // archive/unused_contact_methods/.
    const Config configs[] = {
       { "baseline (both OFF)", false, false, false, false, false, false },
@@ -1385,7 +1347,7 @@ inline bool runFallOntoPileStability(const config::Config::BlockHandle& b)
       bool        manifold;
       bool        rotationalEffMass = false;
    };
-   // [Claude, 2026-10-29] "useSpheroBoxContact" row removed -- see archive/unused_contact_methods/.
+   // "useSpheroBoxContact" row removed -- see archive/unused_contact_methods/.
    const Config configs[] = {
       { "baseline (both OFF)", false, false, false, false, false, false },
       { "useRoundedBoxCorners", true, false, false, false, false, false },

@@ -18,7 +18,7 @@
 //!        papers, for the shape pairs SolidCylinderContactDetection (ParticleKernels.h) currently
 //!        resolves via the generic GJK/EPA fallback: Box x Box and Cylinder x Cylinder.
 //!
-//! [Claude, 2026-10-29] Renamed from PaperAnalyticalContacts.h (namespace paper_analytical ->
+//! Renamed from PaperAnalyticalContacts.h (namespace paper_analytical ->
 //! closed_form_contacts) and split into 4 files by theme -- this header is now a thin aggregator,
 //! kept so every external #include "PaperAnalyticalContacts.h" site needed only a filename update,
 //! not a restructure:
@@ -99,15 +99,16 @@
 //!
 //! This version replaces it with the actual closed form: closestThetaOnCircleToLine derives the
 //! quartic coefficients directly from the geometry (see that function's own comment for the
-//! algebra) and solves them via the Durand-Kerner method (solveQuarticDurandKerner) -- chosen over
-//! Ferrari's method specifically because it has no case-branching on a resolvent cubic's
-//! discriminant to get subtly wrong; every root, real or complex, is refined by the same fixed
-//! iteration loop. closestThetaOnCircleToPoint (used by the edge-edge alternating-projection loop)
-//! turned out to have an even simpler exact answer -- a single atan2, no polynomial at all, since
-//! its objective is a pure first-harmonic trig function of theta. Both closed forms were validated
-//! against the previous golden-section implementation across thousands of randomized
-//! configurations before replacing it (matching to floating-point precision in every trial), the
-//! "compiler-verified reference" the original numeric approach didn't have.
+//! algebra) and solves them via Ferrari's method (solveQuarticFerrari, O(1), no iteration) --
+//! the current production default, after QuarticSolverComparisonTest.cpp found it matches the
+//! originally-used Durand-Kerner iteration's accuracy at a fraction of the cost; Durand-Kerner and
+//! Aberth-Ehrlich remain available for comparison (see QuarticSolverMethod's own comment).
+//! closestThetaOnCircleToPoint (used by the edge-edge alternating-projection loop) turned out to
+//! have an even simpler exact answer -- a single atan2, no polynomial at all, since its objective is
+//! a pure first-harmonic trig function of theta. Both closed forms were validated against the
+//! previous golden-section implementation across thousands of randomized configurations before
+//! replacing it (matching to floating-point precision in every trial), the "compiler-verified
+//! reference" the original numeric approach didn't have.
 //======================================================================================================================
 
 #pragma once

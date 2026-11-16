@@ -170,7 +170,7 @@ inline bool runPairRestitution(const config::Config::BlockHandle& b)
    return acc.allPassed();
 }
 
-//! [Claude, 2026-09-30] Energy conservation of OBLIQUE cylinder-cylinder collisions under each cylinder detection mode
+//! Energy conservation of OBLIQUE cylinder-cylinder collisions under each cylinder detection mode
 //! (thesis Section 5.2, "continuity"). Two free cylinders with uniformly random orientations collide with a random
 //! lateral offset (so that rims, bands and faces all meet), e = 1, mu = 0, no gravity: the kinetic energy after the
 //! collision must equal the energy before. A detection that jumps in depth or normal while the bodies move injects or
@@ -299,7 +299,7 @@ inline bool runCylinderPairEnergyFuzz(const config::Config::BlockHandle& b)
    return acc.allPassed();
 }
 
-//! [Claude, 2026-10-01] Cuboid version of runCylinderPairEnergyFuzz: oblique elastic (e = 1, mu = 0) collisions of two
+//! Cuboid version of runCylinderPairEnergyFuzz: oblique elastic (e = 1, mu = 0) collisions of two
 //! freely rotating cuboids with random orientations and lateral offsets, no gravity; kinetic energy must be conserved.
 //! Modes: "gjk" (GJK/EPA) and "sat" (closed-form separating-axis test, as in the drop tests). Written to test whether
 //! the energy gain seen in the randomised cuboid drop tests comes from the SAT contact point (placed on the line between
@@ -349,7 +349,7 @@ inline bool runCuboidPairEnergyFuzz(const config::Config::BlockHandle& b)
       for (const auto& in : inits)
       {
          // modes: gjk (GJK/EPA), sat (plain SAT, as in the drop tests), multipoint (useMultiPointBoxContact).
-         // [Claude, 2026-10-29] "fraige" mode (useFraigeBoxContactModel) removed -- see
+         // "fraige" mode (useFraigeBoxContactModel) removed -- see
          // archive/unused_contact_methods/ (fraige_multipoint_box_contact.h + fraige_validation_tests.cpp.excerpt).
          DEMEngine engine(dt, real_t(1), real_t(0), poisson, collisionTime, real_t(0), real_t(10) * reach,
                           /*useAnalyticalContactDetection=*/mode != "gjk", /*useRoundedBoxCorners=*/false,
@@ -467,10 +467,10 @@ inline bool runEnergyConservation(const config::Config::BlockHandle& b)
       const Vec3   pBefore  = engine.ac().getMass(idxA) * engine.ac().getLinearVelocity(idxA) +
                               engine.ac().getMass(idxB) * engine.ac().getLinearVelocity(idxB);
 
-      // Live cross-check of the not-yet-simulation-wired closed forms (PaperAnalyticalContacts.h)
-      // against the production GJK/EPA geometry actually driving the dynamics this step, for the two
-      // pairs that have a closed form there (box-box, cylinder-cylinder). Diagnostic only -- does not
-      // change what drives the physics, per that file's own stated intent.
+      // Live cross-check of the closed forms (ClosedFormContacts.h -- opt-in in production behind
+      // ModelParameters.useAnalyticalContactDetection, off by default) against the GJK/EPA geometry
+      // actually driving the dynamics this step, for the two pairs that have a closed form there
+      // (box-box, cylinder-cylinder). Diagnostic only -- does not change what drives the physics.
       const bool crossCheckable =
          (pr.first == "box" && pr.second == "box") || (pr.first == "cylinder" && pr.second == "cylinder");
       real_t maxOverlapDeltaSeen = real_t(0);

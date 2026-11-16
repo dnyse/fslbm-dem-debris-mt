@@ -1347,15 +1347,25 @@ public:
 
       auto result = closed_form_contacts::cylinderCylinderContact(ci, cj);
 
-      // Capsule-bound safety net (always on, independent of useTightLayer1): a cylinder is a subset of
-      // the capsule of the same radius around its axis SEGMENT, so two cylinders can only touch if their
-      // axis segments are within R_i + R_j of each other. Any analytic "contact" violating this is a
-      // false positive of the closed-form dispatch (e.g. the near-parallel band-band-skewed one fixed in
-      // PaperAnalyticalContacts.h, see CylinderNearParallelSkewedTest.cpp) and must never reach the
-      // contact solver -- in particular not in usePureAnalyticalCylinder mode, which trusts the
-      // dispatch without any GJK/EPA cross-check. Cheap (one segment-segment distance) and it can never
-      // reject a real contact (tiny relative slack for round-off only).
-      if (result.contact)
+      // Capsule-bound safety net: a cylinder is a subset of the capsule of the same radius around its
+      // axis SEGMENT, so two cylinders can only touch if their axis segments are within R_i + R_j of
+      // each other. Any analytic "contact" violating this is a false positive of the closed-form
+      // dispatch (e.g. the near-parallel band-band-skewed one fixed in PaperAnalyticalContacts.h, see
+      // CylinderNearParallelSkewedTest.cpp) and must never reach the contact solver -- in particular not
+      // in usePureAnalyticalCylinder mode, which trusts the dispatch without any GJK/EPA cross-check.
+      // Cheap (one segment-segment distance) and it can never reject a real contact (tiny relative slack
+      // for round-off only).
+      // [Claude, 2026-11-08] per author (thesis session, provably redundant when useTightLayer1=true):
+      // skipped in that case. With useTightLayer1=true the pre-filter above (l. ~1320-1331) already
+      // rejects on dist(axis segments) > R_i + R_j using the SAME CylinderState, so by the time this
+      // point is reached every pair already satisfies dist <= R_i + R_j, which trivially also satisfies
+      // this check's (R_i + R_j)*(1+1e-9) bound -- this second evaluation cannot change the outcome and
+      // only re-does the same O(1) distance computation. Still needed, and still run, when
+      // useTightLayer1=false (the pre-filter then uses the looser, orientation-blind circumscribing-
+      // sphere bound, l. ~1333-1338, under which the two bounds genuinely differ); this is also the
+      // configuration under which this safety net historically caught the near-parallel band-band-skewed
+      // bug referenced above.
+      if (result.contact && !useTightLayer1)
       {
          mesa_pd::Vec3 p0i, p1i, p0j, p1j;
          closed_form_contacts::detail::cylinderAxisEndpoints(ci, p0i, p1i);
@@ -2836,22 +2846,15 @@ public:
                                  acd_.getPenetrationDepth(), particleTimestepSize_);
             }
 
-            // TEMP DIAGNOSTIC (remove after investigation): [STRONG-CONTACT-FORCE] -- the collapsed-
-            // plane density05 scenarios (jobs 4124358, 4125031) showed floaters launched far above
-            // both the spawn plane and the waterline (max Z up to 174.9, vs spawn Z=118) in the
-            // window right after all 1000 floaters finish releasing and converge/pack onto the
-            // shared water-surface region -- consistent with a DEM contact-overlap event, but no
-            // force data was captured to confirm it (logFloaterHistory was off due to its own
-            // quota cost). This fires unconditionally (no logFloaterHistory needed) whenever a
-            // single contact's force delta exceeds STRONG_FORCE_THRESHOLD, and dumps a full
-            // breakdown: this contact's own force/torque contribution, each particle's TOTAL
-            // accumulated force/torque so far this sub-cycle (including this contact and everything
-            // already applied before it -- e.g. gravity, other contacts), and each particle's
-            // (fixed-for-this-main-step) hydrodynamic force/torque, so the relative size of the
-            // contact force against gravity/hydro is visible directly rather than inferred.
-            // Threshold is a round number well above a typical gravity-scale weight for this
-            // scenario (~0.0068 LU for a density-0.5 box, see the scenario's own comments) --
-            // deliberately lenient so a real launch-causing event isn't missed. Throttled per rank.
+            // [STRONG-CONTACT-FORCE]: permanent safety-net diagnostic, independent of logFloaterHistory
+            // (which is normally off). Fires whenever a single contact's force delta exceeds
+            // STRONG_FORCE_THRESHOLD and dumps a full breakdown -- this contact's own force/torque,
+            // each particle's total accumulated force/torque so far this sub-cycle, and each particle's
+            // hydrodynamic force/torque -- so an abnormal contact force (e.g. the launched floaters once
+            // traced to a DEM contact-overlap event in the collapsed-plane scenarios) is visible
+            // directly instead of inferred after the fact. Threshold is a round number well above a
+            // typical gravity-scale weight, deliberately lenient so a real event isn't missed. Throttled
+            // per rank.
             {
                const mesa_pd::Vec3 forceDeltaA  = ac.getForceRef(acd_.getIdx1())  - forceBeforeA;
                const mesa_pd::Vec3 forceDeltaB  = ac.getForceRef(acd_.getIdx2())  - forceBeforeB;
@@ -4139,7 +4142,6 @@ public:
       , boundaryHandlingID_(simObjs->antidunesBoundaryHandling ? simObjs->antidunesBoundaryHandling->getHandlingID()
                                                                : BlockDataID())
       , hasFluid_(simObjs->antidunesBoundaryHandling != nullptr)
-      , debugForceObstacleClearAtStep_(simParams->model.debugForceObstacleClearAtStep)
       , diagnosticSweepEnabled_(simParams->model.diagnosticSweepEnabled)
       , diagnosticEvents_(simObjs->diagnosticEvents)
       , vvIntegratorPreForce(simParams->computed.particleTimestepSize)
@@ -4703,16 +4705,13 @@ public:
       const bool logForcesThisStep = (stepCounter_ % evalFrequency_ == uint_t(0));
       for (auto subCycle = uint_t(0); subCycle < numSubCycles; ++subCycle)
       {
-         // TEMP DIAGNOSTIC (remove after investigation): [GHOST-VANISHED] snapshot. Captures, once per
-         // main step (subCycle==0, BEFORE this step's own DEM subcycles/syncCalls touch anything), the
-         // full set of floater UIDs this rank can currently see AT ALL -- local owned OR ghost --
-         // i.e. exactly the population MovingParticleMapping iterated (via SelectAll, ac_->size()) the
-         // last time the fluid-obstacle map (particleField_) was refreshed. That refresh only happens
-         // once per MAIN timestep (timeloopAfterDEM, AFTER all 40 subcycles below), so if a ghost this
-         // rank held at refresh time gets dropped by any of THIS step's syncCalls before the next
-         // refresh, particleField_ is left holding a UID this rank can no longer resolve -- the exact
-         // STALE-PARTICLE-IDX precondition, and one the LOCAL-only [SUBCYCLE-LEFT-RANK] check above
-         // cannot see, since a dropped ghost need not have moved far (or at all) itself.
+         // [GHOST-VANISHED] snapshot: captures, once per main step (subCycle==0, before this step's
+         // own DEM subcycles/syncCalls touch anything), every floater UID this rank can currently see
+         // at all (local or ghost) -- the population the fluid-obstacle map (particleField_) assumed
+         // when it was last refreshed (once per MAIN timestep, after all subcycles). If a ghost held at
+         // refresh time is dropped by a later syncCall() before the next refresh, particleField_ is
+         // left holding a UID this rank can no longer resolve -- the STALE-PARTICLE-IDX precondition,
+         // and one the LOCAL-only [SUBCYCLE-LEFT-RANK] check below cannot see on its own.
          if (subCycle == uint_t(0))
          {
             ghostMappingSnapshot_.clear();
@@ -4725,144 +4724,6 @@ public:
                [this](size_t idx, auto& ac) { ghostMappingSnapshot_.insert(ac.getUid(idx)); },
                *particleAccessor);
          }
-
-         // TEST-ONLY: [DEBUG-FORCE-OBSTACLE-CLEAR] -- DISABLED, 2026-09-27, per explicit request
-         // ("comment out... the failure that you manually introduced as well") while isolating the
-         // gated-guard hang (job 4270904). Not needed for this test (debugForceObstacleClearAtStep_
-         // is 0/off in the prm being used anyway) and removed from the build entirely so it can't be
-         // a confounding factor. See ModelParameters::debugForceObstacleClearAtStep's own doc comment
-         // (SimulationParams.h) and THESIS_PLAN.md for what this block did.
-#if 0
-         if (debugForceObstacleClearAtStep_ != uint_t(0) && subCycle == uint_t(0) &&
-             stepCounter_ == debugForceObstacleClearAtStep_)
-         {
-            particleStorage->forEachParticle(useOpenMP,
-               [](size_t idx, auto& ac) {
-                  using namespace mesa_pd::data::particle_flags;
-                  if (isSet(ac.getFlags(idx), GHOST)) return false;
-                  const uint_t t = ac.getType(idx);
-                  return t == uint_t(1) || t == uint_t(3) || t == uint_t(4); // sphere/box/cylinder floaters
-               },
-               *particleAccessor,
-               [this](size_t idx, auto& ac) {
-                  const walberla::id_t uid = ac.getUid(idx);
-                  uint_t clearedCount       = uint_t(0);
-                  for (auto blockIt = blockForest_->begin(); blockIt != blockForest_->end(); ++blockIt)
-                  {
-                     auto* pf = hasFluid_ ? blockIt->getData< lbm_mesapd_coupling::ParticleField_T >(particleFieldID_) : nullptr;
-                     if (pf == nullptr) continue;
-                     auto* boundaryHandling =
-                        blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(boundaryHandlingID_);
-                     auto* flagField = boundaryHandling->getFlagField();
-                     auto* pdfField  = blockIt->getData< PdfField_T >(pdfFieldID_);
-                     auto* fillField = blockIt->getData< ScalarField_T >(fillFieldID_);
-                     if (!flagField->flagExists(AntidunesBoundaryHandling_T::movingObstacleFlagID)) continue;
-                     const auto obstacleFlag = flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID);
-                     WALBERLA_FOR_ALL_CELLS_XYZ(pf,
-                        if (pf->get(x, y, z) == uid && isFlagSet(flagField->get(x, y, z), obstacleFlag))
-                        {
-                           boundaryHandling->removeBoundary(obstacleFlag, x, y, z);
-                           pdfField->setToEquilibrium(x, y, z, Vector3< real_t >(real_t(0)), real_t(1));
-                           fillField->get(x, y, z) = real_t(1);
-                           pf->get(x, y, z)        = particleAccessor->getInvalidUid();
-                           ++clearedCount;
-                        }
-                     ) // WALBERLA_FOR_ALL_CELLS_XYZ
-                  }
-                  WALBERLA_LOG_WARNING("[DEBUG-FORCE-OBSTACLE-CLEAR] rank=" << mpi::MPIManager::instance()->rank()
-                     << " uid=" << uid << " step=" << stepCounter_ << " clearedCellCount=" << clearedCount
-                     << " -- deliberately cleared this floater's own current obstacle cells to quiescent "
-                        "liquid, reproducing the reverted guard's side effect on a real (not orphaned) body.");
-               },
-               *particleAccessor);
-         }
-#endif
-
-         // TEMP DIAGNOSTIC: [EARLY-CELL-CORRUPTION] -- per explicit request ("I don't really know if
-         // it's cell collapsed -> crazy mem force -> teleport -> stale id, or due to the update...
-         // improve the logging"). MEM-GARBAGE-LINK/STALE-PARTICLE-IDX only ever get checked once per
-         // MAIN step (inside reduceAndAvgHydroForces, before this sub-cycle loop even starts) -- so
-         // between a rod's own force being confirmed normal at step N and confirmed garbage at step
-         // N+9 (observed in job 4269772), there is a multi-step BLIND WINDOW with zero sub-cycle-level
-         // visibility into which of the ~90 intervening sub-cycles a cell actually first went bad, or
-         // whether that happened before or after any given rank's ghost-drop. This runs EVERY
-         // sub-cycle (not gated by GHOST-VANISHED at all -- deliberately independent, so it can't
-         // just re-detect what that check already found), for every LOCAL floater this rank owns:
-         // scans that floater's own currently-mapped obstacle cells' D3Q27 fluid neighbours for any
-         // |PDF component| > 10 (same threshold SimpleBB's own MEM-GARBAGE-LINK check uses) and logs
-         // the first several hits -- giving sub-cycle-resolution timing of exactly when a cell first
-         // goes bad, decoupled from the once-per-step force-computation check.
-         //
-         // DISABLED, 2026-09-27, per explicit request ("comment out all the logging that we
-         // introduced") while isolating the gated-guard hang (job 4270904) -- this block adds
-         // per-sub-cycle iteration cost of its own and is not needed to test the guard itself.
-#if 0
-         {
-            static uint_t earlyCorruptionLogCount = uint_t(0);
-            if (earlyCorruptionLogCount < uint_t(60))
-            {
-               particleStorage->forEachParticle(useOpenMP,
-                  [](size_t idx, auto& ac) {
-                     using namespace mesa_pd::data::particle_flags;
-                     if (isSet(ac.getFlags(idx), GHOST)) return false;
-                     const uint_t t = ac.getType(idx);
-                     return t == uint_t(1) || t == uint_t(3) || t == uint_t(4); // sphere/box/cylinder floaters
-                  },
-                  *particleAccessor,
-                  [this, subCycle](size_t idx, auto& ac) {
-                     if (earlyCorruptionLogCount >= uint_t(60)) return;
-                     const walberla::id_t uid = ac.getUid(idx);
-                     for (auto blockIt = blockForest_->begin();
-                          blockIt != blockForest_->end() && earlyCorruptionLogCount < uint_t(60); ++blockIt)
-                     {
-                        const auto* pf =
-                           hasFluid_ ? blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(particleFieldID_) : nullptr;
-                        if (pf == nullptr) continue;
-                        const auto* pdfField = blockIt->getData< const PdfField_T >(pdfFieldID_);
-                        auto* boundaryHandling =
-                           blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(boundaryHandlingID_);
-                        const auto* flagField = boundaryHandling->getFlagField();
-                        if (!flagField->flagExists(AntidunesBoundaryHandling_T::movingObstacleFlagID)) continue;
-                        const auto obstacleFlag = flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID);
-                        const auto cellBB = pf->xyzSize();
-                        for (cell_idx_t z = cellBB.zMin(); z <= cellBB.zMax() && earlyCorruptionLogCount < uint_t(60); ++z)
-                        for (cell_idx_t y = cellBB.yMin(); y <= cellBB.yMax() && earlyCorruptionLogCount < uint_t(60); ++y)
-                        for (cell_idx_t x = cellBB.xMin(); x <= cellBB.xMax() && earlyCorruptionLogCount < uint_t(60); ++x)
-                        {
-                           if (pf->get(x, y, z) != uid) continue;
-                           for (cell_idx_t dz = -1; dz <= 1 && earlyCorruptionLogCount < uint_t(60); ++dz)
-                           for (cell_idx_t dy = -1; dy <= 1 && earlyCorruptionLogCount < uint_t(60); ++dy)
-                           for (cell_idx_t dx = -1; dx <= 1 && earlyCorruptionLogCount < uint_t(60); ++dx)
-                           {
-                              if (dx == 0 && dy == 0 && dz == 0) continue;
-                              const cell_idx_t nx = x + dx, ny = y + dy, nz = z + dz;
-                              if (!pdfField->xyzSizeWithGhostLayer().contains(nx, ny, nz)) continue;
-                              if (isFlagSet(flagField->get(nx, ny, nz), obstacleFlag)) continue; // only fluid neighbours
-                              for (uint_t q = 0; q < uint_t(27); ++q)
-                              {
-                                 const real_t val = pdfField->get(nx, ny, nz, q);
-                                 if (std::abs(val) > real_t(10))
-                                 {
-                                    WALBERLA_LOG_WARNING("[EARLY-CELL-CORRUPTION] rank="
-                                       << mpi::MPIManager::instance()->rank() << " uid=" << uid
-                                       << " step=" << stepCounter_ << " subCycle=" << subCycle
-                                       << " fluidCell=(" << nx << "," << ny << "," << nz << ")"
-                                       << " q=" << q << " pdf=" << val
-                                       << " density=" << pdfField->getDensity(nx, ny, nz)
-                                       << " -- caught at sub-cycle resolution, independent of "
-                                          "GHOST-VANISHED/MEM-GARBAGE-LINK's own once-per-step timing.");
-                                    ++earlyCorruptionLogCount;
-                                    break;
-                                 }
-                              }
-                           }
-                        }
-                     }
-                  },
-                  *particleAccessor);
-            }
-         }
-#endif
 
          // [VELOCITY-JUMP] -- catches the ONSET of a runaway, not just its aftermath. Every routine
          // per-floater log (BoxForces/BoxTorque) only fires once per evalFrequency_ (1000 steps), so a
@@ -4935,16 +4796,14 @@ public:
             vvIntegratorPreForce, *particleAccessor);
          tp["MESAPD: VelocityVerletPreForceUpdate"].end();
 
-         // TEMP DIAGNOSTIC (remove after investigation): [SUBCYCLE-LEFT-RANK] -- checks whether pure
-         // DEM-subcycle physics (the position update just above) has already moved a LOCAL floater
-         // outside every block this rank owns, BEFORE this subcycle's syncCall() below has a chance
-         // to hand ownership off. The fluid-side obstacle mapping / ghost-sync architecture implicitly
-         // assumes a particle can't move far enough in a single subcycle to leave its owning rank's
-         // territory before the next sync catches up (see the STALE-PARTICLE-IDX investigation, job
-         // 4175896) -- this fires the instant that assumption breaks, so a run's log can be checked
-         // for whether this precedes (and how closely, in step/subCycle terms) a STALE-PARTICLE-IDX
-         // abort. Throttled per rank. Local blocks only (blockForest_->begin()/end() iterates blocks
-         // this process owns), so this is a real "left every block I own" check, not a heuristic.
+         // [SUBCYCLE-LEFT-RANK]: permanent, low-volume safety check (throttled to 50 hits per rank per
+         // run) for whether pure DEM-subcycle physics has already moved a LOCAL floater outside every
+         // block this rank owns, before this subcycle's own syncCall() has a chance to hand ownership
+         // off. The fluid-side obstacle mapping / ghost-sync architecture assumes a particle can't move
+         // far enough in one subcycle to leave its owning rank's territory before the next sync catches
+         // up; this fires the instant that assumption breaks, so a run's log can be checked for whether
+         // it precedes a STALE-PARTICLE-IDX abort. Local blocks only, so this is an exact check, not a
+         // heuristic.
          {
             static uint_t leftRankLogCount = uint_t(0);
             particleStorage->forEachParticle(useOpenMP,
@@ -4984,164 +4843,26 @@ public:
          syncCall();
          tp["MESAPD: syncCall 1"].end();
 
-         // TEMP DIAGNOSTIC (remove after investigation): [GHOST-VANISHED] check -- see
-         // ghostMappingSnapshot_'s own capture-site comment above. After THIS sub-cycle's syncCall(),
-         // check every UID this rank could see at the start of the main step: if uidToIdx() now comes
-         // back invalid, this rank just lost its only visibility (ghost or local) into a particle that
-         // particleField_ may still be citing as a cell's obstacle owner. Most hits here are expected/
-         // benign (ordinary ghost churn as particles drift near a block boundary) -- the point is
-         // cross-referencing UID + step + subCycle against the eventual STALE-PARTICLE-IDX abort's own
-         // uid/step, not that every hit is itself a problem. Erased from the snapshot once reported so
-         // each UID logs at most once per main step. Throttled per rank.
+         // [GHOST-VANISHED] check -- see ghostMappingSnapshot_'s own capture-site comment above. After
+         // this sub-cycle's syncCall(), any UID from the start-of-step snapshot that uidToIdx() now
+         // reports invalid means this rank just lost its only visibility (ghost or local) into a
+         // particle that particleField_ may still cite as a cell's obstacle owner. Most hits are benign
+         // ghost churn; the value is cross-referencing uid/step/subCycle against an eventual
+         // STALE-PARTICLE-IDX abort. Erased from the snapshot once seen, so each UID is only ever
+         // checked once per main step.
+         //
+         // A guard that tried clearing a vanished particle's orphaned obstacle cells here (to pre-empt
+         // the STALE-PARTICLE-IDX abort) was tried and removed: on two crashed jobs, clearing did
+         // eliminate that specific abort, but both runs crashed again shortly after via a worse,
+         // harder-to-trace failure (an abrupt fill-level discontinuity destabilising the free-surface
+         // reconstruction) -- see THESIS_PLAN.md for the full investigation. The original SimpleBB.h
+         // abort remains the correct, intentional behaviour until a real fix is found.
+         for (auto it = ghostMappingSnapshot_.begin(); it != ghostMappingSnapshot_.end(); )
          {
-            static uint_t ghostVanishedLogCount = uint_t(0);
-            for (auto it = ghostMappingSnapshot_.begin(); it != ghostMappingSnapshot_.end(); )
-            {
-               const walberla::id_t uid = *it;
-               if (particleAccessor->uidToIdx(uid) == particleAccessor->getInvalidIdx())
-               {
-                  // [STALE-CELL-GUARD] REVERTED, 2026-09-26 -- per explicit request, after empirical
-                  // testing on both crashed jobs (see THESIS_PLAN.md): actually clearing orphaned
-                  // cells (removing the obstacle flag, resetting PDFs to quiescent equilibrium,
-                  // fill=1, particleField_ to invalid) DID eliminate the targeted STALE-PARTICLE-IDX
-                  // abort in both jobs, but both then crashed anyway, LATER, via a WORSE failure mode
-                  // -- exactly the one the original STALE-PARTICLE-IDX diagnostic message itself
-                  // warned about ("a multi-order-of-magnitude hydrodynamic force spike and a
-                  // subsequent invalid-quaternion crash several steps later"): giant-rod job 4268749
-                  // hit an invalid-quaternion assertion (Quaternion.h:241, r/i/j/k all -nan) at step
-                  // ~21400 (vs. its old 7872 abort); small-rod job 4268750 hit a global
-                  // "reynoldsNumber is nan" abort (WriteData.h:109) at step 22700, traced back to a
-                  // NaN first appearing just 3 steps after the guard cleared >1000 cells at once
-                  // (step 22584) -- an abrupt, geometry-blind fill-level discontinuity that the
-                  // free-surface curvature/normal reconstruction couldn't tolerate (confirmed NOT a
-                  // near-total-enclosure/pinching case: the first NaN cell had obstacleNeighbours=
-                  // 0/26). So the guard just delays and obscures the same underlying instability
-                  // instead of fixing it, trading a clean, immediately-diagnosable abort for a later,
-                  // harder-to-trace one. Reverted back to scan-and-log only (no cell modification) --
-                  // the original SimpleBB.h:313 abort remains the correct, intentional behaviour
-                  // until a real fix (not just clearing cells after the fact) is found. World
-                  // coordinates added to the log (via blockForest_->getBlockLocalCellCenter) so a
-                  // future origin-trace doesn't require cross-referencing block-local coordinates
-                  // against each rank's own block origin by hand.
-                  //
-                  // [STALE-CELL-GUARD-GATED] RE-INTRODUCED, 2026-09-27 -- per explicit request ("one
-                  // last test with guard one where we have 20 obstacle neighbors"). The reverted
-                  // guard's own failure case (above) had obstacleNeighbours=0/26 at the cell where the
-                  // fatal NaN first appeared -- i.e. it cleared a cell sitting right at the fluid
-                  // interface, where the abrupt fill-level jump destabilised curvature/normal
-                  // reconstruction. This gated variant only clears an orphaned cell when at least
-                  // `guardMinObstacleNeighbors` of its 26 D3Q27 neighbours are ALSO obstacle-flagged --
-                  // i.e. only when it is safely buried deep inside the object's own solid interior, far
-                  // from any real fluid/interface cell, where turning it into quiescent fluid cannot
-                  // touch the free-surface reconstruction at all. Orphaned cells that don't meet the
-                  // threshold are left untouched (scan-and-log only, as in the pure revert above) --
-                  // so the original SimpleBB.h:313 abort still fires for those, same as before this
-                  // change.
-                  //
-                  // BUG FOUND, 2026-09-27, while debugging job 4270904's hang: this block was calling
-                  // removeBoundary()/setToEquilibrium() on any cell where particleField_ == uid,
-                  // WITHOUT first checking that the cell's own flagField actually still has the
-                  // obstacle flag set. That is exactly the desync case this code exists to handle --
-                  // particleField_ can reference a uid whose flag state has already moved on (e.g. via
-                  // the formerObstacle->fluid reconstruction pipeline) -- so removeBoundary() could be
-                  // called on a cell that was never flagged obstacle in the first place. The proven-
-                  // working [DEBUG-FORCE-OBSTACLE-CLEAR] block (now disabled above) always guarded this
-                  // with `&& isFlagSet(flagField->get(x, y, z), obstacleFlag)`; this block was missing
-                  // that same guard. Added below -- this is the leading suspect for the hang.
-                  // [Claude, 2026-09-27] Guard turned OFF, per explicit request ("turn the guard off
-                  // and rerun"), as the control counterpart to job 4271079 (guard on, confirmed firing
-                  // -- 314 cells cleared across all 4 ranks -- yet the SAME STALE-PARTICLE-IDX abort
-                  // still happened at the same step 22012). This run answers: with clearing fully
-                  // disabled, does the crash happen at the identical step/signature, confirming the
-                  // guard's clearing of deeply-buried cells has no effect on the outcome either way?
-                  // Scan/count logic (orphanCount) is untouched -- only the actual clear is gated off.
-                  constexpr bool   guardEnabled              = false;
-                  constexpr uint_t guardMinObstacleNeighbors = uint_t(20);
-                  uint_t orphanCount  = uint_t(0);
-                  uint_t clearedCount = uint_t(0);
-                  Cell firstOrphanCell;
-                  Vector3< real_t > firstOrphanWorldPos;
-                  bool foundFirstOrphan = false;
-                  for (auto blockIt = blockForest_->begin(); blockIt != blockForest_->end(); ++blockIt)
-                  {
-                     auto* pf = hasFluid_ ? blockIt->getData< lbm_mesapd_coupling::ParticleField_T >(particleFieldID_) : nullptr;
-                     if (pf == nullptr) continue;
-                     auto* boundaryHandling =
-                        blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(boundaryHandlingID_);
-                     auto* flagField = boundaryHandling->getFlagField();
-                     auto* pdfField  = blockIt->getData< PdfField_T >(pdfFieldID_);
-                     auto* fillField = blockIt->getData< ScalarField_T >(fillFieldID_);
-                     const bool haveObstacleFlag = flagField->flagExists(AntidunesBoundaryHandling_T::movingObstacleFlagID);
-                     const auto obstacleFlag =
-                        haveObstacleFlag ? flagField->getFlag(AntidunesBoundaryHandling_T::movingObstacleFlagID)
-                                         : typename FlagField_T::flag_t(0);
-                     WALBERLA_FOR_ALL_CELLS_XYZ(pf,
-                        if (pf->get(x, y, z) == uid)
-                        {
-                           ++orphanCount;
-                           if (!foundFirstOrphan)
-                           {
-                              firstOrphanCell     = Cell(x, y, z);
-                              firstOrphanWorldPos = blockForest_->getBlockLocalCellCenter(*blockIt, firstOrphanCell);
-                              foundFirstOrphan    = true;
-                           }
-                           // Bug fix, 2026-09-27: must also verify THIS cell's own flag state before
-                           // touching it -- see the dated comment above. Without this, removeBoundary()
-                           // could be called on a cell that was never actually obstacle-flagged.
-                           if (haveObstacleFlag && isFlagSet(flagField->get(x, y, z), obstacleFlag))
-                           {
-                              uint_t obstacleNeighbors = uint_t(0);
-                              for (cell_idx_t dz = -1; dz <= 1; ++dz)
-                              for (cell_idx_t dy = -1; dy <= 1; ++dy)
-                              for (cell_idx_t dx = -1; dx <= 1; ++dx)
-                              {
-                                 if (dx == 0 && dy == 0 && dz == 0) continue;
-                                 const cell_idx_t nx = x + dx;
-                                 const cell_idx_t ny = y + dy;
-                                 const cell_idx_t nz = z + dz;
-                                 if (!flagField->xyzSizeWithGhostLayer().contains(nx, ny, nz)) continue;
-                                 if (isFlagSet(flagField->get(nx, ny, nz), obstacleFlag)) ++obstacleNeighbors;
-                              }
-                              if (guardEnabled && obstacleNeighbors >= guardMinObstacleNeighbors)
-                              {
-                                 boundaryHandling->removeBoundary(obstacleFlag, x, y, z);
-                                 pdfField->setToEquilibrium(x, y, z, Vector3< real_t >(real_t(0)), real_t(1));
-                                 fillField->get(x, y, z) = real_t(1);
-                                 pf->get(x, y, z)        = particleAccessor->getInvalidUid();
-                                 ++clearedCount;
-                              }
-                           }
-                        }
-                     ) // WALBERLA_FOR_ALL_CELLS_XYZ
-                  }
-                  // [Claude, 2026-09-27] Re-enabled, minimal: per explicit request ("activate it"),
-                  // after the previous run left a cell sitting right at the guard's own threshold
-                  // (20/26 obstacle neighbours, [MEM-GARBAGE-LINK] job 4271068) with no way to tell
-                  // whether the gate actually engaged. Unlike the fully-disabled version above, this
-                  // ONLY logs when clearedCount > 0 -- i.e. only when the guard actually clears
-                  // something -- so it stays silent for the ~300 routine orphanCellCount=0 no-ops per
-                  // run (same volume problem the original always-on version had) while still
-                  // definitively answering "did the gate ever fire".
-                  if (clearedCount > 0 && ghostVanishedLogCount < uint_t(50))
-                  {
-                     WALBERLA_LOG_WARNING("[GHOST-VANISHED] rank=" << mpi::MPIManager::instance()->rank()
-                        << " uid=" << uid << " step=" << stepCounter_ << " subCycle=" << subCycle
-                        << " -- this rank can no longer see this UID at all (local or ghost), but "
-                           "particleField_ may still reference it from the last mapping sweep."
-                        << " orphanCellCount=" << orphanCount
-                        << " clearedCellCount=" << clearedCount << " (guard fires only at >="
-                        << guardMinObstacleNeighbors << "/26 obstacle neighbours)"
-                        << " firstOrphanCell=" << (foundFirstOrphan ? firstOrphanCell : Cell(-1, -1, -1))
-                        << " firstOrphanWorldPos=" << (foundFirstOrphan ? firstOrphanWorldPos : Vector3< real_t >(real_t(-1))));
-                     ++ghostVanishedLogCount;
-                  }
-                  it = ghostMappingSnapshot_.erase(it);
-               }
-               else
-               {
-                  ++it;
-               }
-            }
+            if (particleAccessor->uidToIdx(*it) == particleAccessor->getInvalidIdx())
+               it = ghostMappingSnapshot_.erase(it);
+            else
+               ++it;
          }
 
          // [MIGRATION-NAN] -- see lastKnownOwner_'s own doc comment. Fires the first time a LOCAL
@@ -5289,20 +5010,15 @@ public:
          mesa_pd::mpi::ReduceProperty{}.operator()< mesa_pd::ForceTorqueNotification >(*particleStorage);
          tp["MESAPD: ReduceProperty(ForceTorque)"].end();
 
-         // TEMP DIAGNOSTIC (remove after investigation): [TOTAL-FORCE-THRESHOLD] -- checks the FULLY
-         // ACCUMULATED per-subcycle force (every contact + lubrication + tunnel contact + external
-         // force this floater received this subcycle, already cross-rank reduced above), UNLIKE
-         // [STRONG-CONTACT-FORCE] which only ever looks at ONE contact's own force delta against
-         // STRONG_FORCE_THRESHOLD=0.1. Several simultaneous contacts (e.g. a floater squeezed by
-         // multiple neighbours at once in a congested pile) can each stay individually under 0.1 --
-         // and under EVERY other existing per-contact threshold -- while still summing to something
-         // well above baseline, invisibly to every diagnostic added so far. This runs exactly once per
-         // subcycle, right where ac.getForceRef/getTorqueRef hold that final total, immediately before
-         // VelocityVerletPostForceUpdate consumes and resets them. Threshold (0.03) chosen well above
-         // ordinary baseline (gravity+buoyancy+hydro for a floater in this scenario is O(1e-4..1e-3),
-         // confirmed from routine BoxForces logging) but below STRONG_FORCE_THRESHOLD's own 0.1, so it
-         // specifically covers the gap between "ordinary" and "a single contact already flagged it
-         // anyway". Throttled per rank.
+         // [TOTAL-FORCE-THRESHOLD]: permanent companion to [STRONG-CONTACT-FORCE]. That check only
+         // looks at one contact's own force delta; several simultaneous contacts on a squeezed floater
+         // can each stay under that per-contact threshold while summing to something well above
+         // baseline. This checks the fully-accumulated per-subcycle force (every contact + lubrication
+         // + tunnel contact + external force, already cross-rank reduced) once per subcycle, right
+         // before VelocityVerletPostForceUpdate consumes and resets it. Threshold (0.03) sits above
+         // ordinary baseline (O(1e-4..1e-3) for gravity+buoyancy+hydro) but below
+         // STRONG_FORCE_THRESHOLD's 0.1, covering the gap between "ordinary" and "a single contact
+         // already flagged it". Throttled per rank.
          {
             static uint_t totalForceLogCount = uint_t(0);
             particleStorage->forEachParticle(useOpenMP,
@@ -6356,7 +6072,6 @@ private:
    // [Claude, 2026-10-01] false in the fluid-free DropTest (no boundary handling, no particle field): the fluid-side
    // diagnostic sweeps in doDEMSubCycles are skipped then (their block-data lookups abort on the invalid IDs)
    bool                                               hasFluid_;
-   uint_t                                              debugForceObstacleClearAtStep_;
    // See SimulationObjects::DiagnosticEvent's own doc comment -- shared buffer that per-sub-cycle
    // checks below push a lightweight record into (when diagnosticSweepEnabled_) instead of logging
    // directly; drained once per main step by BuildTimeloop.h's addAfterTimeStepDiagnosticSweep.
@@ -6393,27 +6108,21 @@ private:
    std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxAxes_;       // UID → per-axis pin mask (nonzero = pin that axis, 0 = free)
    std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedRotationAxes_; // UID → per-axis rotation pin mask (nonzero = zero that axis's angular velocity every sub-cycle, 0 = free)
 
-   // TEMP DIAGNOSTIC (remove after investigation): [RAW-HYDRO] (checked once per main step, right
-   // after ReduceProperty(HydrodynamicForceTorqueNotification), before doDEMSubCycles' sub-cycle loop
-   // even starts) never fires in a crashed run -- so hydrodynamicForce is proven finite at the TOP of
-   // the main step that ends up crashing. Yet the floater-history state CSV shows it already NaN by
-   // the very first sub-cycle's logState() call, which runs right after that sub-cycle's syncCall().
-   // This map lets [MIGRATION-NAN] below test the specific hypothesis that an ownership migration
-   // during syncCall() is where it happens: hydrodynamicForce/oldHydrodynamicForce are NOT part of
+   // [MIGRATION-NAN] support: hydrodynamicForce/oldHydrodynamicForce are not part of
    // ParticleGhostCopyNotification's packed field list (see FloaterHistoryLogger's own doc comment),
-   // so a particle whose ownership transfers to this rank mid-main-step would arrive with whatever
+   // so a particle whose ownership transfers to this rank mid-main-step arrives with whatever
    // default/uninitialized value this rank's ParticleStorage slot holds for those fields, not the
-   // correct value the OLD owner computed at the top of the step. UID -> last-observed owner rank.
+   // value the old owner computed at the top of the step. UID -> last-observed owner rank, used to
+   // tell a fresh migration from an already-owned particle whose force went bad some other way.
    std::unordered_map< walberla::id_t, int > lastKnownOwner_;
 
-   // TEMP DIAGNOSTIC (remove after investigation): [GHOST-VANISHED] -- see doDEMSubCycles' own
-   // capture-site comment. Snapshot (rebuilt fresh each main step, at subCycle==0) of every floater
-   // UID this rank can see at all (local or ghost), i.e. exactly the population the last fluid-
-   // obstacle mapping sweep iterated.
+   // [GHOST-VANISHED] support -- see doDEMSubCycles' own capture-site comment. Snapshot (rebuilt fresh
+   // each main step, at subCycle==0) of every floater UID this rank can see at all (local or ghost),
+   // i.e. exactly the population the last fluid-obstacle mapping sweep iterated.
    std::unordered_set< walberla::id_t > ghostMappingSnapshot_;
 
-   // TEMP DIAGNOSTIC (remove after investigation): [VELOCITY-JUMP] -- see doDEMSubCycles' own
-   // capture-site comment. UID -> velocity as observed at the start of the previous main step.
+   // [VELOCITY-JUMP] support -- see doDEMSubCycles' own capture-site comment. UID -> velocity as
+   // observed at the start of the previous main step.
    std::unordered_map< walberla::id_t, Vector3< real_t > > lastVelocityForJumpCheck_;
 
    // kernels — declaration order must match initializer-list order to avoid -Wreorder

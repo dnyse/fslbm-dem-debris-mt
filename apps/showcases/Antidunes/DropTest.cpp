@@ -15,38 +15,29 @@
 //
 //! \file DropTest.cpp
 //
-// Fluid-free, DEM-only cuboid (and, as of 2026-09-13, cylinder) drop test at real 72-process
-// block-forest scale. Built to isolate
-// whether the "flying floater" / contact-chatter / STALE-PARTICLE-IDX desync bug chased across this
-// session's Antidunes bridge-scenario cluster jobs (4201656/4202194/4212104/4212265) is a general
-// DEM-contact/parallel-decomposition problem, independent of any fluid coupling, rather than
-// something specific to the bridge geometry or the LBM-DEM coupling itself.
+// Fluid-free, DEM-only drop test (cuboids, cylinders, spheres, capsules) at real multi-process
+// block-forest scale -- validates DEM contact/parallel-decomposition behaviour independent of any
+// fluid coupling. Originally built to isolate a STALE-PARTICLE-IDX desync bug from the fluid
+// coupling (root-caused and fixed, see THESIS_PLAN.md); still useful as a fluid-free regression check.
 //
-// Reuses Antidunes' own production DEM machinery completely unmodified: setupBlockForest,
-// setupParticles, releaseSettledFloatingSpheres (from SetupStages_drop_test.h -- a copy of
-// SetupStages.h with one small addition, X-wall creation; see that file's own header comment for why
-// it's a copy rather than a direct edit) and ParticleKernels::doDEMSubCycles (from ParticleKernels.h,
-// completely unmodified) for the actual contact detection/resolution/integration. No LBM fields are
-// ever created or registered; this is safe because doDEMSubCycles' only fluid-field-dependent code
+// Reuses Antidunes' own production DEM machinery unmodified: setupBlockForest, setupParticles,
+// releaseSettledFloatingSpheres (from SetupStages_drop_test.h, a copy of SetupStages.h with one
+// addition, X-wall creation -- see that file's own header comment for why it's a copy) and
+// ParticleKernels::doDEMSubCycles for contact detection/resolution/integration. No LBM fields are
+// ever created; safe because doDEMSubCycles' only fluid-dependent code
 // (computeSubmergedVolumes()/computeSubmergedVolumesBox()) is gated behind
-// ModelParameters.useMemOnlyBuoyancy, which defaults to true (and must stay true here) -- with it
-// true, AddExternalForces applies plain density-weighted mass*gravity along Z (the only axis with a
-// correct, density-weighted force law in this codebase -- X/Y carry a different, non-density-weighted
-// "driving force" term used for the production sim's periodic-flow forcing, so Z must stay the
-// gravity/height axis here).
+// ModelParameters.useMemOnlyBuoyancy (default true, must stay true here) -- with it true, gravity is
+// applied as plain density-weighted mass*gravity along Z (X/Y instead carry the production sim's
+// non-density-weighted driving-force term, so Z must stay the gravity axis here).
 //
-// setupSimState() is deliberately NOT called (it unconditionally constructs a PIDController, which
-// is both meaningless for a non-flow-driven drop test and an unnecessary link dependency). Instead
-// this file does the two lines of state setupSimState would otherwise provide (beginTimeStep,
-// acceleration) directly.
+// setupSimState() is deliberately NOT called (it unconditionally constructs a PIDController, useless
+// for a non-flow-driven drop test); this file sets beginTimeStep/acceleration directly instead.
 //
-// VTK output is deliberately minimal and NOT BuildTimeloop.h::addBeforeTimeStepVTKOutput (which
-// requires real LBM/FlagField fields and bundles in fluid_field/particles/floater-sphere/
-// floater-cylinder writers this fluid-free tool has no use for): just one domain_decomposition dump
-// at start (as BedGeneration.cpp already does) plus floaterBox/floaterCylinder-only
-// ParticleVtkOutput blocks (the exact same selector/writer fields as BuildTimeloop.h's own "floating
-// boxes (type 3)"/"floating cylinders (type 4)" blocks), each written every prm-configured
-// VTK.writeFrequency steps, and each a no-op if the prm has no floaters of that shape.
+// VTK output is minimal and NOT BuildTimeloop.h::addBeforeTimeStepVTKOutput (which needs real
+// LBM/FlagField fields): one domain_decomposition dump at start (as BedGeneration.cpp also does),
+// plus a floaterBox/floaterCylinder/floater/floaterCapsule ParticleVtkOutput block per shape present
+// (same selectors/writers as BuildTimeloop.h's own blocks), each a no-op if the prm has no floaters
+// of that shape.
 //======================================================================================================================
 
 #include "core/Environment.h"
@@ -235,7 +226,7 @@ int main(int argc, char** argv)
       writeFloaterCylinderVtk = vtk::writeFiles(cylinderFloaterVTKOutput);
    }
 
-   // [Claude, 2026-10-01] Sphere floaters (type 1) -- mirrors BuildTimeloop.h's own "floater" VTK block (radius from
+   // Sphere floaters (type 1) -- mirrors BuildTimeloop.h's own "floater" VTK block (radius from
    // the interaction radius), so that mixed-shape drop tests also render their spheres.
    std::function< void() > writeFloaterSphereVtk = []() {};
    if (!simParams->floatingSpheres.empty())
@@ -265,8 +256,8 @@ int main(int argc, char** argv)
       writeFloaterSphereVtk = vtk::writeFiles(sphereFloaterVTKOutput);
    }
 
-   // Capsule ("pill") floaters (type 5) -- [Claude, 2026-09-23] NEW SHAPE, same treatment as the
-   // cylinder block above, EXCEPT the glyph: ParaView's Tensor Glyph filter has no native capsule
+   // Capsule ("pill") floaters (type 5) -- same treatment as the
+   // cylinder block above, except the glyph: ParaView's Tensor Glyph filter has no native capsule
    // source, so this renders each capsule as a same-radius/same-length CYLINDER glyph -- a visual
    // stand-in only (the physics is the real Capsule shape; only the rendered rims are flat instead of
    // rounded). Good enough to confirm position/orientation/falling/resting behaviour by eye.
@@ -329,14 +320,6 @@ int main(int argc, char** argv)
    WcTimingPool timingPool;
 
    WALBERLA_LOG_INFO_ON_ROOT("beginTimeStep: " << simObjs->beginTimeStep << " / " << simParams->physics.timesteps);
-   // [Claude, 2026-10-29] Per-step [StepTiming] wall-clock breakdown (release / DEM sub-cycles / VTK)
-   // commented out -- it was added to diagnose a multi-rank slowdown (72-process cluster and
-   // 12-process local runs both took many minutes to clear even step 1000 for a 1000-cuboid config,
-   // vs. 5.4s single-process for 48 cuboids) and, by its own original comment, was "logged every
-   // step, unconditionally... not meant to stay this verbose once the bottleneck is identified."
-   // That investigation is closed; this was the highest-volume genuinely-unconditional debug print
-   // left in the production codebase after a survey (per explicit request to find/clean up leftover
-   // debugging prints).
    for (uint_t t = simObjs->beginTimeStep; t != simParams->physics.timesteps; ++t)
    {
       *simObjs->currentMainStep = t;

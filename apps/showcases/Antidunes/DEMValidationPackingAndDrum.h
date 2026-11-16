@@ -31,43 +31,29 @@ namespace dem_validation
 {
 using namespace mesa_pd;
 
-// Direct replay of a REAL production incident, not a hand-tuned or randomized reproduction: job
-// 4199585 (bridge "widerstacks" box scenario), uid=3314649325744685089 (the box independently
-// confirmed "flying" in ParaView -- climbed 31 LU, back above its own spawn height) vs its contact
-// partner uid=720575940379279392, the PROLONGED-CONTACT episode FloaterHistoryLogger recorded as
-// starting at step 25883. Both bodies are seeded with their EXACT logged position/velocity/angular-
-// velocity/orientation at that step (cross-verified via exact-text grep against an earlier
-// awk-numeric-comparison false match on these 19-digit uids -- see this session's own investigation)
-// and run through the SAME production physics (restitutionCoefficient=0.3 "wet/waterlogged wood",
-// frictionCoefficient=0.5, gravity=7.03e-6 LU/step^2, particleCollisionTime/particleTimestepSize from
-// computedParams.txt, useAnalyticalContactDetection=true) for 3540 sub-cycles (177 main steps x 20
-// sub-cycles), matching how long the real run took to reach step 26060 -- the point the production
-// log shows this exact contact had cleanly separated.
+// Direct replay of a real production incident (job 4199585, bridge "widerstacks" box scenario): one
+// box independently confirmed "flying" in ParaView (climbed 31 LU above its own spawn height) against
+// its contact partner, both seeded with their exact logged position/velocity/angular-velocity/
+// orientation at the step their prolonged-contact episode began, run through the same production
+// physics (restitutionCoefficient=0.3 "wet/waterlogged wood", frictionCoefficient=0.5,
+// useAnalyticalContactDetection=true).
 //
-// Measured directly on the REAL production log (not this replay, a completely independent
-// measurement): total system kinetic energy (both bodies, translational+rotational) grew from
-// 9.05e-3 to 5.76e-2 over this window -- a 536% gain -- on a material whose restitution coefficient
-// should LOSE roughly 91% of relative energy in a collision, not gain 5x. This scenario checks
-// whether an ISOLATED two-body replay (no other floaters, no surrounding jam, no fluid coupling)
-// reproduces a comparable gain. If it does, that confirms the defect is a genuine PAIRWISE
-// contact-response defect that needs nothing from the wider jam context to manifest -- the strongest
-// possible reproduction, since every input number here comes from an actual crash-adjacent production
-// run rather than a constructed worst case.
+// Measured directly on the real production log (an independent measurement, not this replay): total
+// system kinetic energy grew by 536% over this window, on a material whose restitution coefficient
+// should LOSE roughly 91% of relative energy in a collision. This scenario checks whether an isolated
+// two-body replay (no jam, no fluid coupling) reproduces a comparable gain -- if it does, the defect
+// is a genuine pairwise contact-response issue, not something that needs the wider jam context.
 //
-// FIDELITY CAVEAT (documented, not hidden): this is a best-effort, not bit-exact, reproduction.
-// LinearSpringDashpot's persistent tangential-spring history starts EMPTY at this replay's own step
-// 0, whereas the real contact may have engaged a few sub-cycles before step 25883 (the
-// PROLONGED-CONTACT log's "started step 25883" reflects when overlap first crossed ITS OWN reporting
-// threshold, not necessarily the exact sub-cycle collisionResponse_ itself first fired). A close but
-// not bit-identical energy trajectory is the expected, honest outcome.
-// Loops the SAME real incident through the standard 9-way mitigation config set (identical rows to
-// runMultiPointEdgeCases/runFallOntoPileStability, so the three battery's results line up directly in
-// one comparison table) instead of a single hard-coded config -- "run all options against this test
-// case too" per direct request. Default duration raised from the original 3540 sub-cycles (exactly
-// matching the real log's own window) to 10000: this session's own finding is that baseline's peak
-// doesn't land until sub-cycle ~4072 and the elevated plateau afterward is itself part of the signature
-// (see this scenario's own history -- the exact-window replay alone understates the real gain by a lot,
-// 72% vs the real log's 536%, because contact hasn't finished compressing yet at sub-cycle 3540).
+// Fidelity caveat: best-effort, not bit-exact. LinearSpringDashpot's persistent tangential-spring
+// history starts empty at this replay's own step 0, whereas the real contact may have engaged a few
+// sub-cycles earlier; a close but not bit-identical energy trajectory is the expected outcome.
+//
+// Loops the same incident through the standard 9-way mitigation config set (identical rows to
+// runMultiPointEdgeCases/runFallOntoPileStability, so all three batteries' results line up in one
+// table). Default duration is 10000 sub-cycles, not the real log's own 3540-sub-cycle window: the
+// baseline's energy peak doesn't land until sub-cycle ~4072, and the elevated plateau afterward is
+// itself part of the signature (an exact-window replay alone understates the real gain, 72% vs. 536%,
+// because the contact hasn't finished compressing by sub-cycle 3540).
 inline bool runProductionCollisionReplay(const config::Config::BlockHandle& b)
 {
    const Vec3   halfExtents   = b.getParameter< Vec3 >("halfExtents", Vec3(6, 1, 1.5));
@@ -113,7 +99,7 @@ inline bool runProductionCollisionReplay(const config::Config::BlockHandle& b)
       bool        manifold;
       bool        rotationalEffMass = false;
    };
-   // [Claude, 2026-10-29] "useSpheroBoxContact" row removed -- see archive/unused_contact_methods/.
+   // "useSpheroBoxContact" row removed -- see archive/unused_contact_methods/.
    const Config configs[] = {
       { "baseline (both OFF)", false, false, false, false, false, false },
       { "useRoundedBoxCorners", true, false, false, false, false, false },
@@ -325,11 +311,8 @@ inline bool runPacking(const config::Config::BlockHandle& b)
    const real_t bulkSolidFraction = totalVolume / (containerX * containerY * std::max(maxTop, real_t(1e-6)));
    // Literature ordering for random-packed basic 3D shapes (Li, S., Zhao, J., Lu, P., & Xie, Y. (2010),
    // "Maximum packing densities of basic 3D objects," Chinese Science Bulletin 55(2), 114-119,
-   // doi:10.1007/s11434-009-0650-0 -- [Claude, 2026-10-29] CORRECTED author attribution: this was
-   // previously misattributed to "Jiao, Y., Stillinger, F.H. & Torquato, S." in this comment, a
-   // different, unrelated set of packing-density researchers who did not write this particular paper;
-   // verified via web search against the DOI/journal/volume/pages, which all match Li et al. instead):
-   // the MAXIMALLY-JAMMED upper bounds are sphere~0.64, cylinder~0.72, cube~0.78. A gravity-poured bed
+   // doi:10.1007/s11434-009-0650-0): the MAXIMALLY-JAMMED upper bounds are sphere~0.64, cylinder~0.72,
+   // cube~0.78. A gravity-poured bed
    // settles BELOW these maxima, so the pass band below is a broad plausibility check ("not obviously
    // broken"), not an exact-match test.
    // NOT gated on step < maxSteps: a nonzero-restitution mixed-shape bed settles into a persistent
@@ -372,17 +355,11 @@ inline bool runAngleOfRepose(const config::Config::BlockHandle& b)
    // for the floor footprint: a small floorHalfExtent alone previously left the pour column poking
    // outside a too-short domain and crashing AssocToBlock's block-assignment assertion.
    //
-   // CALIBRATION NOTE (two earlier versions, both failed): (1) a tall, narrow random-polar column
-   // (1.5-unit radius, 1.1-unit vertical spacing) gave a ~55-unit free-fall for 150 particles --
-   // sqrt(2*g*55)=~33 impact speed, scattering particles across the open floor (measured repose
-   // ~0.4deg, i.e. flat). (2) shortening that column while KEEPING random (r,phi) placement fixed the
-   // impact-energy problem but exposed a worse one: random placement within a small radius routinely
-   // seated multiple particles overlapping at creation (before any integration), and LinearSpringDashpot's
-   // force scales with penetration depth, so a large initial overlap is an explosive first-step force --
-   // particles were measured flying out to r,z in the THOUSANDS (should be tens at most), an outright
-   // numerical blow-up, not a physical spread (still read as "flat" because the fit average washes out).
-   // Fix: a REGULAR GRID (cell size with a safety margin over the largest particle's circumscribing
-   // radius, exactly runPacking's proven-safe non-overlapping placement pattern) instead of random polar
+   // A random (r,phi) pour column reliably seats particles overlapping at creation; LinearSpringDashpot's
+   // force scales with penetration depth, so that overlap is an explosive first-step force (particles
+   // flying out to r,z in the thousands -- a numerical blow-up, not a physical spread, though averaging
+   // can make it read as "flat"). Fix: a regular grid (cell size with a safety margin over the largest
+   // particle's circumscribing radius, exactly runPacking's proven-safe pattern) instead of random polar
    // coordinates, so no two particles start in contact regardless of how many are poured.
    const real_t cellSize =
       real_t(2.2) * std::max(sphereRadius, std::sqrt(cylRadius * cylRadius + real_t(0.25) * cylLength * cylLength));
@@ -392,18 +369,13 @@ inline bool runAngleOfRepose(const config::Config::BlockHandle& b)
                      std::max(real_t(3) * floorHalfExtent, pourColumnHeight + real_t(5)));
    engine.addWall(Vec3(0, 0, 0), Vec3(0, 0, 1));
 
-   // CALIBRATION NOTE (3): even with a numerically clean, non-overlapping pour, the measured pile stayed
-   // essentially flat (repose < 1deg, particles spreading to r~70-80) on a fully open floor. Root cause:
-   // mesa_pd's LinearSpringDashpot models pure Coulomb SLIDING friction with no explicit rolling-
-   // resistance torque, so a sphere -- or even an elongated cylinder once it starts rolling end-over-end
-   // or spinning about its long axis -- keeps rolling indefinitely rather than dissipating into a bounded
-   // pile; this is a well-documented real limitation of plain-Coulomb DEM contact models (granular
-   // calibration literature routinely needs an explicit rolling-friction term for a realistic angle of
-   // repose), not a bug in this test. Containing the pour in a bounded pit (the same wall pattern
-   // runPacking already uses) sidesteps it: material that CAN'T roll away indefinitely still piles up
-   // and develops a measurable free-surface slope near the walls, closer to the "pour into a hopper, then
-   // measure the settled slope" method the DEM calibration literature also documents, rather than
-   // Kodam's fully free-standing open-floor cone.
+   // Even with a numerically clean pour, the pile stays essentially flat on a fully open floor:
+   // mesa_pd's LinearSpringDashpot models pure Coulomb sliding friction with no explicit rolling-
+   // resistance torque, so a sphere or rolling cylinder dissipates into a bounded pile only if it
+   // physically can't roll away -- a well-documented limitation of plain-Coulomb DEM contact models,
+   // not a bug here. Containing the pour in a bounded pit (the same wall pattern runPacking uses)
+   // sidesteps it, closer to the "pour into a hopper, measure the settled slope" method the DEM
+   // calibration literature documents, rather than Kodam's free-standing open-floor cone.
    const real_t pitHalfExtent = b.getParameter< real_t >("pitHalfExtent", real_t(10));
    engine.addWall(Vec3(pitHalfExtent, 0, 0), Vec3(-1, 0, 0));
    engine.addWall(Vec3(-pitHalfExtent, 0, 0), Vec3(1, 0, 0));
@@ -630,10 +602,8 @@ inline void updateDrumWalls(DEMEngine& engine, const std::vector< size_t >& wall
 //! far below 1000/s specifically so drop rate itself doesn't bias the packing (Macrae & Gray, 1961; Zhang
 //! et al., 2001, both cited in the paper); one-at-a-time is the limiting case of that. Measures fill
 //! height and bulk solid fraction (their Eq. (7)) against shape-specific plausibility bands anchored to
-//! the random-close-packing literature (Li, Zhao, Lu & Xie, 2010, Chinese Science Bulletin 55(2):114-119;
-//! NOT "Jiao, Stillinger & Torquato" as an earlier version of this file misattributed it, see runPacking's
-//! own comment) and Kodam's own measured
-//! cylinder values (Table 2: 0.617 experiment / 0.589 true-cylinder-DEM sim).
+//! the random-close-packing literature (Li, Zhao, Lu & Xie, 2010, Chinese Science Bulletin 55(2):114-119)
+//! and Kodam's own measured cylinder values (Table 2: 0.617 experiment / 0.589 true-cylinder-DEM sim).
 inline bool runPackingSingleShape(const config::Config::BlockHandle& b)
 {
    const std::string shape        = b.getParameter< std::string >("shape", "cylinder");
@@ -745,10 +715,9 @@ inline bool runPackingSingleShape(const config::Config::BlockHandle& b)
                                      (math::pi * containerRadius * containerRadius * std::max(maxTop, real_t(1e-6)));
 
    // Shape-specific plausibility bands, anchored to the literature RCP upper bounds (Li, Zhao, Lu & Xie,
-   // 2010, Chinese Science Bulletin 55(2):114-119, doi:10.1007/s11434-009-0650-0 -- see runPacking's own
-   // comment for the attribution correction: NOT "Jiao, Stillinger & Torquato" as an earlier version of
-   // this comment claimed -- sphere~0.64, cylinder~0.72, cube~0.78 maximally jammed; no copy in
-   // cld_kbase/, so treat as a soft, non-gating ceiling only) and Kodam et al.'s own measured cylinder
+   // 2010, Chinese Science Bulletin 55(2):114-119, doi:10.1007/s11434-009-0650-0 -- sphere~0.64,
+   // cylinder~0.72, cube~0.78 maximally jammed; no copy in cld_kbase/, so treat as a soft, non-gating
+   // ceiling only) and Kodam et al.'s own measured cylinder
    // result (0.617 experiment / 0.589 true-cylinder-DEM sim,
    // Table 2, verified against kodam_cylindrical_2010b.txt) as a concrete anchor -- a gravity-poured
    // bed sits below the jammed maxima, so these are broad "not obviously broken" bands, not

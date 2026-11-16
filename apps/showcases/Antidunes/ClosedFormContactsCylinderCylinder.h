@@ -54,7 +54,7 @@ namespace closed_form_contacts
 //! that dips into it (job 4251049, rods ...486/...489, steps 3484-3485.6; see THESIS_PLAN.md). The switch is kept so tests can reproduce the old behaviour.
 inline bool kodamCapSelectionByAxisDistance = true;
 
-//! [Claude, 2026-10-10] ModelParameters.kodamBandEdgeAxialCheck (default false = the dispatch as before). A band-edge result
+//! ModelParameters.kodamBandEdgeAxialCheck (default false = the dispatch as before). A band-edge result
 //! of cylinderCylinderContact is checked against the projection overlap D(n) along its own normal (detail::
 //! cylinderProjectionOverlap: the distance the bodies must move along n until their projections onto n separate, an upper
 //! bound of the depth that equals it at the true contact normal). If D(n) > kBandEdgeConsistencyFactor * overlap, the
@@ -109,7 +109,7 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
          result.contact  = true;
          result.overlap  = deltaA; // eq. 49, unchanged by Guo's correction (only the dispatch changed)
          result.normal   = host.R * Vec3(real_t(0), real_t(0), math::sign(relE[2]));
-         // [Claude, 2026-09-29] contact point sign fix: E is the probe's rim point that has penetrated
+         // contact point sign fix: E is the probe's rim point that has penetrated
          // deepest into the host (|relE_z| < halfLHost), deltaA its distance below the host face at
          // z = sign(relE_z)*halfLHost, and result.normal (host->probe here) points from E towards that
          // face. The overlap along the normal therefore spans [E, E + deltaA*normal], whose midpoint is
@@ -156,7 +156,7 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
    // too-large radial overlap) -- treated as an axial-overlap contact with a face-normal-like normal.
    const bool sameSide            = relP[2] * relProbeCentre[2] > real_t(0);
    const bool probeCentreBeyondFace = std::abs(relProbeCentre[2]) > halfLHost;
-   // [Claude, 2026-09-29] Guo's criterion compared delta_a AT P with delta_r. P (closest to the host axis) is the
+   // Guo's criterion compared delta_a AT P with delta_r. P (closest to the host axis) is the
    // probe's deepest point RADIALLY, but not axially, so delta_a(P) underestimates the axial penetration and the
    // comparison picks the axial ("special") contact too often: in the fuzz suite, most special-contact
    // disagreements with GJK/EPA had GJK normals ~90 degrees from the host axis, i.e. the true escape direction
@@ -164,7 +164,7 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
    // host); if it is not smaller than delta_r, the contact falls through to band-edge (radial depth at P).
    if (sameSide && probeCentreBeyondFace && deltaAp < deltaRp)
    {
-      // [Claude, 2026-09-29] CORRECTED special-contact depth. Guo et al. (2012, Table 1 / Fig. 8) place this
+      // CORRECTED special-contact depth. Guo et al. (2012, Table 1 / Fig. 8) place this
       // contact "at the point P with overlap delta_a", P being the rim point closest to the host AXIS. For a
       // tilted probe, P is in general NOT the probe's deepest point inside the host: the rim is a tilted
       // circle whose height varies along it, and its deepest point inside the host lies where the rim leaves
@@ -210,7 +210,7 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
       }
       // else: axial penetration is the larger one -> band-edge below (radial depth at P).
    }
-   // [Claude, 2026-09-29] the original Guo et al. special-contact result (overlap = deltaAp at P, point
+   // the original Guo et al. special-contact result (overlap = deltaAp at P, point
    // P + 0.5*deltaAp*n) was replaced by the corrected depth above.
 
    // Band-edge (eq. 79-81), CORRECTED per Guo et al.: Kodam's original delta_r < delta_a requirement
@@ -410,7 +410,7 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
                const Vec3 Pi = ci.pos + liW * eI;
                const Vec3 Pj = cj.pos + ljW * eJ;
                const Vec3 diff = Pj - Pi;
-               // [Claude, 2026-09-30] contact point: Kodam et al.'s eq. 65 takes the midpoint of the two closest AXIS
+               // contact point: Kodam et al.'s eq. 65 takes the midpoint of the two closest AXIS
                // points P*, Q*, which lies in the overlap only for equal radii (it is off by |R_i - R_j|/2 along the
                // normal otherwise -- found by the contact-point check in PaperAnalyticalContactTest.cpp: 171 of 183
                // band-band-skewed points outside the intersection for unequal radii). The midpoint of the two SURFACE
@@ -444,7 +444,7 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
    {
       // j's rim against i's face/band: rimVsFaceOrBand returns i->j (host->probe); negate for this
       // file's toward-1st-argument convention (see the face-face branch above).
-      // [Claude, 2026-10-10] kodamBandEdgeAxialCheck: an inconsistent band-edge result is refined (see the flag's comment)
+      // kodamBandEdgeAxialCheck: an inconsistent band-edge result is refined (see the flag's comment)
       const auto checked = [&](const ContactResult& res) {
          if (!kodamBandEdgeAxialCheck || std::string(res.scenario) != "band-edge") return res;
          if (detail::cylinderProjectionOverlap(ci, cj, -res.normal) <= kBandEdgeConsistencyFactor * res.overlap) return res;
@@ -677,7 +677,7 @@ inline bool cylinderCylinderResultIsUncertain(const CylinderState& ci, const Cyl
 }
 
 //======================================================================================================================
-// [Claude, 2026-09-30] Support-function refinement of cylinder-cylinder contacts (thesis Section 5.2).
+// Support-function refinement of cylinder-cylinder contacts (thesis Section 5.2).
 //
 // For two convex, centrally symmetric bodies, the overlap of their projections onto a unit direction L (pointing from
 // ci towards cj) is
@@ -939,7 +939,7 @@ inline Vec3 refinedContactPoint(const CylinderState& ci, const CylinderState& cj
 
 } // namespace detail
 
-//! [Claude, 2026-10-01] Which exit refineCylinderContact took, for profiling (ParticleKernels ContactStats::cylRefine*):
+//! Which exit refineCylinderContact took, for profiling (ParticleKernels ContactStats::cylRefine*):
 //! exact scenario passed through, closed form confirmed by the fast path, closed-form contact re-descended (contact or
 //! separated), pair without a scenario decided separated or in contact. `fastReject` says why the fast path failed;
 //! `kinks` / `convex` whether the kink search / the convex check ran.
@@ -974,7 +974,7 @@ inline ContactResult refineCylinderContact(const CylinderState& ci, const Cylind
 
    Vec3 seeds[6];
    int  n = 0;
-   // [Claude, 2026-10-01] relative tolerance of the fast path (see below), and the short descent's minimum, which the full
+   // relative tolerance of the fast path (see below), and the short descent's minimum, which the full
    // refinement keeps as a candidate when the fast path rejects
    const real_t           kFastRelTol = real_t(1e-3);
    detail::OverlapMinimum fastQ{ std::numeric_limits< real_t >::max(), Vec3(real_t(0)), 0 };
@@ -986,7 +986,7 @@ inline ContactResult refineCylinderContact(const CylinderState& ci, const Cylind
       const real_t scale = ci.radius + cj.radius + real_t(0.5) * (ci.length + cj.length);
       const real_t D0    = detail::cylinderProjectionOverlap(ci, cj, L0);
       tr.fastD0          = D0;
-      // [Claude, 2026-10-01] relative tolerance (was 1e-6 * scale): the face-edge closed form differs from D along its own
+      // relative tolerance (was 1e-6 * scale): the face-edge closed form differs from D along its own
       // normal by a median of 0.13 % in a dense packing, which sent these contacts to the full refinement for nothing
       if (std::abs(D0 - raw.overlap) < std::max(real_t(1e-6) * scale, kFastRelTol * D0))
       {
@@ -1016,7 +1016,7 @@ inline ContactResult refineCylinderContact(const CylinderState& ci, const Cylind
             const detail::OverlapMinimum q = detail::minimiseCylinderProjectionOverlap(ci, cj, std5, 1, false, 20, real_t(1e-7));
             tr.fastQ                       = q.value;
             fastQ                          = q;
-            // [Claude, 2026-10-01] tolerance relative to the depth (was 1e-9 * scale alone): in a dense packing (DropTest
+            // tolerance relative to the depth (was 1e-9 * scale alone): in a dense packing (DropTest
             // Kodam packing, ANTIDUNES_REFINE_DUMP), the short descent improved on 60 % of the face-edge results, by a
             // median of 3e-4 D0 and by less than 1e-2 D0 in 99 % of them; each such rejection cost the full refinement,
             // ~5x the fast path. An improvement below 1 % of the depth is accepted, with the smaller of the two overlaps as

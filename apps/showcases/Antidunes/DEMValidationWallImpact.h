@@ -177,7 +177,7 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
                                                              Vec3(0), wallPos, wallNormal, e, mu);
 
       const std::string caseTag = "wallImpactCylinder tilt=" + std::to_string(tiltDeg) + "deg";
-      // [Claude, 2026-11-09] velocityScale/angularVelocityScale: see logCaseResult's own header comment
+      // velocityScale/angularVelocityScale: see logCaseResult's own header comment
       // (DEMValidationInfra.h) for the general rationale (mixed absolute+relative tolerance, standard
       // practice for a quantity whose reference crosses zero). Scale chosen as 10% of the impact speed --
       // verified directly against the thesis's own committed Kodam-sweep .dat files (not fitted to this
@@ -230,9 +230,9 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
 //! result -- a self-consistency check between two of OUR OWN geometric methods): does mesa_pd's
 //! generic iterative GJK/EPA solver agree with the exact closed-form Cylinder x HalfSpace contact
 //! geometry that production actually uses (SolidCylinderContactDetection's cyl.support()-based
-//! formula, ParticleKernels.h:338 -- algebraically identical to closed_form_contacts::rimPointTowardPlane,
-//! PaperAnalyticalContacts.h:1980, the formula AnalyticalSolutions.h::cylinderWallImpact uses as
-//! wallImpactCylinder's own analytical reference)?
+//! formula, ParticleKernels.h -- algebraically identical to closed_form_contacts::rimPointTowardPlane,
+//! ClosedFormContactsCylinderPlaneGeometry.h, the formula AnalyticalSolutions.h::cylinderWallImpact
+//! uses as wallImpactCylinder's own analytical reference)?
 //!
 //! A true HalfSpace has NO support() function at all (mesa_pd::data::HalfSpace.h) -- GJK/EPA cannot
 //! run on a Cylinder x HalfSpace pair in this codebase AT ALL, by construction, not by configuration
@@ -319,7 +319,7 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
    const real_t dt            = b.getParameter< real_t >("dt", collisionTime / real_t(50));
    const real_t tolerance     = b.getParameter< real_t >("toleranceRelError", real_t(0.2));
    const real_t speed         = b.getParameter< real_t >("impactSpeed", real_t(1));
-   // [Claude, 2026-10-29] Mirrors wallImpactCylinder's own tangentialSpeedFraction (above): default 1.0 keeps
+   // Mirrors wallImpactCylinder's own tangentialSpeedFraction (above): default 1.0 keeps
    // every existing prm's exact prior behaviour (equal tangential/normal, this app's own general oblique-impact
    // sweep); set to 0.0 for a Kodam-et-al.-Test-1-style purely normal impact, now available for the box the same
    // way it already was for the cylinder (author: "can you recreate the kodam version for the cuboids").
@@ -328,7 +328,7 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
    const real_t tiltEndDeg    = b.getParameter< real_t >("tiltEndDeg", real_t(40));
    const real_t tiltStepDeg   = b.getParameter< real_t >("tiltStepDeg", real_t(10));
    const uint_t vtkSpacing    = b.getParameter< uint_t >("vtkSpacing", uint_t(0));
-   // [Claude, 2026-09-30] was not wired for the box (always the plain translational effective mass); default false keeps
+   // was not wired for the box (always the plain translational effective mass); default false keeps
    // the previous behaviour.
    const bool   useRotationalEffectiveMass = b.getParameter< bool >("useRotationalEffectiveMass", false);
    const std::string outBase  = b.getParameter< std::string >("outputBaseName", "wall_impact_box");
@@ -394,7 +394,7 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
                                                               e, mu);
 
       const std::string caseTag = "wallImpactBox tilt=" + std::to_string(tiltDeg) + "deg";
-      // [Claude, 2026-11-09] velocityScale/angularVelocityScale: same mixed-tolerance fix and 10%-of-
+      // velocityScale/angularVelocityScale: same mixed-tolerance fix and 10%-of-
       // impact-speed scale as runWallImpactCylinder above (see that call site's own comment and
       // logCaseResult's header comment, DEMValidationInfra.h, for the general rationale). Checked first
       // against this box sweep's own committed .dat files: at this scale NONE of the currently logged

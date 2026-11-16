@@ -208,7 +208,7 @@ class ForcingAdjuster
    {
       if (frequency_ == uint_c(0)) { return; }
 
-      // PIDParameters.enabled=false (THESIS_PLAN.md item 3, "constant forcing" mode): never touch
+      // PIDParameters.enabled=false ("constant forcing" mode): never touch
       // acceleration_ or the PID controller -- it stays pinned at its setupSimState-computed initial
       // value ("fixed hydraulic gradient") for the whole run. MeanVelocityComputer keeps running
       // regardless (wired up unconditionally in BuildTimeloop.h), so meanVelocity is still tracked.

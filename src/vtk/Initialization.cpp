@@ -100,7 +100,8 @@ void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFuncti
                           const Config::BlockHandle & parentBlockHandle, const std::string & configBlockName,
                           const std::vector< shared_ptr< BlockCellDataWriterInterface > > & _writers,
                           const std::map< std::string, VTKOutput::CellFilter > & _filters,
-                          const std::map< std::string, VTKOutput::BeforeFunction > & _beforeFunctions )
+                          const std::map< std::string, VTKOutput::BeforeFunction > & _beforeFunctions,
+                          std::map< std::string, shared_ptr< VTKOutput > > * vtkOutputsOut )
 {
    if( !parentBlockHandle )
       WALBERLA_ABORT("Invalid Argument: parentBlockHandle not valid!");
@@ -368,6 +369,9 @@ void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFuncti
 
       outputFunctions[ identifier ] = OutputFunction(
          writeFiles( vtkOutput, true, simultaneousIOOperations, requiredBlockStates, incompatibleBlockStates ));
+
+      if( vtkOutputsOut != nullptr )
+         (*vtkOutputsOut)[ identifier ] = vtkOutput;
    }
 }
 
@@ -558,10 +562,11 @@ void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFuncti
                           const RegisterVTKOutputFunction& registerVTKOutputFunction,
                           const shared_ptr< const StructuredBlockStorage > & storage,
                           const shared_ptr< Config > & config,
-                          const std::string & configBlockName )
+                          const std::string & configBlockName,
+                          std::map< std::string, shared_ptr< VTKOutput > > * vtkOutputsOut )
 {
    if( !!config )
-      initializeVTKOutput( outputFunctions, registerVTKOutputFunction, storage, config->getGlobalBlock(), configBlockName );
+      initializeVTKOutput( outputFunctions, registerVTKOutputFunction, storage, config->getGlobalBlock(), configBlockName, vtkOutputsOut );
 }
 
 
@@ -570,7 +575,8 @@ void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFuncti
                           const RegisterVTKOutputFunction& registerVTKOutputFunction,
                           const shared_ptr< const StructuredBlockStorage > & storage,
                           const Config::BlockHandle & parentBlockHandle,
-                          const std::string & configBlockName )
+                          const std::string & configBlockName,
+                          std::map< std::string, shared_ptr< VTKOutput > > * vtkOutputsOut )
 {
    std::vector< shared_ptr< BlockCellDataWriterInterface > > _writers;
    std::map< std::string, VTKOutput::CellFilter >            _filters;
@@ -578,7 +584,7 @@ void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFuncti
 
    registerVTKOutputFunction( _writers, _filters, _beforeFunctions );
 
-   initializeVTKOutput( outputFunctions, storage, parentBlockHandle, configBlockName, _writers, _filters, _beforeFunctions );
+   initializeVTKOutput( outputFunctions, storage, parentBlockHandle, configBlockName, _writers, _filters, _beforeFunctions, vtkOutputsOut );
 }
 
 

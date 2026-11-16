@@ -904,23 +904,13 @@ struct ModelParams {
    //         upward lift. Robust to negative contact-line fill drift (uses no φ). Off by default.
    bool        useHydrostaticReconstruction;
 
-   // [Claude, 2026-11-06] NO LONGER an independent prm option (author: "make sure in the code that when not
-   //         using the strict bogner, it has also to use the pass3 bogner and remove pass 3 as its option from
-   //         the prm file it should be automatically included when running the bogner option which is not
-   //         strict"). Derived below as !strictBognerClassification: non-strict classification reproduces the
-   //         classification-cascade liquid/interface dome on a floater's dry surface without it (confirmed by
-   //         direct VTK inspection of job 4314848 and its sphere/cylinder family); job 4450094 (sphere,
-   //         non-strict + Pass-3) confirmed the dome absent across its full 0..99999-step schedule once Pass-3
-   //         runs alongside non-strict classification. Strict classification (strictBognerClassification true)
-   //         already fixes the dome by itself and does not need Pass-3; the two are mutually exclusive here.
-   //         Any "usePass3Reresolution" key still present in an old prm file is no longer read and has no effect.
    // true  → after Pass 2 of FormerMO reconstruction (PdfReconstructionManager) has given every
    //         freshly-uncovered cell in the block a final state, re-examine cells that fell back to
    //         interface purely because of same-pass ambiguity (an unresolved FormerMO neighbour at
    //         the moment they were classified) and resolve them directly against the now-fully-known
    //         neighbourhood. A cheap, purely local second sweep -- no flood fill, no block-wide scan.
-   // false → plain Pass-2-only fallback (every such cell stays interface, as before).
-   const bool  usePass3Reresolution;
+   // false → plain Pass-2-only fallback (default; every such cell stays interface, as before).
+   bool        usePass3Reresolution;
 
    // [Claude, 2026-10-01] true  -> a freshly uncovered cell that becomes INTERFACE gets the mean volume fraction of ALL its
    //         resolved neighbours (gas 0, liquid 1, interface its fill) as fill level (PdfReconstructionManager.h,
@@ -944,6 +934,21 @@ struct ModelParams {
    //         decisions are applied becomes interface with fill 1 (PdfReconstructionManager.h Pass 2). Fixes the waterline NaN of the
    //         r025 cuboid (THESIS_PLAN.md 2026-10-10). false (default) -> counted only ([FORMERMO-STRICT]).
    bool        strictBognerNoLiquidAtGas;
+   // [Claude, 2026-11-12] true -> (with strictBognerClassification AND strictBognerNoLiquidAtGas) adds a third
+   //         local pass after the liquid-touching-gas fix above: every cell now INTERFACE (whether from the
+   //         strict rule's own both/neither branches, or just promoted by strictBognerNoLiquidAtGas) is
+   //         re-scanned against the now-fully-decided flag field, and demoted to GAS or LIQUID if its real
+   //         D3Q27 neighbourhood shows only one phase. Needed because promoting a liquid cell can itself
+   //         remove the only liquid evidence a neighbouring genuinely-mixed cell had, or let a cell that had
+   //         zero evidence (all same-step neighbours) see real evidence for the first time -- both leave
+   //         cells needlessly interface that strictBognerNoLiquidAtGas alone does not relax. Verified safe
+   //         (zero liquid-directly-touching-gas violations) and strictly less over-cautious than
+   //         usePass3Reresolution across thousands of synthetic sphere/cylinder/cuboid release scenarios
+   //         (author + Claude, thesis Overleaf session 2026-11-12) -- unlike usePass3Reresolution, which can
+   //         reintroduce exactly this invariant violation, since it only ever sees neighbours' frozen Pass-2
+   //         (not Pass-3-corrected) values. A no-op unless both strictBognerClassification and
+   //         strictBognerNoLiquidAtGas are also set. false (default) -> behaviour unchanged.
+   bool        strictBognerRelaxInterface;
    // [Claude, 2026-10-09] true -> log [MOMENTUM-BUDGET] every evaluationFrequency steps: momentum the freed cells carry into the
    //         fluid, momentum of the fluid in newly covered cells, and the total fluid momentum (liquid + fill-weighted interface).
    //         Diagnostic only. false (default) -> off.
@@ -1468,18 +1473,6 @@ struct ModelParams {
    uint_t      waterHeightGridY;
    uint_t      waterHeightEveryNSteps;
 
-   // 0 (DEFAULT) -> disabled, zero cost. Nonzero -> at exactly this main step (checked once,
-   // subCycle 0), every floater this rank LOCALLY owns has every currently-mapped obstacle cell
-   // forcibly cleared: moving-obstacle flag removed, PDFs reset to quiescent equilibrium (rho=1,
-   // u=0), fill level reset to 1 (liquid), particleField_ reset to the invalid-UID sentinel -- the
-   // exact same clear-and-reset sequence a since-reverted STALE-PARTICLE-IDX guard used on
-   // genuinely orphaned cells (see THESIS_PLAN.md, 2026-09-26). TEST-ONLY: lets a small,
-   // deterministic scenario reproduce that guard's own side effect (an abrupt, geometry-blind
-   // fill-level discontinuity destabilising the free-surface curvature/normal reconstruction) on a
-   // REAL, currently-valid floater, without needing the rare cross-rank ghost-ownership desync that
-   // originally triggered it. Not meant for production scenarios.
-   uint_t      debugForceObstacleClearAtStep;
-
    // false (DEFAULT) -> disabled, zero cost. true -> activates a single toggleable sweep, added once
    // per MAIN step (BuildTimeloop.h's addAfterTimeStepDiagnosticSweep, on timeloopEval so it runs
    // after hydro forces/DEM subcycles/everything else this step has settled), that: (1) drains and
@@ -1613,16 +1606,12 @@ struct ModelParams {
       , driveFloatersByMass         { b.getParameter< bool >       ("driveFloatersByMass", false) }
       , useFullVolumeAnalyticBuoyancy { b.getParameter< bool >     ("useFullVolumeAnalyticBuoyancy", false) }
       , useHydrostaticReconstruction { b.getParameter< bool >      ("useHydrostaticReconstruction", false) }
-      // [Claude, 2026-11-06] derived, not read from the prm (see the member comment above): automatically on
-      // whenever strict Bogner classification is off, since non-strict classification needs Pass-3 to avoid the
-      // classification-cascade dome; re-reads the raw prm key here rather than the already-initialised
-      // strictBognerClassification member below, since usePass3Reresolution is declared earlier in this struct
-      // and C++ initialises members in declaration order regardless of initializer-list order.
-      , usePass3Reresolution        { !b.getParameter< bool >      ("strictBognerClassification", false) }
+      , usePass3Reresolution        { b.getParameter< bool >       ("usePass3Reresolution", false) }
       , seedFillFromAllNeighbours   { b.getParameter< bool >       ("seedFillFromAllNeighbours", false) }
       , seedSkipObstacleNeighbours  { b.getParameter< bool >       ("seedSkipObstacleNeighbours", true) }
       , strictBognerClassification  { b.getParameter< bool >       ("strictBognerClassification", false) }
       , strictBognerNoLiquidAtGas   { b.getParameter< bool >       ("strictBognerNoLiquidAtGas", false) }
+      , strictBognerRelaxInterface  { b.getParameter< bool >       ("strictBognerRelaxInterface", false) }
       , logMomentumBudget           { b.getParameter< bool >       ("logMomentumBudget", false) }
       , guardCurvatureInputs        { b.getParameter< bool >       ("guardCurvatureInputs", false) }
       , wallOuterGhostLayer         { b.getParameter< bool >       ("wallOuterGhostLayer", false) }
@@ -1692,7 +1681,6 @@ struct ModelParams {
       , waterHeightGridX             { b.getParameter< uint_t >     ("waterHeightGridX", uint_t(0)) }
       , waterHeightGridY             { b.getParameter< uint_t >     ("waterHeightGridY", uint_t(0)) }
       , waterHeightEveryNSteps       { b.getParameter< uint_t >     ("waterHeightEveryNSteps", uint_t(250)) }
-      , debugForceObstacleClearAtStep{ b.getParameter< uint_t >     ("debugForceObstacleClearAtStep", uint_t(0)) }
       , diagnosticSweepEnabled       { b.getParameter< bool >       ("diagnosticSweepEnabled", false) }
       , useOwnershipHandoffPdfReset  { b.getParameter< bool >       ("useOwnershipHandoffPdfReset", false) }
       , diagnosticSweepFromStep      { b.getParameter< uint_t >     ("diagnosticSweepFromStep", uint_t(0)) }

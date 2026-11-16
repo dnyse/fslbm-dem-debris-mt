@@ -419,75 +419,11 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(cylinderFloaterVTKOutput), "VTK: floating cylinder data");
    }
 
-   // Box pillar VTK and Cylinder pillar VTK (below) are disabled -- redundant with mapped_flag's
-   // NoSlip classification (see fluid_field's own writers), which is what pillar geometry will be
-   // read from going forward instead of these separate glyph-based DEM-body outputs.
-#if 0
-   // Box pillar VTK — one point per pillar at box center with edgeLength attribute.
-   // In ParaView: Filters > Glyph, glyph type Box, scale by edgeLength to render the full solid shape.
-   if (!simParams->pillars.empty())
-   {
-      WALBERLA_LOG_INFO_ON_ROOT("OutputPillar")
-      struct SelectBoxEdgeLength
-      {
-         using return_type = mesa_pd::Vec3;
-         return_type operator()(const mesa_pd::data::Particle& p) const
-         {
-            const auto& shape = p.getBaseShape();
-            if (!shape) return mesa_pd::Vec3(real_t(0));
-            return static_cast< const mesa_pd::data::Box* >(shape.get())->getEdgeLength();
-         }
-      };
-      auto boxPointData = std::make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
-      boxPointData->addOutput< SelectBoxEdgeLength >("edgeLength");
-      boxPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
-         const auto& shape = pIt->getBaseShape();
-         return pIt->getType() == uint_t(2) && shape && shape->getShapeType() == mesa_pd::data::Box::SHAPE_TYPE;
-      });
-      auto boxVTKOutput = vtk::createVTKOutput_PointData(boxPointData, "pillar", simParams->vtk.writeFrequency,
-                                                         simParams->vtk.baseFolder, std::string("simulation_step"),
-                                                         false, false, true, false, simObjs->beginTimeStep);
-      timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(boxVTKOutput), "VTK: pillar data");
-   }
-
-   // Cylinder pillar VTK — one point per pillar at the axis centre with a glyphScale attribute.
-   // In ParaView: Filters > Glyph, Glyph Type = Cylinder, Scale Mode = Scale by Components,
-   // Scale Array = glyphScale, Scale Factor = 1. Then add Filters > Transform, Rotate X = 90
-   // to align the cylinder axis (VTK glyph Y-axis) with the simulation Z-axis.
-   // glyphScale = (2r, domainZ, 2r): the unit cylinder (r=0.5, h=1) scaled component-wise
-   // gives the correct radius and full-domain height without any manual fudge factors.
-   if (!simParams->cylinderPillars.empty())
-   {
-      struct SelectCylinderGlyphScale
-      {
-         using return_type = mesa_pd::Vec3;
-         real_t domainZ;
-         explicit SelectCylinderGlyphScale(real_t dz) : domainZ(dz) {}
-         return_type operator()(const mesa_pd::data::Particle& p) const
-         {
-            const auto* shape = dynamic_cast< const mesa_pd::data::CylindricalBoundary* >(p.getBaseShape().get());
-            if (!shape) return mesa_pd::Vec3(real_t(0));
-            const real_t r = shape->getRadius();
-            return mesa_pd::Vec3(real_t(2) * r, domainZ, real_t(2) * r);
-         }
-      };
-
-      auto cylinderPointData = std::make_shared< mesa_pd::vtk::ParticleVtkOutput >(simObjs->particleStorage);
-      cylinderPointData->addOutput(
-         "glyphScale",
-         std::make_shared< mesa_pd::vtk::OutputSelector< SelectCylinderGlyphScale > >(
-            SelectCylinderGlyphScale(real_c(simParams->domain.domainSize[2]))));
-      cylinderPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
-         const auto& shape = pIt->getBaseShape();
-         return pIt->getType() == uint_t(2) && shape &&
-                shape->getShapeType() == mesa_pd::data::CylindricalBoundary::SHAPE_TYPE;
-      });
-      auto cylinderVTKOutput = vtk::createVTKOutput_PointData(
-         cylinderPointData, "cylinder_pillar", simParams->vtk.writeFrequency, simParams->vtk.baseFolder,
-         std::string("simulation_step"), false, false, true, false, simObjs->beginTimeStep);
-      timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(cylinderVTKOutput), "VTK: cylinder pillar data");
-   }
-#endif
+   // Dedicated box/cylinder pillar glyph VTK outputs (one point per pillar + a shape-scale attribute,
+   // rendered in ParaView via Filters > Glyph) were removed: pillar geometry is already visible via
+   // the fluid field's own "mapped_flag" writer (FlagFieldMapping, VtkWriter.h), which classifies
+   // every NoSlip-flagged cell -- confirmed still live and registered. The glyph-based version is
+   // recoverable from git history if a dedicated pillar-shape visualization is ever needed again.
 }
 
 // [Claude, 2026-10-02] prm ModelParameters.diagnoseNaNNormals: after the normal sweep (and its ghost-layer exchange), scans
@@ -955,18 +891,6 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                  simParams->physics.densityPrecursorLiquidOnly);
    };
 
-   // [Claude, 2026-09-25] Cube trace for the recurring hopper crash region (world X=267.5, Z~18.5-19.5,
-   // Y in the 15-22 range observed across three independent crashes at this exact rod cluster --
-   // THESIS_PLAN.md). Unlike scanIntraStepNaN above (which only logs when a cell IS already
-   // non-finite), this unconditionally prints the FULL PDF/rho/fill state of every cell in the region,
-   // so the actual (still-finite) values immediately before collide can be inspected directly, not
-   // just a pass/fail isfinite() result.
-   // [Claude, 2026-09-25] DISABLED for the full 60k-step Option-B validation run: the collide-stage
-   // crash mechanism this probe was built to trace is now fully characterised and the fix (the
-   // repairDegenerateObstacleCells guard) is validated (THESIS_PLAN.md) -- this heavy per-step,
-   // ~124-cell, 7-hook-point dump is no longer needed and would flood the log over 60k steps.
-   auto probeHopperCrashRegion = [simObjs](const char* label) { (void)simObjs; (void)label; };
-
    // add standard waLBerla boundary handling
    // only relavant for onlyGasAndBoundary blocks (i.e. not interface, not inflow, not liquid)
    timeloop->add() << Sweep(simObjs->antidunesBoundaryHandling->getBoundarySweep(), "Sweep: boundary handling",
@@ -976,8 +900,6 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                     "Probe: after boundary handling")
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-boundarySweep"); },
                                     "Intra-step NaN scan: after boundary handling")
-                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-boundarySweep"); },
-                                    "Hopper crash region probe: after boundary handling")
                    << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 0); },
                                     "Momentum budget probe: after boundary handling");
 
@@ -994,8 +916,6 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                     "Probe: after force weighting")
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-forceDensitySweep"); },
                                     "Intra-step NaN scan: after force weighting")
-                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-forceDensitySweep"); },
-                                    "Hopper crash region probe: after force weighting")
                    << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 1); },
                                     "Momentum budget probe: after force weighting");
 
@@ -1033,8 +953,6 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                        "Probe: after StreamReconstructAdvect")
       << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-streamReconstructAdvect"); },
                        "Intra-step NaN scan: after StreamReconstructAdvect")
-      << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-streamReconstructAdvect"); },
-                       "Hopper crash region probe: after StreamReconstructAdvect")
                    << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 2); },
                                     "Momentum budget probe: after StreamReconstructAdvect");
 
@@ -1087,8 +1005,6 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                     "Probe: after collide")
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-collide"); },
                                     "Intra-step NaN scan: after collide")
-                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-collide"); },
-                                    "Hopper crash region probe: after collide")
                    << AfterFunction([simObjs, simParams]() {
                          if (!simParams->model.repairDegenerateObstaclePdfs) return; // Option B: prm-controlled, default off
                          const uint_t t = *simObjs->currentMainStep;
@@ -1121,8 +1037,6 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                     "Probe: after cell conversion")
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-cellConversion"); },
                                     "Intra-step NaN scan: after cell conversion")
-                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-cellConversion"); },
-                                    "Hopper crash region probe: after cell conversion")
                    << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 4); },
                                     "Momentum budget probe: after cell conversion");
 
@@ -1139,8 +1053,6 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                     "Probe: after EquilibriumRefilling")
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-equilibriumRefilling"); },
                                     "Intra-step NaN scan: after EquilibriumRefilling")
-                   << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-equilibriumRefilling"); },
-                                    "Hopper crash region probe: after EquilibriumRefilling")
                    << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 5); },
                                     "Momentum budget probe: after EquilibriumRefilling");
 
@@ -1170,8 +1082,6 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                       << AfterFunction([&simObjs]() { simObjs->bubbleModel->update(); }, "Sweep: bubble model update")
                       << AfterFunction([probeCrashCell]() { probeCrashCell("PROBE-after-excessMassEvenly"); },
                                        "Probe: after excess mass distribution (evenly)")
-                      << AfterFunction([probeHopperCrashRegion]() { probeHopperCrashRegion("HOPPER-after-excessMassEvenly"); },
-                                       "Hopper crash region probe: after excess mass distribution (evenly)")
                       << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-excessMassEvenly"); },
                                        "Intra-step NaN scan: after excess mass distribution (evenly)");
    }
@@ -1384,14 +1294,6 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    // Streaming from gas neighbours (PDF=0) then reduces ρ, but keeps every f_i ≥ 0, so the
    // collision cannot produce NaN from a negative-density state.
    //
-   // Previous (now-commented) GradsMoment version, kept for reference:
-   // auto gradReconstructor =
-   //    lbm_mesapd_coupling::makeGradsMomentApproximationReconstructor< AntidunesBoundaryHandling_T::BoundaryHandling_T >(
-   //       simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simParams->computed.relaxationRate,
-   //       false,  // recomputeTargetDensity
-   //       true    // useCentralDifferences
-   //    );
-
    // Bogner & Rüde (2013) state-selection + EquilibriumReconstructor.
    //
    // Each FormerMO cell is classified by its D3Q27 non-obstacle neighbourhood B(x):
@@ -1439,14 +1341,14 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    // [Claude, 2026-10-10] prm ModelParameters.strictBognerNoLiquidAtGas (default false)
    bognerReconstructionManager->setStrictBognerNoLiquidAtGas(simParams->model.strictBognerNoLiquidAtGas);
    WALBERLA_LOG_INFO_ON_ROOT("strictBognerNoLiquidAtGas = " << (simParams->model.strictBognerNoLiquidAtGas ? "true" : "false"));
+   // [Claude, 2026-11-12] prm ModelParameters.strictBognerRelaxInterface (default false); no-op unless
+   // strictBognerClassification and strictBognerNoLiquidAtGas are also on.
+   bognerReconstructionManager->setStrictBognerRelaxInterface(simParams->model.strictBognerRelaxInterface);
+   WALBERLA_LOG_INFO_ON_ROOT("strictBognerRelaxInterface = " << (simParams->model.strictBognerRelaxInterface ? "true" : "false"));
    WALBERLA_LOG_INFO_ON_ROOT("FormerMO classification: "
                              << (simParams->model.strictBognerClassification ? "strict Bogner rule (same-step freed cells not in B(x))"
                                                                              : "same-step interface fallback"));
-   // [Claude, 2026-11-06] usePass3Reresolution is no longer an independent prm key: it is now derived as
-   // !strictBognerClassification (SimulationParams.h), so this just reports the resulting state rather than an
-   // author-chosen setting -- non-strict classification always runs with Pass-3, to avoid the classification-
-   // cascade dome a non-strict run without it can develop on a floater's dry surface.
-   WALBERLA_LOG_INFO_ON_ROOT("Pass-3 local re-resolution: " << (simParams->model.usePass3Reresolution ? "on (automatic with non-strict classification)" : "off (not needed under strict classification)"));
+   WALBERLA_LOG_INFO_ON_ROOT("Pass-3 local re-resolution: " << (simParams->model.usePass3Reresolution ? "on" : "off"));
 
    const uint_t convLogFreq = simParams->evaluation.evaluationFrequency;
 
