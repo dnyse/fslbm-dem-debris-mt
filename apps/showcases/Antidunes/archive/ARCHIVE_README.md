@@ -168,6 +168,27 @@ contact gate to "`ComputeTunnelContacts`' own X-extent gate" (still accurate); t
 job 4196224, which happened to be a bridge "widerstacks" scenario (the test itself is a generic
 box-corner regression check, unrelated to arch tunnels).
 
+## (not archived — see `local_only/`)
+
+[Claude, 2026-11-17] Repo cleanup at the author's request, ahead of the public GitHub mirror
+(`github` remote, `dnyse/fslbm-dem-debris-mt`). A long tail of one-off debug/investigation scripts
+(19 `analyze_*.py` plus `census_sealed_cells.py`, `visualize_spherobox.py`, and 8 similar one-offs),
+23 `gen_*_prm.py`→unrelated raw CSV dumps (`wall_impact_*.csv`, 13 files), old chain-runner shell
+scripts (`run_kodam_comparisons_chain.sh`, `run_repro_chain.sh`, `run_shape_comparison.sh`) and their
+logs, the stale `changes.md` changelog (superseded by `THESIS_PLAN.md`), `MITIGATION_COMPARISON.md`,
+`spherobox_visualization.png`, and the Pont-Ferroviere-only `gen_pont_ferroviere_debris.py` /
+`pont_ferroviere_rue_goffontaine.md` were **not** moved here — they were `git rm --cached` and moved
+to a sibling top-level `local_only/` folder instead, which is wholly `.gitignore`'d. Same reasoning
+as the entries above (superseded/unused, kept for the author's own reference) but the author wants
+this specific batch off the public mirror entirely, not just out of the way in a tracked `archive/`.
+`THESIS_PLAN.md`, `DEM_VALIDATION_MATH_REFERENCE.md`, and `FINAL_THESIS_DEM_VALIDATION.md` (personal
+working documents) got the same treatment, untracked in place and moved into `local_only/` too.
+
+Also in `docs/`: `class-structure.md`, `forces.md`, `forces-diagram.{pdf,png,py}`, and
+`material-phases-and-velocities.md` were deleted outright (not archived, not moved to
+`local_only/`) at the author's request, after confirming none were referenced by current code or
+the thesis; `docs/HOWTO_BUILD_AND_RUN.md` and `docs/clogging-animations/` were kept as still-current.
+
 ## unused_contact_methods/fraige_validation_tests.cpp.excerpt
 
 `testBoxBoxFraigeVsGjkVsSatFuzz`/`testFraigeVertexFaceContact`/`testFraigeVertexNearCornerBlend`/

@@ -1,1 +1,6 @@
 logs/
+*.log
+
+# Author's personal working docs + superseded debug/exploratory material --
+# kept on local disk only, never tracked or pushed to the public GitHub mirror
+local_only/

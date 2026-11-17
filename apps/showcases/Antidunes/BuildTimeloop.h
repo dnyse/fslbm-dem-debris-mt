@@ -1597,49 +1597,6 @@ void addAfterTimeStepDiagnosticSweep(const std::shared_ptr< const SimulationPara
          },
          *simObjs->particleAccessor);
 
-      // (4) [Claude, 2026-09-27] Per explicit request ("add to our additional sweep at the end this
-      // cell and surrounding... rerun and analyze"): a ZERO-THRESHOLD, every-step trace of world cell
-      // (608.5,18.5,30.5) -- the [MEM-GARBAGE-LINK] collapse cell shared by jobs 4271068/4271079/
-      // 4271124, all at step 22011, 1 step before the STALE-PARTICLE-IDX abort -- plus its full D3Q27
-      // neighbourhood (27 cells total). Unlike every existing check (MEM-GARBAGE-LINK's |PDF|>10,
-      // checkPdfNaN's density window/NaN), this logs EVERY one of these 27 cells' density/fill/PDFs
-      // EVERY step regardless of value, via the existing trackWatchCells (SetupStages.h) -- so it
-      // can see a sub-threshold drift building up across steps 22001-22010 that every current
-      // threshold-gated check would stay silent on. Reuses trackWatchCells entirely, no new scanning
-      // code. Cheap: only the 1-2 ranks that actually own one of these 27 cells produce any output.
-      {
-         static const std::vector< Vector3< real_t > > memGarbageLinkCube = [] {
-            std::vector< Vector3< real_t > > cells;
-            const Vector3< real_t > centre(real_t(608.5), real_t(18.5), real_t(30.5));
-            for (real_t dz = real_t(-1); dz <= real_t(1); dz += real_t(1))
-               for (real_t dy = real_t(-1); dy <= real_t(1); dy += real_t(1))
-                  for (real_t dx = real_t(-1); dx <= real_t(1); dx += real_t(1))
-                     cells.emplace_back(centre[0] + dx, centre[1] + dy, centre[2] + dz);
-            return cells;
-         }();
-         trackWatchCells(simObjs, "MEM-GARBAGE-LINK-CUBE", t, memGarbageLinkCube);
-      }
-
-      // [Claude, 2026-09-27] Per explicit request ("check the other crash instance too"): the SAME
-      // trace, centred on job 4271048's own [MEM-GARBAGE-LINK] collapse cell (world (603.5,22.5,25.5),
-      // rank 114, step 22263, 1 step before its own STALE-PARTICLE-IDX abort at step 22264) -- a
-      // DIFFERENT desync instance than the 22012 one above (different rank, different cell, 9 orders
-      // of magnitude more severe, ~250 steps later), used to check whether the "squeezed between two
-      // different floaters' obstacle surfaces" pattern found at the 22012 cell also holds here, or is
-      // specific to that one location.
-      {
-         static const std::vector< Vector3< real_t > > crash4271048Cube = [] {
-            std::vector< Vector3< real_t > > cells;
-            const Vector3< real_t > centre(real_t(603.5), real_t(22.5), real_t(25.5));
-            for (real_t dz = real_t(-1); dz <= real_t(1); dz += real_t(1))
-               for (real_t dy = real_t(-1); dy <= real_t(1); dy += real_t(1))
-                  for (real_t dx = real_t(-1); dx <= real_t(1); dx += real_t(1))
-                     cells.emplace_back(centre[0] + dx, centre[1] + dy, centre[2] + dz);
-            return cells;
-         }();
-         trackWatchCells(simObjs, "CRASH-4271048-CUBE", t, crash4271048Cube);
-      }
-
       // [Claude, 2026-09-27] Per explicit request ("create a box around all the cylinders in the
       // crash area, log out their values and see the crash evolution"): the FULL spatial+temporal
       // evolution of every OBSTACLE/INTERFACE cell in a fixed box, once per main step, within its own
