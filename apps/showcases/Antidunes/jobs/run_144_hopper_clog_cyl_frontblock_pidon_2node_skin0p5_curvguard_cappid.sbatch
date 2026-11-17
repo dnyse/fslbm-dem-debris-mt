@@ -13,7 +13,7 @@
 # long axis along Y) pressed against the pillars, PID on, analytic cylinder contacts + owner-rank
 # tiebreak as the original `hopper_clog_cyl_frontblock_pidon_2node_gas.prm`/job, with
 # cylinderContactSkin 0.5 added (cd1b991b) and the row pitch widened 7->8 LU (via
-# `gen_hopper_clog_cyl_prm.py --pitch 8.0 --skin 0.5`) so the skin's own 1.0 LU rod-rod contact
+# `scripts/gen_hopper_clog_cyl_prm.py --pitch 8.0 --skin 0.5`) so the skin's own 1.0 LU rod-rod contact
 # threshold doesn't collide with the [RELEASE-OVERLAP] release-time guard the way it did at the
 # 24-rod test scale (job 4282206, failed in 97s). That guard-vs-skin interaction was then confirmed
 # fixed at 24 and 48 rods (jobs 4282267, 4282396: both full-length, exit 0, zero crash markers) --

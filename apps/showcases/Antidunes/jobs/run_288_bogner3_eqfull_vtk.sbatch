@@ -26,7 +26,7 @@
 # snapshots_b3_r<RHO>_<SHAPE>_s32_101k_vtk (NOT deleted), eval sqlite kept. Auto-archives to the vault
 # on completion (same pattern as run_288_bogner3_shape_s32.sbatch).
 # [Claude, 2026-10-07] copy of run_288_bogner3_vtk_101k.sbatch for the THESIS cuboid equilibrium runs (4273570/4273582/4273583) rerun
-# with VTK output to 40000 steps: prms/bogner3_r{075,050,025}_deep_s32_40k_vtk_gas.prm (gen_bogner3_cuboid_vtk_prms.py).
+# with VTK output to 40000 steps: prms/bogner3_r{075,050,025}_deep_s32_40k_vtk_gas.prm (scripts/gen_bogner3_cuboid_vtk_prms.py).
 #   sbatch --export=ALL,B3_RHO=075 jobs/run_288_bogner3_cuboid_40k_vtk.sbatch   (075 | 050 | 025)
 # [Claude, 2026-10-07] also the sphere / cylinder reruns (prms/gen_bogner3_sphcyl_vtk_prms.py, whole-domain VTK):
 #   sbatch --export=ALL,B3_RHO=075,B3_SHAPE=sphere jobs/run_288_bogner3_cuboid_40k_vtk.sbatch

@@ -13,7 +13,7 @@
 # long axis along Y) pressed against the pillars, PID on, analytic cylinder contacts + owner-rank
 # tiebreak as the original `hopper_clog_cyl_frontblock_pidon_2node_gas.prm`/job, with
 # cylinderContactSkin 0.5 added (cd1b991b) and the row pitch widened 7->8 LU (via
-# `gen_hopper_clog_cyl_prm.py --pitch 8.0 --skin 0.5`) so the skin's own 1.0 LU rod-rod contact
+# `scripts/gen_hopper_clog_cyl_prm.py --pitch 8.0 --skin 0.5`) so the skin's own 1.0 LU rod-rod contact
 # threshold doesn't collide with the [RELEASE-OVERLAP] release-time guard the way it did at the
 # 24-rod test scale (job 4282206, failed in 97s). That guard-vs-skin interaction was then confirmed
 # fixed at 24 and 48 rods (jobs 4282267, 4282396: both full-length, exit 0, zero crash markers) --
@@ -25,7 +25,7 @@
 # multi-hundred-MB log), so 6h requested (same as the original cylinder job).
 # [Claude, 2026-10-03] capped-PID copy of run_144_hopper_clog_cyl_frontblock_pidon_2node_skin0p5_curvguard.sbatch (406 rods, 100000 steps;
 # 4284723 ran ~6.6 steps/s, so ~4.3 h plus VTK output)
-# [Claude, 2026-10-03] 406-rod capped-PID stress test 4292534 with the block moved to the start of the domain, x 8..232 (gen_hopper_stress_prms.py), release 500, VTK at 0, wallOuterGhostLayer true. 5 h requested (4292534 took 3.1 h for 100000 steps).
+# [Claude, 2026-10-03] 406-rod capped-PID stress test 4292534 with the block moved to the start of the domain, x 8..232 (scripts/gen_hopper_stress_prms.py), release 500, VTK at 0, wallOuterGhostLayer true. 5 h requested (4292534 took 3.1 h for 100000 steps).
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then

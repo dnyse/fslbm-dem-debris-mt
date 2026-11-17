@@ -239,10 +239,12 @@ SQLite output and/or extracted `.dat` files. Cross-reference by run name or job 
 ## Why this file exists — the state of the rest of the repo
 
 A large amount of exploratory scratch accumulated here over the course of the thesis work: hundreds
-of one-off `prms/*.prm` variants (gitignored, not meant to be read as history), dozens of `gen_*.py`
-prm generators, one-off `analyze_*.py` scripts from specific debugging sessions, and long dated
-comment trails inside the `.h`/`.cpp` files that record investigation history rather than current
-behaviour. This README only points at the configs confirmed (or best-inferred, explicitly flagged as
-such) to produce the thesis's published numbers. Most of the rest of `prms/`/`jobs/`/the loose
-root-directory scripts are superseded dead ends kept only because they're gitignored/untracked rather
-than cleaned up — not a reliable source of "what the thesis actually used" on their own.
+of one-off `prms/*.prm` variants (gitignored, not meant to be read as history) and dozens of
+`scripts/gen_*.py` prm generators, plus long dated comment trails inside the `.h`/`.cpp` files that
+record investigation history rather than current behaviour (one-off `analyze_*.py` debugging scripts
+and similarly superseded notes were removed from the tracked tree in a 2026-11-17 cleanup — see
+`archive/ARCHIVE_README.md`). This README only points at the configs confirmed (or best-inferred,
+explicitly flagged as such) to produce the thesis's published numbers. Most of the rest of
+`prms/`/`jobs/`/`scripts/` are superseded dead ends kept only because they're gitignored/untracked
+(or, for `scripts/`, simply unused by any current run) rather than cleaned up — not a reliable source
+of "what the thesis actually used" on their own.

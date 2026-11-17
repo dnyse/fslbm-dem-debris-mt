@@ -14,7 +14,7 @@
 # on a mapping tie (axis-aligned face planes through cell centres), which for R1/MEM left it flush on the floor with no fluid cell
 # underneath, starving MEM-only buoyancy (traced and fixed 2026-09-22, 'CORRECTION of the tie explanation'; proven once for R1/box/
 # MEM only, job 4232331, never applied to R2/R4 or the analytic arm before now). Sphere/cylinder prms are UNCHANGED (no tie problem
-# was ever observed for them). See gen_buoyancy_tilted25_box_prm.py.
+# was ever observed for them). See scripts/gen_buoyancy_tilted25_box_prm.py.
 # [Claude, 2026-09-29] Switched from 576 ranks/8 nodes to 288 ranks/4 nodes (cellsPerBlock <32,32,24>
 # -> <32,32,48> in all R4 prms, 6x6x16 -> 6x6x8) per explicit request ("run r4 on four nodes, the
 # other on a single node"); time limit doubled to 14:00:00 accordingly (half the ranks, roughly

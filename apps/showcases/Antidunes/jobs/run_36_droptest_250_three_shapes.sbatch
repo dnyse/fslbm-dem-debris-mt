@@ -78,7 +78,7 @@ case "$CASE" in
     random_cylinders) run_case random_cylinders DropTest_250_random_cylinders_gas.prm ;;
     random_cuboids)   run_case random_cuboids   DropTest_250_random_cuboids_gas.prm ;;
     random_mixed)     run_case random_mixed     DropTest_250_random_mixed_gas.prm ;;
-    # [Claude, 2026-10-03] Kodam et al. (2010b) packing with a round container, one-by-one release (gen_kodam_round_prm.py); 16 tasks
+    # [Claude, 2026-10-03] Kodam et al. (2010b) packing with a round container, one-by-one release (scripts/gen_kodam_round_prm.py); 16 tasks
     kodam_round)      run_case kodam_round      DropTest_kodam_round_gas.prm ;;
     # [Claude, 2026-10-10] the same with kodamBandEdgeAxialCheck true (energy spike of 4292501); 16 tasks as 4292501
     kodam_round_axial) run_case kodam_round_axial DropTest_kodam_round_axial_gas.prm ;;

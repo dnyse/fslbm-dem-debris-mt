@@ -10,7 +10,7 @@
 #SBATCH --mail-user=dennys.huber@fau.de
 
 # [Claude, 2026-09-19] Cylinder hopper: 406 rods (r=3, L=18, D:L = 1:3, long axis along Y) pressed against the pillars, PID on, analytic cylinder contacts + owner-rank
-# tiebreak. See hopper_clog_cyl_frontblock_pidon_2node_gjk_gas.prm and gen_hopper_clog_cyl_prm.py. The sphere hopper took 1h48m for 60000 steps on 144 ranks; rods add
+# tiebreak. See hopper_clog_cyl_frontblock_pidon_2node_gjk_gas.prm and scripts/gen_hopper_clog_cyl_prm.py. The sphere hopper took 1h48m for 60000 steps on 144 ranks; rods add
 # contact cost and very verbose [CylComputation] diagnostics (expect a multi-hundred-MB log), so 6 h requested.
 set -euo pipefail
 

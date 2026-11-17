@@ -14,7 +14,7 @@
 # PID on, Z=180 domain. Time limit 3h15m (4245629 itself COMPLETED in 2h30m56s -- tightened from the original 6h budget to match). Queue: independent, ~/mt-dennys (free).
 # See prms/clog_centred_pillar_startblock_cappid_gas.prm.
 # [Claude, 2026-10-03] capped-PID copy of run_144_clog_measurement_validation_extreme_pidon_flowrate.sbatch
-# [Claude, 2026-10-04] CENTRED PILLAR, current settings (gen_hopper_stress_prms.py --centred-only): 4292673 +
+# [Claude, 2026-10-04] CENTRED PILLAR, current settings (scripts/gen_hopper_stress_prms.py --centred-only): 4292673 +
 # 150000 steps, wallOuterGhostLayer, probes z 20, blockage ratio, VTK snapshots from 0. 6 h requested.
 # [Claude, 2026-10-06] centred pillar with the 100 spheres R 5 as a start block (--centred-startblock-only).
 set -euo pipefail

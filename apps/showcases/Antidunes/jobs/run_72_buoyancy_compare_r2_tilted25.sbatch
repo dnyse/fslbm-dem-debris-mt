@@ -14,7 +14,7 @@
 # on a mapping tie (axis-aligned face planes through cell centres), which for R1/MEM left it flush on the floor with no fluid cell
 # underneath, starving MEM-only buoyancy (traced and fixed 2026-09-22, 'CORRECTION of the tie explanation'; proven once for R1/box/
 # MEM only, job 4232331, never applied to R2/R4 or the analytic arm before now). Sphere/cylinder prms are UNCHANGED (no tie problem
-# was ever observed for them). See gen_buoyancy_tilted25_box_prm.py.
+# was ever observed for them). See scripts/gen_buoyancy_tilted25_box_prm.py.
 # Chained: R1 (no dependency) -> R2 (afterany R1) -> R4 (afterany R2), same checkout (mt-dennys-mirror, which already has all
 # three bed files spheres_out_buoyancy_r{1,2,4}.dat -- avoids a repeat of the earlier cross-mirror bed-file gap).
 # Time limit ADJUSTED from the last real run: job 4223072 (the R2 compare-all that actually COMPLETED) took 1:08:31 total for the 6 untilted runs; the
