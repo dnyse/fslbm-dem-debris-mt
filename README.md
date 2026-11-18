@@ -1,5 +1,7 @@
 # Numerical Simulation of Floating Debris Transport and Clogging
 
+**📄 [Read the full thesis (PDF)](thesis.pdf)**
+
 **Master's Thesis — Dennys Huber, Friedrich-Alexander-Universität Erlangen-Nürnberg, Lehrstuhl für Informatik 10 (Systemsimulation)**
 Supervisor: Prof. Dr.-Ing. Harald Köstler · Advisor: M.Sc. Behzad Safaei
 
