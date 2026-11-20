@@ -1,0 +1,99 @@
+// ARCHIVED 2026-11-20 from tests/showcases_antidunes/PaperAnalyticalContactTest.cpp (useTightTier1). Replaced there by
+// testCapsuleBoundConservative10k, which checks the same capsule bound over all trials. Not compiled.
+
+//======================================================================================================================
+//! Does the tight, capsule-based Tier 1 bound (useTightTier1=true) ever WRONGLY declare two cylinders
+//! "definitely separated" when they're actually in contact? This is the one thing that must NEVER
+//! happen -- a false "definitely separated" would silently skip the GJK/EPA fallback and drop a real
+//! contact. Checked directly against GJK/EPA ground truth on real cylinder geometry, both near the
+//! actual contact boundary (sampleSeparationNearBoundary, the same methodology as every other fuzz
+//! test in this file) and at uniformly-distributed separations across the whole physically-possible
+//! range (representative of a packed simulation, where two pillars can sit anywhere within reach, not
+//! just near their own contact boundary) -- since the tight bound's main value proposition is
+//! specifically for well-separated-but-within-reach pairs, the near-boundary corpus alone would
+//! under-sample exactly the population it's meant to help with.
+//======================================================================================================================
+void testTightTier1Accuracy10k()
+{
+   FuzzRng                                  fuzz(97531); // distinct seed from every other fuzz test
+   std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
+   std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
+
+   constexpr int numTrialsPerCorpus = 5000;
+
+   int dispatchGapTrials = 0;                                  // analytical found NO scenario at all
+   int oldTier1Uncertain = 0, newTightTier1Uncertain = 0;       // how often each bound says "check with GJK"
+   int unsafeFalseSeparated = 0;                                // tight bound wrong -> MUST stay 0
+   real_t maxUnsafeOverlap = 0;
+
+   auto runCorpus = [&](bool uniformSeparation) {
+      for (int trial = 0; trial < numTrialsPerCorpus; ++trial)
+      {
+         const real_t Ri = radiusDist(fuzz.rng), Li = lengthDist(fuzz.rng);
+         const real_t Rj = radiusDist(fuzz.rng), Lj = lengthDist(fuzz.rng);
+         const Rot3   rotI = fuzz.randomRotation();
+         const Rot3   rotJ = fuzz.randomRotation();
+
+         const real_t circumRi = std::sqrt(Ri * Ri + real_t(0.25) * Li * Li);
+         const real_t circumRj = std::sqrt(Rj * Rj + real_t(0.25) * Lj * Lj);
+         const Vec3   dir      = fuzz.randomUnitVec();
+         const Vec3   posI(real_t(0), real_t(0), real_t(0));
+
+         real_t sep;
+         if (uniformSeparation)
+         {
+            std::uniform_real_distribution< real_t > uniformSepDist(real_t(0), real_t(3) * (circumRi + circumRj));
+            sep = uniformSepDist(fuzz.rng);
+         }
+         else
+         {
+            auto contactAtSep = [&](real_t s) {
+               return gjkCylCyl(posI, rotI, Ri, Li, posI + dir * s, rotJ, Rj, Lj).contact;
+            };
+            sep = fuzz.sampleSeparationNearBoundary(contactAtSep, real_t(0), real_t(3) * (circumRi + circumRj),
+                                                       std::min(Ri, Rj));
+         }
+         const Vec3 posJ = posI + dir * sep;
+
+         const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
+         const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
+
+         const ContactResult analytical = cylinderCylinderContact(ci, cj);
+         if (analytical.contact) continue; // Tier 1 only ever applies when the dispatch found nothing
+         ++dispatchGapTrials;
+
+         const bool oldUncertain = cylinderCylinderResultIsUncertain(ci, cj, analytical, false);
+         const bool newUncertain = cylinderCylinderResultIsUncertain(ci, cj, analytical, true);
+         if (oldUncertain) ++oldTier1Uncertain;
+         if (newUncertain) ++newTightTier1Uncertain;
+
+         if (!newUncertain) // tight bound says "definitely separated, don't bother with GJK"
+         {
+            const GjkResult gjk = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+            if (gjk.contact)
+            {
+               ++unsafeFalseSeparated;
+               maxUnsafeOverlap = std::max(maxUnsafeOverlap, -gjk.penetrationDepth);
+            }
+         }
+      }
+   };
+
+   runCorpus(false); // near the actual GJK/EPA contact boundary
+   runCorpus(true);  // uniformly across the whole physically-possible-reach range
+
+   WALBERLA_LOG_INFO_ON_ROOT(
+      "[TightTier1] " << dispatchGapTrials << " dispatch-gap trials (analytical found no scenario) "
+      << "out of " << (2 * numTrialsPerCorpus) << " total | old Tier 1 uncertain=" << oldTier1Uncertain
+      << "/" << dispatchGapTrials << " | NEW tight Tier 1 uncertain=" << newTightTier1Uncertain << "/"
+      << dispatchGapTrials << " (i.e. tight bound resolved "
+      << (dispatchGapTrials - newTightTier1Uncertain) << " trials as definitely-separated, skipping "
+      << "GJK/EPA entirely) | UNSAFE false-separated (tight bound wrong vs GJK/EPA): "
+      << unsafeFalseSeparated << " (max missed overlap=" << maxUnsafeOverlap << ")");
+
+   // The one thing that must NEVER happen: the tight bound declaring "definitely separated" for a
+   // pair GJK/EPA confirms is actually touching. Any failure here means the capsule bound is NOT
+   // conservative as derived and must not be trusted.
+   WALBERLA_CHECK_EQUAL(unsafeFalseSeparated, 0);
+   WALBERLA_CHECK_GREATER_EQUAL(dispatchGapTrials, 200); // sanity: comparison isn't running on noise
+}

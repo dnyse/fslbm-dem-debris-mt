@@ -144,12 +144,7 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
       const real_t reach  = -lowest[2];
 
       DEMEngine engine(dt, e, mu, poisson, collisionTime, real_t(0), real_t(20) * (radius + length),
-                        /*useAnalyticalContactDetection=*/false, /*useRoundedBoxCorners=*/false,
-                        /*boxRoundingRadius=*/real_t(0.05), /*useMultiPointBoxContact=*/false,
-                        /*useBoxOverlapCap=*/false, /*boxOverlapCapFraction=*/real_t(0.3),
-                        /*useAxisHysteresis=*/false, /*axisHysteresisMargin=*/real_t(0.15),
-                        /*useContactManifold=*/false, /*manifoldFadeRate=*/real_t(0.25),
-                        useRotationalEffectiveMass);
+                        /*useAnalyticalContactDetection=*/false, useRotationalEffectiveMass);
       const real_t gap    = real_t(0.01) * radius;
       const size_t cylIdx = engine.addCylinder(Vec3(0, 0, reach + gap),
                                                 Vec3(tangentialFraction * speed, 0, -speed), yrot.rot, radius,
@@ -360,11 +355,7 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
 
       DEMEngine engine(dt, e, mu, poisson, collisionTime, real_t(0),
                        real_t(30) * std::max({ halfExtents[0], halfExtents[1], halfExtents[2] }),
-                       /*useAnalyticalContactDetection=*/false, /*useRoundedBoxCorners=*/false,
-                       /*boxRoundingRadius=*/real_t(0.05), /*useMultiPointBoxContact=*/false,
-                       /*useBoxOverlapCap=*/false, /*boxOverlapCapFraction=*/real_t(0.3),
-                       /*useAxisHysteresis=*/false, /*axisHysteresisMargin=*/real_t(0.15),
-                       /*useContactManifold=*/false, /*manifoldFadeRate=*/real_t(0.25), useRotationalEffectiveMass);
+                       /*useAnalyticalContactDetection=*/false, useRotationalEffectiveMass);
       const real_t gap = real_t(0.01) * std::min({ halfExtents[0], halfExtents[1], halfExtents[2] });
       // Horizontal velocity component aimed so the leading (lowest) corner strikes squarely, matching
       // Housner's planar rocking-block assumption (velocity, spin axis and contact point all in the

@@ -16,8 +16,7 @@
 //! \file ClosedFormContactsBoxPoint.h
 //! \brief Box x Box closed-form contact: Gottschalk, Lin & Manocha (1996) SAT (boxBoxSAT) plus this
 //! codebase's own contact-point construction (box_contact_point, pullIntoBoxIntersection,
-//! placeOnNormalLine, boxBoxContactPoint) and vertex-only multi-point contact (BoxVertexContact,
-//! boxBoxMultiPointContacts). Split out of PaperAnalyticalContacts.h (namespace paper_analytical)
+//! placeOnNormalLine, boxBoxContactPoint). Split out of PaperAnalyticalContacts.h (namespace paper_analytical)
 //! 2026-10-29; see ClosedFormContactsInfra.h for the shared ContactResult type.
 
 #pragma once
@@ -35,9 +34,8 @@ namespace detail
 {
 //! Closest points between two finite line segments P1->Q1 and P2->Q2 -- the standard closed-form
 //! algorithm (Ericson, "Real-Time Collision Detection" 2004, Section 5.1.9, ClosestPtSegmentSegment),
-//! no iteration. Defined here (before boxBoxSAT, which needs it for its own useRoundedCorners option)
-//! rather than down in the cylinder-cylinder section further below, where the squared-distance-only
-//! wrapper closestDistanceSqBetweenSegments (used by the cylinder-cylinder capsule bound) still lives.
+//! no iteration. Used by boxBoxContactPoint below and by the cylinder-cylinder code; the squared-distance-only wrapper
+//! closestDistanceSqBetweenSegments (the cylinder-cylinder capsule bound) lives in ClosedFormContactsCylinderPlaneGeometry.h.
 inline void closestPointsBetweenSegments(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec3& q2,
                                           Vec3& outC1, Vec3& outC2)
 {
@@ -486,54 +484,10 @@ inline Vec3 boxBoxContactPoint(const Vec3& posA, const Vec3 axesA[3], const Vec3
 //! (2nd argument) toward A (1st argument), e.g. testSphereSphereContact's contactNormal = -dir
 //! where the 2nd sphere sits along +dir from the 1st.
 //!
-//! useRoundedCorners/roundingRadius (both default OFF/0, exact pre-existing behaviour otherwise):
-//! mitigation for the corner/edge contact-normal discontinuity documented for polyhedral DEM (Lu,
-//! Third & Müller 2015, Chem. Eng. Sci. 127, Fig. 3/Section 2.1.3, citing Fraige et al. 2008a) and
-//! reproduced directly against this project's own production parameters by
-//! DEMValidationScenarios.h's runCornerNormalDiscontinuity (47.7% spurious kinetic-energy gain with
-//! this OFF). SAT's 15 candidate axes give a genuinely discontinuous winning normal near a
-//! near-degenerate edge-edge/vertex configuration -- a tiny relative rotation can flip which of two
-//! nearly-tied axes has the smaller gap, snapping the reported normal to a different direction between
-//! consecutive sub-cycles. Treating each box as the Minkowski sum of the sharp box with a small ball of
-//! radius `roundingRadius` (a "rounded box"/spherosimplex, Lu et al.'s Table 2/3) removes this
-//! discontinuity at its source for the specific case that actually triggers it -- an EDGE-vs-EDGE
-//! winning axis: instead of trusting SAT's raw cross-product axis direction (fixed, box-orientation-
-//! relative, and what flips discontinuously), the normal is recomputed as the vector between the
-//! ACTUAL closest points on the two finite edge SEGMENTS involved (closestPointsBetweenSegments above)
-//! -- a quantity that varies smoothly as either box translates/rotates, by the standard continuity
-//! property of the distance between two convex sets away from measure-zero symmetric configurations.
-//! Face-axis wins are left untouched (already smooth: a box has only 3 fixed face normals, 90 degrees
-//! apart, essentially never near-tied against each other in a way that matters physically). The
-//! overlap is inflated by 2*roundingRadius for EVERY winning-axis case (not just edge-edge), matching
-//! the actual Minkowski-sum geometry of two rounded boxes each dilated by roundingRadius.
-//! maxOverlapCap (default: no cap, exact pre-existing behaviour): clamps the reported overlap to at
-//! most this value. See boxBoxMultiPointContacts' own header comment for the full rationale -- SAT's
-//! overlap is bounded only by whichever half-extent happens to win as the separating axis, which for
-//! two DEEPLY interpenetrating boxes (a jam, or a floater released directly on top of a neighbour) can
-//! legitimately reach that entire half-extent, producing a spring force far stronger than any shallow,
-//! near-degenerate contact this project's contact model was ever tuned against.
-//!
-//! previousNormal/hysteresisMargin (default: nullptr/no hysteresis, exact pre-existing behaviour):
-//! the OTHER candidate fix for the same axis-flip discontinuity useRoundedCorners targets -- a "sticky"
-//! axis selection instead of geometric rounding. Every candidate axis with gap within hysteresisMargin
-//! (relative) of the TRUE
-//! minimum gap is treated as "competitive"; among those, the one whose properly-signed normal aligns
-//! best with previousNormal is used, even if it is not the strict argmin. This directly targets the
-//! chatter itself (two nearly-tied axes flip-flopping every sub-cycle) without inflating the overlap
-//! the way useRoundedCorners' Minkowski-sum correction does -- see this project's own
-//! multiPointDeepOverlapStability/EdgeCases finding that useRoundedCorners, despite fixing the
-//! axis-tie case cleanly, is CATASTROPHICALLY worse than doing nothing on a shape-mismatched deep
-//! overlap (+884% on "plank-vs-near-cube-deep") -- a side effect hysteresis has no mechanism to
-//! reproduce, since it never changes the reported overlap magnitude, only WHICH already-valid axis is
-//! reported. Caller owns the persistence (previousNormal is read-only here) -- see
-//! SolidCylinderContactDetection's own boxBoxHysteresisNormal_ map (ParticleKernels.h) for how
-//! production keys this per uid-pair across sub-cycles.
+//! The rounded-corner, overlap-cap and axis-hysteresis variants of this function (useRoundedBoxCorners,
+//! useBoxOverlapCap, useAxisHysteresis) were archived on 2026-11-20, see archive/ARCHIVE_README.md.
 inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& halfA, const Vec3& posB,
-                                const Mat3& RB, const Vec3& halfB, bool useRoundedCorners = false,
-                                real_t roundingRadius = real_t(0),
-                                real_t maxOverlapCap = std::numeric_limits< real_t >::max(),
-                                const Vec3* previousNormal = nullptr,
-                                real_t hysteresisMargin = real_t(0.15))
+                                const Mat3& RB, const Vec3& halfB)
 {
    Vec3 axesA[3], axesB[3];
    for (uint_t i = 0; i < 3; ++i)
@@ -544,22 +498,19 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
 
    const Vec3 T = posB - posA;
 
-   // Every valid (non-separating) candidate axis is kept, not just the running minimum -- hysteresis
-   // below needs to compare ALL competitive candidates against previousNormal, not only the argmin.
+   // Every valid (non-separating) candidate axis is kept; the winner is the first one with the smallest gap.
    struct Candidate
    {
       Vec3   axis;
       real_t gap;
       real_t ra, rb;
-      int    edgeIA, edgeJB; // -1,-1 = face-of-A or face-of-B axis, see useRoundedCorners' own comment
    };
    std::vector< Candidate > candidates;
    candidates.reserve(15);
 
    // Returns false the instant a separating axis is found (boxes proven disjoint); otherwise records
-   // this axis as a valid candidate (see Candidate's own comment on why ALL are kept, not just the
-   // running minimum).
-   auto testAxis = [&](Vec3 L, int ia, int jb) -> bool {
+   // this axis as a valid candidate.
+   auto testAxis = [&](Vec3 L) -> bool {
       const real_t len = L.length();
       if (len < real_t(1e-10)) return true; // degenerate (near-parallel edges) -- not a valid axis
 
@@ -575,53 +526,29 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
 
       if (gap < real_t(0)) return false; // separating axis -- disjoint
 
-      candidates.push_back(Candidate{ L, gap, ra, rb, ia, jb });
+      candidates.push_back(Candidate{ L, gap, ra, rb });
       return true;
    };
 
    for (int i = 0; i < 3; ++i)
-      if (!testAxis(axesA[i], -1, -1)) return ContactResult{};
+      if (!testAxis(axesA[i])) return ContactResult{};
    for (int i = 0; i < 3; ++i)
-      if (!testAxis(axesB[i], -1, -1)) return ContactResult{};
+      if (!testAxis(axesB[i])) return ContactResult{};
    for (int i = 0; i < 3; ++i)
       for (int j = 0; j < 3; ++j)
-         if (!testAxis(axesA[i] % axesB[j], i, j)) return ContactResult{};
+         if (!testAxis(axesA[i] % axesB[j])) return ContactResult{};
 
    WALBERLA_ASSERT(!candidates.empty());
 
    size_t bestIdx = 0;
    for (size_t i = 1; i < candidates.size(); ++i)
       if (candidates[i].gap < candidates[bestIdx].gap) bestIdx = i;
-   const real_t minGap = candidates[bestIdx].gap;
-
-   if (previousNormal != nullptr && previousNormal->sqrLength() > real_t(1e-12))
-   {
-      const Vec3   prevN          = previousNormal->getNormalizedIfNotZero();
-      real_t       bestAlignment  = real_t(-2); // below any real cosine, so the loop always picks something
-      size_t       hysteresisIdx  = bestIdx;
-      const real_t competitiveGap = minGap * (real_t(1) + hysteresisMargin);
-      for (size_t i = 0; i < candidates.size(); ++i)
-      {
-         if (candidates[i].gap > competitiveGap) continue; // not close enough to the true minimum to matter
-         const real_t signI = (T * candidates[i].axis >= real_t(0)) ? real_t(1) : real_t(-1);
-         const Vec3   nI    = -signI * candidates[i].axis;
-         const real_t align = nI * prevN;
-         if (align > bestAlignment)
-         {
-            bestAlignment = align;
-            hysteresisIdx = i;
-         }
-      }
-      bestIdx = hysteresisIdx;
-   }
-
-   const Candidate& best    = candidates[bestIdx]; // NOT necessarily the global minimum once hysteresis has acted
+   const Candidate& best    = candidates[bestIdx];
    const Vec3&      bestAxis = best.axis;
    const real_t     bestRa = best.ra, bestRb = best.rb;
-   const int         edgeIA = best.edgeIA, edgeJB = best.edgeJB;
 
    const real_t sign   = (T * bestAxis >= real_t(0)) ? real_t(1) : real_t(-1);
-   Vec3         normal = -sign * bestAxis;
+   const Vec3   normal = -sign * bestAxis;
 
    ContactResult result;
    result.contact  = true;
@@ -637,46 +564,7 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
    result.point = formerPoint ? Vec3(real_t(0.5) * (posA + posB) + real_t(0.5) * sign * (bestRa - bestRb) * bestAxis)
                               : detail::boxBoxContactPoint(posA, axesA, halfA, posB, axesB, halfB, normal, best.gap);
 
-   if (useRoundedCorners && edgeIA >= 0)
-   {
-      // Edge-vs-edge winning axis: rebuild the two specific finite edge SEGMENTS involved (the edge of
-      // A running along axesA[edgeIA], the edge of B running along axesB[edgeJB]) and use the vector
-      // between their actual closest points as the normal instead of the raw (discontinuous) SAT axis
-      // -- see this function's own header comment for the derivation. Each edge's OTHER two axes are
-      // offset by the sign of that axis's projection onto T (A) / -T (B), which selects the specific
-      // one of the four axis-parallel edges that faces the other box.
-      const uint_t edgeIAu = uint_t(edgeIA), edgeJBu = uint_t(edgeJB);
-      Vec3         edgeCenterA = posA;
-      for (uint_t o = 0; o < 3; ++o)
-      {
-         if (o == edgeIAu) continue;
-         edgeCenterA += (axesA[o] * T >= real_t(0) ? real_t(1) : real_t(-1)) * halfA[o] * axesA[o];
-      }
-      Vec3 edgeCenterB = posB;
-      for (uint_t p = 0; p < 3; ++p)
-      {
-         if (p == edgeJBu) continue;
-         edgeCenterB += (axesB[p] * T >= real_t(0) ? real_t(-1) : real_t(1)) * halfB[p] * axesB[p];
-      }
-      const Vec3 halfEdgeA = halfA[edgeIAu] * axesA[edgeIAu];
-      const Vec3 halfEdgeB = halfB[edgeJBu] * axesB[edgeJBu];
-
-      Vec3 closestA, closestB;
-      detail::closestPointsBetweenSegments(edgeCenterA - halfEdgeA, edgeCenterA + halfEdgeA,
-                                            edgeCenterB - halfEdgeB, edgeCenterB + halfEdgeB, closestA,
-                                            closestB);
-      const Vec3   diff = closestA - closestB; // points from B's edge toward A's edge
-      const real_t len  = diff.length();
-      if (len > real_t(1e-10))
-      {
-         normal       = diff / len;
-         result.point = real_t(0.5) * (closestA + closestB);
-      }
-   }
-
    result.normal = normal;
-   if (useRoundedCorners) result.overlap += real_t(2) * roundingRadius;
-   result.overlap = std::min(result.overlap, maxOverlapCap);
    return result;
 }
 
@@ -684,117 +572,8 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
 // useSpheroBoxAnalytical) and boxBoxSpheroAnalytical removed entirely -- unused by any thesis-cited
 // result. Archived at archive/unused_contact_methods/spherosimplex_box_contact.h (see ARCHIVE_README.md).
 
-//! One vertex-in-the-other-box overlap, for boxBoxMultiPointContacts below.
-struct BoxVertexContact
-{
-   Vec3   point;
-   Vec3   normal; // points OUT of the box the vertex is embedded in, toward the vertex's own box
-   real_t overlap;
-   // Stable identity for the SAME physical vertex across sub-cycles: 0-7 = one of A's 8 corners
-   // (encoded as 4*(sx>0)+2*(sy>0)+1*(sz>0) in A's own body frame), 8-15 = the equivalent for B's
-   // corners. A vertex's IDENTITY never changes between sub-cycles (it's always "A's +x+y+z corner"),
-   // only whether it happens to be embedded and how deep -- this lets a persistent contact manifold
-   // (ParticleKernels.h's useContactManifold) match this sub-cycle's points to last sub-cycle's by
-   // exact identity instead of a fragile world-distance threshold.
-   int identity = -1;
-};
-
-//! Multi-point Box x Box contact: tests all 8 vertices of A against B and all 8 vertices of B against
-//! A (the "simple particle geometry" polyhedron test described in Lu et al. 2015, Section 2.2.3 --
-//! "it is first assessed whether any vertex from one cube falls inside the other cube and vice versa"),
-//! returning one BoxVertexContact per vertex actually found embedded in the other box. Mitigation for
-//! the SAME literature-documented defect as boxBoxSAT's useRoundedCorners (see that function's own
-//! comment), via the OTHER remedy the review names specifically for this failure mode (Fraige et al.
-//! 2008a/2008b): "a multi-point contact concept... multiple simultaneous contacts are modelled. This
-//! 'stabilizes' the collision... and effectively prevents a sudden change of the contact force (both
-//! direction and amplitude) over the contact region" -- resolving several simultaneously-overlapping
-//! vertices each with their own local normal/overlap, rather than the single SAT-chosen deepest point/
-//! axis, means no single sub-cycle-to-sub-cycle axis flip can dominate the total force by itself.
-//! Deliberately independent of boxBoxSAT/useRoundedCorners -- either mitigation can be enabled alone or
-//! together (see ModelParameters.useMultiPointBoxContact/useRoundedBoxCorners, both togglable).
-//!
-//! maxOverlapCap (default: no cap, exact pre-existing behaviour): clamps EACH vertex's own overlap to
-//! at most this value before it is returned. Unlike boxBoxSAT (one overlap number, one force), this
-//! function can return several simultaneously-embedded vertices, each contributing its OWN independent
-//! spring force in ComputeContacts (ParticleKernels.h) at its OWN world point -- and each is bounded
-//! only by min(halfBox) with no shared cap across points, so under deep interpenetration (a real jam,
-//! or a floater released directly on top of a neighbour -- see the RELEASE-OVERLAP diagnostic) a single
-//! vertex can carry an overlap approaching the box's own half-extent, applied at a point that may sit
-//! far from the centroid -- exactly the ingredient for a large, badly-placed spurious torque.
-//! DEMValidationScenarios.h's multiPointDeepOverlapStability/Fuzz/EdgeCases scenarios confirm this
-//! directly: useMultiPointBoxContact, uncapped, can inject MORE energy than plain boxBoxSAT at
-//! identical deep-overlap geometry that a real production jam produces (e.g. the "grazing-plank-stack"
-//! edge case, +618% vs baseline's -0.9%) -- precisely the geometry this mitigation was meant to help,
-//! not hurt. Capping brings deep-overlap behaviour back in line with what the underlying contact model
-//! was actually tuned for (shallow, near-degenerate contact), at the cost of under-representing the
-//! true geometric overlap once a vertex is embedded deeper than the cap -- an intentional trade-off:
-//! a bounded, physically-plausible force beats an unbounded, geometrically-exact one that can inject
-//! spurious energy.
-inline std::vector< BoxVertexContact > boxBoxMultiPointContacts(
-   const Vec3& posA, const Mat3& RA, const Vec3& halfA, const Vec3& posB, const Mat3& RB, const Vec3& halfB,
-   real_t maxOverlapCap = std::numeric_limits< real_t >::max())
-{
-   std::vector< BoxVertexContact > out;
-
-   auto testVerticesAgainstBox = [&](const Vec3& posV, const Mat3& RV, const Vec3& halfV, const Vec3& posBox,
-                                      const Mat3& RBox, const Vec3& halfBox, real_t sign) {
-      Vec3 axesV[3], axesBox[3];
-      for (uint_t i = 0; i < 3; ++i)
-      {
-         axesV[i]   = Vec3(RV(0, i), RV(1, i), RV(2, i));
-         axesBox[i] = Vec3(RBox(0, i), RBox(1, i), RBox(2, i));
-      }
-      for (int sx = -1; sx <= 1; sx += 2)
-         for (int sy = -1; sy <= 1; sy += 2)
-            for (int sz = -1; sz <= 1; sz += 2)
-            {
-               const Vec3 vertex = posV + real_t(sx) * halfV[0] * axesV[0] + real_t(sy) * halfV[1] * axesV[1] +
-                                   real_t(sz) * halfV[2] * axesV[2];
-               const Vec3 rel = vertex - posBox;
-               real_t     local[3];
-               for (uint_t k = 0; k < 3; ++k)
-                  local[k] = rel * axesBox[k];
-               if (std::abs(local[0]) > halfBox[0] || std::abs(local[1]) > halfBox[1] ||
-                   std::abs(local[2]) > halfBox[2])
-                  continue; // this vertex is outside the box -- no contact from it
-
-               // Embedded: penetration is the SMALLEST distance to any of the box's 3 pairs of faces
-               // (the same "deepest point" logic Lu et al. Section 2.1.3 describes for polygon vertex-
-               // in-polygon contacts), and the outward normal is that face's own normal, signed to
-               // point away from the box (toward the embedded vertex's own body).
-               real_t bestOverlap = std::numeric_limits< real_t >::max();
-               uint_t bestAxis    = 0;
-               real_t bestSign    = real_t(1);
-               for (uint_t k = 0; k < 3; ++k)
-               {
-                  const real_t overlapK = halfBox[k] - std::abs(local[k]);
-                  if (overlapK < bestOverlap)
-                  {
-                     bestOverlap = overlapK;
-                     bestAxis    = k;
-                     bestSign    = (local[k] >= real_t(0)) ? real_t(1) : real_t(-1);
-                  }
-               }
-               BoxVertexContact c;
-               c.point    = vertex;
-               c.normal   = sign * bestSign * axesBox[bestAxis];
-               c.overlap  = std::min(bestOverlap, maxOverlapCap);
-               c.identity = (sign > real_t(0) ? 0 : 8) + (sx > 0 ? 4 : 0) + (sy > 0 ? 2 : 0) + (sz > 0 ? 1 : 0);
-               out.push_back(c);
-            }
-   };
-
-   // A's vertices embedded in B: normal points from B toward A (this file's convention, see boxBoxSAT's
-   // own header comment) -- i.e. away from B, toward the vertex's own box (A), sign=+1 with bestSign
-   // already pointing away from B's centre along the box's own local axis.
-   testVerticesAgainstBox(posA, RA, halfA, posB, RB, halfB, real_t(1));
-   // B's vertices embedded in A: normal must still point from B toward A, i.e. TOWARD A's centre here
-   // (away from A would be backwards for this pairing) -- sign=-1 flips bestSign's "away from the
-   // embedding box" convention to match.
-   testVerticesAgainstBox(posB, RB, halfB, posA, RA, halfA, real_t(-1));
-
-   return out;
-}
+// BoxVertexContact and boxBoxMultiPointContacts (useMultiPointBoxContact) were archived on 2026-11-20, see
+// archive/unused_contact_methods/multipoint_box_contact.h.
 
 } // namespace closed_form_contacts
 } // namespace antidunes

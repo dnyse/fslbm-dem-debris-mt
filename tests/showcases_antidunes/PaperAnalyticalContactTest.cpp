@@ -2960,23 +2960,19 @@ void testClosestDistanceSqBetweenSegments()
       WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(distSq, real_t(0), real_t(1e-9));
    }
 
-   WALBERLA_LOG_INFO_ON_ROOT("[TightTier1] closestDistanceSqBetweenSegments: all 4 hand-computed "
+   WALBERLA_LOG_INFO_ON_ROOT("[CapsuleBound] closestDistanceSqBetweenSegments: all 4 hand-computed "
                               "ground-truth cases matched.");
 }
 
 //======================================================================================================================
-//! Does the tight, capsule-based Tier 1 bound (useTightTier1=true) ever WRONGLY declare two cylinders
-//! "definitely separated" when they're actually in contact? This is the one thing that must NEVER
-//! happen -- a false "definitely separated" would silently skip the GJK/EPA fallback and drop a real
-//! contact. Checked directly against GJK/EPA ground truth on real cylinder geometry, both near the
-//! actual contact boundary (sampleSeparationNearBoundary, the same methodology as every other fuzz
-//! test in this file) and at uniformly-distributed separations across the whole physically-possible
-//! range (representative of a packed simulation, where two pillars can sit anywhere within reach, not
-//! just near their own contact boundary) -- since the tight bound's main value proposition is
-//! specifically for well-separated-but-within-reach pairs, the near-boundary corpus alone would
-//! under-sample exactly the population it's meant to help with.
+//! Does the capsule bound (cylinder Layer 1, ModelParameters.useTightLayer1: axis-segment distance vs. sum of the radii)
+//! ever WRONGLY declare two cylinders "definitely separated" when they are in contact? That must never happen: the
+//! pair would be dropped before any contact detection. Checked against GJK/EPA on two corpora, near the contact
+//! boundary (sampleSeparationNearBoundary) and uniformly across the whole reach.
+//! Retargeted 2026-11-20 from testTightTier1Accuracy10k, which applied the same bound only to the pairs the closed form
+//! found no scenario for (useTightTier1, archived); same seed and corpora, now over all trials.
 //======================================================================================================================
-void testTightTier1Accuracy10k()
+void testCapsuleBoundConservative10k()
 {
    FuzzRng                                  fuzz(97531); // distinct seed from every other fuzz test
    std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
@@ -2984,10 +2980,9 @@ void testTightTier1Accuracy10k()
 
    constexpr int numTrialsPerCorpus = 5000;
 
-   int dispatchGapTrials = 0;                                  // analytical found NO scenario at all
-   int oldTier1Uncertain = 0, newTightTier1Uncertain = 0;       // how often each bound says "check with GJK"
-   int unsafeFalseSeparated = 0;                                // tight bound wrong -> MUST stay 0
-   real_t maxUnsafeOverlap = 0;
+   int    rejected             = 0; // capsule bound says "definitely separated"
+   int    unsafeFalseSeparated = 0; // ... while GJK/EPA reports contact -> MUST stay 0
+   real_t maxUnsafeOverlap     = 0;
 
    auto runCorpus = [&](bool uniformSeparation) {
       for (int trial = 0; trial < numTrialsPerCorpus; ++trial)
@@ -3021,23 +3016,19 @@ void testTightTier1Accuracy10k()
          const CylinderState ci{ posI, rotI.getMatrix(), Ri, Li };
          const CylinderState cj{ posJ, rotJ.getMatrix(), Rj, Lj };
 
-         const ContactResult analytical = cylinderCylinderContact(ci, cj);
-         if (analytical.contact) continue; // Tier 1 only ever applies when the dispatch found nothing
-         ++dispatchGapTrials;
+         // same test as the Layer-1 reject in ParticleKernels.h (SolidCylinderContactDetection, Cylinder x Cylinder)
+         Vec3 p0i, p1i, p0j, p1j;
+         detail::cylinderAxisEndpoints(ci, p0i, p1i);
+         detail::cylinderAxisEndpoints(cj, p0j, p1j);
+         const real_t reach = Ri + Rj;
+         if (detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) <= reach * reach) continue;
+         ++rejected;
 
-         const bool oldUncertain = cylinderCylinderResultIsUncertain(ci, cj, analytical, false);
-         const bool newUncertain = cylinderCylinderResultIsUncertain(ci, cj, analytical, true);
-         if (oldUncertain) ++oldTier1Uncertain;
-         if (newUncertain) ++newTightTier1Uncertain;
-
-         if (!newUncertain) // tight bound says "definitely separated, don't bother with GJK"
+         const GjkResult gjk = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
+         if (gjk.contact)
          {
-            const GjkResult gjk = gjkCylCyl(posI, rotI, Ri, Li, posJ, rotJ, Rj, Lj);
-            if (gjk.contact)
-            {
-               ++unsafeFalseSeparated;
-               maxUnsafeOverlap = std::max(maxUnsafeOverlap, -gjk.penetrationDepth);
-            }
+            ++unsafeFalseSeparated;
+            maxUnsafeOverlap = std::max(maxUnsafeOverlap, -gjk.penetrationDepth);
          }
       }
    };
@@ -3045,20 +3036,12 @@ void testTightTier1Accuracy10k()
    runCorpus(false); // near the actual GJK/EPA contact boundary
    runCorpus(true);  // uniformly across the whole physically-possible-reach range
 
-   WALBERLA_LOG_INFO_ON_ROOT(
-      "[TightTier1] " << dispatchGapTrials << " dispatch-gap trials (analytical found no scenario) "
-      << "out of " << (2 * numTrialsPerCorpus) << " total | old Tier 1 uncertain=" << oldTier1Uncertain
-      << "/" << dispatchGapTrials << " | NEW tight Tier 1 uncertain=" << newTightTier1Uncertain << "/"
-      << dispatchGapTrials << " (i.e. tight bound resolved "
-      << (dispatchGapTrials - newTightTier1Uncertain) << " trials as definitely-separated, skipping "
-      << "GJK/EPA entirely) | UNSAFE false-separated (tight bound wrong vs GJK/EPA): "
+   WALBERLA_LOG_INFO_ON_ROOT("[CapsuleBound] " << rejected << " of " << (2 * numTrialsPerCorpus)
+      << " trials rejected as definitely separated | UNSAFE (rejected although GJK/EPA reports contact): "
       << unsafeFalseSeparated << " (max missed overlap=" << maxUnsafeOverlap << ")");
 
-   // The one thing that must NEVER happen: the tight bound declaring "definitely separated" for a
-   // pair GJK/EPA confirms is actually touching. Any failure here means the capsule bound is NOT
-   // conservative as derived and must not be trusted.
    WALBERLA_CHECK_EQUAL(unsafeFalseSeparated, 0);
-   WALBERLA_CHECK_GREATER_EQUAL(dispatchGapTrials, 200); // sanity: comparison isn't running on noise
+   WALBERLA_CHECK_GREATER_EQUAL(rejected, 200); // sanity: comparison isn't running on noise
 }
 
 //======================================================================================================================
@@ -3113,7 +3096,7 @@ void testBoxSeparationAlongCenterLine()
 //======================================================================================================================
 //! Does the cheap single-axis box-box separation bound (Layer 1 pre-filter) ever WRONGLY declare two
 //! boxes "definitely separated" when they're actually touching? Checked directly against GJK/EPA
-//! ground truth on real box geometry (same two-corpus methodology as testTightTier1Accuracy10k: near
+//! ground truth on real box geometry (same two-corpus methodology as testCapsuleBoundConservative10k: near
 //! the actual contact boundary, and uniformly across the whole physically-possible-reach range).
 //======================================================================================================================
 void testTightLayer1BoxAccuracy10k()
@@ -5704,7 +5687,7 @@ int main(int argc, char** argv)
    testEdgeEdgeThreeWayAccuracy10k();
    testThetaRefTieBreakNecessity10k();
    testClosestDistanceSqBetweenSegments();
-   testTightTier1Accuracy10k();
+   testCapsuleBoundConservative10k();
    testBoxSeparationAlongCenterLine();
    testTightLayer1BoxAccuracy10k();
    testCylinderCylinderLargeOverlapDegenerateStress();

@@ -16,14 +16,14 @@
 //! \file DEMValidationScenarios.h
 //! \brief Fluid-free DEM validation experiments for DEMValidation.cpp.
 //!
-//! Split into 5 files by scenario family (this header is now a thin aggregator,
+//! Split into 4 files by scenario family (this header is now a thin aggregator,
 //! kept so DEMValidation.cpp's own #include "DEMValidationScenarios.h" needs no change):
 //!   - DEMValidationInfra.h: DEMEngine, PassFailAccumulator, shared logging/loop helpers.
 //!   - DEMValidationWallImpact.h: single-body wall-impact scenarios.
 //!   - DEMValidationPairEnergy.h: pairwise central head-on restitution/energy scenarios.
-//!   - DEMValidationCornerAndMultiPoint.h: corner-discontinuity and multi-point box-contact scenarios.
-//!   - DEMValidationPackingAndDrum.h: packing/angle-of-repose/rotating-drum scenarios, plus the real-
-//!     incident collision replay.
+//!   - DEMValidationPackingAndDrum.h: packing/angle-of-repose/rotating-drum scenarios.
+//! (DEMValidationCornerAndMultiPoint.h and the collision replay were archived on 2026-11-20, see
+//! archive/unused_contact_methods/.)
 //!
 //! Every scenario runs the PRODUCTION contact/integration code (SolidCylinderContactDetection,
 //! ComputeContacts, mesa_pd::kernel::VelocityVerletPre/PostForceUpdate -- ParticleKernels.h) through a
@@ -39,5 +39,4 @@
 #include "DEMValidationInfra.h"
 #include "DEMValidationWallImpact.h"
 #include "DEMValidationPairEnergy.h"
-#include "DEMValidationCornerAndMultiPoint.h"
 #include "DEMValidationPackingAndDrum.h"

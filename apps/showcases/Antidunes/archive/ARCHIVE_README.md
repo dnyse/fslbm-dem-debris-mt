@@ -196,3 +196,31 @@ the thesis; `docs/HOWTO_BUILD_AND_RUN.md` and `docs/clogging-animations/` were k
 `tests/showcases_antidunes/PaperAnalyticalContactTest.cpp` (lines 4195-4532 at archive time). Unlike
 the feng2017 tests, these WERE actively called from that file's own `main()` before this archival;
 those 5 calls were removed as part of the same change. Reference only, not standalone-compilable.
+
+## unused_contact_methods/: box-contact mitigations, Tier-1 variants, analytic box buoyancy (2026-11-20)
+
+Eight experimental `ModelParameters` switches that defaulted to off and were never turned on in a
+thesis-cited run, removed from the live build together with their companion values:
+
+- `useRoundedBoxCorners`/`boxRoundingRadius`, `useBoxOverlapCap`/`boxOverlapCapFraction`,
+  `useAxisHysteresis`/`axisHysteresisMargin`: variants of `closed_form_contacts::boxBoxSAT`
+  (rounded edge-edge normal, overlap cap, sticky axis choice) against the SAT axis-flip discontinuity.
+- `useMultiPointBoxContact` and `useContactManifold`/`manifoldFadeRate`: one contact point per embedded
+  vertex (`BoxVertexContact`, `boxBoxMultiPointContacts`, now in `multipoint_box_contact.h`) and a
+  persistent faded vertex set on top of it.
+- `useTightTier1`, `skipTier1`: capsule-bound and skip variants of the Tier-1 check in
+  `cylinderCylinderResultIsUncertain`. The capsule bound itself stays live as cylinder Layer 1
+  (`useTightLayer1`); its conservativeness test is now `testCapsuleBoundConservative10k` in
+  `PaperAnalyticalContactTest.cpp` (the original test is in `tight_tier1_accuracy_test.cpp.excerpt`).
+- `useAnalyticBoxBuoyancy`: used the analytic OBB/disk clip for the submerged volume of floating boxes and
+  cylinders instead of the 12³ sampling. Sampling is now the only method; the analytic clip is still
+  computed and logged as a cross-check.
+
+With all switches at their defaults the live code paths are unchanged (verified bit-identical on the unit
+tests and the tracked `dem_validation_*.prm` runs). The removed code paths and parameter docs are in
+`box_contact_mitigations.cpp.excerpt`. The DEM-validation scenarios that compared these mitigations
+(`DEMValidationCornerAndMultiPoint.h`: cornerNormalDiscontinuity, cornerFixComparison,
+multiPointDeepOverlapStability/Fuzz, multiPointEdgeCases, contactStiffnessCalibrationSweep,
+fallOntoPileStability, multiPointBoxContactFuzz; and `DEMValidationProductionCollisionReplay.h`) moved
+here as well; they use the pre-archive `DEMEngine` signature and would need adapting to compile again.
+Their prms were never git-tracked.

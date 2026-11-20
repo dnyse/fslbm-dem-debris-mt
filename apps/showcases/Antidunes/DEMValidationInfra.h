@@ -17,8 +17,8 @@
 //! \brief Shared infrastructure for the DEM validation experiments (DEMEngine, PassFailAccumulator,
 //! wall-impact loop, energy/conservation logging helpers) -- split out of DEMValidationScenarios.h
 //! 2026-10-29 so each scenario family lives in its own file. See that split's sibling files
-//! (DEMValidationWallImpact.h, DEMValidationPairEnergy.h, DEMValidationCornerAndMultiPoint.h,
-//! DEMValidationPackingAndDrum.h), all of which include this one.
+//! (DEMValidationWallImpact.h, DEMValidationPairEnergy.h, DEMValidationPackingAndDrum.h), all of which include
+//! this one.
 
 #pragma once
 
@@ -92,19 +92,9 @@ public:
    // scenario that specifically investigates a defect in that path (e.g. runCornerNormalDiscontinuity),
    // since GJK/EPA and the closed-form analytical dispatch are different code with different failure
    // modes and a bug specific to one is not reproduced by running the other.
-   // useRoundedBoxCorners/boxRoundingRadius/useMultiPointBoxContact: the two togglable Box x Box
-   // corner/edge contact-normal-discontinuity mitigations (see SimulationParams.h's own doc comments
-   // and closed_form_contacts::boxBoxSAT/boxBoxMultiPointContacts) -- threaded straight through to
-   // ComputeContacts so runCornerNormalDiscontinuity/runCornerFixComparison below can A/B/C/D-test them
-   // against the exact same production contact-response code path production runs use.
    DEMEngine(real_t dt, real_t restitutionCoefficient, real_t frictionCoefficient, real_t poissonsRatio,
              real_t collisionTime, real_t gravityMagnitude, real_t domainHalfExtent = real_t(500),
-             bool useAnalyticalContactDetection = false, bool useRoundedBoxCorners = false,
-             real_t boxRoundingRadius = real_t(0.05), bool useMultiPointBoxContact = false,
-             bool useBoxOverlapCap = false, real_t boxOverlapCapFraction = real_t(0.3),
-             bool useAxisHysteresis = false, real_t axisHysteresisMargin = real_t(0.15),
-             bool useContactManifold = false, real_t manifoldFadeRate = real_t(0.25),
-             bool useRotationalEffectiveMass = false)
+             bool useAnalyticalContactDetection = false, bool useRotationalEffectiveMass = false)
       : dt_(dt)
       , gravityZ_(-gravityMagnitude)
       , restitutionCoefficient_(restitutionCoefficient)
@@ -129,10 +119,7 @@ public:
       computeContacts_ = std::make_unique< ComputeContacts >(
          domain_, restitutionCoefficient_, kappa_, collisionTime_, dt_, frictionCoefficient, uint_t(2),
          useAnalyticalContactDetection, /*usePureAnalyticalCylinder=*/false,
-         /*useContactFilterOwnerTiebreak=*/false, /*useTightTier1=*/false, /*useTightLayer1=*/false,
-         /*skipTier1=*/false, useRoundedBoxCorners, boxRoundingRadius, useMultiPointBoxContact,
-         useBoxOverlapCap, boxOverlapCapFraction, useAxisHysteresis, axisHysteresisMargin,
-         useContactManifold, manifoldFadeRate, useRotationalEffectiveMass);
+         /*useContactFilterOwnerTiebreak=*/false, /*useTightLayer1=*/false, useRotationalEffectiveMass);
    }
 
    //! direct access to the production contact functor (detection-mode switches)

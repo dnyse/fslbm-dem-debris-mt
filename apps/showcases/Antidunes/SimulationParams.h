@@ -839,13 +839,6 @@ struct ModelParams {
    //         effect on the simulation; a full field scan per step. Default false.
    bool        diagnoseNaNNormals;
 
-   // true  → floating-box submerged volume & centre of buoyancy computed ANALYTICALLY by clipping the
-   //         oriented box against the fitted free-surface plane (exact 6-tetrahedron OBB∩half-space
-   //         clip; no discretisation error, rotation-exact).
-   // false → legacy 12³ point-sampling clip of the box against the same plane (default; kept as the
-   //         reference and for cross-checking the analytical result).
-   bool        useAnalyticBoxBuoyancy;
-
    // true  → subtract the analytic phantom force F_pred_z = ΔP·A_proj·taper (the double-counted pile-up
    //         head, validated live to ratio ≈ 1) from the VERTICAL MEM force on each floating sphere,
    //         downstream of the fluid (particle side only, no PDF feedback). Removes the spurious waterline
@@ -939,32 +932,18 @@ struct ModelParams {
    // false -> (DEFAULT) unchanged closed-form dispatch.
    bool        kodamBandEdgeAxialCheck;
 
-   // true  → (only meaningful together with useAnalyticalContactDetection=true) cylinderCylinderResultIsUncertain's
-   //         Tier 1 check (fired when the analytical dispatch found no scenario at all) uses the tight,
-   //         capsule-based bound (detail::closestDistanceSqBetweenSegments: the two cylinders' own axis
-   //         SEGMENTS vs. the sum of their radii) instead of the original loose center-distance bound
-   //         (radius+halfLength sum per side). Both are fully conservative -- neither can ever wrongly
-   //         declare "definitely separated" for a pair that's actually touching (validated directly
-   //         against GJK/EPA in PaperAnalyticalContactTest.cpp's testTightTier1Accuracy10k, 0 unsafe
-   //         cases across 10000 trials) -- but the tight bound is strictly tighter for any cylinder
-   //         with length > 0, so it resolves far more dispatch-gap pairs as "definitely separated,
-   //         skip GJK/EPA entirely" instead of falling back on every one of them. See
-   //         PaperAnalyticalContacts.h's own comment on cylinderCylinderResultIsUncertain's
-   //         useTightTier1 parameter for the full derivation.
-   // false → (DEFAULT) the original loose center-distance Tier 1 bound, unchanged behaviour.
-   bool        useTightTier1;
-
    // true  → the "cheap raw-center-distance reject" that runs BEFORE any real contact detection at
    //         all (both Cylinder x Cylinder and, newly, Box x Box) uses a tight, ORIENTATION-AWARE bound
    //         instead of collapsing each body to its circumscribing sphere. Cylinder x Cylinder: the
-   //         same capsule/segment-distance bound as useTightTier1 above, applied one level earlier (so
+   //         capsule bound, the distance between the two axis segments against the sum of the radii (so
    //         a pair it resolves never even reaches the analytical dispatch, not just skips GJK/EPA).
    //         Box x Box: a NEW cheap single-candidate-axis test (detail::boxesDefinitelySeparatedAlongCenterLine
    //         -- projects each box onto the line between the two centres and compares to the sum of
    //         radii, i.e. one axis of full SAT instead of all 15) run ahead of boxBoxSAT, which
    //         previously had no pre-filter at all. Both remain fully conservative (validated directly
    //         against GJK/EPA: 0 unsafe cases across 10000 trials each, see
-   //         PaperAnalyticalContactTest.cpp's testTightTier1Accuracy10k and testTightLayer1BoxAccuracy10k)
+   //         PaperAnalyticalContactTest.cpp's testTightLayer1BoxAccuracy10k; the cylinder check,
+   //         testTightTier1Accuracy10k, was archived with useTightTier1 on 2026-11-20)
    //         -- see PaperAnalyticalContacts.h's own comments on closestDistanceSqBetweenSegments and
    //         boxesDefinitelySeparatedAlongCenterLine for the full derivation of each.
    // false → the original circumscribing-sphere-sum reject for Cylinder x Cylinder, unchanged; NO
@@ -1014,105 +993,9 @@ struct ModelParams {
    uint_t      shadowAnalyticStartStep;
    uint_t      shadowAnalyticEndStep;
 
-   // true  → (only correct together with useTightLayer1=true -- see below) skips
-   //         cylinderCylinderResultIsUncertain's Tier 1 check ENTIRELY for dispatch-gap pairs (no
-   //         distance computation of any kind; "no contact" is trusted immediately) instead of merely
-   //         swapping which bound it uses. Justified by a proof, not just a benchmark: any pair that
-   //         survives the tight Layer 1 pre-filter is GUARANTEED (via the triangle inequality) to also
-   //         survive Tier 1's own bound, tight or original -- so once Layer 1 is tight, Tier 1's
-   //         dispatch-gap check can provably never reject anything, and running it is pure wasted
-   //         work. Confirmed empirically too (job 4194491: cylTier1CheaplyProvedSeparated=0 at every
-   //         interval with both useTightLayer1 and useTightTier1 on together). See
-   //         PaperAnalyticalContacts.h's own comment on cylinderCylinderResultIsUncertain's skipTier1
-   //         parameter for the full derivation.
-   // false → (DEFAULT) Tier 1 always runs (using whichever bound useTightTier1 selects).
-   // WARNING: skipTier1=true with useTightLayer1=false is NOT just a missed optimization -- it is
-   //          incorrect, and will silently trust "no contact" for real dispatch-gap contacts the loose
-   //          Layer 1 reject lets through. A startup warning fires if this combination is detected.
-   bool        skipTier1;
 
-   // true  → Box x Box's boxBoxSAT (only meaningful together with useAnalyticalContactDetection=true)
-   //         replaces its normal with a closest-point-between-edge-segments vector whenever the
-   //         winning SAT axis is edge-vs-edge, and inflates the reported overlap by
-   //         2*boxRoundingRadius -- see PaperAnalyticalContacts.h's own comment on boxBoxSAT's
-   //         useRoundedCorners parameter for the full derivation and the corner/edge contact-normal
-   //         DISCONTINUITY this fixes (Lu, Third & Müller 2015, Chem. Eng. Sci. 127, Section 2.1.3,
-   //         citing Fraige et al. 2008a) -- proven present in this project's own production Box x Box
-   //         dispatch by DEMValidationScenarios.h's runCornerNormalDiscontinuity (47.7% spurious
-   //         kinetic-energy gain with this OFF, using this project's own real FloatingBox parameters).
-   // false → (DEFAULT) exact pre-existing boxBoxSAT behaviour, unchanged.
-   bool        useRoundedBoxCorners;
-   // Rounding radius used only when useRoundedBoxCorners is true. 0.05 (DEFAULT) is small relative to
-   // a typical FloatingBox's own half-extents (this scenario family's own logs use halfExtents as
-   // small as <6,1,1.5>) -- enough to smooth the corner/edge transition without materially changing
-   // the box's effective size.
-   real_t      boxRoundingRadius;
 
-   // true  → Box x Box additionally resolves via closed_form_contacts::boxBoxMultiPointContacts (the
-   //         OTHER literature-documented remedy for the same defect useRoundedBoxCorners targets --
-   //         Fraige et al. 2008a/2008b's "multi-point contact concept", see that function's own doc
-   //         comment in PaperAnalyticalContacts.h): every one of both boxes' 8 vertices found embedded
-   //         in the other box gets its own local normal/overlap and its own (history-free, same
-   //         formula as the existing arch/tunnel secondary-contact code) spring-dashpot force, each
-   //         scaled by 1/N (N = total active contact points this sub-cycle) so multiple simultaneous
-   //         points don't multiply the total force -- rather than one single SAT-chosen deepest
-   //         point/axis whose identity can flip discontinuously between sub-cycles. Independent of
-   //         useRoundedBoxCorners -- either, both, or neither can be enabled.
-   // false → (DEFAULT) exact pre-existing single-point behaviour, unchanged.
-   bool        useMultiPointBoxContact;
 
-   // true  → both closed_form_contacts::boxBoxSAT's single overlap AND every individual vertex overlap
-   //         closed_form_contacts::boxBoxMultiPointContacts reports are clamped to at most
-   //         boxOverlapCapFraction * min(halfExtents over BOTH boxes' 3 components) before being used
-   //         for force computation -- see boxBoxMultiPointContacts' own doc comment (PaperAnalyticalContacts.h)
-   //         for the full rationale. Confirmed necessary by DEMValidationScenarios.h's
-   //         multiPointDeepOverlapStability/Fuzz/EdgeCases scenarios: UNCAPPED, useMultiPointBoxContact
-   //         can inject dramatically MORE spurious energy than doing nothing at all under deep
-   //         interpenetration (e.g. +618% vs baseline's -0.9% on the "grazing-plank-stack" edge case,
-   //         the everyday two-slightly-askew-planks geometry a real jam actually produces) -- exactly
-   //         the opposite of what the mitigation is for. Independent of useRoundedBoxCorners/
-   //         useMultiPointBoxContact -- meaningful with either, both, or (via boxBoxSAT's own cap)
-   //         even neither enabled.
-   // false → (DEFAULT) exact pre-existing unbounded overlap behaviour, unchanged.
-   bool        useBoxOverlapCap;
-   // Fraction of min(halfExtents) used as the cap when useBoxOverlapCap is true. 0.3 (DEFAULT) sits
-   // comfortably above the shallow, near-degenerate overlaps this contact model was actually tuned
-   // against (typically a few percent of the smaller half-extent, per this project's own
-   // STRONG-CONTACT-FORCE/DEM-WATCH log evidence) while still well below the geometric maximum
-   // (1.0 = a vertex sitting exactly at the other box's centre).
-   real_t      boxOverlapCapFraction;
-
-   // true  → Box x Box's boxBoxSAT axis selection becomes "sticky": among all candidate axes within
-   //         axisHysteresisMargin (relative) of the true minimum-gap axis, the one whose normal aligns
-   //         best with the PREVIOUS sub-cycle's reported normal for this exact uid pair is used, even
-   //         when it is not the strict minimum -- see closed_form_contacts::boxBoxSAT's own doc comment
-   //         (PaperAnalyticalContacts.h) for the full derivation. The OTHER candidate fix for the same
-   //         axis-flip discontinuity useRoundedBoxCorners targets, without useRoundedBoxCorners' own
-   //         deep-overlap side effect (confirmed by this project's own multiPointDeepOverlapStability/
-   //         EdgeCases scenarios: useRoundedBoxCorners is +884% on "plank-vs-near-cube-deep" despite
-   //         fixing the axis-tie case cleanly). Independent of useRoundedBoxCorners/
-   //         useMultiPointBoxContact/useBoxOverlapCap -- any combination is meaningful.
-   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
-   bool        useAxisHysteresis;
-   // Relative margin (DEFAULT 0.15 = 15%) within which a competing axis is considered "as good as" the
-   // true minimum for hysteresis purposes -- see useAxisHysteresis's own comment.
-   real_t      axisHysteresisMargin;
-
-   // true  → boxBoxMultiPointContacts' own vertex SET is smoothed across sub-cycles into a persistent
-   //         manifold (one entry per possible vertex identity, up to 16, per uid pair) instead of being
-   //         used fresh every sub-cycle -- a newly-embedded vertex fades its overlap contribution IN
-   //         over several sub-cycles, and one that just separated fades OUT the same way, rather than
-   //         appearing/vanishing in one discontinuous step. See ParticleKernels.h's
-   //         ComputeContacts::boxBoxManifold_ own doc comment for the full rationale -- a simplified,
-   //         same-spirit version of the persistent contact manifold + warm-starting real physics
-   //         engines (Bullet/PhysX) use, targeting a THIRD distinct symptom from useAxisHysteresis
-   //         (which axis wins) and useBoxOverlapCap (how deep one point's force can be): the vertex SET
-   //         itself changing abruptly. Only meaningful together with useMultiPointBoxContact=true.
-   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
-   bool        useContactManifold;
-   // Fraction of full strength gained/lost per sub-cycle a manifold entry fades by (DEFAULT 0.25 = a
-   // vertex reaches full/zero strength over 4 sub-cycles).
-   real_t      manifoldFadeRate;
 
    // true  → the normal-direction stiffness/damping fed into LinearSpringDashpot::setStiffnessAndDamping
    //         is computed from a GENERALIZED effective mass that includes each body's rotational inertia
@@ -1134,10 +1017,7 @@ struct ModelParams {
    //         whose point has a nonzero moment arm off the line of centres (any Box/Cylinder corner or
    //         edge contact) bleeds kinetic energy into rotation that this damping was never sized to
    //         control -- under-damping that combination and injecting energy on its own, BEFORE and
-   //         INDEPENDENT of any SAT axis-flip discontinuity. useAxisHysteresis/useContactManifold/
-   //         useRoundedBoxCorners all instead fix WHICH (point,normal,overlap) triplet feeds the force
-   //         law; this option is the only one of the five that changes the force law's own calibration,
-   //         so it is meaningful together with any/all of the others, or entirely on its own.
+   //         INDEPENDENT of any SAT axis-flip discontinuity.
    // false → (DEFAULT) exact pre-existing behaviour: plain translational effectiveMass, unchanged.
    bool        useRotationalEffectiveMass;
 
@@ -1466,7 +1346,6 @@ struct ModelParams {
       , guardCurvatureInputs        { b.getParameter< bool >       ("guardCurvatureInputs", false) }
       , wallOuterGhostLayer         { b.getParameter< bool >       ("wallOuterGhostLayer", false) }
       , diagnoseNaNNormals          { b.getParameter< bool >       ("diagnoseNaNNormals", false) }
-      , useAnalyticBoxBuoyancy      { b.getParameter< bool >       ("useAnalyticBoxBuoyancy", false) }
       , usePhantomForceCorrection   { b.getParameter< bool >       ("usePhantomForceCorrection", false) }
       , useDynamicReferenceHeight   { b.getParameter< bool >       ("useDynamicReferenceHeight", false) }
       , staticReferenceHeightOverride{ b.getParameter< real_t >    ("staticReferenceHeightOverride", real_t(-1)) }
@@ -1476,7 +1355,6 @@ struct ModelParams {
       , usePureAnalyticalCylinder   { b.getParameter< bool >       ("usePureAnalyticalCylinder", false) }
       , refineCylinderContacts      { b.getParameter< bool >       ("refineCylinderContacts", false) }
       , kodamBandEdgeAxialCheck     { b.getParameter< bool >       ("kodamBandEdgeAxialCheck", false) }
-      , useTightTier1               { b.getParameter< bool >       ("useTightTier1", false) }
       , useTightLayer1              { b.getParameter< bool >       ("useTightLayer1", true) }
       , useCapsuleShapeForCylinders { b.getParameter< bool >       ("useCapsuleShapeForCylinders", false) }
       , rodCapHydroForce            { b.getParameter< real_t >     ("rodCapHydroForce", real_t(0)) }
@@ -1490,16 +1368,6 @@ struct ModelParams {
       , shadowAnalyticCylinderLog   { b.getParameter< bool >       ("shadowAnalyticCylinderLog", false) }
       , shadowAnalyticStartStep     { b.getParameter< uint_t >     ("shadowAnalyticStartStep", uint_t(0)) }
       , shadowAnalyticEndStep       { b.getParameter< uint_t >     ("shadowAnalyticEndStep", uint_t(0)) }
-      , skipTier1                   { b.getParameter< bool >       ("skipTier1", false) }
-      , useRoundedBoxCorners        { b.getParameter< bool >       ("useRoundedBoxCorners", false) }
-      , boxRoundingRadius           { b.getParameter< real_t >     ("boxRoundingRadius", real_t(0.05)) }
-      , useMultiPointBoxContact     { b.getParameter< bool >       ("useMultiPointBoxContact", false) }
-      , useBoxOverlapCap            { b.getParameter< bool >       ("useBoxOverlapCap", false) }
-      , boxOverlapCapFraction       { b.getParameter< real_t >     ("boxOverlapCapFraction", real_t(0.3)) }
-      , useAxisHysteresis           { b.getParameter< bool >       ("useAxisHysteresis", false) }
-      , axisHysteresisMargin        { b.getParameter< real_t >     ("axisHysteresisMargin", real_t(0.15)) }
-      , useContactManifold          { b.getParameter< bool >       ("useContactManifold", false) }
-      , manifoldFadeRate            { b.getParameter< real_t >     ("manifoldFadeRate", real_t(0.25)) }
       , useRotationalEffectiveMass  { b.getParameter< bool >       ("useRotationalEffectiveMass", false) }
       , cylinderContactSkin         { b.getParameter< real_t >     ("cylinderContactSkin", real_t(0)) }
       , boxContactSkin               { b.getParameter< real_t >     ("boxContactSkin", real_t(0)) }
@@ -1547,24 +1415,6 @@ struct ModelParams {
          WALBERLA_LOG_WARNING("usePureAnalyticalCylinder=true but useAnalyticalContactDetection=false -- "
             "this flag only has an effect inside the Cylinder x Cylinder analytical dispatch, which is "
             "off, so it does nothing here.");
-      if (useTightTier1 && !useAnalyticalContactDetection)
-         WALBERLA_LOG_WARNING("useTightTier1=true but useAnalyticalContactDetection=false -- "
-            "this flag only has an effect inside the Cylinder x Cylinder analytical dispatch's Tier 1 "
-            "check, which is off, so it does nothing here.");
-      if (skipTier1 && !useAnalyticalContactDetection)
-         WALBERLA_LOG_WARNING("skipTier1=true but useAnalyticalContactDetection=false -- "
-            "this flag only has an effect inside the Cylinder x Cylinder analytical dispatch's Tier 1 "
-            "check, which is off, so it does nothing here.");
-      if (useRoundedBoxCorners && !useAnalyticalContactDetection)
-         WALBERLA_LOG_WARNING("useRoundedBoxCorners=true but useAnalyticalContactDetection=false -- "
-            "this flag only has an effect inside boxBoxSAT, which is off (Box x Box uses GJK/EPA), so "
-            "it does nothing here.");
-      if (skipTier1 && !useTightLayer1)
-         WALBERLA_LOG_WARNING("skipTier1=true but useTightLayer1=false -- this is NOT just a missed "
-            "optimization, it is INCORRECT: without a sufficiently tight Layer 1 pre-filter upstream, "
-            "skipping Tier 1 entirely will silently trust \"no contact\" for real dispatch-gap "
-            "contacts the loose Layer 1 reject lets through. Set useTightLayer1=true as well, or turn "
-            "skipTier1 back off.");
       if (logFloaterHistoryEndStep != uint_t(0) && logFloaterHistoryEndStep <= logFloaterHistoryStartStep)
          WALBERLA_LOG_WARNING("logFloaterHistoryEndStep=" << logFloaterHistoryEndStep << " <= "
             "logFloaterHistoryStartStep=" << logFloaterHistoryStartStep << " -- this window is empty, "

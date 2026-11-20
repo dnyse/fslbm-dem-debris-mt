@@ -1,0 +1,436 @@
+// ARCHIVED 2026-11-20: the code paths and parameter docs of the box-contact mitigation switches and the Tier-1 variants,
+// excerpted verbatim from ParticleKernels.h and SimulationParams.h (ModelParameters). Reference only, not compiled.
+// See ../ARCHIVE_README.md.
+
+// ==== ParticleKernels.h ====
+// ---- SolidCylinderContactDetection Box x Box operator(): overlap cap, axis hysteresis, multi-point + manifold ----
+      // See ModelParameters.useBoxOverlapCap/boxOverlapCapFraction's own doc comment (SimulationParams.h)
+      // -- computed per-pair since it scales with these two SPECIFIC bodies' own half-extents, not a
+      // single project-wide constant.
+      const real_t overlapCap = useBoxOverlapCap
+         ? boxOverlapCapFraction * std::min({ halfA[0], halfA[1], halfA[2], halfB[0], halfB[1], halfB[2] })
+         : std::numeric_limits< real_t >::max();
+
+      // See ModelParameters.useAxisHysteresis/axisHysteresisMargin's own doc comment (SimulationParams.h)
+      // and boxBoxHysteresisNormal_'s own comment above for why this state lives here, keyed by uid
+      // pair so it survives across sub-cycles for the SAME pair regardless of local index churn.
+      const auto  hysteresisKey = ac.getUid(idx1) < ac.getUid(idx2)
+                                     ? std::make_pair(ac.getUid(idx1), ac.getUid(idx2))
+                                     : std::make_pair(ac.getUid(idx2), ac.getUid(idx1));
+      const auto  hysteresisIt  = useAxisHysteresis ? boxBoxHysteresisNormal_.find(hysteresisKey)
+                                                     : boxBoxHysteresisNormal_.end();
+      const mesa_pd::Vec3* previousNormal = (hysteresisIt != boxBoxHysteresisNormal_.end()) ? &hysteresisIt->second : nullptr;
+
+      const auto result = closed_form_contacts::boxBoxSAT(posA, RA, halfA, posB, RB, halfB,
+                                                        useRoundedBoxCorners, boxRoundingRadius, overlapCap,
+                                                        previousNormal, axisHysteresisMargin);
+      if (useAxisHysteresis && result.contact) boxBoxHysteresisNormal_[hysteresisKey] = result.normal;
+
+      // useMultiPointBoxContact: see closed_form_contacts::boxBoxMultiPointContacts' and
+      // getMultiPointContacts()'s own doc comments. Computed independently of (and even when) the raw
+      // SAT result above reports no contact -- boxBoxSAT's single winning axis can occasionally miss
+      // a case a direct vertex-in-box test still catches near a degenerate configuration, and this list
+      // is exactly the OTHER, independent literature-documented remedy for that same class of defect.
+      if (useMultiPointBoxContact)
+      {
+         // [Claude, 2026-10-29] useFraigeBoxContactModel (boxBoxFraigeMultiPointContacts) removed
+         // entirely -- unused by any thesis-cited result; archived at archive/unused_contact_methods/.
+         multiPointContacts_ = closed_form_contacts::boxBoxMultiPointContacts(posA, RA, halfA, posB, RB, halfB,
+                                                                            overlapCap);
+
+         // See boxBoxManifold_'s own doc comment for the full rationale. Replaces the fresh,
+         // potentially-discontinuous vertex set with a persistent, faded-in/out one keyed by uid pair
+         // + stable per-vertex identity.
+         if (useContactManifold)
+         {
+            const auto manifoldKey = ac.getUid(idx1) < ac.getUid(idx2)
+                                         ? std::make_pair(ac.getUid(idx1), ac.getUid(idx2))
+                                         : std::make_pair(ac.getUid(idx2), ac.getUid(idx1));
+            auto& manifold = boxBoxManifold_[manifoldKey]; // creates an empty one on first contact
+
+            std::unordered_map< int, bool > matched;
+            for (const auto& fresh : multiPointContacts_)
+            {
+               auto& entry     = manifold[fresh.identity]; // creates a fresh, fade=0 entry if new
+               entry.point     = fresh.point;
+               entry.normal    = fresh.normal;
+               entry.trueOverlap = fresh.overlap;
+               entry.fade      = std::min(real_t(1), entry.fade + manifoldFadeRate);
+               matched[fresh.identity] = true;
+            }
+            for (auto it = manifold.begin(); it != manifold.end();)
+            {
+               if (!matched[it->first]) // no fresh point this sub-cycle -- fade out, holding last pose
+               {
+                  it->second.fade -= manifoldFadeRate;
+                  if (it->second.fade <= real_t(0)) { it = manifold.erase(it); continue; }
+               }
+               ++it;
+            }
+
+            multiPointContacts_.clear();
+            for (const auto& kv : manifold)
+            {
+               closed_form_contacts::BoxVertexContact c;
+               c.point    = kv.second.point;
+               c.normal   = kv.second.normal;
+               c.overlap  = kv.second.trueOverlap * kv.second.fade; // fade scales overlap, see doc comment
+               c.identity = kv.first;
+               multiPointContacts_.push_back(c);
+            }
+            if (manifold.empty()) boxBoxManifold_.erase(manifoldKey); // don't leak empty entries forever
+         }
+      }
+
+      if (!result.contact && multiPointContacts_.empty()) return false;
+
+      // See wasLastCallBoxBox()'s own doc comment for why this must be set unconditionally here (not
+      // only when multiPointContacts_ is non-empty) -- ComputeContacts needs to know "this pair is
+      // Box-Box" independent of whether any vertex happens to be embedded THIS particular sub-cycle.
+      wasLastCallBoxBox_ = true;
+
+      if (result.contact)
+      {
+         ++contactStats.boxBoxSAT;
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "closed-form analytical (Box-Box SAT)");
+         // closed_form_contacts convention: overlap > 0 = penetrating. This class: penetrationDepth < 0.
+         getPenetrationDepth() = -result.overlap;
+         getContactNormal()    = result.normal;
+         getContactPoint()     = result.point;
+      }
+      else
+      {
+         // SAT itself found no contact, but useMultiPointBoxContact's independent vertex test did --
+         // report the DEEPEST vertex-overlap point as the primary contact (sorted below) so the normal
+         // ComputeContacts response path always has something to work with; the rest of the list
+         // (including this one) is what ComputeContacts::operator() applies additional force at.
+         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
+            "multi-point vertex overlap (Box-Box, SAT found no scenario)");
+         const auto deepest = std::max_element(multiPointContacts_.begin(), multiPointContacts_.end(),
+            [](const auto& a, const auto& b) { return a.overlap < b.overlap; });
+         getPenetrationDepth() = -deepest->overlap;
+         getContactNormal()    = deepest->normal;
+         getContactPoint()     = deepest->point;
+      }
+      return true;
+   }
+
+
+// ---- SolidCylinderContactDetection members ----
+   // Runtime switches (both default false). See ModelParameters.useRoundedBoxCorners/
+   // useMultiPointBoxContact's own doc comments (SimulationParams.h) -- both are togglable mitigations
+   // for the corner/edge contact-normal discontinuity documented for polyhedral DEM and reproduced
+   // directly against this project's own boxBoxSAT by DEMValidationScenarios.h's
+   // runCornerNormalDiscontinuity. Threaded straight through to closed_form_contacts::boxBoxSAT
+   // (useRoundedBoxCorners/boxRoundingRadius) and closed_form_contacts::boxBoxMultiPointContacts
+   // (useMultiPointBoxContact) from the Box x Box operator() overload below.
+   bool   useRoundedBoxCorners = false;
+   real_t boxRoundingRadius    = real_t(0.05);
+   bool   useMultiPointBoxContact = false;
+   // [Claude, 2026-10-29] useFraigeBoxContactModel (boxBoxFraigeMultiPointContacts) removed entirely --
+   // unused by any thesis-cited result; archived at archive/unused_contact_methods/.
+   // See ModelParameters.useBoxOverlapCap/boxOverlapCapFraction's own doc comment (SimulationParams.h)
+   // and closed_form_contacts::boxBoxMultiPointContacts' own comment (PaperAnalyticalContacts.h) for why
+   // this exists: confirmed necessary by DEMValidationScenarios.h's multiPointDeepOverlapStability/
+   // Fuzz/EdgeCases scenarios (uncapped, useMultiPointBoxContact can inject MORE spurious energy than
+   // doing nothing under deep interpenetration). Threaded to BOTH boxBoxSAT and
+   // boxBoxMultiPointContacts as an absolute overlap value (boxOverlapCapFraction * min(halfExtents)),
+   // computed per-pair in the Box x Box operator() below since it depends on both bodies' own sizes.
+   bool   useBoxOverlapCap      = false;
+   real_t boxOverlapCapFraction = real_t(0.3);
+
+   // "Sticky" SAT axis selection -- the OTHER candidate fix for the axis-flip discontinuity
+   // useRoundedBoxCorners targets, see closed_form_contacts::boxBoxSAT's own doc comment
+   // (PaperAnalyticalContacts.h) for the full rationale and why it doesn't share useRoundedBoxCorners'
+   // deep-overlap side effect. boxBoxHysteresisNormal_ is the per-uid-pair persistent state
+   // closed_form_contacts::boxBoxSAT itself has no memory of (it's a pure function) -- keyed the same way
+   // as this class's other per-pair maps (see wasLastCallBoxBox_'s sibling members below), read/written
+   // ONLY from the Box x Box operator() overload, independent of useRoundedBoxCorners/
+   // useMultiPointBoxContact/useBoxOverlapCap (any combination is meaningful).
+   bool   useAxisHysteresis      = false;
+   real_t axisHysteresisMargin   = real_t(0.15);
+   std::map< std::pair< walberla::id_t, walberla::id_t >, mesa_pd::Vec3 > boxBoxHysteresisNormal_;
+
+   // Persistent contact manifold, only meaningful when useMultiPointBoxContact is ALSO true -- option
+   // 3 of the three candidate fixes for the axis/vertex-set discontinuity discussed this session
+   // (rounding, hysteresis, this). Unlike useAxisHysteresis (which stabilises WHICH single axis SAT
+   // reports) or useBoxOverlapCap (which bounds HOW DEEP one point's force can be), this targets a
+   // DIFFERENT, THIRD symptom: boxBoxMultiPointContacts' own vertex SET can change abruptly between
+   // sub-cycles (a vertex crosses from just-outside to just-inside the other box, or vice versa) --
+   // each such appearance/disappearance is itself a step discontinuity in the net force/torque, exactly
+   // the kind of asymmetric-point-set torque imbalance identified as the "grazing-plank-stack"
+   // regression (+618% even with useMultiPointBoxContact alone, DEMValidationScenarios.h). A real
+   // physics-engine-style manifold (Bullet/PhysX) never adds or drops a point in one step either --
+   // this is a simplified version of the same idea: each of BoxVertexContact's up to 16 possible
+   // identities (see that struct's own comment) is tracked persistently per uid pair; a NEWLY-embedded
+   // vertex fades its overlap IN linearly over several sub-cycles instead of applying full force
+   // immediately, and a vertex that just separated fades OUT the same way instead of vanishing --
+   // scaling each entry's EFFECTIVE overlap by its own fade fraction (0..1) reuses ComputeContacts'
+   // existing per-point force formula completely unchanged (see its own comment on why overlap, not
+   // force, is scaled).
+   struct ManifoldPoint
+   {
+      mesa_pd::Vec3 point;
+      mesa_pd::Vec3 normal;
+      real_t        trueOverlap = real_t(0); // last known REAL (uncapped-by-fade) overlap for this vertex
+      real_t        fade        = real_t(0); // 0 = contributes nothing, 1 = full strength
+   };
+   bool   useContactManifold  = false;
+   real_t manifoldFadeRate    = real_t(0.25); // fraction of full strength gained/lost per sub-cycle
+   std::map< std::pair< walberla::id_t, walberla::id_t >, std::unordered_map< int, ManifoldPoint > > boxBoxManifold_;
+
+
+// ---- getMultiPointContacts / wasLastCallBoxBox ----
+   // Populated by the Box x Box operator() overload below ONLY when useMultiPointBoxContact is true and
+   // at least one of either box's vertices was found embedded in the other -- see
+   // closed_form_contacts::boxBoxMultiPointContacts' own doc comment. ComputeContacts reads this (alongside
+   // the normal single point/normal/penetration this class already returns for the DEEPEST vertex) to
+   // apply a history-free spring-dashpot force at every OTHER point too, each scaled by 1/N -- see that
+   // call site's own comment.
+   const std::vector< closed_form_contacts::BoxVertexContact >& getMultiPointContacts() const
+   {
+      return multiPointContacts_;
+   }
+
+   // Set true by the Box x Box operator() overload below on EVERY call (whether or not any vertex was
+   // actually found embedded) -- lets ComputeContacts distinguish "this pair is Box-Box and
+   // useMultiPointBoxContact is on, so ALWAYS use the plain per-point formula" from "this pair isn't
+   // Box-Box at all" without needing getMultiPointContacts().empty() to double as both signals. Fixes a
+   // real defect found by DEMValidationScenarios.h's runMultiPointBoxContactFuzz: without this,
+   // ComputeContacts fell back to the full LinearSpringDashpot (WITH persistent tangential-spring
+   // history) on any sub-cycle where no vertex happened to be embedded (e.g. a pure edge-edge overlap
+   // between two elongated/tilted boxes with neither box's corner inside the other), then back to the
+   // plain multi-point formula (WITHOUT history) the next sub-cycle once a vertex re-entered -- for
+   // elongated/large-tilt configurations this geometry can flicker between the two every few sub-
+   // cycles, and the resulting mid-episode switch between two DIFFERENT force-response models was
+   // itself injecting massive spurious energy (up to ~6800% in the fuzz sweep), independent of and on
+   // top of the SAT-axis discontinuity useMultiPointBoxContact was built to fix.
+   bool wasLastCallBoxBox() const { return wasLastCallBoxBox_; }
+
+
+// ---- ComputeContacts::operator(): per-vertex force for useMultiPointBoxContact ----
+            // useMultiPointBoxContact (Box-Box only, see ModelParameters/SolidCylinderContactDetection's
+            // own doc comments): resolve EVERY vertex-overlap point independently instead of routing
+            // only the single deepest one through collisionResponse_ (LinearSpringDashpot) -- exactly
+            // the "multi-point contact concept" Fraige et al. 2008a/2008b describe as the fix for the
+            // sudden-normal-shift defect (see closed_form_contacts::boxBoxMultiPointContacts' own comment).
+            //
+            // Gated on acd_.wasLastCallBoxBox(), NOT on getMultiPointContacts() being non-empty: a
+            // pair-by-pair mix of "some sub-cycles have an embedded vertex, some don't" (routine for
+            // elongated/tilted boxes, where the contact can be pure edge-edge with neither box's corner
+            // inside the other) must NOT flip which force-response MODEL is used mid-episode. An
+            // earlier version of this gate (checking getMultiPointContacts().empty() instead) did
+            // exactly that -- fell back to the full LinearSpringDashpot (WITH persistent tangential-
+            // spring history) whenever no vertex happened to be embedded that sub-cycle, then back to
+            // this plain formula (WITHOUT history) once one re-entered -- and DEMValidationScenarios.h's
+            // runMultiPointBoxContactFuzz caught the consequence directly: that mid-episode model switch
+            // was itself injecting massive spurious energy (up to ~6800% relative KE gain across a
+            // randomized sweep), independent of and on top of the SAT-axis discontinuity this mode
+            // exists to fix. Fixed by ALWAYS using this same plain velocity-based normal+tangential
+            // spring-dashpot formula for Box-Box once useMultiPointBoxContact is on -- with N=1 (the
+            // single SAT point, synthesized into a one-element list below) on sub-cycles with no
+            // embedded vertex, or N>1 (the real vertex list) when there are -- never collisionResponse_.
+            // Same rationale as the arch/tunnel secondary-contact block below for not using
+            // collisionResponse_ here at all: its persistent tangential-spring history is keyed only by
+            // the uid pair, not by "which of N points", so reusing it per-point (or intermittently
+            // switching to it) would conflate/discontinue N physically distinct sliding histories.
+            // Each point's force is scaled by 1/N so simultaneous points don't multiply the total force
+            // applied this sub-cycle (Höhner et al. 2011's own "corrections" for exactly this, cited in
+            // Lu et al. 2015 Section 2.2.4: "the incremental elastic and dissipative forces were divided
+            // by the number of contact points involved").
+            if (acd_.useMultiPointBoxContact && acd_.wasLastCallBoxBox())
+            {
+               const real_t stiffnessN = collisionResponse_.getStiffnessN(t1, t2);
+               const real_t dampingN   = collisionResponse_.getDampingN(t1, t2);
+               const real_t dampingT   = collisionResponse_.getDampingT(t1, t2);
+               const real_t muDynamic  = collisionResponse_.getFrictionCoefficientDynamic(t1, t2);
+
+               const auto& mpList = acd_.getMultiPointContacts();
+               const closed_form_contacts::BoxVertexContact fallbackSingle{ acd_.getContactPoint(),
+                                                                          acd_.getContactNormal(),
+                                                                          -acd_.getPenetrationDepth() };
+               const auto& points = mpList.empty()
+                  ? std::vector< closed_form_contacts::BoxVertexContact >{ fallbackSingle }
+                  : mpList;
+               const real_t invN = real_t(1) / real_t(points.size());
+
+               for (const auto& mp : points)
+               {
+                  // [LARGE-OVERLAP] above only ever inspects acd_.getPenetrationDepth() -- the ONE
+                  // "primary" overlap (boxBoxSAT's own, or the single deepest vertex chosen as a
+                  // fallback when SAT itself found nothing) -- never each individual point actually
+                  // used for force application here. With N>1 points that gap is real: a SECONDARY
+                  // vertex can carry a much deeper overlap than the primary one (each vertex is
+                  // tested independently against the other box, with no shared cap), and its force
+                  // is applied at that point's own (potentially far-from-centroid) world position --
+                  // exactly the ingredient for a large, unwarned spurious torque. Mirrors
+                  // [LARGE-OVERLAP]'s own threshold (half the smaller body's interaction radius) so
+                  // the two are directly comparable.
+                  if (mp.overlap > real_t(0.5) * smallerRad)
+                  {
+                     static uint_t largeOverlapMultiPointLogCount = uint_t(0);
+                     if (largeOverlapMultiPointLogCount < uint_t(20))
+                     {
+                        WALBERLA_LOG_WARNING_ON_ROOT(
+                           "[LARGE-OVERLAP-MULTIPOINT] step=" << mainStep_ << " subCycle=" << subCycle_
+                           << " uid=" << ac.getUid(acd_.getIdx1()) << " <-> uid=" << ac.getUid(acd_.getIdx2())
+                           << " point=" << mp.point << " normal=" << mp.normal << " overlap=" << mp.overlap
+                           << " (smallerInteractionRadius=" << smallerRad << ", pointIndex of "
+                           << points.size() << " total) -- this SECONDARY multi-point vertex carries an "
+                              "anomalously deep overlap that [LARGE-OVERLAP] (primary-contact-only) would "
+                              "never see.");
+                        ++largeOverlapMultiPointLogCount;
+                     }
+                  }
+
+                  const mesa_pd::Vec3 relVel = mesa_pd::getVelocityAtWFPoint(acd_.getIdx2(), ac, mp.point)
+                                              - mesa_pd::getVelocityAtWFPoint(acd_.getIdx1(), ac, mp.point);
+                  const real_t        velN = relVel * mp.normal;
+                  const mesa_pd::Vec3 velT = relVel - velN * mp.normal;
+
+                  real_t fN = stiffnessN * mp.overlap + dampingN * velN;
+                  if (fN < real_t(0)) fN = real_t(0); // a spring-dashpot must never pull the bodies together
+
+                  mesa_pd::Vec3 fT = dampingT * velT;
+                  const real_t  fTmag = fT.length();
+                  const real_t  fTmax = muDynamic * fN;
+                  if (fTmag > fTmax && fTmag > real_t(1e-12)) fT *= (fTmax / fTmag);
+
+                  const mesa_pd::Vec3 force = invN * (fN * mp.normal + fT);
+                  mesa_pd::addForceAtWFPosAtomic(acd_.getIdx1(), ac,  force, mp.point);
+                  mesa_pd::addForceAtWFPosAtomic(acd_.getIdx2(), ac, -force, mp.point);
+               }
+            }
+
+
+// ==== SimulationParams.h (ModelParameters declarations and parsing) ====
+
+   // true  → floating-box submerged volume & centre of buoyancy computed ANALYTICALLY by clipping the
+   //         oriented box against the fitted free-surface plane (exact 6-tetrahedron OBB∩half-space
+   //         clip; no discretisation error, rotation-exact).
+   // false → legacy 12³ point-sampling clip of the box against the same plane (default; kept as the
+   //         reference and for cross-checking the analytical result).
+   bool        useAnalyticBoxBuoyancy;
+
+   // true  → (only meaningful together with useAnalyticalContactDetection=true) cylinderCylinderResultIsUncertain's
+   //         Tier 1 check (fired when the analytical dispatch found no scenario at all) uses the tight,
+   //         capsule-based bound (detail::closestDistanceSqBetweenSegments: the two cylinders' own axis
+   //         SEGMENTS vs. the sum of their radii) instead of the original loose center-distance bound
+   //         (radius+halfLength sum per side). Both are fully conservative -- neither can ever wrongly
+   //         declare "definitely separated" for a pair that's actually touching (validated directly
+   //         against GJK/EPA in PaperAnalyticalContactTest.cpp's testTightTier1Accuracy10k, 0 unsafe
+   //         cases across 10000 trials) -- but the tight bound is strictly tighter for any cylinder
+   //         with length > 0, so it resolves far more dispatch-gap pairs as "definitely separated,
+   //         skip GJK/EPA entirely" instead of falling back on every one of them. See
+   //         PaperAnalyticalContacts.h's own comment on cylinderCylinderResultIsUncertain's
+   //         useTightTier1 parameter for the full derivation.
+   // false → (DEFAULT) the original loose center-distance Tier 1 bound, unchanged behaviour.
+   bool        useTightTier1;
+
+   // true  → (only correct together with useTightLayer1=true -- see below) skips
+   //         cylinderCylinderResultIsUncertain's Tier 1 check ENTIRELY for dispatch-gap pairs (no
+   //         distance computation of any kind; "no contact" is trusted immediately) instead of merely
+   //         swapping which bound it uses. Justified by a proof, not just a benchmark: any pair that
+   //         survives the tight Layer 1 pre-filter is GUARANTEED (via the triangle inequality) to also
+   //         survive Tier 1's own bound, tight or original -- so once Layer 1 is tight, Tier 1's
+   //         dispatch-gap check can provably never reject anything, and running it is pure wasted
+   //         work. Confirmed empirically too (job 4194491: cylTier1CheaplyProvedSeparated=0 at every
+   //         interval with both useTightLayer1 and useTightTier1 on together). See
+   //         PaperAnalyticalContacts.h's own comment on cylinderCylinderResultIsUncertain's skipTier1
+   //         parameter for the full derivation.
+   // false → (DEFAULT) Tier 1 always runs (using whichever bound useTightTier1 selects).
+   // WARNING: skipTier1=true with useTightLayer1=false is NOT just a missed optimization -- it is
+   //          incorrect, and will silently trust "no contact" for real dispatch-gap contacts the loose
+   //          Layer 1 reject lets through. A startup warning fires if this combination is detected.
+   bool        skipTier1;
+   // true  → Box x Box's boxBoxSAT (only meaningful together with useAnalyticalContactDetection=true)
+   //         replaces its normal with a closest-point-between-edge-segments vector whenever the
+   //         winning SAT axis is edge-vs-edge, and inflates the reported overlap by
+   //         2*boxRoundingRadius -- see PaperAnalyticalContacts.h's own comment on boxBoxSAT's
+   //         useRoundedCorners parameter for the full derivation and the corner/edge contact-normal
+   //         DISCONTINUITY this fixes (Lu, Third & Müller 2015, Chem. Eng. Sci. 127, Section 2.1.3,
+   //         citing Fraige et al. 2008a) -- proven present in this project's own production Box x Box
+   //         dispatch by DEMValidationScenarios.h's runCornerNormalDiscontinuity (47.7% spurious
+   //         kinetic-energy gain with this OFF, using this project's own real FloatingBox parameters).
+   // false → (DEFAULT) exact pre-existing boxBoxSAT behaviour, unchanged.
+   bool        useRoundedBoxCorners;
+   // Rounding radius used only when useRoundedBoxCorners is true. 0.05 (DEFAULT) is small relative to
+   // a typical FloatingBox's own half-extents (this scenario family's own logs use halfExtents as
+   // small as <6,1,1.5>) -- enough to smooth the corner/edge transition without materially changing
+   // the box's effective size.
+   real_t      boxRoundingRadius;
+
+   // true  → Box x Box additionally resolves via closed_form_contacts::boxBoxMultiPointContacts (the
+   //         OTHER literature-documented remedy for the same defect useRoundedBoxCorners targets --
+   //         Fraige et al. 2008a/2008b's "multi-point contact concept", see that function's own doc
+   //         comment in PaperAnalyticalContacts.h): every one of both boxes' 8 vertices found embedded
+   //         in the other box gets its own local normal/overlap and its own (history-free, same
+   //         formula as the existing arch/tunnel secondary-contact code) spring-dashpot force, each
+   //         scaled by 1/N (N = total active contact points this sub-cycle) so multiple simultaneous
+   //         points don't multiply the total force -- rather than one single SAT-chosen deepest
+   //         point/axis whose identity can flip discontinuously between sub-cycles. Independent of
+   //         useRoundedBoxCorners -- either, both, or neither can be enabled.
+   // false → (DEFAULT) exact pre-existing single-point behaviour, unchanged.
+   bool        useMultiPointBoxContact;
+   // true  → both closed_form_contacts::boxBoxSAT's single overlap AND every individual vertex overlap
+   //         closed_form_contacts::boxBoxMultiPointContacts reports are clamped to at most
+   //         boxOverlapCapFraction * min(halfExtents over BOTH boxes' 3 components) before being used
+   //         for force computation -- see boxBoxMultiPointContacts' own doc comment (PaperAnalyticalContacts.h)
+   //         for the full rationale. Confirmed necessary by DEMValidationScenarios.h's
+   //         multiPointDeepOverlapStability/Fuzz/EdgeCases scenarios: UNCAPPED, useMultiPointBoxContact
+   //         can inject dramatically MORE spurious energy than doing nothing at all under deep
+   //         interpenetration (e.g. +618% vs baseline's -0.9% on the "grazing-plank-stack" edge case,
+   //         the everyday two-slightly-askew-planks geometry a real jam actually produces) -- exactly
+   //         the opposite of what the mitigation is for. Independent of useRoundedBoxCorners/
+   //         useMultiPointBoxContact -- meaningful with either, both, or (via boxBoxSAT's own cap)
+   //         even neither enabled.
+   // false → (DEFAULT) exact pre-existing unbounded overlap behaviour, unchanged.
+   bool        useBoxOverlapCap;
+   // Fraction of min(halfExtents) used as the cap when useBoxOverlapCap is true. 0.3 (DEFAULT) sits
+   // comfortably above the shallow, near-degenerate overlaps this contact model was actually tuned
+   // against (typically a few percent of the smaller half-extent, per this project's own
+   // STRONG-CONTACT-FORCE/DEM-WATCH log evidence) while still well below the geometric maximum
+   // (1.0 = a vertex sitting exactly at the other box's centre).
+   real_t      boxOverlapCapFraction;
+   // true  → Box x Box's boxBoxSAT axis selection becomes "sticky": among all candidate axes within
+   //         axisHysteresisMargin (relative) of the true minimum-gap axis, the one whose normal aligns
+   //         best with the PREVIOUS sub-cycle's reported normal for this exact uid pair is used, even
+   //         when it is not the strict minimum -- see closed_form_contacts::boxBoxSAT's own doc comment
+   //         (PaperAnalyticalContacts.h) for the full derivation. The OTHER candidate fix for the same
+   //         axis-flip discontinuity useRoundedBoxCorners targets, without useRoundedBoxCorners' own
+   //         deep-overlap side effect (confirmed by this project's own multiPointDeepOverlapStability/
+   //         EdgeCases scenarios: useRoundedBoxCorners is +884% on "plank-vs-near-cube-deep" despite
+   //         fixing the axis-tie case cleanly). Independent of useRoundedBoxCorners/
+   //         useMultiPointBoxContact/useBoxOverlapCap -- any combination is meaningful.
+   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
+   bool        useAxisHysteresis;
+   // Relative margin (DEFAULT 0.15 = 15%) within which a competing axis is considered "as good as" the
+   // true minimum for hysteresis purposes -- see useAxisHysteresis's own comment.
+   real_t      axisHysteresisMargin;
+   // true  → boxBoxMultiPointContacts' own vertex SET is smoothed across sub-cycles into a persistent
+   //         manifold (one entry per possible vertex identity, up to 16, per uid pair) instead of being
+   //         used fresh every sub-cycle -- a newly-embedded vertex fades its overlap contribution IN
+   //         over several sub-cycles, and one that just separated fades OUT the same way, rather than
+   //         appearing/vanishing in one discontinuous step. See ParticleKernels.h's
+   //         ComputeContacts::boxBoxManifold_ own doc comment for the full rationale -- a simplified,
+   //         same-spirit version of the persistent contact manifold + warm-starting real physics
+   //         engines (Bullet/PhysX) use, targeting a THIRD distinct symptom from useAxisHysteresis
+   //         (which axis wins) and useBoxOverlapCap (how deep one point's force can be): the vertex SET
+   //         itself changing abruptly. Only meaningful together with useMultiPointBoxContact=true.
+   // false → (DEFAULT) exact pre-existing behaviour, unchanged.
+   bool        useContactManifold;
+   // Fraction of full strength gained/lost per sub-cycle a manifold entry fades by (DEFAULT 0.25 = a
+   // vertex reaches full/zero strength over 4 sub-cycles).
+   real_t      manifoldFadeRate;
+      , useAnalyticBoxBuoyancy      { b.getParameter< bool >       ("useAnalyticBoxBuoyancy", false) }
+      , useTightTier1               { b.getParameter< bool >       ("useTightTier1", false) }
+      , skipTier1                   { b.getParameter< bool >       ("skipTier1", false) }
+      , useRoundedBoxCorners        { b.getParameter< bool >       ("useRoundedBoxCorners", false) }
+      , boxRoundingRadius           { b.getParameter< real_t >     ("boxRoundingRadius", real_t(0.05)) }
+      , useMultiPointBoxContact     { b.getParameter< bool >       ("useMultiPointBoxContact", false) }
+      , useBoxOverlapCap            { b.getParameter< bool >       ("useBoxOverlapCap", false) }
+      , boxOverlapCapFraction       { b.getParameter< real_t >     ("boxOverlapCapFraction", real_t(0.3)) }
+      , useAxisHysteresis           { b.getParameter< bool >       ("useAxisHysteresis", false) }
+      , axisHysteresisMargin        { b.getParameter< real_t >     ("axisHysteresisMargin", real_t(0.15)) }
+      , useContactManifold          { b.getParameter< bool >       ("useContactManifold", false) }
+      , manifoldFadeRate            { b.getParameter< real_t >     ("manifoldFadeRate", real_t(0.25)) }

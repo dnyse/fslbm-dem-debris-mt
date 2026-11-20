@@ -1137,114 +1137,15 @@ public:
       const mesa_pd::Vec3 posA = ac.getPosition(idx1), posB = ac.getPosition(idx2);
       const mesa_pd::Mat3 RA = ac.getRotation(idx1).getMatrix(), RB = ac.getRotation(idx2).getMatrix();
 
-      // See ModelParameters.useBoxOverlapCap/boxOverlapCapFraction's own doc comment (SimulationParams.h)
-      // -- computed per-pair since it scales with these two SPECIFIC bodies' own half-extents, not a
-      // single project-wide constant.
-      const real_t overlapCap = useBoxOverlapCap
-         ? boxOverlapCapFraction * std::min({ halfA[0], halfA[1], halfA[2], halfB[0], halfB[1], halfB[2] })
-         : std::numeric_limits< real_t >::max();
+      const auto result = closed_form_contacts::boxBoxSAT(posA, RA, halfA, posB, RB, halfB);
+      if (!result.contact) return false;
 
-      // See ModelParameters.useAxisHysteresis/axisHysteresisMargin's own doc comment (SimulationParams.h)
-      // and boxBoxHysteresisNormal_'s own comment above for why this state lives here, keyed by uid
-      // pair so it survives across sub-cycles for the SAME pair regardless of local index churn.
-      const auto  hysteresisKey = ac.getUid(idx1) < ac.getUid(idx2)
-                                     ? std::make_pair(ac.getUid(idx1), ac.getUid(idx2))
-                                     : std::make_pair(ac.getUid(idx2), ac.getUid(idx1));
-      const auto  hysteresisIt  = useAxisHysteresis ? boxBoxHysteresisNormal_.find(hysteresisKey)
-                                                     : boxBoxHysteresisNormal_.end();
-      const mesa_pd::Vec3* previousNormal = (hysteresisIt != boxBoxHysteresisNormal_.end()) ? &hysteresisIt->second : nullptr;
-
-      const auto result = closed_form_contacts::boxBoxSAT(posA, RA, halfA, posB, RB, halfB,
-                                                        useRoundedBoxCorners, boxRoundingRadius, overlapCap,
-                                                        previousNormal, axisHysteresisMargin);
-      if (useAxisHysteresis && result.contact) boxBoxHysteresisNormal_[hysteresisKey] = result.normal;
-
-      // useMultiPointBoxContact: see closed_form_contacts::boxBoxMultiPointContacts' and
-      // getMultiPointContacts()'s own doc comments. Computed independently of (and even when) the raw
-      // SAT result above reports no contact -- boxBoxSAT's single winning axis can occasionally miss
-      // a case a direct vertex-in-box test still catches near a degenerate configuration, and this list
-      // is exactly the OTHER, independent literature-documented remedy for that same class of defect.
-      if (useMultiPointBoxContact)
-      {
-         // [Claude, 2026-10-29] useFraigeBoxContactModel (boxBoxFraigeMultiPointContacts) removed
-         // entirely -- unused by any thesis-cited result; archived at archive/unused_contact_methods/.
-         multiPointContacts_ = closed_form_contacts::boxBoxMultiPointContacts(posA, RA, halfA, posB, RB, halfB,
-                                                                            overlapCap);
-
-         // See boxBoxManifold_'s own doc comment for the full rationale. Replaces the fresh,
-         // potentially-discontinuous vertex set with a persistent, faded-in/out one keyed by uid pair
-         // + stable per-vertex identity.
-         if (useContactManifold)
-         {
-            const auto manifoldKey = ac.getUid(idx1) < ac.getUid(idx2)
-                                         ? std::make_pair(ac.getUid(idx1), ac.getUid(idx2))
-                                         : std::make_pair(ac.getUid(idx2), ac.getUid(idx1));
-            auto& manifold = boxBoxManifold_[manifoldKey]; // creates an empty one on first contact
-
-            std::unordered_map< int, bool > matched;
-            for (const auto& fresh : multiPointContacts_)
-            {
-               auto& entry     = manifold[fresh.identity]; // creates a fresh, fade=0 entry if new
-               entry.point     = fresh.point;
-               entry.normal    = fresh.normal;
-               entry.trueOverlap = fresh.overlap;
-               entry.fade      = std::min(real_t(1), entry.fade + manifoldFadeRate);
-               matched[fresh.identity] = true;
-            }
-            for (auto it = manifold.begin(); it != manifold.end();)
-            {
-               if (!matched[it->first]) // no fresh point this sub-cycle -- fade out, holding last pose
-               {
-                  it->second.fade -= manifoldFadeRate;
-                  if (it->second.fade <= real_t(0)) { it = manifold.erase(it); continue; }
-               }
-               ++it;
-            }
-
-            multiPointContacts_.clear();
-            for (const auto& kv : manifold)
-            {
-               closed_form_contacts::BoxVertexContact c;
-               c.point    = kv.second.point;
-               c.normal   = kv.second.normal;
-               c.overlap  = kv.second.trueOverlap * kv.second.fade; // fade scales overlap, see doc comment
-               c.identity = kv.first;
-               multiPointContacts_.push_back(c);
-            }
-            if (manifold.empty()) boxBoxManifold_.erase(manifoldKey); // don't leak empty entries forever
-         }
-      }
-
-      if (!result.contact && multiPointContacts_.empty()) return false;
-
-      // See wasLastCallBoxBox()'s own doc comment for why this must be set unconditionally here (not
-      // only when multiPointContacts_ is non-empty) -- ComputeContacts needs to know "this pair is
-      // Box-Box" independent of whether any vertex happens to be embedded THIS particular sub-cycle.
-      wasLastCallBoxBox_ = true;
-
-      if (result.contact)
-      {
-         ++contactStats.boxBoxSAT;
-         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "closed-form analytical (Box-Box SAT)");
-         // closed_form_contacts convention: overlap > 0 = penetrating. This class: penetrationDepth < 0.
-         getPenetrationDepth() = -result.overlap;
-         getContactNormal()    = result.normal;
-         getContactPoint()     = result.point;
-      }
-      else
-      {
-         // SAT itself found no contact, but useMultiPointBoxContact's independent vertex test did --
-         // report the DEEPEST vertex-overlap point as the primary contact (sorted below) so the normal
-         // ComputeContacts response path always has something to work with; the rest of the list
-         // (including this one) is what ComputeContacts::operator() applies additional force at.
-         recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2),
-            "multi-point vertex overlap (Box-Box, SAT found no scenario)");
-         const auto deepest = std::max_element(multiPointContacts_.begin(), multiPointContacts_.end(),
-            [](const auto& a, const auto& b) { return a.overlap < b.overlap; });
-         getPenetrationDepth() = -deepest->overlap;
-         getContactNormal()    = deepest->normal;
-         getContactPoint()     = deepest->point;
-      }
+      ++contactStats.boxBoxSAT;
+      recordDetectionPath(ac.getUid(idx1), ac.getUid(idx2), "closed-form analytical (Box-Box SAT)");
+      // closed_form_contacts convention: overlap > 0 = penetrating. This class: penetrationDepth < 0.
+      getPenetrationDepth() = -result.overlap;
+      getContactNormal()    = result.normal;
+      getContactPoint()     = result.point;
       return true;
    }
 
@@ -1315,8 +1216,7 @@ public:
       // conservativeness guarantee (see that function's own comment), just orientation-aware instead
       // of orientation-blind, so it resolves far more genuinely-separated pairs at this cheap stage,
       // BEFORE they'd otherwise reach the (now more expensive to enter at all) analytical dispatch
-      // below -- not merely before GJK/EPA, as cylinderCylinderResultIsUncertain's useTightTier1 does
-      // one level deeper. CylinderState built here (moved up from below) so both branches can use it.
+      // below. CylinderState built here (moved up from below) so both branches can use it.
       const closed_form_contacts::CylinderState ci{ ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(),
                                                  cyl1.getRadius(), cyl1.getHeight() };
       const closed_form_contacts::CylinderState cj{ ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(),
@@ -1392,7 +1292,7 @@ public:
             const auto s0 = std::chrono::steady_clock::now();
             const auto rawAgain = closed_form_contacts::cylinderCylinderContact(ci, cj);
             const auto s1 = std::chrono::steady_clock::now();
-            if (closed_form_contacts::cylinderCylinderResultIsUncertain(ci, cj, rawAgain, useTightTier1, skipTier1))
+            if (closed_form_contacts::cylinderCylinderResultIsUncertain(ci, cj, rawAgain))
             {
                ++contactStats.shadowFallbackCalls;
                (void) GeneralContactDetection::operator()(idx1, idx2, cyl1, cyl2, ac);
@@ -1460,7 +1360,7 @@ public:
          return true;
       }
 
-      if (closed_form_contacts::cylinderCylinderResultIsUncertain(ci, cj, result, useTightTier1, skipTier1))
+      if (closed_form_contacts::cylinderCylinderResultIsUncertain(ci, cj, result))
       {
          // Tier 1 (analytical found nothing at all) vs special-contact (analytical DID find a
          // contact, but that ONE scenario is unconditionally distrusted) -- see
@@ -1522,9 +1422,8 @@ public:
       if (!result.contact)
       {
          // Reached only when cylinderCylinderResultIsUncertain() returned false (NOT uncertain) for a
-         // dispatch-gap pair -- i.e. some bound (the tight capsule one, when useTightTier1 is on; the
-         // original loose one essentially never triggers this in production, see that function's own
-         // comment) proved the two cylinders cannot possibly be touching, so "no contact" is trusted
+         // dispatch-gap pair -- i.e. its centre-distance bound (which essentially never triggers this in
+         // production, since the Layer-1 reject above is tighter) proved the two cylinders cannot possibly be touching, so "no contact" is trusted
          // directly, with NO GJK/EPA call at all. Counted separately from cylFallbackTier1 (which is
          // the OTHER, uncertain outcome of the same dispatch-gap case) specifically to measure this.
          ++contactStats.cylTier1CheaplyProvedSeparated;
@@ -1640,8 +1539,7 @@ public:
       // Dispatch-gap pairs (analytical found no scenario) where cylinderCylinderResultIsUncertain()
       // was NOT triggered -- some bound proved the pair definitely separated, so "no contact" is
       // trusted directly with NO GJK/EPA call. Mutually exclusive with cylFallbackTier1 (the other,
-      // uncertain outcome of the same dispatch-gap case); added specifically to measure
-      // ModelParameters.useTightTier1's effect against GJK/EPA's own no-contact rate.
+      // uncertain outcome of the same dispatch-gap case).
       uint64_t cylTier1CheaplyProvedSeparated = 0;
       // Box x Box pairs the useTightLayer1 single-axis pre-filter proved definitely separated before
       // boxBoxSAT ever ran -- see ModelParameters.useTightLayer1's own doc comment.
@@ -1794,21 +1692,6 @@ public:
    // [Claude, 2026-09-30] see ModelParameters.refineCylinderContacts
    bool refineCylinderContacts = false;
 
-   // Runtime switch (default false), only meaningful while useAnalyticalContactDetection is also
-   // true. See ModelParameters.useTightTier1's own doc comment (SimulationParams.h) -- swaps
-   // cylinderCylinderResultIsUncertain's Tier 1 check (fired when the dispatch found no scenario at
-   // all) from the original loose center-distance bound to the tight, capsule-based
-   // detail::closestDistanceSqBetweenSegments bound, resolving far more dispatch-gap pairs as
-   // "definitely separated" without needing a GJK/EPA call at all.
-   bool useTightTier1 = false;
-
-   // Runtime switch (default false). See ModelParameters.skipTier1's own doc comment
-   // (SimulationParams.h) -- skips cylinderCylinderResultIsUncertain's dispatch-gap check ENTIRELY (no
-   // distance computation at all, "no contact" trusted immediately) instead of merely swapping which
-   // bound it uses. Only correct when useTightLayer1 is ALSO on -- see
-   // cylinderCylinderResultIsUncertain's own comment in PaperAnalyticalContacts.h for the proof.
-   bool skipTier1 = false;
-
    // Runtime switch (default TRUE since 2026-09-20). See ModelParameters.useTightLayer1's own doc comment
    // (SimulationParams.h) -- swaps the cheap "definitely too far apart to touch" pre-filter that runs
    // BEFORE any real contact detection (Cylinder x Cylinder's own reject, and, newly, a Box x Box one
@@ -1819,72 +1702,8 @@ public:
    // also true (boxBoxSAT, the only thing this pre-filter guards for boxes, is only reached then).
    bool useTightLayer1 = true; // default ON since 2026-09-20 (user request)
 
-   // Runtime switches (both default false). See ModelParameters.useRoundedBoxCorners/
-   // useMultiPointBoxContact's own doc comments (SimulationParams.h) -- both are togglable mitigations
-   // for the corner/edge contact-normal discontinuity documented for polyhedral DEM and reproduced
-   // directly against this project's own boxBoxSAT by DEMValidationScenarios.h's
-   // runCornerNormalDiscontinuity. Threaded straight through to closed_form_contacts::boxBoxSAT
-   // (useRoundedBoxCorners/boxRoundingRadius) and closed_form_contacts::boxBoxMultiPointContacts
-   // (useMultiPointBoxContact) from the Box x Box operator() overload below.
-   bool   useRoundedBoxCorners = false;
-   real_t boxRoundingRadius    = real_t(0.05);
-   bool   useMultiPointBoxContact = false;
-   // [Claude, 2026-10-29] useFraigeBoxContactModel (boxBoxFraigeMultiPointContacts) removed entirely --
-   // unused by any thesis-cited result; archived at archive/unused_contact_methods/.
-   // See ModelParameters.useBoxOverlapCap/boxOverlapCapFraction's own doc comment (SimulationParams.h)
-   // and closed_form_contacts::boxBoxMultiPointContacts' own comment (PaperAnalyticalContacts.h) for why
-   // this exists: confirmed necessary by DEMValidationScenarios.h's multiPointDeepOverlapStability/
-   // Fuzz/EdgeCases scenarios (uncapped, useMultiPointBoxContact can inject MORE spurious energy than
-   // doing nothing under deep interpenetration). Threaded to BOTH boxBoxSAT and
-   // boxBoxMultiPointContacts as an absolute overlap value (boxOverlapCapFraction * min(halfExtents)),
-   // computed per-pair in the Box x Box operator() below since it depends on both bodies' own sizes.
-   bool   useBoxOverlapCap      = false;
-   real_t boxOverlapCapFraction = real_t(0.3);
-
-   // "Sticky" SAT axis selection -- the OTHER candidate fix for the axis-flip discontinuity
-   // useRoundedBoxCorners targets, see closed_form_contacts::boxBoxSAT's own doc comment
-   // (PaperAnalyticalContacts.h) for the full rationale and why it doesn't share useRoundedBoxCorners'
-   // deep-overlap side effect. boxBoxHysteresisNormal_ is the per-uid-pair persistent state
-   // closed_form_contacts::boxBoxSAT itself has no memory of (it's a pure function) -- keyed the same way
-   // as this class's other per-pair maps (see wasLastCallBoxBox_'s sibling members below), read/written
-   // ONLY from the Box x Box operator() overload, independent of useRoundedBoxCorners/
-   // useMultiPointBoxContact/useBoxOverlapCap (any combination is meaningful).
-   bool   useAxisHysteresis      = false;
-   real_t axisHysteresisMargin   = real_t(0.15);
-   std::map< std::pair< walberla::id_t, walberla::id_t >, mesa_pd::Vec3 > boxBoxHysteresisNormal_;
-
-   // Persistent contact manifold, only meaningful when useMultiPointBoxContact is ALSO true -- option
-   // 3 of the three candidate fixes for the axis/vertex-set discontinuity discussed this session
-   // (rounding, hysteresis, this). Unlike useAxisHysteresis (which stabilises WHICH single axis SAT
-   // reports) or useBoxOverlapCap (which bounds HOW DEEP one point's force can be), this targets a
-   // DIFFERENT, THIRD symptom: boxBoxMultiPointContacts' own vertex SET can change abruptly between
-   // sub-cycles (a vertex crosses from just-outside to just-inside the other box, or vice versa) --
-   // each such appearance/disappearance is itself a step discontinuity in the net force/torque, exactly
-   // the kind of asymmetric-point-set torque imbalance identified as the "grazing-plank-stack"
-   // regression (+618% even with useMultiPointBoxContact alone, DEMValidationScenarios.h). A real
-   // physics-engine-style manifold (Bullet/PhysX) never adds or drops a point in one step either --
-   // this is a simplified version of the same idea: each of BoxVertexContact's up to 16 possible
-   // identities (see that struct's own comment) is tracked persistently per uid pair; a NEWLY-embedded
-   // vertex fades its overlap IN linearly over several sub-cycles instead of applying full force
-   // immediately, and a vertex that just separated fades OUT the same way instead of vanishing --
-   // scaling each entry's EFFECTIVE overlap by its own fade fraction (0..1) reuses ComputeContacts'
-   // existing per-point force formula completely unchanged (see its own comment on why overlap, not
-   // force, is scaled).
-   struct ManifoldPoint
-   {
-      mesa_pd::Vec3 point;
-      mesa_pd::Vec3 normal;
-      real_t        trueOverlap = real_t(0); // last known REAL (uncapped-by-fade) overlap for this vertex
-      real_t        fade        = real_t(0); // 0 = contributes nothing, 1 = full strength
-   };
-   bool   useContactManifold  = false;
-   real_t manifoldFadeRate    = real_t(0.25); // fraction of full strength gained/lost per sub-cycle
-   std::map< std::pair< walberla::id_t, walberla::id_t >, std::unordered_map< int, ManifoldPoint > > boxBoxManifold_;
-
    // See ModelParameters::useRotationalEffectiveMass's own doc comment (SimulationParams.h) for the full
-   // derivation. Unlike useAxisHysteresis/useContactManifold/useRoundedBoxCorners (which all change WHICH
-   // (point,normal,overlap) triplet is fed into the unmodified LinearSpringDashpot force law), this
-   // changes the force law's OWN calibration -- read by ComputeContacts (not this class directly) at the
+   // derivation. It changes the force law's OWN calibration -- read by ComputeContacts (not this class directly) at the
    // point it calls collisionResponse_.setStiffnessAndDamping(...), since that is where the generalized
    // effective mass actually needs to replace the plain translational one.
    bool useRotationalEffectiveMass = false;
@@ -1899,32 +1718,6 @@ public:
    // recursive inflated-shape call -- see the Box x Box/Box x HalfSpace/Box x CylindricalBoundary
    // overloads above).
    real_t boxContactSkin = real_t(0);
-
-   // Populated by the Box x Box operator() overload below ONLY when useMultiPointBoxContact is true and
-   // at least one of either box's vertices was found embedded in the other -- see
-   // closed_form_contacts::boxBoxMultiPointContacts' own doc comment. ComputeContacts reads this (alongside
-   // the normal single point/normal/penetration this class already returns for the DEEPEST vertex) to
-   // apply a history-free spring-dashpot force at every OTHER point too, each scaled by 1/N -- see that
-   // call site's own comment.
-   const std::vector< closed_form_contacts::BoxVertexContact >& getMultiPointContacts() const
-   {
-      return multiPointContacts_;
-   }
-
-   // Set true by the Box x Box operator() overload below on EVERY call (whether or not any vertex was
-   // actually found embedded) -- lets ComputeContacts distinguish "this pair is Box-Box and
-   // useMultiPointBoxContact is on, so ALWAYS use the plain per-point formula" from "this pair isn't
-   // Box-Box at all" without needing getMultiPointContacts().empty() to double as both signals. Fixes a
-   // real defect found by DEMValidationScenarios.h's runMultiPointBoxContactFuzz: without this,
-   // ComputeContacts fell back to the full LinearSpringDashpot (WITH persistent tangential-spring
-   // history) on any sub-cycle where no vertex happened to be embedded (e.g. a pure edge-edge overlap
-   // between two elongated/tilted boxes with neither box's corner inside the other), then back to the
-   // plain multi-point formula (WITHOUT history) the next sub-cycle once a vertex re-entered -- for
-   // elongated/large-tilt configurations this geometry can flicker between the two every few sub-
-   // cycles, and the resulting mid-episode switch between two DIFFERENT force-response models was
-   // itself injecting massive spurious energy (up to ~6800% in the fuzz sweep), independent of and on
-   // top of the SAT-axis discontinuity useMultiPointBoxContact was built to fix.
-   bool wasLastCallBoxBox() const { return wasLastCallBoxBox_; }
 
    // Secondary contact point (arch/tunnel containment only, Box/Cylinder floaters): the containment
    // branches' farthest-point search can find TWO independent points simultaneously poking past the
@@ -1943,23 +1736,11 @@ public:
    // pair visited in a sub-cycle (not reconstructed per-pair), so without an explicit reset a stale
    // hasSecondaryContact_=true from a PREVIOUS pair could leak into a pair whose own branch (or a
    // branch other than the two containment ones below) never touches these fields at all.
-   // ALSO clears multiPointContacts_ (getMultiPointContacts() above) -- same reused-across-every-pair
-   // rationale as hasSecondaryContact_ below: without this, a stale list from a PREVIOUS pair could
-   // leak into a pair whose own branch never repopulates it.
-   void resetSecondaryContact()
-   {
-      hasSecondaryContact_ = false;
-      multiPointContacts_.clear();
-      wasLastCallBoxBox_ = false;
-   }
+   void resetSecondaryContact() { hasSecondaryContact_ = false; }
 
 private:
    // Backing storage for recordDetectionPath()/lookupDetectionPath() above.
    std::map<std::pair<walberla::id_t, walberla::id_t>, std::string> pairDetectionPath;
-
-   // Backing storage for getMultiPointContacts()/wasLastCallBoxBox() above.
-   std::vector< closed_form_contacts::BoxVertexContact > multiPointContacts_;
-   bool wasLastCallBoxBox_ = false;
 
    // Backing storage for the secondary-contact getters above.
    bool          hasSecondaryContact_       = false;
@@ -2298,12 +2079,7 @@ public:
       real_t collisionTime, real_t particleTimestepSize, real_t frictionCoefficient,
       uint_t numParticleTypes = uint_t(2), bool useAnalyticalContactDetection = false,
       bool usePureAnalyticalCylinder = false, bool useContactFilterOwnerTiebreak = false,
-      bool useTightTier1 = false, bool useTightLayer1 = true, bool skipTier1 = false,
-      bool useRoundedBoxCorners = false, real_t boxRoundingRadius = real_t(0.05),
-      bool useMultiPointBoxContact = false, bool useBoxOverlapCap = false,
-      real_t boxOverlapCapFraction = real_t(0.3), bool useAxisHysteresis = false,
-      real_t axisHysteresisMargin = real_t(0.15), bool useContactManifold = false,
-      real_t manifoldFadeRate = real_t(0.25), bool useRotationalEffectiveMass = false)
+      bool useTightLayer1 = true, bool useRotationalEffectiveMass = false)
       : domain_(domain)
       , collisionResponse_(numParticleTypes)
       , restitutionCoefficient_(restitutionCoefficient)
@@ -2316,17 +2092,6 @@ public:
             collisionResponse_.setFrictionCoefficientDynamic(t, u, frictionCoefficient);
       acd_.useAnalyticalContactDetection = useAnalyticalContactDetection;
       acd_.usePureAnalyticalCylinder     = usePureAnalyticalCylinder;
-      acd_.useTightTier1                 = useTightTier1;
-      acd_.skipTier1                     = skipTier1;
-      acd_.useRoundedBoxCorners          = useRoundedBoxCorners;
-      acd_.boxRoundingRadius             = boxRoundingRadius;
-      acd_.useMultiPointBoxContact       = useMultiPointBoxContact;
-      acd_.useBoxOverlapCap              = useBoxOverlapCap;
-      acd_.boxOverlapCapFraction         = boxOverlapCapFraction;
-      acd_.useAxisHysteresis             = useAxisHysteresis;
-      acd_.axisHysteresisMargin          = axisHysteresisMargin;
-      acd_.useContactManifold            = useContactManifold;
-      acd_.manifoldFadeRate              = manifoldFadeRate;
       acd_.useRotationalEffectiveMass    = useRotationalEffectiveMass;
       acd_.useTightLayer1                = useTightLayer1;
       contact_filter_.useOwnerRankTiebreak = useContactFilterOwnerTiebreak;
@@ -2748,103 +2513,8 @@ public:
             const mesa_pd::Vec3 torqueBeforeA = ac.getTorqueRef(acd_.getIdx1());
             const mesa_pd::Vec3 torqueBeforeB = ac.getTorqueRef(acd_.getIdx2());
 
-            // useMultiPointBoxContact (Box-Box only, see ModelParameters/SolidCylinderContactDetection's
-            // own doc comments): resolve EVERY vertex-overlap point independently instead of routing
-            // only the single deepest one through collisionResponse_ (LinearSpringDashpot) -- exactly
-            // the "multi-point contact concept" Fraige et al. 2008a/2008b describe as the fix for the
-            // sudden-normal-shift defect (see closed_form_contacts::boxBoxMultiPointContacts' own comment).
-            //
-            // Gated on acd_.wasLastCallBoxBox(), NOT on getMultiPointContacts() being non-empty: a
-            // pair-by-pair mix of "some sub-cycles have an embedded vertex, some don't" (routine for
-            // elongated/tilted boxes, where the contact can be pure edge-edge with neither box's corner
-            // inside the other) must NOT flip which force-response MODEL is used mid-episode. An
-            // earlier version of this gate (checking getMultiPointContacts().empty() instead) did
-            // exactly that -- fell back to the full LinearSpringDashpot (WITH persistent tangential-
-            // spring history) whenever no vertex happened to be embedded that sub-cycle, then back to
-            // this plain formula (WITHOUT history) once one re-entered -- and DEMValidationScenarios.h's
-            // runMultiPointBoxContactFuzz caught the consequence directly: that mid-episode model switch
-            // was itself injecting massive spurious energy (up to ~6800% relative KE gain across a
-            // randomized sweep), independent of and on top of the SAT-axis discontinuity this mode
-            // exists to fix. Fixed by ALWAYS using this same plain velocity-based normal+tangential
-            // spring-dashpot formula for Box-Box once useMultiPointBoxContact is on -- with N=1 (the
-            // single SAT point, synthesized into a one-element list below) on sub-cycles with no
-            // embedded vertex, or N>1 (the real vertex list) when there are -- never collisionResponse_.
-            // Same rationale as the arch/tunnel secondary-contact block below for not using
-            // collisionResponse_ here at all: its persistent tangential-spring history is keyed only by
-            // the uid pair, not by "which of N points", so reusing it per-point (or intermittently
-            // switching to it) would conflate/discontinue N physically distinct sliding histories.
-            // Each point's force is scaled by 1/N so simultaneous points don't multiply the total force
-            // applied this sub-cycle (Höhner et al. 2011's own "corrections" for exactly this, cited in
-            // Lu et al. 2015 Section 2.2.4: "the incremental elastic and dissipative forces were divided
-            // by the number of contact points involved").
-            if (acd_.useMultiPointBoxContact && acd_.wasLastCallBoxBox())
-            {
-               const real_t stiffnessN = collisionResponse_.getStiffnessN(t1, t2);
-               const real_t dampingN   = collisionResponse_.getDampingN(t1, t2);
-               const real_t dampingT   = collisionResponse_.getDampingT(t1, t2);
-               const real_t muDynamic  = collisionResponse_.getFrictionCoefficientDynamic(t1, t2);
-
-               const auto& mpList = acd_.getMultiPointContacts();
-               const closed_form_contacts::BoxVertexContact fallbackSingle{ acd_.getContactPoint(),
-                                                                          acd_.getContactNormal(),
-                                                                          -acd_.getPenetrationDepth() };
-               const auto& points = mpList.empty()
-                  ? std::vector< closed_form_contacts::BoxVertexContact >{ fallbackSingle }
-                  : mpList;
-               const real_t invN = real_t(1) / real_t(points.size());
-
-               for (const auto& mp : points)
-               {
-                  // [LARGE-OVERLAP] above only ever inspects acd_.getPenetrationDepth() -- the ONE
-                  // "primary" overlap (boxBoxSAT's own, or the single deepest vertex chosen as a
-                  // fallback when SAT itself found nothing) -- never each individual point actually
-                  // used for force application here. With N>1 points that gap is real: a SECONDARY
-                  // vertex can carry a much deeper overlap than the primary one (each vertex is
-                  // tested independently against the other box, with no shared cap), and its force
-                  // is applied at that point's own (potentially far-from-centroid) world position --
-                  // exactly the ingredient for a large, unwarned spurious torque. Mirrors
-                  // [LARGE-OVERLAP]'s own threshold (half the smaller body's interaction radius) so
-                  // the two are directly comparable.
-                  if (mp.overlap > real_t(0.5) * smallerRad)
-                  {
-                     static uint_t largeOverlapMultiPointLogCount = uint_t(0);
-                     if (largeOverlapMultiPointLogCount < uint_t(20))
-                     {
-                        WALBERLA_LOG_WARNING_ON_ROOT(
-                           "[LARGE-OVERLAP-MULTIPOINT] step=" << mainStep_ << " subCycle=" << subCycle_
-                           << " uid=" << ac.getUid(acd_.getIdx1()) << " <-> uid=" << ac.getUid(acd_.getIdx2())
-                           << " point=" << mp.point << " normal=" << mp.normal << " overlap=" << mp.overlap
-                           << " (smallerInteractionRadius=" << smallerRad << ", pointIndex of "
-                           << points.size() << " total) -- this SECONDARY multi-point vertex carries an "
-                              "anomalously deep overlap that [LARGE-OVERLAP] (primary-contact-only) would "
-                              "never see.");
-                        ++largeOverlapMultiPointLogCount;
-                     }
-                  }
-
-                  const mesa_pd::Vec3 relVel = mesa_pd::getVelocityAtWFPoint(acd_.getIdx2(), ac, mp.point)
-                                              - mesa_pd::getVelocityAtWFPoint(acd_.getIdx1(), ac, mp.point);
-                  const real_t        velN = relVel * mp.normal;
-                  const mesa_pd::Vec3 velT = relVel - velN * mp.normal;
-
-                  real_t fN = stiffnessN * mp.overlap + dampingN * velN;
-                  if (fN < real_t(0)) fN = real_t(0); // a spring-dashpot must never pull the bodies together
-
-                  mesa_pd::Vec3 fT = dampingT * velT;
-                  const real_t  fTmag = fT.length();
-                  const real_t  fTmax = muDynamic * fN;
-                  if (fTmag > fTmax && fTmag > real_t(1e-12)) fT *= (fTmax / fTmag);
-
-                  const mesa_pd::Vec3 force = invN * (fN * mp.normal + fT);
-                  mesa_pd::addForceAtWFPosAtomic(acd_.getIdx1(), ac,  force, mp.point);
-                  mesa_pd::addForceAtWFPosAtomic(acd_.getIdx2(), ac, -force, mp.point);
-               }
-            }
-            else
-            {
-               collisionResponse_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), acd_.getContactNormal(),
-                                 acd_.getPenetrationDepth(), particleTimestepSize_);
-            }
+            collisionResponse_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), acd_.getContactNormal(),
+                               acd_.getPenetrationDepth(), particleTimestepSize_);
 
             // [STRONG-CONTACT-FORCE]: permanent safety-net diagnostic, independent of logFloaterHistory
             // (which is normally off). Fires whenever a single contact's force delta exceeds
@@ -3755,18 +3425,7 @@ public:
          simParams->model.useAnalyticalContactDetection,
          simParams->model.usePureAnalyticalCylinder,
          simParams->model.useContactFilterOwnerTiebreak,
-         simParams->model.useTightTier1,
          simParams->model.useTightLayer1,
-         simParams->model.skipTier1,
-         simParams->model.useRoundedBoxCorners,
-         simParams->model.boxRoundingRadius,
-         simParams->model.useMultiPointBoxContact,
-         simParams->model.useBoxOverlapCap,
-         simParams->model.boxOverlapCapFraction,
-         simParams->model.useAxisHysteresis,
-         simParams->model.axisHysteresisMargin,
-         simParams->model.useContactManifold,
-         simParams->model.manifoldFadeRate,
          simParams->model.useRotationalEffectiveMass)
       , dormantFloaterUIDs_(simObjs->dormantFloaterUIDs)
       , freshlyActivatedFloaterUIDs_(simObjs->freshlyActivatedFloaterUIDs)
@@ -3886,7 +3545,6 @@ public:
             pinnedRotationAxes_[floaterUIDs_[fi]] = simParams->floatingSpheres[fi].pinRotationAxes;
       }
 
-      useAnalyticBoxBuoyancy_    = simParams->model.useAnalyticBoxBuoyancy;
       usePhantomForceCorrection_ = simParams->model.usePhantomForceCorrection;
       useMemOnlyBuoyancy_        = simParams->model.useMemOnlyBuoyancy;
       useFullVolumeAnalyticBuoyancy_ = simParams->model.useFullVolumeAnalyticBuoyancy;
@@ -3938,8 +3596,7 @@ public:
             pinnedRotationAxes_[simObjs->floaterCylinderUIDs[ci]] = fcp.pinRotationAxes;
       }
       WALBERLA_LOG_INFO_ON_ROOT("[BoxBuoyancy] V_sub method (box + cylinder): "
-         << (useAnalyticBoxBuoyancy_ ? "ANALYTIC (box: OBB∩plane 6-tet clip; cylinder: disk∩plane closed form)"
-                                     : "SAMPLING (12³ points)")
+         << "SAMPLING (12³ points)"
          << "  pinned-position floaters: " << pinnedBoxPositions_.size());
 
       // Self-identify the buoyancy sampling mode in the log (answers "did this run use the ring?").
@@ -5435,7 +5092,6 @@ public:
 
          if (wTot > real_t(1e-6))
          {
-            const bool logStep = (stepCounter_ % evalFrequency_ == uint_t(0));
             // Plane-fit the surrounding surface (wide shell, upward normals only), then clip the rotated
             // box against that plane. n̂ points liquid→gas; degenerate (cancelled) normals fall back to
             // vertical (horizontal surface).
@@ -5450,18 +5106,16 @@ public:
                                          acc[bi*stride+6] / wTot);
 
             // ---- Analytical clip (exact OBB∩plane for boxes, exact disk∩plane for cylinders; cheap) —
-            //      used for the force when selected, and always logged as the cross-check against the
-            //      sampling estimate. ----
+            //      logged as the cross-check against the sampling estimate (useAnalyticBoxBuoyancy, which
+            //      used it for the force, was archived on 2026-11-20). ----
             Vector3< real_t > cbAnalytic(real_t(0));
             if (isCyl) clipCylinderAnalytic(hx, hz, R, nHat, xBar, pos, vSubAnalytic, cbAnalytic);
             else       clipBoxAnalytic(Vector3< real_t >(hx, hy, hz), R, nHat, xBar, pos, vSubAnalytic, cbAnalytic);
 
-            // ---- Sampling clip (12³ points; reference). Computed when it is the selected method, or at
-            //      eval steps so the log can compare it against the analytical result. For cylinders,
+            // ---- Sampling clip (12³ points), the V_sub used for the force. For cylinders,
             //      grid points outside the circular cross-section (body xy) are rejected, so the kept
             //      samples uniformly fill the cylinder volume. ----
             Vector3< real_t > cbSample(real_t(0));
-            if (!useAnalyticBoxBuoyancy_ || logStep)
             {
                const real_t planeOffset = nHat * (xBar - pos); // submerged sample: nHat·off < planeOffset
                constexpr int N = 12; // 12³ = 1728 samples per box (≈ π/4 of them inside a cylinder)
@@ -5484,8 +5138,8 @@ public:
                if (below > uint_t(0)) cbSample = cbSum / real_t(below);
             }
 
-            if (useAnalyticBoxBuoyancy_) { vSub = vSubAnalytic; cbOff = cbAnalytic; }
-            else                         { vSub = vSubSample;   cbOff = cbSample;   }
+            vSub  = vSubSample;
+            cbOff = cbSample;
          }
          else
          {
@@ -5543,7 +5197,7 @@ public:
                << "  |B-G|_horiz=" << std::sqrt(cbOff[0] * cbOff[0] + cbOff[1] * cbOff[1])
                << "  comOffsetZ=" << (boxComOffsetZ_.count(clipFloaters_[bi].uid)
                                          ? boxComOffsetZ_.at(clipFloaters_[bi].uid) : real_t(0))
-               << "  method=" << (useAnalyticBoxBuoyancy_ ? "ANALYTIC" : "SAMPLING")
+               << "  method=SAMPLING"
                // Cross-check both estimators when both were computed this step (both ≥ 0).
                << "  [xcheck V_sub: analytic=" << vSubAnalytic << " sampling=" << vSubSample
                << ((vSubAnalytic >= real_t(0) && vSubSample >= real_t(0) && vFull > real_t(0))
@@ -5571,7 +5225,7 @@ public:
                << "  M_y=" << Mvec[1] << "  |M|=" << Mvec.length() << " (>0 restoring)"
                << "  GZ=" << GZ << " LU  (righting arm)"
                << "  V_sub=" << vSub << "  submersion=" << real_t(100) * vSub / vFull << "%"
-               << "  |g|=" << gMag << "  method=" << (useAnalyticBoxBuoyancy_ ? "ANALYTIC" : "SAMPLING"));
+               << "  |g|=" << gMag << "  method=SAMPLING");
          }
       }
    }
@@ -5638,7 +5292,6 @@ private:
    std::unordered_map< walberla::id_t, real_t >       phantomForceZ_;       // keyed by UID; tapered F_pred_z per sphere (Option A vertical MEM correction)
    std::unordered_map< walberla::id_t, Vector3< real_t > > buoyancyCenterOffset_; // box C_b − C_com (world frame); box-only, for righting torque
    std::unordered_map< walberla::id_t, real_t >       boxComOffsetZ_;       // per-box COM offset below centroid (body z, const); for the pendulum righting torque
-   bool                                               useAnalyticBoxBuoyancy_{ false }; // analytical V_sub (box: OBB∩plane clip; cylinder: disk∩plane closed form) instead of the 12³ sampling
    bool                                               usePhantomForceCorrection_{ false }; // Option A: subtract F_pred_z from vertical MEM force
    // (DEFAULT) true → skip computeSubmergedVolumes()/computeSubmergedVolumesBox() entirely in
    // doDEMSubCycles: no vSub, no righting torque, matching Bogner & Rude (2013) exactly (buoyant

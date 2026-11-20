@@ -343,18 +343,18 @@ inline bool runCuboidPairEnergyFuzz(const config::Config::BlockHandle& b)
    }
    std::map< std::string, std::vector< real_t > > keErr, pErr, pen;
    std::map< std::string, std::vector< bool > >   contacted;
+   for (const auto& mode : modes)
+      if (mode != "gjk" && mode != "sat")
+         WALBERLA_ABORT("cuboidPairEnergyFuzz: unknown mode '" << mode << "' (valid: gjk, sat)");
    const real_t sep0 = real_t(2.5) * reach;
    for (const auto& mode : modes)
    {
       for (const auto& in : inits)
       {
-         // modes: gjk (GJK/EPA), sat (plain SAT, as in the drop tests), multipoint (useMultiPointBoxContact).
-         // "fraige" mode (useFraigeBoxContactModel) removed -- see
-         // archive/unused_contact_methods/ (fraige_multipoint_box_contact.h + fraige_validation_tests.cpp.excerpt).
+         // modes: gjk (GJK/EPA), sat (plain SAT, as in the drop tests). The "fraige" and "multipoint" modes were
+         // archived, see archive/unused_contact_methods/.
          DEMEngine engine(dt, real_t(1), real_t(0), poisson, collisionTime, real_t(0), real_t(10) * reach,
-                          /*useAnalyticalContactDetection=*/mode != "gjk", /*useRoundedBoxCorners=*/false,
-                          /*boxRoundingRadius=*/real_t(0.05), /*useMultiPointBoxContact=*/mode == "multipoint",
-                          false, real_t(0.3), false, real_t(0.15), false, real_t(0.25), false);
+                          /*useAnalyticalContactDetection=*/mode != "gjk");
          const size_t A = engine.addBox(Vec3(-sep0 / 2, 0, 0) - in.offset * real_t(0.5), Vec3(speed / 2, 0, 0), in.rotA,
                                         real_t(2) * halfExt, density);
          const size_t B = engine.addBox(Vec3(sep0 / 2, 0, 0) + in.offset * real_t(0.5), Vec3(-speed / 2, 0, 0), in.rotB,

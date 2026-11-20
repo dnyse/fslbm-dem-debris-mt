@@ -62,15 +62,6 @@ int main(int argc, char** argv)
    else if (testCase == "energyConservation") pass = dem_validation::runEnergyConservation(block);
    else if (testCase == "cylinderPairEnergyFuzz") pass = dem_validation::runCylinderPairEnergyFuzz(block);
    else if (testCase == "cuboidPairEnergyFuzz") pass = dem_validation::runCuboidPairEnergyFuzz(block);
-   else if (testCase == "cornerNormalDiscontinuity") pass = dem_validation::runCornerNormalDiscontinuity(block);
-   else if (testCase == "cornerFixComparison") pass = dem_validation::runCornerFixComparison(block);
-   else if (testCase == "multiPointDeepOverlapStability") pass = dem_validation::runMultiPointDeepOverlapStability(block);
-   else if (testCase == "multiPointDeepOverlapFuzz") pass = dem_validation::runMultiPointDeepOverlapFuzz(block);
-   else if (testCase == "multiPointEdgeCases") pass = dem_validation::runMultiPointEdgeCases(block);
-   else if (testCase == "fallOntoPileStability") pass = dem_validation::runFallOntoPileStability(block);
-   else if (testCase == "contactStiffnessCalibrationSweep") pass = dem_validation::runContactStiffnessCalibrationSweep(block);
-   else if (testCase == "multiPointBoxContactFuzz") pass = dem_validation::runMultiPointBoxContactFuzz(block);
-   else if (testCase == "productionCollisionReplay") pass = dem_validation::runProductionCollisionReplay(block);
    else if (testCase == "packing") pass = dem_validation::runPacking(block);
    else if (testCase == "angleOfRepose") pass = dem_validation::runAngleOfRepose(block);
    else if (testCase == "packingSingleShape") pass = dem_validation::runPackingSingleShape(block);
@@ -84,12 +75,10 @@ int main(int argc, char** argv)
                                                 "wallImpactBox, boxFaceDropRestitution, "
                                                 "boxInclineSlideStraightness, gjkVsAnalyticalCylinderWall, "
                                                 "pairRestitution, energyConservation, cylinderPairEnergyFuzz, "
-                                                "cuboidPairEnergyFuzz, cornerNormalDiscontinuity, "
-                                                "cornerFixComparison, multiPointDeepOverlapStability, "
-                                                "multiPointDeepOverlapFuzz, multiPointEdgeCases, "
-                                                "fallOntoPileStability, contactStiffnessCalibrationSweep, "
-                                                "multiPointBoxContactFuzz, productionCollisionReplay, packing, "
-                                                "angleOfRepose, packingSingleShape, rotatingDrum.");
+                                                "cuboidPairEnergyFuzz, packing, angleOfRepose, "
+                                                "packingSingleShape, rotatingDrum.");
+   // The corner-discontinuity, multi-point, pile, stiffness-sweep and collision-replay scenarios were archived on
+   // 2026-11-20 with the box-contact mitigation switches they compared, see archive/unused_contact_methods/.
 
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] FINAL RESULT for " << testCase << ": " << (pass ? "PASS" : "FAIL"));
    return pass ? EXIT_SUCCESS : EXIT_FAILURE;

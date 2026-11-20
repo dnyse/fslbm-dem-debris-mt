@@ -630,44 +630,13 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
 //! than the severe (>90%) errors special-contact alone used to produce. face-face, band-band-parallel
 //! and band-band-skewed remain provably exact under their own preconditions regardless (see their own
 //! branch comments above), so trusting them directly was never in question.
-// useTightTier1: OPTIONAL simplification (this session) -- default false reproduces the ORIGINAL
-// Tier 1 bound exactly (centre-to-centre distance vs. radius+halfLength sum per side). true replaces
-// it with detail::closestDistanceSqBetweenSegments's capsule bound: the two cylinders' own AXIS
-// SEGMENTS vs. the sum of their radii, instead of collapsing each cylinder to a sphere first. Still
-// fully conservative (never wrongly declares "definitely separated" for a real contact -- see that
-// function's own comment for why), but strictly tighter for any cylinder with length > 0, which is
-// every cylinder this file is ever used on. The original bound is ALSO provably redundant in
-// production regardless of this flag: ParticleKernels.h's own outer per-pair reject (circumscribing-
-// sphere sum) always runs first and is strictly tighter than the original center-distance Tier 1
-// bound, so any pair that ever reaches this check has already passed a stricter version of it -- the
-// original Tier 1 can never actually reject anything. useTightTier1=true is the first version of this
-// check that can. Old bound kept fully intact (not deleted) so the two can be A/B compared -- see
-// PaperAnalyticalContactTest.cpp's testTightTier1Accuracy10k.
-// skipTier1: OPTIONAL (this session) -- default false runs Tier 1 as normal (either bound above).
-// true skips the dispatch-gap check ENTIRELY -- no distance computation of any kind, "no contact" is
-// trusted immediately. This is NOT a general-purpose speedup: it is only correct when a sufficiently
-// tight Layer 1 pre-filter (ParticleKernels.h's own cheap reject, ModelParameters.useTightLayer1) has
-// ALREADY run upstream and rejected every pair that could possibly need this check -- proven via the
-// triangle inequality (see useTightTier1's own comment: any pair passing the tight Layer 1 bound also
-// passes -- i.e. is never rejected by -- Tier 1's own bound, tight OR original), and confirmed
-// empirically (job 4194491: cylTier1CheaplyProvedSeparated=0 at every interval with both flags on).
-// Using skipTier1=true WITHOUT a tight Layer 1 filter upstream would silently trust "no contact" for
-// pairs Tier 1 would otherwise have caught -- a real correctness risk, not just a missed optimization.
+// The tight capsule-bound and skip variants of Tier 1 (useTightTier1, skipTier1) were archived on 2026-11-20, see
+// archive/ARCHIVE_README.md; the capsule bound itself runs upstream as Layer 1 (useTightLayer1).
 inline bool cylinderCylinderResultIsUncertain(const CylinderState& ci, const CylinderState& cj,
-                                               const ContactResult& analytical, bool useTightTier1 = false,
-                                               bool skipTier1 = false)
+                                               const ContactResult& analytical)
 {
    if (!analytical.contact)
    {
-      if (skipTier1) return false; // Tier 1 disabled entirely -- see this function's own comment above.
-      if (useTightTier1)
-      {
-         Vec3 p0i, p1i, p0j, p1j;
-         detail::cylinderAxisEndpoints(ci, p0i, p1i);
-         detail::cylinderAxisEndpoints(cj, p0j, p1j);
-         const real_t reach = ci.radius + cj.radius;
-         return detail::closestDistanceSqBetweenSegments(p0i, p1i, p0j, p1j) < reach * reach;
-      }
       const real_t centreDist = (cj.pos - ci.pos).length();
       const real_t reach = ci.radius + cj.radius + real_t(0.5) * ci.length + real_t(0.5) * cj.length;
       return centreDist < reach; // Tier 1 (original, loose center-distance bound)
