@@ -91,14 +91,14 @@ inline void closestPointsBetweenSegments(const Vec3& p1, const Vec3& q1, const V
 // contact and outside both bodies; the force then acts with a wrong lever arm and the contact does net work
 // (energy gain in elastic collisions, DEMValidation cuboidPairEnergyFuzz).
 //  1. Contact patch of each box towards the other along the normal: the body-frame bounding box of the part of the box
-//     within `depth` of its deepest point (see supportFeature) -- a vertex for a just-touching corner, growing
+//     within kPatchDepthFraction * `depth` of its deepest point (see supportFeature) -- a vertex for a just-touching corner, growing
 //     continuously into an edge strip or a whole face.
 //  2. The two features are projected onto the plane perpendicular to the normal and intersected (point, segment, or
 //     convex polygon); the in-plane point is the centroid of the intersection, at mid-depth between the two features
 //     along the normal. Edge-edge -> crossing point; face-face -> centre of the common area; vertex-face -> the vertex.
 //     If the projections do not intersect (round-off at a feature boundary), the closest pair of points of the two
 //     features is used instead.
-//  3. The patches are bounding boxes, slightly larger than the penetrating parts, so the point is placed on the body
+//  3. The patches are bounding boxes, larger than the regions they bound, so the point is placed on the body
 //     overlap in closed form (placeOnNormalLine): the line through the point along the normal is clipped against the
 //     slabs of both boxes (clipLineToBox) and the point is the midpoint of the common interval. This moves the point
 //     only along the normal, the force's line of action, so the torque is unchanged. Where the line misses the
@@ -114,7 +114,7 @@ struct P2
 };
 inline real_t cross2(const P2& a, const P2& b, const P2& c) { return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x); }
 
-// convex hull (counter-clockwise) of up to 4 points; collinear/duplicate points removed
+// convex hull (counter-clockwise, monotone chain) of a point set; collinear/duplicate points removed
 inline std::vector< P2 > hull(std::vector< P2 > pts, real_t eps)
 {
    std::sort(pts.begin(), pts.end(), [](const P2& a, const P2& b) { return a.x < b.x || (!(b.x < a.x) && a.y < b.y); });

@@ -69,7 +69,7 @@ struct SimulationObjects
    BlockDataID excessMassFieldID;                     const std::string excessMassFieldFile{ "excessMassField.file" };
    BlockDataID forceDensityFieldID;
 
-   // Surface geomtery fields -----------------------------------------------------------------------------------------
+   // Surface geometry fields -----------------------------------------------------------------------------------------
    BlockDataID curvatureFieldID;
    BlockDataID normalFieldID;
    BlockDataID obstacleNormalFieldID;
@@ -87,7 +87,8 @@ struct SimulationObjects
    // floaterBoxUIDs[bi] = UID of floating box bi (matches simParams->floatingBoxes[bi]).
    // floaterCylinderUIDs[ci] = UID of floating cylinder ci (matches simParams->floatingCylinders[ci]).
    // floaterCapsuleUIDs[pi] = UID of floating capsule pi (matches simParams->floatingCapsules[pi]).
-   // Filled by setupParticles (indexed creation + allReduce(SUM)), so every rank knows every floater's UID.
+   // Filled by setupParticles (indexed creation + allReduce(SUM)), so every rank knows every floater's UID;
+   // floaterCapsuleUIDs only by the DropTest variant (SetupStages_drop_test.h).
    std::vector< walberla::id_t >                               floaterUIDs;
    std::vector< walberla::id_t >                               floaterBoxUIDs;
    std::vector< walberla::id_t >                               floaterCylinderUIDs;
@@ -101,8 +102,9 @@ struct SimulationObjects
       std::make_shared< std::unordered_set< walberla::id_t > >();
 
    // UIDs of floaters released in this main step (SetupStages::releaseSettledFloatingSpheres). ComputeContacts
-   // (ParticleKernels.h) aborts with diagnostics if one of them is in genuine contact, i.e. was released on top of
-   // an active neighbour. Cleared at the end of every doDEMSubCycles(). Debug/validation aid.
+   // (ParticleKernels.h) aborts with diagnostics if one of them is in genuine contact at sub-cycle 0, i.e. was
+   // released on top of an active neighbour; contacts at later sub-cycles are only logged. Cleared at the end of
+   // every doDEMSubCycles(). Debug/validation aid.
    std::shared_ptr< std::unordered_set< walberla::id_t > >     freshlyActivatedFloaterUIDs =
       std::make_shared< std::unordered_set< walberla::id_t > >();
 

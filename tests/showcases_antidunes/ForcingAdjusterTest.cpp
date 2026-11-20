@@ -32,7 +32,7 @@
 
 #include "BuildTimeloop.h"
 // BuildTimeloop.h only forward-declares trackWatchCells, checkPdfNaN, logFluidBoxHistory, logDensityColumn and
-// logWaterHeights; their definitions are in SetupStages.h, which Antidunes.cpp includes right after it. Without it
+// logWaterHeights; their definitions are in SetupStages.h, which Antidunes.cpp includes after it. Without it
 // the addSweep*/addAfterTimeStepDiagnosticSweep lambdas from BuildTimeloop.h leave them unresolved at link time.
 #include "SetupStages.h"
 

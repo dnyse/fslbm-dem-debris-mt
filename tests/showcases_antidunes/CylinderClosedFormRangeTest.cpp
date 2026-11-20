@@ -3,17 +3,17 @@
 //! Characterisation test: for which overlap depths is the closed-form Kodam+Guo cylinder-cylinder result
 //! (closed_form_contacts::cylinderCylinderContact) a correct penetration depth?
 //!
-//! Background: rods piled up in the cylinder hopper interpenetrate by 30-90 % of their volume; there the closed form
-//! returned e.g. face-edge overlap 0.001 LU or edge-edge overlap 18 LU for a pair with true depth ~5.9 LU (GJK/EPA
-//! agrees with the truth). The test shows:
-//!   (1) ground truth: the exact penetration depth of two convex bodies is PD = min_n [ h_A(n) + h_B(n) - d.n ]
-//!       (support function h(n) = (L/2)|n.a| + R sqrt(1-(n.a)^2));
-//!   (2) the closed form is accurate for shallow overlaps and wrong for deep ones (measured per depth class);
-//!   (3) a cheap self-consistency check, needed(n) = h_A(n)+h_B(n)-d.n along the reported normal (min over both
-//!       orientations), exposes wrong results: needed(n) >= PD always, so an under-estimate overlap < needed - tol is
-//!       always detectable, and for shallow contacts needed(n) == overlap;
-//!   (4) GJK/EPA (analytic path off) is accurate at every depth.
-//! The check in (3) is not a production fallback; this test only shows that it would separate right from wrong.
+//! Ground truth: the exact penetration depth of two convex bodies, PD = min_n [ h_A(n) + h_B(n) - d.n ] (support function
+//! h(n) = (L/2)|n.a| + R sqrt(1-(n.a)^2)), minimised over a direction grid. Self-consistency check: needed(n) =
+//! h_A(n)+h_B(n)-d.n along the reported normal (min over both orientations) satisfies needed(n) >= PD, so every
+//! under-estimate by more than tol is flagged by overlap < needed - tol; over-estimates are flagged against upperBound().
+//!   (A) five recorded deeply nested rod pairs from a cylinder-hopper run: PD ~2R, the closed form under-reports by >4x,
+//!       the check flags it, GJK/EPA (analytic path off) is within 0.25 LU of PD;
+//!   (B) random pairs binned by PD: GJK/EPA within 0.25 LU, every under-estimate flagged, <= 8 % false alarms on correct
+//!       results, >= 95 % of over-estimates flagged, closed form right for >= 99 % of overlaps < 0.3 R and wrong for
+//!       > 10 % of overlaps of 0.6-2 R.
+//! Production applies a form of this check only to band-edge results and only with kodamBandEdgeAxialCheck (default
+//! off). CYL_CENTRE_CAP set: use the 3D centre-distance cap selection instead of Kodam Eq. 68-70.
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 

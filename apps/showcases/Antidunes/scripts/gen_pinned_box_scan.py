@@ -70,7 +70,7 @@ def sbatch(cases):
 
 # Pinned-box heel-angle scan at real gravity (gen_pinned_box_scan.py): {len(cases)} cases sequentially. Submit as
 # `cd <checkout>/apps/showcases/Antidunes && sbatch jobs/run_72_pinbox_scan.sbatch`. Per-job results dir (never overwritten), read-only backup in
-# ~/pinscan_backup, NO vault archive (file quota exhausted).
+# ~/pinscan_backup, NO vault archive.
 if [[ -n "${{SLURM_SUBMIT_DIR:-}}" ]]; then
     REPO="$(cd "$SLURM_SUBMIT_DIR/../../.." && pwd)"
 else

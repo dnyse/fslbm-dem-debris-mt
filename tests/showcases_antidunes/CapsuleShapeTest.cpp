@@ -25,9 +25,10 @@
 //!  - support() (GJK): cardinal and oblique directions against the Minkowski-sum definition (segment + ball).
 //!  - ContainsPointFunctor through SingleCast, the call path of MovingParticleMapping.h, including points
 //!    beyond the core end but inside the rounded cap, and just outside the rounded corner.
-//!  - Contact detection through the production class SolidCylinderContactDetection: Capsule x HalfSpace,
-//!    Capsule x CylindricalBoundary and Capsule x Capsule. No analytic Capsule overload exists, so all three
-//!    use the generic GJK/EPA fallback.
+//!  - Contact detection through the production class SolidCylinderContactDetection: Capsule x HalfSpace and
+//!    Capsule x Capsule fall through to GeneralContactDetection (its generic HalfSpace support-point template and
+//!    GJK/EPA, respectively); Capsule x CylindricalBoundary uses the closed-form solid-pillar overload in
+//!    ParticleKernels.h.
 //!  - pack()/unpack() MPI round-trip.
 //======================================================================================================================
 
@@ -249,8 +250,9 @@ void testCapsuleContainsPoint_RespectsPositionAndRotation()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Contact detection through the production class SolidCylinderContactDetection (ParticleKernels.h). No analytic
-// Capsule overload exists, so these also cover the generic GeneralContactDetection fallback.
+// Contact detection through the production class SolidCylinderContactDetection (ParticleKernels.h). Its only Capsule
+// overload is Capsule x CylindricalBoundary (closed form, solid pillar); HalfSpace and Capsule x Capsule cover the
+// generic GeneralContactDetection fallback.
 // ---------------------------------------------------------------------------------------------
 
 void testCapsuleHalfSpaceContact()
@@ -346,7 +348,7 @@ void testCapsuleCapsuleContact()
 {
    // Two parallel capsules (radius 0.5, axis world z), centres 0.8 apart along x -> overlap 0.5+0.5-0.8 = 0.2.
    // Same geometry as testCylinderCylinderContact in ContactDetectionTest.cpp; the end caps play no role, so
-   // the GJK/EPA fallback must match the cylinder result.
+   // GJK/EPA must match the cylinder result.
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
    mesa_pd::data::ParticleAccessor ac(ps);
 

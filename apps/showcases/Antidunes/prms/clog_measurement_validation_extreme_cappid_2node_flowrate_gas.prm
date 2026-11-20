@@ -1,6 +1,6 @@
 // Centred pillar, extreme scale, capped PID, staggered release; 2-node variant with the flow-rate evaluator.
-// Domain <768,40,180>, X periodic, Y walled, NoSlip top and bottom. Z was doubled from 90 to 180 because at Z = 90 the
-// backed-up free surface upstream of the jam reached the ceiling; the pillar's BodyBC spans the full height.
+// Domain <768,40,180>, X periodic, Y walled, NoSlip top and bottom. Z = 180 keeps the backed-up free surface upstream
+// of the jam below the ceiling (at Z = 90 it reaches it); the pillar's BodyBC spans the full height.
 // Obstacle: one CylinderPillar at (384, 20), radius 12 (60 % of the 40 LU width), leaving two 8 LU slits that are
 // narrower than the 10 LU sphere diameter, so a single sphere cannot pass.
 // Physics: target velocity 0.04 (high enough to drive spheres into the slits), Re 3100, Fr 1.31, We 15.62,
@@ -18,7 +18,6 @@
 // spawn points (startInactive keeps them dormant until release).
 // cellsPerBlock <64,20,30> -> (12, 2, 6) = 144 ranks, 2 nodes. 124750 steps. ClogMeasurement probe pairs at
 // X = 280/500 on both slit centrelines (Y = 4 and 36, z = 40) with flow rate; VTK every 24950 steps.
-// Derived from clog_measurement_validation_extreme_pidon_2node_flowrate_gas.prm (PID cap, guardCurvatureInputs).
 
 BlockForestParameters
 {

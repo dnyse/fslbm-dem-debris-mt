@@ -15,25 +15,25 @@
 //
 //! \file QuarticSolverComparisonTest.cpp
 //! Time/accuracy comparison of the three quartic root finders in the `detail` namespace of
-//! ClosedFormContactsCylinderPlaneGeometry.h: solveQuarticDurandKerner (default; at its 30-iteration default and at
-//! 60), solveQuarticFerrari (closed form, no iteration) and solveQuarticAberthEhrlich (same simultaneous-refinement
-//! family with a full Newton correction: cubic instead of quadratic convergence order; tested at 30 and at 10
-//! iterations to see whether it gets away with fewer sweeps).
+//! ClosedFormContactsCylinderPlaneGeometry.h: solveQuarticDurandKerner (at its 30-iteration default and at 60),
+//! solveQuarticFerrari (closed form, no iteration; the production default, QuarticSolverMethod::Ferrari) and
+//! solveQuarticAberthEhrlich (same simultaneous-refinement family with a full Newton correction: cubic instead of
+//! quadratic convergence order; tested at 30 and at 10 iterations to see whether it gets away with fewer sweeps).
+//! Reports only; no assertions.
 //!
 //! Quartics are built from known roots, so each solver is compared with ground truth rather than with another
 //! solver. Five root configurations, chosen because they stress the methods differently:
 //!   0) four real roots, widely separated                     -- easy for every method.
-//!   1) four real roots with one close pair                   -- stresses the iterative convergence rate.
+//!   1) four real roots in two close pairs                    -- stresses the iterative convergence rate.
 //!   2) two real roots + one complex-conjugate pair           -- the common case in the geometric application
 //!      (a quartic in tan(theta/2) generally has 0 or 2 real roots, not 4).
 //!   3) two complex-conjugate pairs, no real roots            -- the "no valid theta" case.
-//!   4) a near-repeated real root pair                        -- the hard case: Ferrari's resolvent-cubic
+//!   4) an exact double real root + a near-repeated real pair -- the hard case: Ferrari's resolvent-cubic
 //!      discriminant is near its branch boundary, and the Durand-Kerner/Aberth-Ehrlich denominators (products/sums
 //!      of root differences) get small and convergence slows.
 //!
 //! Timing uses one fixed category-2 quartic in a tight call loop, as in CylinderCylinderContactBenchmark.cpp
 //! (volatile sink against dead-code elimination; fixed input, so only per-call cost is measured).
-//! Informs whether solveQuarticDurandKerner should be replaced.
 //======================================================================================================================
 
 #include "ClosedFormContacts.h"

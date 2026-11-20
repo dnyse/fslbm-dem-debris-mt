@@ -26,11 +26,14 @@
 //!     solvers, Cylinder x Plane, Cylinder x Sphere.
 //!   - ClosedFormContactsCylinderCylinder.h: Cylinder x Cylinder (depends on the geometry file above).
 //!
-//! Use in the simulation is opt-in: ParticleKernels.h's ComputeContacts calls
-//! cylinderCylinderContact/cylinderCylinderResultIsUncertain only if ModelParameters.useAnalyticalContactDetection
-//! is set (default false, GJK/EPA only). A result flagged by cylinderCylinderResultIsUncertain still falls back to
-//! GJK/EPA unless ModelParameters.usePureAnalyticalCylinder is also set, which trusts the flagged analytical answer
-//! with no safety net; see ComputeContacts::operator() for the exact tiering. PaperAnalyticalContactTest.cpp compares
+//! Use in the simulation is opt-in: SolidCylinderContactDetection (ParticleKernels.h, used by ComputeContacts) calls
+//! boxBoxSAT / cylinderCylinderContact / cylinderCylinderResultIsUncertain only if
+//! ModelParameters.useAnalyticalContactDetection is set (default false, GJK/EPA only; the diagnostic
+//! shadowAnalyticCylinderLog mode evaluates cylinderCylinderContact alongside GJK/EPA without using it). A result
+//! flagged by cylinderCylinderResultIsUncertain still falls back to GJK/EPA unless
+//! ModelParameters.usePureAnalyticalCylinder is also set, which trusts the flagged analytical answer with no safety
+//! net; see SolidCylinderContactDetection's Cylinder x Cylinder operator() for the exact tiering (including the
+//! opt-in refineCylinderContacts path). PaperAnalyticalContactTest.cpp compares
 //! these closed forms against SolidCylinderContactDetection's GJK/EPA results standalone.
 //!
 //! -------------------------------------------------------------------------------------------------
@@ -55,25 +58,26 @@
 //! Validation caveat (companion Part II paper, Chemical Engineering Science 65(22), 5863-5871): Part II validates
 //! the cylinder-PLANE algorithm directly against a closed-form rebound formula (single cylinder bouncing off a
 //! wall). It does NOT validate cylinder-CYLINDER contact geometry (overlap/normal/point) against direct ground
-//! truth; its only cylinder-cylinder experiment (250 cylinders packed in a container) is compared with AGGREGATE
-//! bulk measurements (fill height, bulk solid fraction). "This is the published algorithm" is therefore a stronger
+//! truth; its multi-particle experiments (fill height and bulk solid fraction of 250 cylinders dropped into a
+//! container, dynamic angle of repose in a rotating drum) compare only AGGREGATE bulk measurements. "This is the
+//! published algorithm" is therefore a stronger
 //! claim than "its cylinder-cylinder branch has been independently ground-truthed".
 //!
 //! Corrections: Guo, Y., Wassgren, C., Ketterhagen, W., Hancock, B., & Curtis, J. (2012). "Some
 //! computational considerations associated with discrete element modeling of cylindrical particles."
 //! Powder Technology, 228, 193-198. A follow-up by an overlapping author team documenting classification bugs in
 //! Kodam et al.'s face-edge/band-edge/band-band-skewed dispatch ("undetected or wrongly detected contacts can lead
-//! to large overlaps") and a scenario Kodam et al. never defined (their Fig. 8 "special contact"). This file
-//! implements Guo et al.'s corrected criteria (see rimVsFaceOrBand() and the band-band-skewed exclusion) in place of
-//! Kodam et al.'s originals; Kodam's original dispatch gives false negatives for overlapping, obliquely tilted
-//! pairs that GJK/EPA detects (PaperAnalyticalContactTest.cpp).
+//! to large overlaps") and a scenario Kodam et al. never defined (their Fig. 8 "special contact").
+//! ClosedFormContactsCylinderCylinder.h implements Guo et al.'s corrected criteria (see rimVsFaceOrBand() and the
+//! band-band-skewed exclusion) in place of Kodam et al.'s originals; Kodam's original dispatch gives false negatives
+//! for overlapping, obliquely tilted pairs that GJK/EPA detects (PaperAnalyticalContactTest.cpp).
 //!
 //! Two sub-problems (band-edge, eq. 74-77; edge-edge point location, eq. 82-85) reduce to a fourth-order
-//! polynomial in sin(theta). closestThetaOnCircleToLine derives the quartic coefficients directly from the
-//! geometry (algebra in its own comment) and solves them with Ferrari's method (solveQuarticFerrari, O(1), no
-//! iteration), the default; QuarticSolverComparisonTest.cpp found it as accurate as Durand-Kerner iteration at a
-//! fraction of the cost. Durand-Kerner and Aberth-Ehrlich remain for comparison (see QuarticSolverMethod).
-//! closestThetaOnCircleToPoint (edge-edge alternating-projection loop) has a simpler exact answer, a single
+//! polynomial in sin(theta). closestThetaOnCircleToLine (band-edge) and findRimCrossing (edge-edge point A) instead
+//! derive quartics in t = tan(theta/2) directly from the geometry (algebra in their own comments) and solve them
+//! with Ferrari's method (solveQuarticFerrari, O(1), no iteration), the default; QuarticSolverComparisonTest.cpp
+//! found it as accurate as Durand-Kerner iteration at a fraction of the cost. Durand-Kerner and Aberth-Ehrlich remain for comparison (see QuarticSolverMethod).
+//! closestThetaOnCircleToPoint (findRimCrossing's optional fast reference angle) has a simpler exact answer, a single
 //! atan2, since its objective is a pure first-harmonic trig function of theta. Both closed forms match a
 //! golden-section reference minimisation to floating-point precision across thousands of randomised
 //! configurations.

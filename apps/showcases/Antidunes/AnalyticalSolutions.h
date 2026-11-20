@@ -141,7 +141,7 @@ inline ImpactResult rigidBodyImpact(const BodyState& A, const BodyState& B, cons
    if (vt < real_t(1e-12) || friction <= real_t(0))
    {
       // No tangential slip (or frictionless): pure normal impulse.
-      // nKn = 1/m + r^2*cos^2(alpha+theta)/Iyy  (Kodam et al. 2010 Eq. 3 denominator, cylinder-wall case)
+      // nKn = 1/m + r^2*cos^2(alpha+theta)/Iyy  (Kodam et al. 2010 Part II, Eq. 3 denominator, cylinder-wall case)
       const real_t nKn = n * (K * n);
       // Jn = -(1+e)*vn / nKn  =>
       // omega_y^+ = m*Vz,CM^-*(1+e)*r*cos(alpha+theta) / (Iyy + m*r^2*cos^2(alpha+theta))  (Eq. 3)
@@ -298,7 +298,7 @@ inline ImpactResult cylinderWallImpact(const closed_form_contacts::CylinderState
    }
    else
    {
-      // corner point C at r = sqrt(R^2 + L^2/4) from the centre (Kodam et al. 2010 Eq. 4, Fig. 3)
+      // corner point C at r = sqrt(R^2 + L^2/4) from the centre (Kodam et al. 2010 Part II, Eq. 4, Fig. 3)
       const Vec3 E = closed_form_contacts::detail::rimPointTowardPlane(cyl, wallPos, wallNormal);
       contactPoint = E - cyl.pos;
    }
@@ -306,7 +306,7 @@ inline ImpactResult cylinderWallImpact(const closed_form_contacts::CylinderState
                                restitution, friction);
 }
 
-//! Box-corner-first wall impact. `support` is the box's own support() function (its exact deepest-point
+//! Box-corner-first wall impact. `supportPointBodyFrame` is the box's own support point (its exact deepest-point
 //! geometry, mesa_pd::data::Box::support) evaluated at the body-frame direction opposite the wall
 //! normal -- the corner-selection logic of SolidCylinderContactDetection's Box x HalfSpace overload
 //! (ParticleKernels.h), so the analytical reference targets the contact point the DEM code under test finds.
@@ -349,10 +349,10 @@ inline real_t selfCheckHousnerRelativeError(real_t slendernessAngleRad)
    const real_t alpha = slendernessAngleRad;
    const real_t omegaBefore = real_t(1); // arbitrary reference magnitude -- the ratio is scale-invariant
 
-   // Pre-impact: block rotating about the OLD corner O (position -b*(sin a, 0, -cos a) rel. to centroid,
+   // Pre-impact: block rotating about the OLD corner O (position (-b*sin a, 0, -b*cos a) rel. to centroid,
    // i.e. down and to one side) with angular velocity omegaBefore about +Y. The NEW corner O' about to
    // touch down is at +b*(sin a, 0, -cos a) rel. to centroid. Centroid velocity from rigid rotation about
-   // O: v_G = omega x (G - O) = omega*Y x (b*sin a, 0, -b*cos a).
+   // O: v_G = omega x (G - O) = omega*Y x (b*sin a, 0, b*cos a).
    const Vec3 omegaVec(real_t(0), omegaBefore, real_t(0));
    const Vec3 rOldCorner(-b * std::sin(alpha), real_t(0), -b * std::cos(alpha));
    const Vec3 rNewCorner( b * std::sin(alpha), real_t(0), -b * std::cos(alpha));

@@ -139,8 +139,9 @@ struct PhysicsParams {
    // > 0 -> sets the LBM relaxation rate directly and derives the matching viscosity, e.g. to damp a still-water
    // settle test. 0 = off (default).
    real_t relaxationRateOverride;
-   // > 0 -> sets the lattice gravity directly, overriding both values above, e.g. g = 7.5e-4 of Bogner & Rude (2013)
-   // for their floating-cube validation (the default Fr-derived value is ~7.0e-6). 0 = off (default).
+   // > 0 -> sets the lattice gravity directly, overriding the Fr-derived or hardcoded value, e.g. g = 7.5e-4 of
+   // Bogner & Rude (2013) for their floating-cube validation (the default Fr-derived value is ~7.0e-6). 0 = off
+   // (default).
    real_t gravityOverride;
    // Surface tension [LU]: >= 0 replaces the derived/hardcoded value (0 = no surface tension); < 0 (default -1)
    // keeps it.
@@ -184,8 +185,9 @@ struct PhysicsParams {
    // (defaults 0.1 / 1.9); |u| > fluidSanityMaxVelocity; max|f_i| > fluidSanityMaxPopulation (default 2); fill outside
    // [-tol, 1+tol] (interface) or [1-tol, 1+tol] (liquid), tol = fluidSanityFillTolerance (default 0.05).
    // fluidSanityMaxVelocity default 0.17 = lattice Mach number 0.3 (Kruger et al. 2017, Sect. 7.2, p. 279): an accuracy
-   // warning, not a collapse threshold. Output: per rank [FLUID-SANITY] (first 60 lines), root [FLUID-SANITY-SUMMARY]
-   // (first 400). fluidSanityAbortAbove > 0 aborts once one step has more violating cells (0 = report only).
+   // warning, not a collapse threshold. Output: per rank [FLUID-SANITY] (at most 400 lines), root
+   // [FLUID-SANITY-SUMMARY] (at most 2000), each throttled by fluidSanityShouldLog (SetupStages.h).
+   // fluidSanityAbortAbove > 0 aborts once one step has more violating cells (0 = report only).
    // A threshold of 0 (fill tolerance < 0) disables that category.
    bool   fluidSanityEnabled;
    uint_t fluidSanityFromStep;
@@ -257,8 +259,8 @@ struct ParticleParams {
    bool        useLubricationCorrection;
    bool        useNoSlipParticles;
    bool        useParticleBed;
-   real_t      floaterRingBand;   // sphere V_sub plane fit: keep interface cells with |dist-r| < band. Default 1.5
-                                  // (contact ring); a huge value (e.g. 1e6) samples the full box.
+   real_t      floaterRingBand;   // Default 1.5. Only printed in the [FloaterBuoyancy] constructor log
+                                  // (ParticleKernels.h); the sphere V_sub plane fit does not read it.
    // Both > 0: the SI scaling skips inFileName's header (getAvgDiameterScalingFactor, Utility.h) and uses
    // avgParticleDiameterOverride [LU] (sets liquidHeight, floorHeight, particleFixingHeight) and dxSIOverride [m/LU]
    // (sets dx_SI, dt_SI) directly, e.g. for floater-only scenarios. Either alone is ignored. Default 0.
@@ -329,12 +331,13 @@ struct FloatingSphereParams {
    Vector3< real_t > position;
    real_t            radius;
    real_t            densityRatio;
-   // LBM steps the sphere is held fixed before release, so the FSLBM can settle the interface around a body started at
-   // or above the free surface. 0 = release immediately (default).
+   // Main step at which the sphere is released; until then it is held FIXED (unless pinPosition), so the FSLBM can
+   // settle the interface around a body started at or above the free surface. 0 = never fixed (default).
    uint_t            settlingSteps;
-   // Initial linear velocity [LU/step], e.g. for collision tests. Default <0,0,0>; only effective with settlingSteps 0.
+   // Initial linear velocity [LU/step], e.g. for collision tests. Default <0,0,0>. Meant for settlingSteps 0: a FIXED
+   // sphere keeps this velocity (the integrator skips it) and moves with it once released.
    Vector3< real_t > initialVelocity;
-   // pinPosition/pinAxes: hold the translational DOFs selected by pinAxes (nonzero = pinned, default <1,1,1>) at
+   // pinPosition/pinAxes: hold the translational DOFs selected by pinAxes (1 = pinned, 0 = free, default <1,1,1>) at
    // `position` every DEM sub-cycle; rotation stays free. <1,1,0> lets a body find its buoyant depth without lateral
    // drift. Default false.
    bool              pinPosition;
@@ -424,14 +427,14 @@ struct FloatingBoxParams {
    Vector3< real_t > halfExtents;   // half-size in each dimension; edgeLength = 2 * halfExtents
    real_t            densityRatio;
    uint_t            settlingSteps;      // same semantics as FloatingSphereParams::settlingSteps
-   real_t            initialTiltAngleDeg; // initial rotation about the Y-axis (degrees); 0 = upright
+   real_t            initialTiltAngleDeg; // initial rotation about initialTiltAxis (degrees); 0 = upright
    // Axis of the initial rotation (default world Y); with a random axis and angle the box starts in any orientation.
    Vector3< real_t > initialTiltAxis;
    real_t            comOffsetZ;          // body-frame z-offset of the COM from the centroid [LU]; negative = COM
                                           // below the centroid (righting torque). Default 0 (uniform density).
    bool              pinPosition;         // true -> translation held at `position` every DEM sub-cycle, rotation
                                           // free (unlike the FIXED flag). Default false.
-   Vector3< real_t > pinAxes;             // pin mask for pinPosition, nonzero = pinned. Default <1,1,1>; <1,1,0>
+   Vector3< real_t > pinAxes;             // pin mask for pinPosition, 1 = pinned. Default <1,1,1>; <1,1,0>
                                           // lets the box find its buoyant depth without lateral drift.
    bool              pinRotation;         // true -> the angular velocity components selected by pinRotationAxes
                                           // are zeroed every DEM sub-cycle. Default false.
@@ -475,7 +478,7 @@ inline std::vector< FloatingBoxParams > parseFloatingBoxes(const shared_ptr< con
 
 // Floating cylinder ("log", type 4): a finite solid mesa_pd Cylinder, fully two-way coupled like
 // the floating box. The shape's axis is the BODY z-axis; `axis` gives its initial WORLD direction
-// (default <0,1,0> = spanwise log lying across the flow). All box knobs carry over 1:1.
+// (default <0,1,0> = spanwise log lying across the flow). The box knobs carry over, except initialTiltAxis.
 struct FloatingCylinderParams {
    Vector3< real_t > position;
    real_t            radius;
@@ -484,7 +487,7 @@ struct FloatingCylinderParams {
    real_t            densityRatio;
    uint_t            settlingSteps;       // same semantics as FloatingSphereParams::settlingSteps
    real_t            initialTiltAngleDeg; // extra rotation about the world Y-axis, applied AFTER axis alignment
-   real_t            comOffsetZ;          // signed body-frame offset of the COM below the centroid (same as box)
+   real_t            comOffsetZ;          // body-frame z-offset of the COM from the centroid (same as box)
    bool              pinPosition;         // hold TRANSLATION at `position`, rotation free (same as box)
    Vector3< real_t > pinAxes;             // per-axis pin mask (same as box)
    bool              pinRotation;         // per-axis rotation pin, zero angular velocity (same as box)
@@ -528,22 +531,26 @@ inline std::vector< FloatingCylinderParams > parseFloatingCylinders(const shared
    return result;
 }
 
-// Floating capsule (mesa_pd::data::Capsule, SHAPE_TYPE 7): a cylinder with hemispherical caps. `length` is the full
-// end-to-end length including the caps, as in FloatingCylinderParams. There is no closed-form contact routine: every
-// capsule pair goes through GeneralContactDetection's GJK/EPA.
+// Floating capsule (mesa_pd::data::Capsule, SHAPE_TYPE 7, particle type 5), created only by DropTest
+// (SetupStages_drop_test.h). `length` is the full end-to-end length including the caps, as in FloatingCylinderParams.
+// Capsule pairs go through GeneralContactDetection's GJK/EPA; only Capsule x solid CylindricalBoundary has a closed
+// form (ParticleKernels.h).
+// Not applied to capsules: the pin masks and pinRotation (ParticleKernels' pinBoxTranslations handles types 1/3/4
+// only; pinPosition merely suppresses the FIXED flag), and the release at settlingSteps / of startInactive
+// (releaseSettledFloatingSpheres skips capsules), so such a capsule stays FIXED / dormant.
 struct FloatingCapsuleParams {
    Vector3< real_t > position;
    real_t            radius;
    real_t            length;              // full end-to-end length INCLUDING the hemispherical caps
    Vector3< real_t > axis;                // initial world direction of the capsule axis (normalised on parse)
    real_t            densityRatio;
-   uint_t            settlingSteps;       // same semantics as FloatingSphereParams::settlingSteps
+   uint_t            settlingSteps;       // > 0 -> created FIXED (unless pinPosition); see the struct comment
    real_t            initialTiltAngleDeg; // extra rotation about the world Y-axis, applied AFTER axis alignment
-   bool              pinPosition;         // hold TRANSLATION at `position`, rotation free (same as box/cylinder)
-   Vector3< real_t > pinAxes;             // per-axis pin mask (same as box/cylinder)
-   bool              pinRotation;         // per-axis rotation pin, zero angular velocity (same as box/cylinder)
-   Vector3< real_t > pinRotationAxes;     // per-axis rotation pin mask (same as box/cylinder)
-   bool              startInactive;       // see FloatingSphereParams::startInactive.
+   bool              pinPosition;
+   Vector3< real_t > pinAxes;
+   bool              pinRotation;
+   Vector3< real_t > pinRotationAxes;
+   bool              startInactive;       // registered as dormant; see the struct comment
 
    FloatingCapsuleParams(const config::Config::BlockHandle& b)
    {
@@ -692,19 +699,21 @@ struct ModelParams {
    //         steps (BuildTimeloop.h, diagnoseNaNNormals). Diagnostic only, full field scan per step. Default false.
    bool        diagnoseNaNNormals;
 
-   // true -> subtract the analytic phantom force F_pred_z = dP * A_proj * taper (pile-up head) from the vertical MEM
-   //         force on each floating sphere (particle side only, no PDF feedback); vanishes without pile-up. Applied
-   //         only when useMemOnlyBuoyancy=false (AddExternalForces). false (default) -> no correction.
+   // true -> AddExternalForces subtracts the per-floater phantom force F_pred_z (pile-up head dP * A_proj * taper)
+   //         from the vertical MEM force, only when useMemOnlyBuoyancy=false. Currently a no-op: the F_pred_z
+   //         computation in computeSubmergedVolumes (ParticleKernels.h) is commented out, so the map stays empty.
+   //         false (default) -> no correction.
    bool        usePhantomForceCorrection;
 
    // true -> the MEM hydrostatic reference height H (SimpleBB's rhoHydStat, force side only) is tracked live: each step
-   //         the local waterlines of all floaters with a clean fitted ring are averaged and EMA-blended (alpha 0.2)
-   //         into one shared H. An offset correction only; it cannot remove velocity-dependent residuals. No effect on
-   //         the MEM force while useBognerThreePhaseMEM=true. false (default) -> H = absoluteLiquidHeight.
+   //         the fitted local waterlines of the sphere floaters are averaged and EMA-blended (alpha 0.2) into one
+   //         shared H (computeSubmergedVolumes, ParticleKernels.h, so only updated when useMemOnlyBuoyancy=false). An
+   //         offset correction only; it cannot remove velocity-dependent residuals. No effect on the MEM force while
+   //         useBognerThreePhaseMEM=true. false (default) -> H = staticReferenceHeight().
    bool        useDynamicReferenceHeight;
 
    // >= 0 -> replaces the static reference height H (SimpleBB's rhoHydStat, the hydrostatic reconstruction target, the
-   //         PhantomDecomp flatRef) by this absolute z [LU] instead of absoluteLiquidHeight. Diagnostic ablation:
+   //         seed of the dynamic H) by this absolute z [LU] instead of absoluteLiquidHeight. Diagnostic ablation:
    //         shifts the subtracted reference by drho = 3*|a_z|*dH, which a fully submerged body does not feel but a
    //         floater does. Fluid initialisation unaffected. < 0 (default -1) -> disabled.
    real_t      staticReferenceHeightOverride;
@@ -736,7 +745,8 @@ struct ModelParams {
    //         projection overlap r_i(L) + r_j(L) - L.(x_j - x_i) over directions L
    //         (closed_form_contacts::refineCylinderContact): exact closed-form scenarios are unchanged, inexact ones get
    //         the minimising depth/normal, "no scenario" pairs are decided by the same descent; no GJK/EPA call. Also
-   //         used for rod vs. solid cylindrical pillar. Validated in PaperAnalyticalContactTest.cpp (depth error
+   //         used, independently of useAnalyticalContactDetection, for rod vs. solid cylindrical pillar
+   //         (cylinderPillarCore, ParticleKernels.h). Validated in PaperAnalyticalContactTest.cpp (depth error
    //         <= 5e-4; separated pairs closer than ~0.01 may be reported as grazing contacts, overlap <= 0.006).
    // false (default) -> GJK/EPA fallback for "no scenario" and special contacts.
    bool        refineCylinderContacts;
@@ -774,9 +784,10 @@ struct ModelParams {
    real_t      rodCapAngularVelocity;
    real_t      rodCapOverlap;
 
-   // Test option (all 0 = off, default): prescribed rigid motion of all rods (type 4). After every DEM sub-cycle's
-   // velocity update the linear velocity is set to this vector and the angular velocity to 0 (forces and torques
-   // ignored), so moving rods cover/uncover cells without DEM dynamics. Changes the physics; not for production.
+   // Test option (all 0 = off, default): prescribed rigid motion of all sphere, box and cylinder floaters (types 1/3/4,
+   // not capsules). After every DEM sub-cycle's velocity update the linear velocity is set to this vector and the
+   // angular velocity to 0 (forces and torques ignored), so moving bodies cover/uncover cells without DEM dynamics.
+   // Changes the physics; not for production.
    real_t      rodPrescribedVelocityX;   // three scalars: the config proxy cannot brace-initialise a Vector3 member
    real_t      rodPrescribedVelocityY;
    real_t      rodPrescribedVelocityZ;
@@ -825,11 +836,13 @@ struct ModelParams {
    //         lubrication pair it computed and accepted (passed mesa_pd::mpi::ContactFilter), for every DEM sub-cycle.
    //         Rows hold the computing rank, both uids/isGhost and ac.getOwner(idx) of both particles (comparing the
    //         ranks' CSVs for one (uidA, uidB, mainStep, subCycle) reveals double-accepted contacts), the contact
-   //         point/normal/penetration depth and the force delta of that pair. Rows are flushed immediately so they
-   //         survive an abort. Heavy (one row per pair per sub-cycle); default false.
+   //         point/normal/penetration depth and the force delta of that pair. A second file rank_<N>_state.csv holds
+   //         one row per floater copy (local and ghost) per sub-cycle. Rows are flushed immediately so they survive
+   //         an abort. Heavy; default false.
    bool        logFloaterHistory;
 
-   // Folder of logFloaterHistory's CSVs (default "floater-history"), created by Antidunes.cpp when enabled.
+   // Folder of logFloaterHistory's CSVs (default "floater-history"), created by Antidunes.cpp / DropTest.cpp when
+   // enabled.
    std::string floaterHistoryBaseFolder;
 
    // 0 (default) -> logFloaterHistory (per-contact log() and per-floater logState()) covers every floater. Nonzero ->
@@ -891,7 +904,7 @@ struct ModelParams {
    bool        logWaterHeight;
 
    // true -> after every collide, obstacle cells whose PDF sum is <= 0 or non-finite are reset to rest equilibrium
-   // (SetupStages.h, repairDegenerateObstacleCells). Default false; required by the hopper/rod-bundle clogging prms.
+   // (SetupStages.h, repairDegenerateObstacleCells). Default false.
    bool        repairDegenerateObstaclePdfs;
 
    // true -> seed the scratch PDF clone of the stream-reconstruct-advect sweep
@@ -933,9 +946,9 @@ struct ModelParams {
    //                                   may exceed what the explicit integrator step was tuned for).
    // false (default) -> off, no cost.
    bool        logContactAnomalies;
-   // 0 (DEFAULT) -> from step 0, if logContactAnomalies is on.
+   // 0 (default) -> from step 0, if logContactAnomalies is on.
    uint_t      contactAnomalyStartStep;
-   // 0 (DEFAULT) -> unbounded (through end of run), if logContactAnomalies is on.
+   // 0 (default) -> unbounded (through end of run), if logContactAnomalies is on.
    uint_t      contactAnomalyEndStep;
 
    // true -> every step, warn as soon as a local cell above highAltitudeWaterThresholdZ [LU] is liquid or interface,
@@ -1063,8 +1076,8 @@ struct ModelParams {
 struct EvaluationParams {
    uint_t      performanceLogFrequency;
    uint_t      evaluationFrequency;
-   // Frequency of AverageDataSliceEvaluator (BuildTimeloop.h), which writes three text files per call to
-   // eval/avgDataSlices/. 0 / unset = evaluationFrequency. A larger value throttles the slice output when
+   // Frequency of AverageDataSliceEvaluator (Evaluators.h), which writes three text files per call to
+   // <baseFolderName>/avgDataSlices/. 0 / unset = evaluationFrequency. A larger value throttles the slice output when
    // evaluationFrequency is small (e.g. per-step force logging).
    uint_t      dataSliceFrequency;
    std::string baseFolderName;
@@ -1091,8 +1104,8 @@ struct EvaluationParams {
    // Key blockageRatioEnabled (default false): also write the fraction of the reference (undisturbed) wetted cross-
    // section occupied by the pillar(s) and the floater jam at the probes' x (clog{Upstream,Downstream}BlockageRatio
    // and the clog*PillarArea / clog*JamArea components; ClogMeasurementEvaluator::blockageAt), for afflux vs.
-   // blockage ratio as in Panici & Kripakaran (2018). First probe pair only; the pillar geometry and channel width
-   // come from simParams at the BuildTimeloop.h call site.
+   // blockage ratio as in Panici & Kripakaran (2018). First probe pair only; the cylindrical pillar geometry and the
+   // channel width come from simParams at the BuildTimeloop.h call site (box pillars are not passed).
    bool               clogBlockageRatioEnabled;
    bool               clogPillarMeasurementEnabled;
    Vector3< real_t >  clogPillarUpstreamPos;
@@ -1146,15 +1159,16 @@ struct VTKParams {
    std::string       baseFolder;
    real_t            samplingResolution;
 
-   // Optional VTK block "fluid_field_dense": extra fluid_field output executed only in [denseFromStep, denseToStep)
-   // (VtkWriter.h, addVTKOutput), e.g. at a higher frequency around an expected crash. Absent -> denseEnabled false.
+   // Optional VTK block "fluid_field_dense": extra fluid_field output written every step in [denseFromStep,
+   // denseToStep) (lbm/free_surface/VtkWriter.h, addVTKOutput; its writeFrequency is bypassed), e.g. around an
+   // expected crash. Absent -> denseEnabled false.
    bool              denseEnabled;
    uint_t            denseFromStep;
    uint_t            denseToStep;
 
    // Optional VTK block "fluid_field_snapshots": fluid_field output only at the listed steps (key "steps", e.g.
-   // "0,1000,2000,4000,8000"; VtkWriter.h, addVTKOutput). Its writeFrequency is unused (vtk::initializeVTKOutput
-   // requires it; leave it at 1). Absent -> snapshotsEnabled false.
+   // "0,1000,2000,4000,8000"; lbm/free_surface/VtkWriter.h, addVTKOutput). Its writeFrequency is unused
+   // (vtk::initializeVTKOutput requires it; leave it at 1). Absent -> snapshotsEnabled false.
    bool               snapshotsEnabled;
    std::set< uint_t > snapshotSteps;
 

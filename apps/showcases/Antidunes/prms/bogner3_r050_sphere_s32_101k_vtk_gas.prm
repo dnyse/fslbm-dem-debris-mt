@@ -3,10 +3,9 @@
 // still-water level 60.0746, the same start and size for all three densities, i.e. not at equilibrium: the sphere
 // settles to its own draft during the run.
 // Basin and units as bogner3_r075_deep_s32_100k_gas.prm: <192,90,120>, periodic in x, no-slip N/S/T/B,
-// bedCopiesInX/Y = 2, gravityOverride 5.06585e-05 = g_SI 9.81 m/s^2, water viscosity, surface tension from We.
+// bedCopiesInX/Y = 2, gravityOverride 5.06585e-05 = g_SI 9.81 m/s^2, water viscosity and surface tension from useHardcodedUnits.
 // 101000 steps in one run, so that the step-100000 frame is written. VTK slab y 43..47 through the centre at the
 // fluid_field_snapshots steps (0 ... 100000). Eval and water height every 250 steps, density column 99000-100999.
-// Derived from bogner3_r050_sphere_s32_100k_gas.prm (the cuboid's FloatingBox replaced by a FloatingSphere).
 BlockForestParameters
 {
    cellsPerBlock                 < 32, 15, 15 >;

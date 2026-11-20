@@ -428,11 +428,11 @@ inline uint_t runWallImpactLoop(DEMEngine& engine, size_t bodyIdx, size_t wallId
 
 // velocityScale/angularVelocityScale (default 0: pure relative error with the 1e-8 floor): optional mixed
 // absolute+relative tolerance, the standard combined form (atol + rtol*|b|) rewritten as a floored-denominator
-// relative error, relErr = resid / (scale + |analytic|). The pure relative form is unusable where the analytical
-// reference crosses zero: at a tilt where the true rebound speed is ~0.01 of the impact speed, an ordinary small
-// absolute residual becomes a 10-200x relative error (see the thesis's wall-impact section). `scale` must be a
-// fixed physical reference for the quantity (e.g. the impact speed), not the per-tilt analytic value, or the
-// tolerance would be circular.
+// relative error, relErr = resid / (scale + |analytic|) (angular: scale + max(|analytic|, |sim|)). The pure
+// relative form is unusable where the analytical reference crosses zero: at a tilt where the true rebound speed is
+// ~0.01 of the impact speed, an ordinary small absolute residual becomes a 10-200x relative error (see the thesis's
+// wall-impact section). `scale` must be a fixed physical reference for the quantity (e.g. the impact speed), not the
+// per-tilt analytic value, or the tolerance would be circular.
 inline void logCaseResult(const std::string& tag, const Vec3& simVel, const Vec3& analyticVel,
                            const Vec3& simAngVel, const Vec3& analyticAngVel, real_t tolerance,
                            PassFailAccumulator& acc, real_t velocityScale = real_t(0),
@@ -454,7 +454,7 @@ inline void logCaseResult(const std::string& tag, const Vec3& simVel, const Vec3
 
 //! Hard physical bound independent of any friction-model calibration: a passive contact (no motors, no
 //! energy source) can only ever dissipate kinetic energy, never create it, regardless of the restitution
-//! or friction coefficients. Checked in EVERY collision scenario (wall-impact and pairwise) as a model-agnostic
+//! or friction coefficients. Checked in the wall-impact scenarios and runPairRestitution as a model-agnostic
 //! sanity bound alongside each test's quantitative comparison; a violation would mean the contact law itself
 //! injects energy, a more basic problem than a friction-model calibration mismatch. tolerance guards only against
 //! integration noise (sub-cycled spring-dashpot contacts are not exactly energy-monotonic step-to-step).
@@ -499,7 +499,7 @@ inline void logMomentumConservation(const std::string& tag, const Vec3& pBefore,
 }
 
 //! Total mechanical energy (kinetic + gravitational potential, PE = m*g*z relative to the floor at
-//! z=0) summed over every non-fixed, non-global dynamic particle. For a multi-body gravity-settling
+//! z=0) summed over every non-GLOBAL particle. For a multi-body gravity-settling
 //! system with only dissipative internal forces (inelastic/frictional contacts, no energy source), this must be
 //! MONOTONICALLY NON-INCREASING; a violation (checked between sampling checkpoints, not step-to-step, since a
 //! single sub-cycle is not exactly energy-monotonic) means the contact/integration scheme injects energy.

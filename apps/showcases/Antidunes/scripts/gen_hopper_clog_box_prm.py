@@ -6,8 +6,8 @@ gen_hopper_clog_cyl_prm.py (cylinders) and gen_hopper_clog_prm.py (spheres).
 
 Same channel / pillars / PID / water height / VTK / ModelParameters / population grid (positions, densities,
 row/column/layer counts) as the cylinder hopper: every FloatingCylinder is replaced 1:1 by a FloatingBox of the same
-bounding footprint (halfExtents <r, length/2, r>; no axis field, the long dimension is the Y half-extent), the
-convention of the smaller box runs (e.g. boxes_24x_2x4x3_clog_gas.prm, halfExtents <3,9,3>). Production scale:
+bounding footprint (halfExtents <r, length/2, r>, by default <3,9,3>; no axis field, the long dimension is the Y
+half-extent). Production scale:
 domain 768 x 40 x 180, 406 floaters.
 
 Geometry note: neither shape is rotated at setup (both released axis-aligned, long axis along Y), so a box's XY
@@ -32,8 +32,7 @@ ap.add_argument("--front-x", type=float, default=368.0, help="X of the row neare
 ap.add_argument("--pillar-clearance", type=float, default=1.0)
 ap.add_argument("--skin", type=float, default=0.0,
                  help="boxContactSkin (LU, box analog of cylinderContactSkin): box-box contact starts "
-                      "at a surface gap of 2*skin, box-wall/pillar at skin. 0 (default) = off, matching the "
-                      "original un-adapted hopper. When >0, --clearance/--pitch must leave a real gap safely "
+                      "at a surface gap of 2*skin, box-wall/pillar at skin. 0 (default) = off. When >0, --clearance/--pitch must leave a real gap safely "
                       "above that threshold or the [RELEASE-OVERLAP] release-time check aborts the run.")
 ap.add_argument("--hold", type=int, default=2000)
 ap.add_argument("--timesteps", type=int, default=60000)
@@ -121,8 +120,8 @@ skin_header = "" if args.skin <= 0 else (
     "// ─────────────────────────────────────────────────────────────────────────────\n"
     "// SKIN-ADAPTED: boxContactSkin "
     f"{args.skin:g} (box analog of cylinderContactSkin: box-box contact from a surface gap of\n"
-    f"// {2*args.skin:g} LU, box-wall/pillar from {args.skin:g} LU), as for the cylinder version\n"
-    "// (hopper_clog_cyl_frontblock_pidon_2node_skin0p5_gas.prm). The default --pitch 7.0 leaves adjacent rows exactly\n"
+    f"// {2*args.skin:g} LU, box-wall/pillar from {args.skin:g} LU), as for the cylinder version.\n"
+    "// The default --pitch 7.0 leaves adjacent rows exactly\n"
     "// 1.0 LU apart, which for skin 0.5 equals 2*skin and trips the [RELEASE-OVERLAP] release check, so the skin runs\n"
     "// use --pitch 8.0 (real box-box gap\n"
     f"// {minsep:.2f} LU, above 2*skin = {2*args.skin:g}). Every clearance (box-box, box-Ywall, box-floor, box-pillar) is\n"
@@ -293,7 +292,7 @@ MeshOutputParameters
    baseFolder     mesh-out;
 }}
 
-// 12 dumps over the run; fluid cropped to X 128..640, Z 0..100 (boxes/pillars unfiltered).
+// 12 dumps over the run; fluid cropped to X 128..640, Z 0..100 (boxes unfiltered).
 VTK
 {{
    fluid_field

@@ -193,10 +193,10 @@ void testCubeFormerObstacleNeighbourBlocksGasPromotion()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Stale-flag tests: MovingParticleMapping.h can leave a cell flagged OBSTACLE together with a stale GAS or LIQUID
-// bit from before it was covered (the mapping only rewrites flags of cells that were isDomain(), i.e.
-// liquid|interface, so a gas cell keeps its gas bit). The obstacle check in classifyFormerObstacleCell must ignore
-// such a neighbour whatever phase bit it carries.
+// Stale-flag tests: MovingParticleMapping.h can leave a cell flagged OBSTACLE together with a stale phase bit from
+// before it was covered (the mapping only rewrites flags of cells that were isDomain(), i.e. liquid|interface, so a
+// gas cell keeps its gas bit). The obstacle check in classifyFormerObstacleCell must ignore such a neighbour whatever
+// phase bit it carries.
 // ---------------------------------------------------------------------------------------------
 
 void testObstacleExcludesStaleGasEvidence()

@@ -14,22 +14,17 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file CollideKernelCrashReplayTest.cpp
-//! Replays a recorded hopper-clogging collide-stage crash through the compiled generated Cumulant collision kernel
+//! Replays a recorded pre-collide state through the compiled generated Cumulant collision kernel
 //! (AntidunesLatticeModel::Sweep::collide), not a re-implementation of its formula.
 //!
-//! The crash cell (world (267.5,18.5,19.5), local block index (11,18,19) for cellsPerBlock <64,20,30>) went from an
-//! ordinary near-equilibrium PDF/force state, recorded in the [WATCH ... HOPPER-after-streamReconstructAdvect] line,
-//! to all 27 PDFs NaN after the next stage ([WATCH ... HOPPER-after-collide]). The recorded PDFs are close to the
-//! D3Q27 equilibrium weights, the force density is small, omega is never modified per cell or block, and the
-//! CollideSweep in BuildTimeloop.h uses numberOfGhostLayersToInclude=0, consistent with the field-size/stride
-//! computation of Sweep::collide for the PDF and force fields; a Python port of the generated kernel's arithmetic
-//! gives finite output for the same input.
-//!
-//! This test feeds the recorded input into the compiled collide() in a single block of the same cellsPerBlock, at the
-//! same cell position relative to the block edge (Y=18, 2 cells from the Y=20 edge), so the real pointer/stride
-//! address computation is exercised. Pass criterion: all 27 post-collide PDFs finite. A pass means the kernel's own
-//! arithmetic and addressing are not the cause; the NaN must then come from memory corruption elsewhere, which only
-//! a memory checker (ASan/Valgrind) on the full binary can catch.
+//! Input: the PDFs (near the D3Q27 equilibrium weights, rho ~1.0069) and force density of a hopper cell (world
+//! (267.5,18.5,19.5), local block index (11,18,19) for cellsPerBlock <64,20,30>) recorded after
+//! streamReconstructAdvect, i.e. immediately before a collide that produced all-NaN PDFs in the full run; omega
+//! 1.99753. They are fed into collide() in a single block of the same cellsPerBlock, at the same cell position
+//! relative to the block edge (Y=18, 2 cells from the Y=20 edge), with numberOfGhostLayersToInclude=0 as in the
+//! CollideSweep of BuildTimeloop.h, so the real pointer/stride address computation is exercised. Pass criterion: all
+//! 27 post-collide PDFs finite, i.e. the kernel's own arithmetic and addressing do not produce the NaN from this
+//! input.
 //======================================================================================================================
 
 // SimulationObjects.h (pulled in transitively by ParticleKernels.h) uses blockforest::SimpleCommunication
@@ -81,8 +76,7 @@ void runTest()
    const cell_idx_t iy = cell_idx_t(18);
    const cell_idx_t iz = cell_idx_t(19);
 
-   // PDFs from [WATCH t=2838 HOPPER-after-streamReconstructAdvect] world=(267.5,18.5,19.5): the state immediately
-   // before the collide that produced NaN.
+   // Recorded PDFs [WATCH t=2838 HOPPER-after-streamReconstructAdvect] world=(267.5,18.5,19.5).
    const real_t f[27] = { real_t(2.9828e-01), real_t(7.4444e-02), real_t(7.4698e-02), real_t(7.5976e-02),
                           real_t(7.3192e-02), real_t(7.2307e-02), real_t(7.6906e-02), real_t(1.8962e-02),
                           real_t(1.8267e-02), real_t(1.9026e-02), real_t(1.8329e-02), real_t(1.8046e-02),

@@ -9,7 +9,6 @@
 // liquidHeightFactor 2.0, avgParticleDiameterOverride/dxSIOverride.
 // 124750 steps, as the jam runs, so the late-time windows line up. ClogMeasurement probe pairs at X = 280/500 on both
 // slit centrelines (Y = 4 and 36, z = 40) with flow rate; VTK every 24950 steps.
-// Derived from clog_measurement_validation_noclog_reference_extreme_gas.prm (flowRateEnabled added).
 
 BlockForestParameters
 {

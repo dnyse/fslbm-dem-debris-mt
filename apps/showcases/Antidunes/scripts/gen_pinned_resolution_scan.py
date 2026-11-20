@@ -45,7 +45,7 @@ def sbatch(R):
 
 # Pinned-sphere RESOLUTION scan, R={R} (see gen_pinned_resolution_scan.py). Submit as
 # `cd <checkout>/apps/showcases/Antidunes && sbatch jobs/run_{npr}_pinres_sphere_R{R}.sbatch`. Needs spheres_out_buoyancy_r{R}.dat in the build dir.
-# Results (per-job dir, never overwritten, read-only backup in ~/pinscan_backup, no vault archive -- its file quota is exhausted).
+# Results (per-job dir, never overwritten, read-only backup in ~/pinscan_backup, no vault archive).
 if [[ -n "${{SLURM_SUBMIT_DIR:-}}" ]]; then
     REPO="$(cd "$SLURM_SUBMIT_DIR/../../.." && pwd)"
 else

@@ -10,19 +10,15 @@ Base: DropTest_250_sat_gas.prm (container 32 x 30 x 180, gravity, contact detect
  - Orientation uniformly random (uniform unit quaternion -> axis-angle; cylinders: axis = rotated body axis), seeded.
  - Release: 4 points per wave, (8, 7.5), (24, 7.5), (8, 22.5), (24, 22.5) at z = 170, each with a random lateral offset of
    up to +-0.75; centres of one wave are >= 13.5 apart, more than the largest circumscribed diameter (12.5), and >= 6.75
-   from the side walls (largest circumscribed radius 6.26). 63 waves every 1500 steps [revised 2026-10-02: 1200, see below] (a released floater falls
-   0.5 g t^2 = 24 cells in that time), last release at step 93000, then 10000 steps to settle: timesteps 103000.
+   from the side walls (largest circumscribed radius 6.26). 63 waves every 1200 steps (a released floater falls
+   0.5 g t^2 = 15.4 LU in that time, more than the 12.5 needed before the next release at the same point), last
+   release at step 74400, then 10000 steps to settle: timesteps 84400.
  - Wood-like contact: collisionTimeFactor 1/8.0019 -> collision time 1 LBM step = 20 DEM sub-steps (Rettinger 2023,
-   Sec. 4.3.4: >= 10 steps per collision for an accurate restitution; was 32 LBM steps), restitution 0.25, friction 0.3
+   Sec. 4.3.4: >= 10 steps per collision for an accurate restitution), restitution 0.25, friction 0.3
    (driftwood DEM of Watanabe et al. 2023, Sec. 3).
- - Blocks 16 x 15 x 30 (2 x 2 x 6 = 24 processes): every block wider than the particle sync reach of 12.5 (see the
-   SyncNextNeighbors fix in SetupStages*.h).
- - [2026-10-02] Revised after the first runs timed out (3 h; cuboids at step 60006, mixed at 93370; no errors):
-   blocks 16 x 15 x 15 (2 x 2 x 12 = 48 processes) -- the pile (~25-35 LU high) lay in the bottom block layer alone, so
-   4 of 24 processes did all contact work and the rest waited in the particle sync (~75 % of all process time); now
-   it spans two layers. Every block is still wider than the sync reach of 12.5. Waves every 1200 steps instead of 1500
-   (a floater falls 0.5 g t^2 = 15.4 LU in that time, more than the 12.5 needed before the next release at the same
-   point): last release at step 74400, then 10000 steps to settle -> timesteps 84400.
+ - Blocks 16 x 15 x 15 (2 x 2 x 12 = 48 processes): the pile (~25-35 LU high) spans two block layers instead of
+   leaving all contact work to the bottom layer, and every block is wider than the particle sync reach of 12.5
+   (SetupStages*.h).
 Usage: python3 gen_droptest_250_random.py  (from this directory)
 """
 import math

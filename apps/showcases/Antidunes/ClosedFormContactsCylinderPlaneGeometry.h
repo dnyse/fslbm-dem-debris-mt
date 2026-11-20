@@ -70,7 +70,7 @@ inline real_t closestThetaOnCircleToPointClosedForm(const Vec3& C, const Vec3& u
 //! converges to double precision within ~20-30 iterations for the geometries this is used on.
 // maxIterations: default 30, validated against the full PaperAnalyticalContactTest.cpp suite (fuzz tests included);
 // exposed so PaperAnalyticalContactTest.cpp can compare iteration counts on identical trials
-// (testEdgeEdgeFastReferenceAccuracy10k).
+// (testEdgeEdgeThreeWayAccuracy10k).
 inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
                                       std::complex< real_t > roots[4], int maxIterations = 30)
 {
@@ -286,11 +286,12 @@ inline void solveQuarticGeneric(real_t c4, real_t c3, real_t c2, real_t c1, real
 //! that other cylinder's radius.
 //!
 //! Re-derived here rather than transcribed from that paper's Appendix A: its intermediate step
-//! ("F(theta) = -a*x0*sin(theta)+b*y0*cos(theta) = -a*x*x'+b*y*y'", then "F(theta)=0 gives a*x*x'=b*y*y'") is
+//! ("F(theta) = -a*x*sin(theta)+b*y*cos(theta) = -a*x*x'+b*y*y'", then "F(theta)=0 gives a*x*x'=b*y*y'") is
 //! inconsistent with its own substitution x'=cos(theta), y'=sin(theta) two lines above -- substituting directly
-//! gives a*x0*y'=b*y0*x', not a*x*x'=b*y*y'. The quartic is therefore derived independently (same Weierstrass-
+//! gives a*x*y'=b*y*x', not a*x*x'=b*y*y'. The quartic is therefore derived independently (same Weierstrass-
 //! substitution technique as closestThetaOnCircleToLine below) and validated against a brute-force numeric sweep
-//! in PaperAnalyticalContactTest.cpp.
+//! (archive/unused_contact_methods/feng2017_validation_tests.cpp.excerpt). The ellipse helpers here are used only by
+//! the archived Feng et al. (2017) cylinder-cylinder method (archive/unused_contact_methods/).
 //!
 //! f(theta) = (x0+a*cos theta)^2 + (y0+b*sin theta)^2; F(theta) = f'(theta)/2 =
 //! -a*x0*sin(theta) + b*y0*cos(theta) + (b^2-a^2)*sin(theta)*cos(theta) -- a mix of first- and
@@ -322,8 +323,8 @@ inline void allCriticalThetasOnEllipseToOrigin(real_t a, real_t b, real_t x0, re
          thetasOut[countOut++] = real_t(2) * std::atan(r.real());
 }
 
-//! Global-minimum reduction of allCriticalThetasOnEllipseToOrigin, for callers (and the brute-force cross-check
-//! test) that do not need the constrained search.
+//! Global-minimum reduction of allCriticalThetasOnEllipseToOrigin, for callers (and the archived brute-force
+//! cross-check) that do not need the constrained search.
 inline real_t closestThetaOnEllipseToOrigin(real_t a, real_t b, real_t x0, real_t y0)
 {
    auto distSq = [&](real_t theta) {
@@ -429,7 +430,7 @@ inline bool closestThetaOnEllipseWithinAxialRange(real_t a, real_t b, real_t x0,
 //! from its eq. (31)-(32), drops a minus sign (redoing that line does not reproduce eq. (33)). (A third
 //! inconsistency, in Appendix A, is noted at closestThetaOnEllipseToOrigin.) This quartic is derived fresh,
 //! cross-checked at theta=0, pi and pi/2 (each re-deriving the corresponding coefficient), and validated against a
-//! brute-force numeric sweep in PaperAnalyticalContactTest.cpp.
+//! brute-force numeric sweep (archive/unused_contact_methods/feng2017_validation_tests.cpp.excerpt).
 //!
 //! Derivation: substituting the ellipse's parametrisation into x^2+y^2=R^2 and expanding cos^2(theta),
 //! sin^2(theta) via the double-angle identities gives a mix of first- and second-harmonic terms in theta;
@@ -472,8 +473,8 @@ inline void intersectEllipseWithCircle(real_t a, real_t b, real_t x0, real_t y0,
 
 //! Closed-form global minimizer of theta -> |P(theta) - closest point on the given infinite line|,
 //! where P(theta) = C + R*cos(theta)*u + R*sin(theta)*v traces a circle of radius R centred at C in
-//! the plane spanned by (u, v). This is the paper's own quartic-in-sin(theta) (eq. 74-77 / 82-85,
-//! see the file-level comment above): expanding |P(theta)-linePos|^2 - ((P(theta)-linePos).lineDir)^2
+//! the plane spanned by (u, v). The band-edge minimisation the paper reduces to a quartic in sin(theta) (eq. 74-77),
+//! solved here via a quartic in t = tan(theta/2): expanding |P(theta)-linePos|^2 - ((P(theta)-linePos).lineDir)^2
 //! gives const + M'cos(theta) + N'sin(theta) - R^2*Amag^2*cos^2(theta-psi) (a mix of first- and
 //! second-harmonic terms), whose stationary points satisfy R^2*Amag^2*sin(2*theta-2*psi) =
 //! M'*sin(theta) - N'*cos(theta). Substituting t=tan(theta/2) (Weierstrass) and clearing
@@ -639,7 +640,7 @@ inline real_t farthestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Ve
 }
 
 //! Closed-form (no search) version of the same minimization as closestThetaOnCircleToLine, against
-//! a fixed POINT instead of a line. Used by the edge-edge alternating-projection loop below.
+//! a fixed POINT instead of a line. Used by findRimCrossing's useFastReference option below.
 inline real_t closestThetaOnCircleToPoint(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                            const Vec3& point)
 {
@@ -647,8 +648,8 @@ inline real_t closestThetaOnCircleToPoint(const Vec3& C, const Vec3& u, const Ve
 }
 
 //! Two arbitrary unit vectors spanning the plane perpendicular to `axis` (paper's u-hat/v-hat, eq.
-//! 71-72), built more robustly than the paper's literal "cross with global z" (which degenerates
-//! when axis IS global z) via a standard not-parallel helper vector.
+//! 71-72), built more robustly than the paper's literal "cross with cylinder i's z-axis" (eq. 71, which degenerates
+//! when the two axes are parallel) via a standard not-parallel helper vector.
 inline void perpendicularBasis(const Vec3& axis, Vec3& u, Vec3& v)
 {
    const Vec3 helper = (std::abs(axis[2]) < real_t(0.9)) ? Vec3(real_t(0), real_t(0), real_t(1))
@@ -699,7 +700,7 @@ struct RimCrossing
 // testThetaRefTieBreakNecessity10k found 0/832 real calls with more than one candidate for either point.
 // lazyThetaRef (default true): compute thetaRef only after the candidates are collected, and only if either list
 // has more than one entry. Collect-then-select keeps the same traversal order and strict "<" tie-break, so ties
-// resolve identically (bit-identical results, testLazyThetaRefAccuracy10k); false computes it eagerly up front.
+// resolve identically (bit-identical results, testEdgeEdgeThreeWayAccuracy10k); false computes it eagerly up front.
 inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                     const Vec3& targetPos, const Vec3& eTarget, real_t targetRadius,
                                     real_t targetHalfLength, bool useFastReference = false,
@@ -876,7 +877,8 @@ inline Vec3 rimPointTowardPlane(const CylinderState& cyl, const Vec3& planePos, 
 //! INFINITE lateral surface of a target cylinder (axis through targetPos along eTarget, radius
 //! targetRadius) -- Kodam et al. (2010) eq. 83, the same quartic findRimCrossing solves for its point A.
 //! findRimCrossing keeps only ONE crossing (tie-broken by a reference angle, as its edge-edge chord
-//! construction needs); the corrected special-contact depth below needs every crossing, so this returns
+//! construction needs); the corrected special-contact depth in rimVsFaceOrBand (ClosedFormContactsCylinderCylinder.h)
+//! needs every crossing, so this returns
 //! all real roots that satisfy the crossing condition (up to 4, plus theta = pi, which the Weierstrass
 //! substitution t = tan(theta/2) cannot reach). Kept separate from findRimCrossing so the edge-edge results
 //! are unaffected. Returns the number of thetas written.
@@ -1071,7 +1073,7 @@ inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& 
 
    // --- Edge-plane (eq. 13-21): general (tilted) orientation, Kodam et al. 2010 Part I -----------
    // Point E, the point on the cylinder's rim closest to the plane (eq. 15-17), via the shared
-   // detail::rimPointTowardPlane (see its comment for the corrected-formula derivation).
+   // detail::rimPointTowardPlane (see its comment for the derivation).
    const Vec3   E  = detail::rimPointTowardPlane(cyl, planePos, nHat);
    const real_t zE = (E - planePos) * nHat;
 
@@ -1161,9 +1163,9 @@ inline ContactResult sphereCylinderContact(const Vec3& spherePos, real_t sphereR
 
 //! Contact point shared by face-face (eq. 30-33) and band-band-parallel (paper: "same approach... as
 //! Eqs. (30)-(33)", since band-band-parallel's overlap formula eq. 53 is literally identical to
-//! face-face's radial overlap eq. 27). Only cylinder i's radius (Ri) and cylinder j's length (Li,
-//! confusingly named after the paper's own i/j-swapped eq. 32) are needed -- deltaRadial and
-//! deltaAxial already fold in the other cylinder's radius/length, so it is not a separate parameter.
+//! face-face's radial overlap eq. 27). Only cylinder i's radius (Ri) and cylinder j's length (eq. 32's L_j, passed
+//! as the parameter `Li`; the caller passes cj.length) are needed -- deltaRadial and deltaAxial already fold in the
+//! other cylinder's radius/length, so it is not a separate parameter.
 inline Vec3 faceFaceStyleContactPoint(const Vec3& relBodyI, real_t Ri, real_t Li, real_t deltaAxial,
                                        real_t deltaRadial)
 {

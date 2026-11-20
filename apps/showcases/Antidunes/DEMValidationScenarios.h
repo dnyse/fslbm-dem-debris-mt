@@ -19,7 +19,7 @@
 //! Thin aggregator of the scenario families:
 //!   - DEMValidationInfra.h: DEMEngine, PassFailAccumulator, shared logging/loop helpers.
 //!   - DEMValidationWallImpact.h: single-body wall-impact scenarios.
-//!   - DEMValidationPairEnergy.h: pairwise central head-on restitution/energy scenarios.
+//!   - DEMValidationPairEnergy.h: pairwise restitution/energy scenarios (central head-on and oblique fuzz).
 //!   - DEMValidationPackingAndDrum.h: packing/angle-of-repose/rotating-drum scenarios.
 //!
 //! Every scenario runs the PRODUCTION contact/integration code (SolidCylinderContactDetection, ComputeContacts,

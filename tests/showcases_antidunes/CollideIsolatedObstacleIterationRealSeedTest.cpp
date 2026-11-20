@@ -14,13 +14,12 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file CollideIsolatedObstacleIterationRealSeedTest.cpp
-//! Variant of CollideIsolatedObstacleIterationTest.cpp seeded with the recorded state of the cell that later
-//! collapsed, taken at the start of its obstacle phase (world (267.5,18.5,19.5), step 2700, rho = 1.007356,
-//! near-equilibrium PDFs). The recorded trace shows this cell's rho drifting by ~1e-4 to ~5e-4 per step while its
-//! flag stays OBST at every probed hook point, before collapsing at step 2828. If isolated collide iteration (zero
-//! force, no other input, omega = 1.99753) is the whole mechanism, iterating from this seed should reproduce (a) the
-//! same per-iteration drift and (b) eventual divergence to non-finite values. Runs 200 iterations and logs rho and
-//! drho per iteration; diagnostic only, no assertion.
+//! Variant of CollideIsolatedObstacleIterationTest.cpp seeded with a recorded post-collide state of an
+//! obstacle-flagged cell (world (267.5,18.5,19.5), step 2700, rho = 1.007356, near-equilibrium PDFs, force 0). In the
+//! recorded run this cell stayed OBST while its rho drifted by ~1e-4 to ~5e-4 per step until its PDFs became
+//! non-finite at step 2828. If isolated collide iteration (zero force, no other input, omega = 1.99753) is the whole
+//! mechanism, iterating from this seed should reproduce (a) that per-iteration drift and (b) eventual divergence to
+//! non-finite values. Runs up to 200 iterations and logs rho and drho per iteration; diagnostic only, no assertion.
 //======================================================================================================================
 
 #include "lbm/blockforest/communication/SimpleCommunication.h"
@@ -67,7 +66,7 @@ void runTest()
    const cell_idx_t iz = cell_idx_t(19);
 
    // Recorded state [WATCH t=2700 HOPPER-after-collide]: world=(267.5,18.5,19.5) local=(11,18,19) flag=OBST
-   // rho=1.007356e+00 fill=1.0 force=(0,0,0), 128 steps before the cell collapsed at t=2828.
+   // rho=1.007356e+00 fill=1.0 force=(0,0,0).
    const real_t f[27] = { real_t(2.9844e-01), real_t(7.4683e-02), real_t(7.4412e-02), real_t(7.6309e-02),
                           real_t(7.2937e-02), real_t(7.3678e-02), real_t(7.5695e-02), real_t(1.9029e-02),
                           real_t(1.8316e-02), real_t(1.9093e-02), real_t(1.8122e-02), real_t(1.8451e-02),

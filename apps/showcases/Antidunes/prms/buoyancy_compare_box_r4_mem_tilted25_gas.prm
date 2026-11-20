@@ -11,7 +11,7 @@
 // tilted so that they start from the same state.
 //
 // Domain and floater scale with R, the physical scenario is the same for every R. Domain <192,192,384>, cellsPerBlock
-// <32,32,48> -> 6x6x8 = 288 processes (4 nodes; set by hand after generation, was <32,32,24> = 576).
+// <32,32,48> -> 6x6x8 = 288 processes (4 nodes).
 // Periodic in x and y (one floater; cross-section ~3x the floater size, the minimum without self-image
 // interaction), no-slip T/B. liquidHeightFactor 6 (production value 2.862) for a deep liquid column. Box centre
 // <96,96,166.0>: domain centre in x and y, z = floor + ~1.05 half-extents.
@@ -24,7 +24,7 @@
 
 BlockForestParameters
 {
-   cellsPerBlock                 < 32, 32, 48 >;   // 6x6x8 = 288 processes (4 nodes); generated value <32,32,24>
+   cellsPerBlock                 < 32, 32, 48 >;   // 6x6x8 = 288 processes (4 nodes)
    periodicity                   < 1, 1, 0 >;
    loadSnapshot                  false;
    storeSnapshot                 false;

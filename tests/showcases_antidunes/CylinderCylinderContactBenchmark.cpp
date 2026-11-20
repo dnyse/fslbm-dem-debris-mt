@@ -28,9 +28,10 @@
 //! sync algorithm are nearly the same, so the benchmark asks whether the cylinder-cylinder closed-form dispatch
 //! itself, even when it avoids GJK, costs more per call than box-box SAT and box-box GJK/EPA.
 //!
-//! Uses ClosedFormContacts*.h and SolidCylinderContactDetection unmodified; gjkCylCyl/gjkBoxBox/HybridResult are
-//! duplicated from PaperAnalyticalContactTest.cpp, which keeps them out of the headers so that ClosedFormContacts*.h
-//! does not depend on ParticleKernels.h.
+//! Uses ClosedFormContacts*.h and SolidCylinderContactDetection unmodified; GjkResult, rot3FromMatrix and the GJK/EPA
+//! wrappers (gjkCylCylOnce/gjkBoxBoxOnce, reduced from gjkCylCyl/gjkBoxBox) are duplicated from
+//! PaperAnalyticalContactTest.cpp, which keeps such helpers out of the headers so that ClosedFormContacts*.h does not
+//! depend on ParticleKernels.h.
 //======================================================================================================================
 
 #include "lbm/blockforest/communication/SimpleCommunication.h"
@@ -76,8 +77,8 @@ struct GjkResult
    real_t penetrationDepth;
 };
 
-//! Duplicated from PaperAnalyticalContactTest.cpp's rot3FromMatrix (standard matrix-to-quaternion conversion,
-//! largest-diagonal-term-safe variant).
+//! Duplicated from PaperAnalyticalContactTest.cpp's rot3FromMatrix (component magnitudes from the diagonal, signs from
+//! the off-diagonal differences).
 Rot3 rot3FromMatrix(const Mat3& m)
 {
    const real_t w = std::sqrt(std::max(real_t(0), real_t(1) + m(0, 0) + m(1, 1) + m(2, 2))) / real_t(2);
@@ -283,8 +284,9 @@ int main(int argc, char** argv)
       WALBERLA_CHECK_EQUAL(std::string(cylinderCylinderContact(ci, cj).scenario), "edge-edge");
       results.push_back(rProductionDefault);
 
-      // Solver variants: same geometry, line-based reference and 30 iterations, only the quartic solver swapped.
-      // QuarticSolverComparisonTest.cpp has the synthetic-quartic time/accuracy comparison.
+      // Solver variants: same geometry, line-based reference and 30 iterations, quartic solver swapped. lazyThetaRef is
+      // not passed and takes its default (true), so the Ferrari row is the same call as the production-default and
+      // "Ferrari + lazyThetaRef" rows. QuarticSolverComparisonTest.cpp has the synthetic-quartic comparison.
       const auto rFerrari = timeIt("edge-edge (Ferrari solver, opt-in)", N, [&]() {
          return cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::Ferrari);
       });
@@ -303,7 +305,7 @@ int main(int argc, char** argv)
       results.push_back(rAberthEhrlich);
 
       // lazyThetaRef: Ferrari, but thetaRef's quartic is computed only if point A's or B's containment check gives
-      // more than one candidate (never on real geometry per testThetaRefTieBreakNecessity10k, 0/832 calls).
+      // more than one candidate (never in testThetaRefTieBreakNecessity10k's fuzz corpus, 0/832 calls).
       // lazyThetaRef changes only when thetaRef is computed, not which reference.
       const auto rLazyThetaRef = timeIt("edge-edge (Ferrari + lazyThetaRef, opt-in)", N, [&]() {
          return cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::Ferrari, true);
@@ -327,7 +329,8 @@ int main(int argc, char** argv)
    }
 
    // ---- Cylinder x Cylinder, GJK/EPA fallback (SolidCylinderContactDetection, as called by the hybrid dispatch),
-   // geometry of testHybridTier1TriggersOnMissedContact (closed form finds nothing). Bodies built once.
+   // geometry of PaperAnalyticalContactTest.cpp's testCylinderCylinderTiltedRimIntoBand (exactly touching, closed form
+   // finds nothing). Bodies built once.
    {
       auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
       mesa_pd::data::ParticleAccessor ac(ps);

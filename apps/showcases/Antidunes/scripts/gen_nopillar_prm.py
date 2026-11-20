@@ -3,7 +3,7 @@
 
 Purpose: the PID-on cylinder hopper run that broke down (sealed pore at ~29k steps) had two cylindrical pillars
 (X=384, R=12) in the channel. Does the crash need the pillars/the jam, or do rods crash in an OPEN channel just the same? The sphere twin
-(same channel, same PID, same block of debris, no pillars) is the shape control. Both write the new flow-rate columns of the
+(same channel, same PID, same block of debris, no pillars) is the shape control. Both write the flow-rate columns of the
 ClogMeasurement evaluator (Q and wet area of the y-z planes at x=336 and x=432, i.e. where the pre-/post-pillar planes were).
 Only these things differ from the source prms: CylinderPillars block and both BodyBC pillar lines removed, timesteps 100000, snapshots
 every 10000, ClogMeasurement.flowRateEnabled true (pillar probe pair dropped), header; rods: sanity/dense scan windows extended, sweep
@@ -34,7 +34,7 @@ def common(t):
     t, n = re.subn(r"timesteps\s+\d+;", "timesteps         100000;", t, count=1); assert n == 1
     t, n = re.subn(r"snapshotFrequency\s+\d+;", "snapshotFrequency             10000;", t, count=1); assert n == 1
     t, n = re.subn(r"\n\s*pillarUpstreamPos[^\n]*\n\s*pillarDownstreamPos[^\n]*", "", t); assert n == 1
-    t, n = re.subn(r"(probeHalfWidthXY\s+\d+;)", r"\1\n      flowRateEnabled   true;   // NEW: volumetric flow rate Q + wet area of the y-z plane at x=336 (pre) and x=432 (post) -> clogUpstream/DownstreamFlowRate, ...WetArea", t, count=1); assert n == 1
+    t, n = re.subn(r"(probeHalfWidthXY\s+\d+;)", r"\1\n      flowRateEnabled   true;   // volumetric flow rate Q + wet area of the y-z plane at x=336 (pre) and x=432 (post) -> clogUpstream/DownstreamFlowRate, ...WetArea", t, count=1); assert n == 1
     return t
 
 # ---- rods ----

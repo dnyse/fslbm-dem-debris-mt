@@ -2,12 +2,12 @@
 // Box s x 2s x s = 32 x 64 x 32 cells (halfExtents <16,32,16>, long axis Y), seed heel 2.86 deg about Y.
 // Released at the heave of that heel, z_c = 68.065 (submerged cross-section = rho*s^2 below the level 60.0746).
 // Heave and X/Y translation free, roll about Y only (pinRotationAxes <1,0,1>). Periodic in x, no-slip N/S/T/B.
-// Basin <192,90,120>: the s=16 basin <96,45,60> doubled in every direction (Bogner doubles his 130x40x40 basin for
-// s=32), liquidHeightFactor 10 -> still-water level 60.0746. bedCopiesInX/Y = 2 (doubled with the domain) keep
+// Basin <192,90,120>: the s=16 basin <96,45,60> doubled in every direction (Bogner's own s=16
+// basin is 130x40x40), liquidHeightFactor 10 -> still-water level 60.0746. bedCopiesInX/Y = 2 (doubled with the domain) keep
 // avgParticleDiameter, dx_SI and dt_SI at the s=16 values (getAvgDiameterScalingFactor, Utility.h, scales with
 // domainSize / bedCopies), so gravityOverride 5.06585e-05 is still g_SI = 9.81 m/s^2. cellsPerBlock <32,15,15> ->
 // 6x6x8 = 288 processes.
-// Water viscosity (useHardcodedUnits), surface tension from We. 100000 steps in one continuous run, checkpoint
+// Water viscosity and surface tension from useHardcodedUnits. 100000 steps in one continuous run, checkpoint
 // every 50000 (written, never reloaded). No VTK. Eval and water height every 250 steps, density column (x=5, y=45)
 // over the last 2000 steps.
 // densityRatio variant of bogner3_r075_deep_s32_100k_gas.prm (only rho, z_c and the snapshot folder differ).

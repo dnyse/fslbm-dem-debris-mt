@@ -41,7 +41,7 @@ ParticleParameters
 {
    inFileName spheres_out.dat;
    bedCopiesInX 1;
-   bedCopiesInY 1; // scalingFactor=500, 500*0.015*8=60 matches domainY
+   bedCopiesInY 1; // scalingFactor = 128/0.046425 = 2757.1 (BedGeneration.prm); 2757.1*0.021870 = 60.3 -> domainY 60
    densityRatio 2.55;
    fixingHeightFactor 1.5; // proportional to the mean particle diameter
    frictionCoefficient 0.5;
@@ -69,7 +69,7 @@ Pillars
 }
 
 // Cylinder pillars: DEM uses CylindricalBoundary (exterior contact via SolidCylinderContactDetection);
-// LBM uses a Body block with shape Cylinder in BoundaryParameters (see below).
+// LBM uses a BodyBC block with shape Cylinder in BoundaryParameters (see below).
 // The cylinder spans the full domain height; end caps are the floor/ceiling NoSlip planes.
 //CylinderPillars
 //{
@@ -165,7 +165,7 @@ VTK
          //force;
       }
 
-      // X-Z midplane (y = 30, cuts through pillar centre)
+      // X-Z midplane (y = 29-30, through the slit centre)
       CellBB_filter_0 {
          min < 0, 29, 0 >;
          max < 128, 30, 150 >;
@@ -177,7 +177,7 @@ VTK
          max < 1, 60, 150 >;
       }
 
-      // X-Y-Z volume around pillar: full domain in x and y, full z height
+      // X-Y-Z volume: full domain in x and y, z = 0-150
       CellBB_filter_2 {
          min < 0, 0, 0 >;
          max < 128, 60, 150 >;
@@ -194,7 +194,7 @@ VTK
       before_functions
       {
          //ghost_layer_synchronization; // only needed if writing the ghost layer
-         gas_cell_zero_setter;          // sets velocity=0 and density=1 all gas cells before writing VTK output
+         gas_cell_zero_setter;          // sets velocity=0 and density=1 in all gas and obstacle cells before writing VTK output
       }
    }
 

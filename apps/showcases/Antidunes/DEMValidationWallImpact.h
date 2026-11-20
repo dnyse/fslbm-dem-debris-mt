@@ -215,7 +215,7 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
 //! validation against a literature result): does mesa_pd's generic iterative GJK/EPA solver agree with the
 //! exact closed-form Cylinder x HalfSpace contact geometry that production uses (SolidCylinderContactDetection's
 //! cyl.support()-based formula, ParticleKernels.h -- algebraically identical to
-//! closed_form_contacts::rimPointTowardPlane, ClosedFormContactsCylinderPlaneGeometry.h, which
+//! closed_form_contacts::detail::rimPointTowardPlane, ClosedFormContactsCylinderPlaneGeometry.h, which
 //! AnalyticalSolutions.h::cylinderWallImpact uses as wallImpactCylinder's analytical reference)?
 //!
 //! A HalfSpace has NO support() function (mesa_pd::data::HalfSpace.h), so GJK/EPA cannot run on a
@@ -340,9 +340,9 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
                        real_t(30) * std::max({ halfExtents[0], halfExtents[1], halfExtents[2] }),
                        /*useAnalyticalContactDetection=*/false, useRotationalEffectiveMass);
       const real_t gap = real_t(0.01) * std::min({ halfExtents[0], halfExtents[1], halfExtents[2] });
-      // Horizontal velocity component aimed so the leading (lowest) corner strikes squarely, matching
-      // Housner's planar rocking-block assumption (velocity, spin axis and contact point all in the
-      // X-Z plane -- tilt is about world Y, so no Y motion is introduced).
+      // Velocity (tangentialFraction*speed, 0, -speed) in the X-Z plane, matching Housner's planar rocking-block
+      // assumption (velocity, spin axis and contact point all in the X-Z plane -- tilt is about world Y, so no Y
+      // motion is introduced).
       const size_t boxIdx = engine.addBox(Vec3(0, 0, reach + gap),
                                             Vec3(tangentialFraction * speed, 0, -speed), yrot.rot, edgeLength,
                                             density);
@@ -374,7 +374,7 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
       // (~0.054) that no reasonable scale rescues -- a genuine lever-arm deficiency, not a denominator artefact.
       // Applied for consistency and for finer sweeps closer to the box's zero-crossing (~53.5deg). leverArm uses
       // the diagonal-in-the-tilt-plane convention of the dimensionless angular-speed normalisation
-      // (figures/wall-impact/data via scripts/figures/wall_impact_kodam.py's R_BOX).
+      // (thesis repo: figures/wall-impact/data via scripts/figures/wall_impact_kodam.py's R_BOX).
       const real_t leverArm = std::sqrt(halfExtents[0] * halfExtents[0] + halfExtents[2] * halfExtents[2]);
       detail::logCaseResult(caseTag, simVel, analytic.postVelocityA, simAngVel, analytic.postAngularVelocityA,
                              tolerance, acc, real_t(0.1) * speed, real_t(0.1) * speed / leverArm);

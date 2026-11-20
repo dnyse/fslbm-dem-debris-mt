@@ -57,7 +57,7 @@ for r in ("075", "050", "025"):
     s = s[:i + 1] + VTK
     if MARK not in s:
         s = (MARK + ": whole domain (192 x 90 x 120), velocity + fill_level + mapped_flag,\n"
-             "// same steps; was the slab y 43..47 with velocity + fill_level.\n" + s)
+             "// same steps.\n" + s)
     f.write_text(s)
     print(f.name)
 

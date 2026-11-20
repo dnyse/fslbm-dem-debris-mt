@@ -5,8 +5,7 @@ two methods start from an IDENTICAL initial condition and stay directly comparab
 Why: the R1 box at upright (0 deg) sits on a mapping tie -- its face planes pass exactly through cell centres, and
 depending on which way the tie resolves, the mapped bottom layer can end up flush on the floor with no fluid cell
 underneath, starving MEM-only buoyancy of the pressure it needs from below. A 25 deg initial tilt breaks every
-face-alignment tie at once (tested on R1/box/MEM: the box rises 41.5 -> 56.1 over 2590 steps). The analytic arm never
-had the tie problem, but is tilted too so both arms start from the same box orientation and stay comparable.
+face-alignment tie at once. The analytic arm is tilted too so both arms start from the same box orientation.
 
 usage: gen_buoyancy_tilted25_box_prm.py   (no args; regenerates all 6 from prms/buoyancy_compare_box_r{1,2,4}_{mem,analytic}_gas.prm)
 """

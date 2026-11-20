@@ -13,7 +13,6 @@
 // freeze the integral and leave a steady-state error; at the cap the windup is bounded by maxRamp.
 // 100000 steps (~1.7 flow-throughs at the bulk velocity ~0.013); dense NaN scan over steps 8900..9100; discharge, wet
 // area at the probes (x = 336 / 432, z = 40); fluid VTK (x 100..500, z 0..100) and floater VTK at 8 snapshot steps.
-// Lineage: small_rods_192x_2x32x3_clog_skin0p5_gas.prm (192-rod step of the rod-doubling series) + curv. guard, cap.
 
 BlockForestParameters
 {

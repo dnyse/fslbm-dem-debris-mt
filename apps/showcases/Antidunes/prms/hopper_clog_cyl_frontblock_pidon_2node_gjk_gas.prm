@@ -6,12 +6,12 @@
 // rod-rod / wall / floor), centres x 172..368 (front row 1.04 LU from the pillar surface); densityRatio 1.2 (bottom two
 // layers), 1.0 (middle three), 0.5 (top two, the top layer's axis at the waterline). Held fixed for 2000 steps, then
 // released together. No contact skin.
-// Contacts: useAnalyticalContactDetection false, i.e. GJK/EPA for all pairs including rod-pillar (in short test runs
-// the closed-form path aborted while GJK/EPA stayed clean with rod-rod penetration <= 0.43 LU); default stiffness
+// Contacts: useAnalyticalContactDetection false, i.e. GJK/EPA for rod-rod pairs (rod-pillar and rod-wall contacts use
+// their closed forms regardless; in short test runs the closed-form rod-rod path aborted while GJK/EPA stayed clean
+// with rod-rod penetration <= 0.43 LU); default stiffness
 // (collisionTimeFactor 4); friction/restitution 0.5 / 0.5.
 // 60000 steps, checkpoints every 5000; probes at x = 336 (inside the rod block) and x = 432, z = 40; fluid VTK every
 // 5000 steps, cropped to x 128..640, z 0..100.
-// Lineage: hopper_clog_cyl_frontblock_pidon_2node_gas.prm (gen_hopper_clog_cyl_prm.py); only the contact switch differs
 
 BlockForestParameters
 {
@@ -52,7 +52,7 @@ PhysicsParameters
    Fr                1.31;
    We                15.6188;
    useHardcodedUnits false;
-   // no gravityOverride -- dynamically computed, see the extreme-clog prm's header
+   // no gravityOverride -- derived from U, Re and Fr (useHardcodedUnits false)
 }
 
 ParticleParameters
@@ -491,12 +491,12 @@ FloatingCylinders
 
 ModelParameters
 {
-   useAnalyticalContactDetection false;   // GJK/EPA for all contacts, rod-pillar included (closed-form Kodam+Guo off)
+   useAnalyticalContactDetection false;   // GJK/EPA for Cylinder x Cylinder (closed-form Kodam+Guo off)
    usePureAnalyticalCylinder     false;  // (default, explicit) keep the GJK/EPA fallback for uncertain pairs
    useContactFilterOwnerTiebreak true;   // one rank accepts each boundary-straddling contact (min owner rank)
 
    // Contact/buoyancy options: tight layer-1 pre-filter and rotational effective mass ON, the rest OFF
-   useTightLayer1                true;   // conservative pre-filter ahead of the closed-form contact tests
+   useTightLayer1                true;   // conservative pre-filter ahead of the contact tests
    useRotationalEffectiveMass    true;   // contact stiffness/damping from the effective mass incl. rotational inertia
    useFullVolumeAnalyticBuoyancy false;
    usePass3Reresolution          false;
@@ -553,7 +553,7 @@ MeshOutputParameters
    baseFolder     mesh-out;
 }
 
-// 12 dumps over the run; fluid cropped to X 128..640, Z 0..100 (rods/pillars unfiltered).
+// 12 dumps over the run; fluid cropped to X 128..640, Z 0..100 (rods unfiltered).
 VTK
 {
    fluid_field

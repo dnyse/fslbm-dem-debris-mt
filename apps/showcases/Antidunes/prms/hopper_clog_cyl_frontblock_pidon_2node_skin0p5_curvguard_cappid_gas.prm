@@ -6,14 +6,13 @@
 // densityRatio 1.2 (bottom two layers), 1.0 (middle three), 0.5 (top two; the top layer's axis sits at the waterline).
 // All rods are held fixed for 2000 steps (settlingSteps) and then released together.
 // Contacts: analytical Cylinder x Cylinder (Kodam + Guo hybrid, GJK/EPA fallback), friction/restitution 0.5 / 0.5.
-// cylinderContactSkin 0.5: rod-rod contact starts at a surface gap of 2*skin = 1, rod-wall/pillar at 0.5. Row pitch 8
-// leaves a rod-rod gap of 1.52 > 2*skin (pitch 7 gave exactly 1.0, which the [RELEASE-OVERLAP] check rejects).
+// cylinderContactSkin 0.5: rod-rod contact starts at a surface gap of 2*skin = 1, rod-wall/pillar at 0.5. The x/z pitch
+// 8/7.52 leaves rod-rod gaps of 2/1.52 > 2*skin (x pitch 7 would give exactly 1.0, which [RELEASE-OVERLAP] rejects).
 // guardCurvatureInputs true: the FD curvature skips uninitialised/non-finite neighbour normals.
 // PID cap maxActuatingVariable 2.65e-6 = 5.0 a_ref of the clean hopper (a_ref = 5.31e-7): a tight jam can then hold
 // back at most (k - 1) a_ref L_x / g ~ 28 LU of head, about the freeboard 0.5 h0 = 24.6.
 // Probes at x = 336 (inside the rod block, not usable as a clog signal) and x = 432, z = 40; discharge and wet area.
 // 100000 steps; fluid (whole channel) and floater VTK at 14 snapshot steps up to 99000.
-// Lineage: hopper_clog_cyl_frontblock_pidon_2node_skin0p5_gas.prm (gen_hopper_clog_cyl_prm.py) + curvature guard, cap.
 
 BlockForestParameters
 {
@@ -54,7 +53,7 @@ PhysicsParameters
    Fr                1.31;
    We                15.6188;
    useHardcodedUnits false;
-   // no gravityOverride -- dynamically computed, see the extreme-clog prm's header
+   // no gravityOverride -- derived from U, Re and Fr (useHardcodedUnits false)
 }
 
 ParticleParameters
@@ -559,8 +558,8 @@ MeshOutputParameters
 }
 
 // VTK: the periodic fluid_field output is off (writeFrequency 0); fluid_field_snapshots writes the fluid only at the
-// listed steps (VTKParams::snapshotsEnabled, VtkWriter.h), and the floater/pillar point-data writers follow the same
-// list (addSnapshotAwareVTKWrite, BuildTimeloop.h). Fluid over the whole channel, floaters/pillars unfiltered.
+// listed steps (VTKParams::snapshotsEnabled, VtkWriter.h), and the floater point-data writers follow the same
+// list (addSnapshotAwareVTKWrite, BuildTimeloop.h). Fluid over the whole channel (pillars via mapped_flag).
 VTK
 {
    fluid_field

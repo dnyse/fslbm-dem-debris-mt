@@ -18,7 +18,8 @@
 //! classification in PdfReconstructionManager.h). Like BognerStateClassificationTest.cpp it calls the pure decision
 //! functions (classifyFormerObstacleCellStrict, classifyFormerObstacleCell, isPass3Candidate), here over hand-built 3D
 //! flag grids in which a sphere, cylinder or cuboid floater moves and releases cells. Floater sizes follow the prm
-//! files: sphere radius 4-5 LU (prms/clog_centred_pillar_startblock_cappid_gas.prm), cylinder radius 3 / length 18 LU
+//! files: sphere radius 5 LU (prms/clog_centred_pillar_startblock_cappid_gas.prm; also 4 LU and random 3-5 LU
+//! variants), cylinder radius 3 / length 18 LU
 //! (prms/hopper_clog_cyl_startblock_skin0p5_cappid_gas.prm), box half-extents <9,18,9> LU
 //! (prms/bogner3_r025_deep_resume_gas.prm). The ambient field is liquid below / interface / gas above, either a flat
 //! waterline or a moving wave-front height field. Not covered: BoundaryHandling/StructuredBlockForest integration,
@@ -35,8 +36,7 @@
 //!
 //! Also logged, for every strategy other than (c): the "out-of-place interface" count, i.e. released cells the
 //! strategy classifies INTERFACE while (c) classifies the same cell LIQUID or GAS. It shows how much of a strategy's
-//! safety comes from over-classifying cells as interface (the "avoidably interface" cell (4,4) in the thesis figure
-//! script coupling_classification.py).
+//! safety comes from over-classifying cells as interface.
 //======================================================================================================================
 
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/PdfReconstructionManager.h"
@@ -69,9 +69,7 @@ struct IVec3 { int x, y, z; };
 
 // Zero-evidence instrumentation: released cells whose real (non-same-step) neighbourhood has neither liquid nor gas
 // (hasGas == hasLiquid == false in Round 0). classifyStrictBognerNeighbourhood (`if (!hasLiquid) return Gas; if
-// (!hasGas) return Liquid; return Interface;`) assigns them GAS, whereas bogner_together() in the thesis figure script
-// coupling_classification.py (`if hasG and not hasL: G; elif hasL and not hasG: L; else: I`) assigns INTERFACE, as for
-// cell (4,4) in its three-cell-move example.
+// (!hasGas) return Liquid; return Interface;`, Bogner's ordered rule) assigns them GAS rather than INTERFACE.
 uint_t g_zeroEvidenceCount = 0;
 uint_t g_zeroEvidenceMismatchVsRelax = 0; // Round-0 GAS differs from relax result
 struct ZeroEvidenceExample { std::string scenario; IVec3 cell; MockFlag pureResult; MockFlag relaxResult; };
@@ -735,7 +733,7 @@ int main(int argc, char** argv)
    walberla::uint_t pureOOP = 0, noLiquidAtGasOOP = 0, legacyOOP = 0, pass2OnlyOOP = 0;
 
    // ---- Single sphere, radius 5 LU (prms/clog_centred_pillar_startblock_cappid_gas.prm), ----
-   // translating through the waterline in every axis-aligned and diagonal direction, 1-4 LU/step.
+   // translating through the waterline along axis-aligned and diagonal directions, 1-4 LU/step.
    {
       const int N = 28, WZ = 14;
       const Vec3 centre{ 14, 14, 14 };
@@ -1036,8 +1034,8 @@ int main(int argc, char** argv)
       << " | legacy Pass-2-only (no Pass-3)=" << (pass2OnlyOOP + pass2OnlyOOPWave)
       << " cells classified INTERFACE that strictBognerRelaxInterface itself resolved to LIQUID/GAS ===");
 
-   // Zero-evidence report over all scenarios (the situation of cell (4,4) in the figure script). These cells are set
-   // to GAS, not INTERFACE, so a wrong call shows up only here or as a violation, never as out-of-place interface.
+   // Zero-evidence report over all scenarios. These cells are set to GAS, not INTERFACE, so a wrong call shows up
+   // only here or as a violation, never as out-of-place interface.
    WALBERLA_LOG_INFO_ON_ROOT("=== ZERO-REAL-EVIDENCE INSTRUMENTATION (author's (4,4) counterexample re-check): "
       << g_zeroEvidenceCount << " released cells, across all " << (totalScenarios + waveScenarios)
       << " scenarios, had zero real (non-same-step) liquid/gas evidence under pure Round-0 strict Bogner | "

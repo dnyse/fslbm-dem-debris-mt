@@ -138,8 +138,8 @@ void initFillFieldSinus(const std::shared_ptr<const SimulationParams>& simParams
       ScalarField_T* const fillField = blockIt->getData< ScalarField_T >(simObjs->fillFieldID);
 
       WALBERLA_FOR_ALL_CELLS(fillFieldIt, fillField, {
-         // cell in block-local coordinates
-         // TODO: check if it's cell center. If yes, sampling is wrong cuz it's shifted by 0.5
+         // cell in block-local coordinates (integer index, i.e. the cell's lower corner; the samples below span
+         // [index, index + 1])
          const Cell localCell = fillFieldIt.cell();
 
          // get cell in global coordinates
@@ -218,8 +218,8 @@ void initPdfFieldPoiseuille(const std::shared_ptr<const SimulationParams>& simPa
  * Initialize the hydrostatic pressure in the direction in which a force is acting in ALL cells (regardless of a cell's
  * flag). The velocity remains unchanged.
  *
- * The force vector must have only one component, i.e., the direction of the force can only be in x-, y- or z-axis.
- * The variable fluidHeight determines the height at which the density is equal to reference density (=1).
+ * Only the z component of the acceleration (gravity) is used (HydrostaticDensityFtor).
+ * computed.absoluteLiquidHeight is the height at which the density equals the reference density (=1).
  **********************************************************************************************************************/
 void initPdfFieldHydrostaticPressure(const std::shared_ptr<const SimulationParams>& simParams, const std::shared_ptr<SimulationObjects>& simObjs)
 {
@@ -239,7 +239,7 @@ void initPdfFieldHydrostaticPressure(const std::shared_ptr<const SimulationParam
          // initialize the (hydrostatic) pressure, i.e., LBM density
          // Bernoulli: p = p0 + density * gravity * height
          // => LBM (density=1): rho = rho0 + gravity * height = 1 + 1/cs^2 * g * h = 1 + 3 * g * h
-         // shift global cell by 0.5 since density is set for cell center
+         // evaluated at the cell centre
 
          Vector3< real_t > cellCenter = bf->getBlockLocalCellCenter(*blockIt, cell);
          const real_t rho             = hydrostaticDensityFtor(cellCenter);

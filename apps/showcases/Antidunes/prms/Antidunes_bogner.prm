@@ -1,18 +1,12 @@
 // Antidunes_bogner.prm
 // ─────────────────────────────────────────────────────────────────────────────
-// Real E1 antidune showcase (identical geometry/particle bed/Re/Fr/We/timesteps
-// to ../Antidunes.prm), except ModelParameters switches the buoyancy/MEM force
-// computation to Bogner & Rude (2013)'s original three-phase formula
-// (useBognerThreePhaseMEM + useMemOnlyBuoyancy, both true) instead of Antidunes'
-// extended split (static/dynamic reference height subtraction + separate
-// analytic vSub*g channel). See prms/sphere_density_showcase_bogner_gas.prm
-// for the isolated validation of these two switches (job 3905990: stable but
-// ~8-12% under-submerged equilibrium at all three densityRatios) and the
-// force-breakdown analysis (measured MEM force 5.6-13.3% above the analytic
-// V_sub*g Archimedes prediction for the same submerged volume). Gravity and
-// viscosity here are the REAL Re/Fr/We-derived E1 values, unchanged -- this
-// run isolates the effect of the buoyancy MODEL on actual bedform evolution,
-// not the gravity-matched isolated-sphere experiment.
+// Real E1 antidune showcase, identical to ../Antidunes.prm (geometry, particle
+// bed, Re/Fr/We, timesteps) except that ModelParameters sets Bogner & Rude
+// (2013)'s three-phase MEM force explicitly (useFillWeighting,
+// useBognerThreePhaseMEM, useMemOnlyBuoyancy, all true). These are the code
+// defaults, so ../Antidunes.prm runs the same model; the alternative is
+// Antidunes' extended split (reference-height subtraction + separate analytic
+// vSub*g term). Gravity and viscosity are the real Re/Fr/We-derived E1 values.
 // ─────────────────────────────────────────────────────────────────────────────
 
 BlockForestParameters
@@ -58,7 +52,7 @@ ParticleParameters
 {
    inFileName spheres_out.dat;
    bedCopiesInX 1;
-   bedCopiesInY 1; // scalingFactor=500, 500*0.015*8=60 matches domainY
+   bedCopiesInY 1; // scalingFactor = 128/0.046425 = 2757.1 (BedGeneration.prm); 2757.1*0.021870 = 60.3 -> domainY 60
    densityRatio 2.55;
    fixingHeightFactor 1.5; // proportional to the mean particle diameter
    frictionCoefficient 0.5;
@@ -86,7 +80,7 @@ Pillars
 }
 
 // Cylinder pillars: DEM uses CylindricalBoundary (exterior contact via SolidCylinderContactDetection);
-// LBM uses a Body block with shape Cylinder in BoundaryParameters (see below).
+// LBM uses a BodyBC block with shape Cylinder in BoundaryParameters (see below).
 // The cylinder spans the full domain height; end caps are the floor/ceiling NoSlip planes.
 //CylinderPillars
 //{
@@ -121,17 +115,11 @@ ModelParameters
    //   false = uniform all-interface reconstruction (no fill=1 over-promotion band).
    useBognerReconstruction       true;
    useFillWeighting              true;   // Eq. 5.9's phi(x_b) blend -- already the default, kept explicit here
-   useBognerThreePhaseMEM        true;   // NEW: no rhoHydStat subtraction at all -- Bogner & Rude (2013)'s
-                                         // three-phase MEM force exactly as published, instead of Antidunes'
+   useBognerThreePhaseMEM        true;   // default: no rhoHydStat subtraction -- Bogner & Rude (2013)'s
+                                         // three-phase MEM force as published, instead of Antidunes'
                                          // extended split (static/dynamic reference height + subtraction).
-   useMemOnlyBuoyancy             true;   // NEW: no separate vSub*g analytic buoyancy channel -- buoyant
-                                         // support comes solely from the (now-uncancelled) MEM/hydro force,
-                                         // matching Bogner & Rude (2013). Real Re/Fr/We-derived gravity and
-                                         // viscosity are kept UNCHANGED here (this run only swaps the
-                                         // buoyancy/MEM MODEL, not the physical scaling of the E1 experiment
-                                         // this showcase reproduces -- see the sphere-density validation runs
-                                         // for the isolated gravity-matched comparison against Bogner's own
-                                         // g=7.5e-4 validation regime).
+   useMemOnlyBuoyancy             true;   // default: no separate vSub*g analytic buoyancy term -- buoyant
+                                         // support comes solely from the MEM force, as in Bogner & Rude (2013).
 }
 
 EvaluationParameters
@@ -194,7 +182,7 @@ VTK
          //force;
       }
 
-      // X-Z midplane (y = 30, cuts through pillar centre)
+      // X-Z midplane (y = 29-30, through the slit centre)
       CellBB_filter_0 {
          min < 0, 29, 0 >;
          max < 128, 30, 150 >;
@@ -206,7 +194,7 @@ VTK
          max < 1, 60, 150 >;
       }
 
-      // X-Y-Z volume around pillar: full domain in x and y, full z height
+      // X-Y-Z volume: full domain in x and y, z = 0-150
       CellBB_filter_2 {
          min < 0, 0, 0 >;
          max < 128, 60, 150 >;
@@ -223,7 +211,7 @@ VTK
       before_functions
       {
          //ghost_layer_synchronization; // only needed if writing the ghost layer
-         gas_cell_zero_setter;          // sets velocity=0 and density=1 all gas cells before writing VTK output
+         gas_cell_zero_setter;          // sets velocity=0 and density=1 in all gas and obstacle cells before writing VTK output
       }
    }
 

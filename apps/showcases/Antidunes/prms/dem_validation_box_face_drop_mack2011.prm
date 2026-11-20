@@ -1,8 +1,7 @@
 // Literal replica of Mack et al. (2011)'s single-cube coefficient-of-restitution drop test methodology
 // (Powder Technology 214:431-442, Section 2.4: e = sqrt(h1/h0), measured for real hexahedra -- but
-// FACE-first (flush, zero tilt), the exact degenerate configuration where Cylinder/Box::support()'s
-// tie-break bug (fixed 2026-09-13) picked an arbitrary corner instead of the true face centre, injecting
-// a spurious lever arm/torque. By symmetry the true post-impact angular velocity is exactly zero and the
+// FACE-first (flush, zero tilt), the degenerate configuration in which Cylinder/Box::support() must return
+// the face centre rather than an arbitrary corner, which would inject a spurious lever arm/torque. By symmetry the true post-impact angular velocity is exactly zero and the
 // normal velocity ratio must equal the input e -- any deviation is a direct regression signal.
 DEMValidation{
     testCase boxFaceDropRestitution;

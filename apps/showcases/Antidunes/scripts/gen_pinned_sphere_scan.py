@@ -205,7 +205,7 @@ def sbatch(R, cases, ibb=False, jobtag='', nofw=False, lv=None, sig=None):
 
 # Pinned-sphere MEM buoyancy scan, radius {R} (see gen_pinned_sphere_scan.py). Submit as
 # `cd <checkout>/apps/showcases/Antidunes && sbatch jobs/run_72_pinscan_sphere_R{R}{jsfx}.sbatch`.
-# NO vault archive (its file quota is exhausted): each case is reduced in-job to
+# NO vault archive: each case is reduced in-job to
 # a few KB under pinscan_results/<jobid>/ (unique per job, never overwritten, backed up to ~/pinscan_backup, read-only) (FloaterForces lines, waterline, mean rho(z)); big outputs are deleted.
 if [[ -n "${{SLURM_SUBMIT_DIR:-}}" ]]; then
     REPO="$(cd "$SLURM_SUBMIT_DIR/../../.." && pwd)"

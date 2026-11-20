@@ -4,11 +4,10 @@
 // equilibrium). Pinned: y translation (pinAxes <0,1,0>; with periodic y the cylinder otherwise slides along its axis)
 // and pitch/yaw (pinRotationAxes <1,0,1>); roll about Y, heave and x translation free.
 // Basin and units as bogner3_r075_deep_s32_100k_gas.prm (<192,90,120>, bedCopiesInX/Y = 2, gravityOverride
-// 5.06585e-05 = g_SI 9.81 m/s^2, water viscosity, surface tension from We), but periodic in x and y (no N/S walls)
-// and FormerMO fill seeding as before 2026-10-01 (seedSkipObstacleNeighbours false).
+// 5.06585e-05 = g_SI 9.81 m/s^2, water viscosity and surface tension from useHardcodedUnits), but periodic in x and y (no N/S walls)
+// and seedSkipObstacleNeighbours false (obstacle-flagged interface neighbours count in the FormerMO fill seeding).
 // 101000 steps. VTK of the whole domain (velocity, fill_level, mapped_flag) at the fluid_field_snapshots steps
 // (0 ... 99999). Eval and water height every 250 steps, density column 99000-100999.
-// Derived from bogner3_r025_cyl_s32_101k_vtk_freesharedstart_gas.prm (fully free cylinder, same start).
 BlockForestParameters
 {
    cellsPerBlock                 < 32, 15, 15 >;
@@ -83,7 +82,7 @@ FloatingCylinders
 }
 ModelParameters
 {
-   seedSkipObstacleNeighbours false;   // FormerMO fill seeding as before 2026-10-01
+   seedSkipObstacleNeighbours false;   // obstacle-flagged interface neighbours count in the fill seeding
    pdfReconstructionModel        OnlyMissing;
    pdfRefillingModel             EquilibriumRefilling;
    excessMassDistributionModel   EvenlyNewInterfaceFallbackLiquid;

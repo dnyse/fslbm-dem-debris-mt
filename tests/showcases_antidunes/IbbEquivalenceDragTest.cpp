@@ -357,10 +357,10 @@ private:
    \endverbatim
  *
  * The collision model used for the LBM is TRT with a relaxation parameter tau=1.5 and the magic parameter 3/16.
- * The Stokes approximation of the equilibrium PDFs is used.
- * The flow is driven by a constant body force of 1e-5.
+ * The incompressible second-order equilibrium is used (D3Q19 default EquilibriumAccuracyOrder = 2).
+ * The flow is driven by a constant body force of 1e-7.
  * The domain is 32x32x32, and the sphere has a diameter of 16 cells ( chi * domainlength )
- * The simulation is run until the relative change in the dragforce between 100 time steps is less than 1e-5.
+ * The simulation is run until the relative change in the dragforce between 100 time steps is less than 1e-7.
  * The RPD is not used since the sphere is kept fixed and the force is explicitly reset after each time step.
  * To avoid periodicity constrain problems, the sphere is set as global.
  *
@@ -456,7 +456,7 @@ int main( int argc, char **argv )
    // RPD COUPLING //
    //////////////////
 
-   // connect to pe
+   // periodic-mapping size check
    const real_t overlap = real_t( 1.5 ) * dx;
 
    if( setup.radius > real_c( setup.length ) * real_t(0.5) - overlap )
@@ -519,7 +519,7 @@ int main( int argc, char **argv )
       // uses a higher order boundary condition (CLI)
       ps->forEachParticle(false, mesa_pd::kernel::SelectAll(), *accessor, movingParticleMappingKernel, *accessor, MO_CLI_Flag);
    }else{
-      // uses standard bounce back boundary conditions
+      // SimpleBB: plain bounce back, or interpolated bounce back for --MEMVariant IBB
       ps->forEachParticle(false, mesa_pd::kernel::SelectAll(), *accessor, movingParticleMappingKernel, *accessor, MO_BB_Flag);
    }
 

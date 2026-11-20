@@ -247,7 +247,7 @@ class ForcingAdjuster
       // only evaluate in given frequencies
       if (executionCounter_ % frequency_ == uint_c(0))
       {
-         // compute new forcing value on root (since flow rate only known on root)
+         // compute new forcing value on root (the PID state is advanced on root only)
          WALBERLA_ROOT_SECTION()
          {
             newForceX = pidController_->update(meanVelocity_->length());

@@ -1,6 +1,6 @@
 //======================================================================================================================
 //! \file CylinderNearParallelSkewedTest.cpp
-//! Regression test for false band-band-skewed contacts between separated near-parallel rods ([RELEASE-OVERLAP]).
+//! Regression test: no false band-band-skewed contacts between separated near-parallel rods.
 //!
 //! Kodam et al. (2010), Part I, Section 3.2.4.2 (Eqs. 55-66): for two cylinders with skewed axes the shortest line
 //! between the infinite centrelines has length d = |x_cyl_j^i . r_hat|, r_hat = (e_i x e_j)/|e_i x e_j| (Eqs. 55-56),
@@ -8,10 +8,10 @@
 //! |l_j*| < L_j/2 (Eq. 63).
 //!
 //! For nearly parallel axes (tilt ~1e-6 rad, floating-point noise of an axis-aligned body) the lines come close only
-//! far along the axes (|l*| ~ separation/theta ~ 1e6 LU), so Eq. 63 correctly rejects. A "division by ~0" guard that
-//! sets l* = 0 when 1-(e_i.e_j)^2 < 1e-10 (band-band-skewed branch, ClosedFormContactsCylinderCylinder.h) makes both
-//! l* conditions vacuously true while d with a noise direction r_hat can be ~0, so separated rods are reported as
-//! overlapping by up to R_i+R_j = 6 LU. This test
+//! far along the axes (|l*| ~ separation/theta ~ 1e6 LU), so Eq. 63 correctly rejects. Setting l* = 0 when
+//! 1-(e_i.e_j)^2 < 1e-10 (a "division by ~0" guard) would make both l* conditions vacuously true while d along a noise
+//! direction r_hat can be ~0, reporting separated rods as overlapping by up to R_i+R_j = 6 LU; the band-band-skewed
+//! branch in ClosedFormContactsCylinderCylinder.h therefore skips that regime. This test
 //!   (1) implements Kodam Eqs. 55-66 literally (exact l* of Eq. 59, no guard) as an independent reference,
 //!   (2) shows the reference rejects separated near-parallel pairs (the paper's equations are correct),
 //!   (3) requires closed_form_contacts::cylinderCylinderContact and the production dispatch (analytic on, tight
@@ -75,7 +75,7 @@ double kodamBandBandSkewed(const Rod& i, const Rod& j, double& liStar, double& l
    return contact ? double(2 * kR) - d : -1.0;                     // Eq. 64
 }
 
-//! Two Y-axis rods (as in the hopper), the second at (-centreDistance) along X, tilted by `tilt` rad about `tiltAxis`.
+//! Rod at `pos` whose axis is +Y (as in the hopper) rotated by `tilt` rad about `tiltAxis`.
 Rod tiltedRod(const Vec3& pos, const Vec3& tiltAxis, double tilt)
 {
    mesa_pd::Rot3 r; r.rotate(tiltAxis, real_t(tilt));
@@ -133,7 +133,7 @@ int main(int argc, char** argv)
          check(!o.dispatchTight,  tag.str() + ": production dispatch (analytic + useTightLayer1) reports a contact between SEPARATED rods");
       }
 
-   // ---- (B) Monte Carlo: random tilt axis/magnitude, position noise, gap > 0 in any XZ-plane direction ----
+   // ---- (B) Monte Carlo: random tilt axes/magnitudes for both rods, gap > 0 in a random XZ-plane direction ----
    {
       std::mt19937 gen(4711); std::normal_distribution< double > nd(0.0, 1.0); std::uniform_real_distribution< double > ud(0.0, 6.283185307179586);
       int nFalse = 0, nTrials = 0;
@@ -146,7 +146,8 @@ int main(int argc, char** argv)
                const Vec3 tiltAxisA(real_t(nd(gen)), real_t(nd(gen)), real_t(nd(gen))), tiltAxisB(real_t(nd(gen)), real_t(nd(gen)), real_t(nd(gen)));
                const Rod a = tiltedRod(base, tiltAxisA.getNormalized(), tilt * nd(gen));
                const Rod b = tiltedRod(base + sep * real_t(2 * kR + gap + 1e-3), tiltAxisB.getNormalized(), tilt * nd(gen));
-               // gap between the axis-aligned rods; the tilt shifts the surface by < 9*1e-4 = 9e-4 < 1e-3 margin
+               // surface gap of the untilted rods >= 0.021 LU; tilts of a few 1e-4 rad move each rod end by only
+               // 9*|angle| ~ 1e-3 LU, so every pair stays separated
                const auto o = evaluate(a, b);
                ++nTrials;
                if (o.paper || o.dispatch || o.dispatchTight || o.kodam) ++nFalse;
@@ -167,8 +168,8 @@ int main(int argc, char** argv)
          check(o.dispatch && std::abs(o.dispatchOverlap - overlap) < 1e-3, tag.str() + ": dispatch overlap " + std::to_string(o.dispatchOverlap) + " != " + std::to_string(overlap));
       }
 
-   // ---- (D) capsule bound: axis segments 40 LU apart, so no analytic result may be accepted (defence in depth),
-   //          checked through the dispatch for several tilts ----
+   // ---- (D) capsule bound: centres 40 LU apart (axis segments >= 37 LU apart for all tilts), so neither the closed
+   //          form nor the dispatch may report a contact ----
    for (double tilt : { 0.0, 1e-6, 1e-3, 0.3 })
    {
       const Rod a{ base, Vec3(0, 1, 0) };

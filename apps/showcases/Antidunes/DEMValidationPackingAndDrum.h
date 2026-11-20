@@ -30,7 +30,7 @@ namespace dem_validation
 using namespace mesa_pd;
 
 //======================================================================================================================
-// 6-7: bulk mixed-shape tests
+// 6-7: bulk packing (mixed shapes) and angle-of-repose tests
 //======================================================================================================================
 
 inline bool runPacking(const config::Config::BlockHandle& b)
@@ -200,10 +200,10 @@ inline bool runAngleOfRepose(const config::Config::BlockHandle& b)
    // for the floor footprint; a pour column poking outside the domain trips AssocToBlock's block-assignment
    // assertion.
    //
-   // A random (r,phi) pour column seats particles overlapping at creation; LinearSpringDashpot's force scales with
-   // penetration depth, so that overlap is an explosive first-step force (a numerical blow-up to r,z in the
-   // thousands, which averaging can make read as "flat"). Hence a regular grid (cell size with a safety margin
-   // over the largest particle's circumscribing radius, as in runPacking), so no two particles start in contact.
+   // A random (r,phi) pour column would seat particles overlapping at creation; LinearSpringDashpot's force scales
+   // with penetration depth, so that overlap is an explosive first-step force (a numerical blow-up that the fit can
+   // read as "flat"). Hence a regular grid (cell size with a safety margin over the largest particle's
+   // circumscribing radius, as in runPacking), so no two particles start in contact.
    const real_t cellSize =
       real_t(2.2) * std::max(sphereRadius, std::sqrt(cylRadius * cylRadius + real_t(0.25) * cylLength * cylLength));
    const uint_t gridSide          = uint_t(4); // 4x4 = 16 particles per layer
@@ -215,8 +215,8 @@ inline bool runAngleOfRepose(const config::Config::BlockHandle& b)
    // Even with a clean pour, the pile stays essentially flat on a fully open floor: mesa_pd's LinearSpringDashpot
    // models pure Coulomb sliding friction with no rolling-resistance torque, so a sphere or rolling cylinder forms a
    // bounded pile only if it cannot roll away (a well-documented limitation of plain-Coulomb DEM contact models).
-   // Containing the pour in a bounded pit (the wall pattern of runPacking) sidesteps it, closer to the "pour into a
-   // hopper, measure the settled slope" method of the DEM calibration literature than Kodam's free-standing cone.
+   // Containing the pour in a bounded pit (the wall pattern of runPacking) sidesteps it, close to the "pour into a
+   // hopper, measure the settled slope" method of the DEM calibration literature.
    const real_t pitHalfExtent = b.getParameter< real_t >("pitHalfExtent", real_t(10));
    engine.addWall(Vec3(pitHalfExtent, 0, 0), Vec3(-1, 0, 0));
    engine.addWall(Vec3(-pitHalfExtent, 0, 0), Vec3(1, 0, 0));
@@ -288,8 +288,8 @@ inline bool runAngleOfRepose(const config::Config::BlockHandle& b)
                               << "relative increase=" << worstEnergyIncrease << "  "
                               << (energyMonotonic ? "PASS" : "FAIL (energy created -- contact/integration unstable)"));
 
-   // Least-squares fit of height vs. radial distance from the pour axis over the settled pile's outer
-   // shell -- slope magnitude approximates tan(angle of repose).
+   // Least-squares fit of height vs. radial distance from the pour axis over ALL particle centres of the
+   // settled pile -- slope magnitude approximates tan(angle of repose).
    real_t sumR = 0, sumZ = 0, sumRZ = 0, sumRR = 0;
    real_t minR = std::numeric_limits< real_t >::max(), maxR = real_t(0);
    real_t minZ = std::numeric_limits< real_t >::max(), maxZ = real_t(0);
@@ -316,15 +316,15 @@ inline bool runAngleOfRepose(const config::Config::BlockHandle& b)
                               << maxR << "] zRange=[" << minZ << "," << maxZ << "]");
    const real_t denom = real_t(n) * sumRR - sumR * sumR;
    const real_t slope = (std::abs(denom) > real_t(1e-9)) ? (real_t(n) * sumRZ - sumR * sumZ) / denom : real_t(0);
-   // repose angle = atan(|slope|) of the pile's r-vs-z least-squares fit; checked against the
-   // plausibility band below, anchored by Kodam et al. 2010 Part II's 39.6deg sim / 43.9deg experiment
+   // repose angle = atan(|slope|) of the pile's z-vs-r least-squares fit; checked against the
+   // plausibility band below
    const real_t reposeAngleDeg = std::atan(std::abs(slope)) * real_t(180) / math::pi;
 
    // Plausibility band only (~15-55 deg spans essentially all real granular materials); Kodam et al.
    // (2010) Part II's cylinder result (39.6 deg simulated vs. 43.9 deg experimental, aspect ratio
-   // ~0.66) is one concrete literature anchor within this band. NOT gated on step < maxSteps -- see
-   // runPacking's identical reasoning: a nonzero-restitution mixed-shape pile settles into a persistent
-   // low-level dynamic equilibrium, not exact rest.
+   // ~0.66) is a loose literature anchor within this band -- a DYNAMIC angle measured in a rotating drum
+   // (see runRotatingDrum), not a static pile. NOT gated on step < maxSteps -- see runPacking's reasoning:
+   // a nonzero-restitution pile settles into a persistent low-level dynamic equilibrium, not exact rest.
    const bool pass = reposeAngleDeg > real_t(15) && reposeAngleDeg < real_t(55) && energyMonotonic;
 
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] angleOfRepose steps="
@@ -352,9 +352,9 @@ inline bool runAngleOfRepose(const config::Config::BlockHandle& b)
 
 namespace detail
 {
-//! Creates one particle of `shape` ("sphere"/"box"/"cylinder") at `pos`, at rest, with a uniformly random
-//! 3D orientation (Kodam et al.'s "random initial orientation" drop protocol); skipped for orientation-invariant
-//! spheres.
+//! Creates one particle of `shape` ("sphere"/"box"/"cylinder") at `pos`, at rest, with a random 3D orientation
+//! (Kodam et al.'s "random initial orientation" drop protocol): axis drawn in [-1,1]^3 and normalised, angle uniform
+//! in [0, 2pi) -- random but not uniformly distributed over SO(3). Skipped for orientation-invariant spheres.
 inline size_t addRandomOrientedShape(DEMEngine& engine, const std::string& shape, const Vec3& pos,
                                       real_t sphereRadius, const Vec3& boxHalfExtents, real_t cylRadius,
                                       real_t cylLength, real_t density)
@@ -539,13 +539,13 @@ inline bool runPackingSingleShape(const config::Config::BlockHandle& b)
    const real_t bulkSolidFraction = real_t(created) * particleVolume /
                                      (math::pi * containerRadius * containerRadius * std::max(maxTop, real_t(1e-6)));
 
-   // Shape-specific plausibility bands, anchored to the literature RCP upper bounds (Li, Zhao, Lu & Xie, 2010,
-   // Chinese Science Bulletin 55(2):114-119, doi:10.1007/s11434-009-0650-0 -- sphere~0.64, cylinder~0.72,
-   // cube~0.78 maximally jammed; not verified against a local copy, so a soft, non-gating ceiling only) and Kodam et
-   // al.'s measured cylinder result (0.617 experiment / 0.589 true-cylinder-DEM sim, Table 2, verified against
-   // kodam_cylindrical_2010b.txt) as a concrete anchor. A gravity-poured bed sits below the jammed maxima, so these
-   // are broad "not obviously broken" bands: this dry run's contact parameters are not calibrated to Kodam's
-   // Plexiglas-on-Plexiglas values, so exact numeric reproduction is not the goal.
+   // Shape-specific plausibility bands [0.30, bandHi], both bounds gating: bandHi is the literature RCP upper bound
+   // (Li, Zhao, Lu & Xie, 2010, Chinese Science Bulletin 55(2):114-119, doi:10.1007/s11434-009-0650-0 --
+   // sphere~0.64, cylinder~0.72, cube~0.78 maximally jammed; values not checked against the paper). Kodam et al.'s
+   // measured cylinder result (0.617 experiment / 0.589 true-cylinder-DEM sim, Table 2) is a concrete anchor. A
+   // gravity-poured bed sits below the jammed maxima, so these are broad "not obviously broken" bands: this dry
+   // run's contact parameters are not calibrated to Kodam's Plexiglas-on-Plexiglas values, so exact numeric
+   // reproduction is not the goal.
    real_t bandHi = real_t(0.64);
    if (shape == "cylinder") bandHi = real_t(0.72);
    else if (shape == "box") bandHi = real_t(0.78);
@@ -772,7 +772,7 @@ inline bool runRotatingDrum(const config::Config::BlockHandle& b)
    const real_t denom          = real_t(n) * sumXX - sumX * sumX;
    const real_t slope          = (std::abs(denom) > real_t(1e-9)) ? (real_t(n) * sumXZ - sumX * sumZ) / denom : real_t(0);
    // repose angle = atan(|slope|) of the pooled free-surface points' least-squares fit; checked against
-   // the plausibility band below, anchored by Kodam et al. 2010 Part II's 39.6deg sim / 43.9deg experiment
+   // the plausibility band below
    const real_t reposeAngleDeg = std::atan(std::abs(slope)) * real_t(180) / math::pi;
 
    // Plausibility band only (~5-60deg spans essentially all real granular materials in a rotating drum);

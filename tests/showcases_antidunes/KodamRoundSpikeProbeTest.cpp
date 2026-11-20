@@ -79,9 +79,9 @@ void probe(const Sample& s)
       std::cout << "\n";
    }
 }
-// Sweep around the step-125000 pose: B's rotation relative to A scaled by f (0 = coaxial-parallel, 1 = as in the run)
-// and B's lateral offset (perpendicular to A's axis) scaled by g; axial position unchanged. Prints scenario / depth /
-// normal z of the production dispatch and the plain GJK/EPA depth.
+// Sweep around the step-125000 pose: B's axis tilted by fDeg (0-5 deg) from A's axis line, and B's lateral offset
+// (perpendicular to A's axis) scaled by g (0, 1, 3); axial position unchanged. Prints the raw closed-form scenario,
+// depth and normal z of the production dispatch, and the plain GJK/EPA depth.
 void sweep()
 {
    const Sample& s0 = samples[14]; // step 125000

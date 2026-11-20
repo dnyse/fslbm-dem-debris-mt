@@ -16,13 +16,13 @@
 //! \file CollideIsolatedObstacleIterationTest.cpp
 //! Hypothesis test for a collide-stage NaN in the hopper: the "treat non-interface cells" branch of
 //! StreamReconstructAdvectSweep.h never writes PDFs for an obstacle-flagged cell (only the fill level is copied, no
-//! streaming or reconstruction), while the generated collision kernel runs on every cell including obstacles (no flag
-//! gate at the call site, see CollideKernelCrashReplayTest.cpp and the CollideSweep in BuildTimeloop.h). A cell that
-//! stays obstacle-covered therefore has its PDFs updated only by collide, every step, with zero streaming input and
-//! zero force (ForceDensityCodegenSweep also skips obstacle cells): a repeated, isolated iteration of the collision
-//! map, at relaxationRate 1.99753, close to the omega = 2 stability limit. A single application on near-equilibrium
-//! input is finite (CollideKernelCrashReplayTest.cpp); this test iterates the same map up to 20000 times from that
-//! input and reports whether it diverges. Diagnostic only: both outcomes are logged, no assertion.
+//! streaming or reconstruction), while the generated collision kernel runs on every cell including obstacles (the
+//! CollideSweep in BuildTimeloop.h has no flag gate). PDFs of an obstacle cell that no bounce-back link refreshes are
+//! therefore changed only by collide, with no streaming input and no force update (ForceDensityCodegenSweep skips
+//! obstacle cells; the force is held at zero here): a repeated, isolated iteration of the collision map at
+//! relaxationRate 1.99753, close to the omega = 2 stability limit. A single application on near-equilibrium input is
+//! finite (CollideKernelCrashReplayTest.cpp); this test iterates the same map up to 20000 times from that input and
+//! reports whether it diverges. Diagnostic only: both outcomes are logged, no assertion.
 //======================================================================================================================
 
 #include "lbm/blockforest/communication/SimpleCommunication.h"
@@ -80,7 +80,7 @@ void runTest()
    for (uint_t q = uint_t(0); q < uint_t(27); ++q)
       pdfField->get(ix, iy, iz, q) = f[q];
 
-   // Force stays exactly zero, as ForceDensityCodegenSweep leaves it for obstacle-flagged cells (the isolated-iteration
+   // Zero force throughout: ForceDensityCodegenSweep does not update obstacle-flagged cells (the isolated-iteration
    // condition under test).
    forceField->get(ix, iy, iz, uint_t(0)) = real_t(0);
    forceField->get(ix, iy, iz, uint_t(1)) = real_t(0);

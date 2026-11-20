@@ -19,12 +19,12 @@ import argparse, json, math, pathlib
 ap = argparse.ArgumentParser()
 ap.add_argument("--s", type=int, default=16)
 ap.add_argument("--timesteps", type=int, default=0, help="default 20000*s/16")
-ap.add_argument("--window", type=int, default=300, help="logging window length in steps (ends at timesteps-700)")
+ap.add_argument("--window", type=int, default=300, help="logging window length in steps (starts at timesteps-1000)")
 ap.add_argument("--boxes", default="0.75,0.5,0.25", help="densities of the held boxes, left to right (default: all three of Bogner's basin)")
 ap.add_argument("--angles", default="0,5,10,15,20,25,26.565,30", help="comma-separated heel angles in degrees")
 ap.add_argument("--prefix", default="bogner_righting_scan", help="file-name prefix for the prms and the manifest")
-ap.add_argument("--nofill", action="store_true", help="[2026-09-21] write ModelParameters.useFillWeighting false (raw two-phase MEM force, ablation of the waterline phi-weighting); default true")
-ap.add_argument("--ibb", action="store_true", help="[2026-09-21] write ModelParameters.useInterpolatedBounceBack true (CLI interpolated bounce-back on the box links, SimpleBB.h); default: simple bounce-back")
+ap.add_argument("--nofill", action="store_true", help="write ModelParameters.useFillWeighting false (raw two-phase MEM force, ablation of the waterline phi-weighting); default true")
+ap.add_argument("--ibb", action="store_true", help="write ModelParameters.useInterpolatedBounceBack true (CLI interpolated bounce-back on the box links, SimpleBB.h); default: simple bounce-back")
 ARGS = ap.parse_args()
 s = ARGS.s; k = s / 16.0
 LX, LY, LZ = int(round(130 * k)), int(round(40 * k)), int(round(40 * k))
@@ -116,8 +116,8 @@ for alpha in ANGLES:
 //  * {len(DENS)} boxes rho {' / '.join(map(str, DENS))} at X = {', '.join(f'{x:.1f}' for x in xs)}, ALL at heel {alpha:g} deg about Y, each held (position AND rotation pinned in every axis) at the heave where its submerged
 //    cross-section area equals rho*s^2: Z = {', '.join(format(next(e['z_centre'] for e in manifest if e['alpha']==alpha and e['rho']==r), '.3f') for r in DENS)} for rho {', '.join(map(str, DENS))} (ideal geometry, waterline {ZW:g}).
 //  * MEM-only buoyancy (useMemOnlyBuoyancy + useBognerThreePhaseMEM), no analytic buoyancy.
-//  * {TIMESTEPS} steps, then the floater-history state CSV (raw MEM hydroForce/hydroTorque of the local copy of each box) is logged for steps {WIN_START}..{WIN_END} only -- the CSV has blown the home
-//    quota before, so the window is short and the fluid has {WIN_START} steps to settle (acoustic damping is slow at tau=0.526).
+//  * {TIMESTEPS} steps, then the floater-history state CSV (raw MEM hydroForce/hydroTorque of the local copy of each box) is logged for steps {WIN_START}..{WIN_END} only -- the CSV is large,
+//    so the window is short and the fluid has {WIN_START} steps to settle (acoustic damping is slow at tau=0.526).
 //  * Domain {LX}x{LY}x{LZ} / cellsPerBlock <{BLOCKS[0]},{BLOCKS[1]},{BLOCKS[2]}> = {nb[0]}x{nb[1]}x{nb[2]} = {nr} processes.
 // ─────────────────────────────────────────────────────────────────────────────
 

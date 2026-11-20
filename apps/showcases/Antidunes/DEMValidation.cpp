@@ -16,7 +16,7 @@
 //! \file DEMValidation.cpp
 //! \brief Fluid-free DEM validation dry-run: runs a battery of physically-grounded validation
 //!        experiments against the production DEM code (contact detection + LinearSpringDashpot +
-//!        VelocityVerlet, exactly as used by Antidunes.cpp's doDEMSubCycles), with NO fluid coupling.
+//!        VelocityVerlet, as in ParticleKernels::doDEMSubCycles), with NO fluid coupling.
 //!        Unlike the static contact-geometry tests, this checks dynamics against closed-form
 //!        analytical solutions (Kodam et al. 2010, Housner 1963) and literature bulk-behaviour ranges.
 //!        See AnalyticalSolutions.h / DEMValidationScenarios.h for the physics and experiment design.

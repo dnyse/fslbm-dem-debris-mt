@@ -9,7 +9,7 @@
 // upstream probes (x = 336) start in clean water; densityRatio 1.2 / 1.0 / 0.5 in the bottom two / middle three / top
 // two layers. All floaters are held fixed for 500 steps, then released together.
 // Contacts: analytical Cylinder x Cylinder (Kodam + Guo hybrid, GJK/EPA fallback), friction/restitution 0.5 / 0.5;
-// cylinderContactSkin 0.5: rod-rod contact starts at a surface gap of 2*skin = 1 (row pitch 8 leaves 1.52),
+// cylinderContactSkin 0.5: rod-rod contact starts at a surface gap of 2*skin = 1 (the x/z pitch 8/7.52 leaves 2/1.52),
 // rod-wall/pillar at 0.5. guardCurvatureInputs and wallOuterGhostLayer on.
 // Probes at x = 336 / 432, z = 20: centre pair in the middle slot (y = 40), pillar pair in line with pillar 1 (y = 25),
 // with discharge and blockage ratio.
@@ -55,7 +55,7 @@ PhysicsParameters
    Fr                1.31;
    We                15.6188;
    useHardcodedUnits false;
-   // no gravityOverride -- dynamically computed, see the extreme-clog prm's header
+   // no gravityOverride -- derived from U, Re and Fr (useHardcodedUnits false)
 }
 
 ParticleParameters
@@ -969,8 +969,8 @@ MeshOutputParameters
 }
 
 // VTK: the periodic fluid_field output is off (writeFrequency 0); fluid_field_snapshots writes the fluid only at the
-// listed steps (VTKParams::snapshotsEnabled, VtkWriter.h), and the floater/pillar point-data writers follow the same
-// list (addSnapshotAwareVTKWrite, BuildTimeloop.h). Fluid over the whole channel, floaters/pillars unfiltered.
+// listed steps (VTKParams::snapshotsEnabled, VtkWriter.h), and the floater point-data writers follow the same
+// list (addSnapshotAwareVTKWrite, BuildTimeloop.h). Fluid over the whole channel (pillars via mapped_flag).
 VTK
 {
    fluid_field

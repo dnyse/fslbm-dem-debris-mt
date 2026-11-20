@@ -120,9 +120,10 @@ GjkResult gjkCylCyl(const Vec3& posI, const Rot3& rotI, real_t radiusI, real_t l
    body1->setRotation(rotJ);
    const mesa_pd::data::Cylinder cylI(radiusI, lengthI), cylJ(radiusJ, lengthJ);
 
-   // The Cylinder x Cylinder overload (ParticleKernels.h) rejects pairs whose centre distance exceeds the sum of
-   // the interaction radii, which ParticleStorage defaults to 0. Set the circumscribing-sphere radius production
-   // uses (SetupStages.h: sqrt(radius^2 + halfLength^2)), otherwise every pair is reported as no contact.
+   // The Cylinder x Cylinder overload (ParticleKernels.h) pre-filters by axis-segment distance (useTightLayer1,
+   // default true) or, with useTightLayer1=false, by the sum of the interaction radii (skipped while they are 0,
+   // the ParticleStorage default). Set the circumscribing-sphere radius production uses (SetupStages.h:
+   // sqrt(radius^2 + halfLength^2), without skin) so the helper matches production either way.
    body0->setInteractionRadius(std::sqrt(radiusI * radiusI + real_t(0.25) * lengthI * lengthI));
    body1->setInteractionRadius(std::sqrt(radiusJ * radiusJ + real_t(0.25) * lengthJ * lengthJ));
 
@@ -748,7 +749,7 @@ void testCylinderCylinderFaceBand()
    WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-band");
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-3));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.normal, Vec3(real_t(0), real_t(0), real_t(-1)), real_t(1e-3));
-   // point = AB's midpoint projected onto i's face plane = (0, 0.45, 0.95) (Kodam et al. 2010 eq. 40-41)
+   // point = midpoint of AB's two disc crossings, (0, 0.45), half the overlap below the face: (0, 0.45, 0.95)
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0), real_t(0.45), real_t(0.95)), real_t(1e-3));
 
    const GjkResult gjk = gjkCylCyl(ci.pos, Rot3(), ci.radius, ci.length, cj.pos, rotJ, cj.radius, cj.length);
@@ -1081,8 +1082,8 @@ void testCylinderCylinderEdgeEdge()
 // Randomized fuzz helpers shared by the Cylinder x Cylinder and Box x Box fuzz tests: random orientation, and a
 // separation sampler that stays within a physically plausible overlap depth. Uniform sampling of the full separation
 // range mostly yields near-total interpenetration, which a spring-dashpot contact never lets develop; the overlap is
-// therefore capped at 15 % of the smaller body's radius (by default), already a stress case compared with the
-// few-percent overlaps of a DEM run.
+// therefore capped at 15 % (by default) of the smaller radius (smallest half-extent for boxes), already a stress case
+// compared with the few-percent overlaps of a DEM run.
 //======================================================================================================================
 struct FuzzRng
 {
@@ -1115,7 +1116,7 @@ struct FuzzRng
       return r;
    }
    //! Uniform axis and uniform angle in [0, 2pi): NOT uniform on SO(3) (the Haar measure has density
-   //! ~ 1 - cos(angle)), it over-samples rotations near the identity. Unused; kept for reproducing older numbers.
+   //! ~ 1 - cos(angle)), it over-samples rotations near the identity. Unused.
    Rot3 randomRotationAxisAngle()
    {
       Rot3 r;
@@ -1146,13 +1147,6 @@ struct FuzzRng
       return d(rng);
    }
 };
-
-//======================================================================================================================
-// Randomized fuzz test: random radius/length/orientation for both cylinders, separation sampled near the GJK/EPA
-// contact boundary (FuzzRng::sampleSeparationNearBoundary). Both the raw closed form (cylinderCylinderContact) and
-// the hybrid dispatcher (cylinderCylinderContactHybrid, GJK/EPA fallback when cylinderCylinderResultIsUncertain())
-// are checked against GJK/EPA. Fixed seed.
-//======================================================================================================================
 
 //======================================================================================================================
 // Debug visualization: every raw closed-form vs. GJK/EPA disagreement of the fuzz test (wrong existence, or wrong
@@ -1312,6 +1306,12 @@ inline void writeCylMismatchCSV(const std::string& path, const std::vector< CylM
    WALBERLA_LOG_INFO_ON_ROOT("[fuzz] wrote " << records.size() << " mismatch row(s) to " << path);
 }
 
+//======================================================================================================================
+// Randomized fuzz test: 10000 trials, seed 12345, radius U[0.3,2], length U[0.5,4] and uniform SO(3) for both
+// cylinders, separation sampled near the GJK/EPA contact boundary (FuzzRng::sampleSeparationNearBoundary). Both the
+// raw closed form (cylinderCylinderContact) and the hybrid dispatcher (cylinderCylinderContactHybrid, GJK/EPA fallback
+// when cylinderCylinderResultIsUncertain()) are compared with GJK/EPA; only the hybrid's contact existence is asserted.
+//======================================================================================================================
 void testCylinderCylinderRandomizedFuzz()
 {
    FuzzRng                                  fuzz(12345); // fixed seed -- reproducible across runs
@@ -2058,8 +2058,9 @@ void testCylinderCylinderBandEdgeClean()
                               << "not a general band-edge defect)");
 }
 
-//! Rotation matrix -> quaternion (e.g. Shepperd 1978); Rot3 has no Mat3 constructor. Also snaps a slightly
-//! non-orthonormal matrix to a valid rotation.
+//! Rotation matrix -> quaternion (component magnitudes from the diagonal, signs from the off-diagonal differences);
+//! Rot3 has no Mat3 constructor. The squared components sum to 1 by construction, so a slightly non-orthonormal
+//! matrix is snapped to a valid rotation.
 Rot3 rot3FromMatrix(const Mat3& m)
 {
    const real_t w = std::sqrt(std::max(real_t(0), real_t(1) + m(0, 0) + m(1, 1) + m(2, 2))) / real_t(2);
@@ -2195,8 +2196,8 @@ const char* classifyDispatchGapCause(const CylinderState& ci, const CylinderStat
 //! Only trials classified "edge-edge" by variant A are scored (the only scenario the variants affect), so the
 //! selection does not depend on the variants compared. 10000 trials, seed 13579, sampling as in
 //! testCylinderCylinderRandomizedFuzz; edge-edge fires on roughly 4 % of trials. Also counts trials where a variant
-//! gives the identical answer to A (overlap and point within 1e-9). Checks: at least 100 edge-edge trials, and
-//! A/B/C scored on the same set.
+//! gives the identical answer to A (C: to B; same contact flag, overlap and point within 1e-9). Checks: at least 100
+//! edge-edge trials, and A/B/C scored on the same set.
 void testEdgeEdgeThreeWayAccuracy10k()
 {
    FuzzRng                                  fuzz(13579); // distinct seed from the master-table test
@@ -2712,7 +2713,7 @@ void testTightLayer1BoxAccuracy10k()
 //======================================================================================================================
 void testCylinderCylinderFullComparisonAndHybridFeasibility()
 {
-   FuzzRng                                  fuzz(24680); // same seed as every breakdown/pattern test above
+   FuzzRng                                  fuzz(24680); // seed of testCylinderCylinderPureAnalyticalScenarioBreakdown
    std::uniform_real_distribution< real_t > radiusDist(real_t(0.3), real_t(2.0));
    std::uniform_real_distribution< real_t > lengthDist(real_t(0.5), real_t(4.0));
 
@@ -3181,8 +3182,8 @@ void testBoxBoxRandomizedFuzz()
 
 //! Tier 1: a genuine missed contact, trial 1209 of the independent-reference sample (overleaf
 //! scripts/contact-validation/data/cyl_pairs.csv): no scenario applies (the end faces meet corner to corner near both
-//! rims, thesis Figure 4.11). The reach-sum gate (centre distance < sum of radii and half-lengths) must trigger the
-//! fallback, which must return GJK/EPA's depth 0.113 (brute-force MTD 0.1131).
+//! rims, thesis Figure fig:cc-miss). The reach-sum gate (centre distance < sum of radii and half-lengths) must trigger
+//! the fallback, which must return GJK/EPA's depth 0.113 (brute-force MTD 0.1131).
 void testHybridTier1TriggersOnMissedContact()
 {
    const Mat3 rotIRows(real_t(0.0903122648821542), real_t(-0.93901787549968108), real_t(0.33179681177479803),
@@ -3666,13 +3667,14 @@ void testSphereCylinderRandomizedFuzz()
 
 
 //======================================================================================================================
-// Continuity of the detection along a path (thesis Section 5.2). For each random pair (uniform
-// SO(3)), cylinder j is translated along a straight line through the contact boundary, from an overlap of 15 % of the
-// smaller radius to a gap of 10 %, in 300 steps of size ds. Under a pure translation the true penetration depth is
+// Continuity of the detection along a path (thesis Section sec:results-contact-behaviour). For each random pair
+// (uniform SO(3)), cylinder j is translated along a straight line through the contact boundary, from an overlap of
+// 15 % of the smaller radius to a gap of 10 %, in 300 steps of size ds. Under a pure translation the true penetration depth is
 // Lipschitz with constant 1 (it changes at most by ds per step), contact switches exactly once, and the normal turns
-// continuously. Counted per method (GJK/EPA, raw closed form, hybrid, refined): paths with a depth jump > 2 ds,
-// paths whose contact flag switches more than once, paths with a normal jump > 5 deg between consecutive steps, and
-// the largest depth jump in units of ds.
+// continuously. Counted per method (GJK/EPA, raw closed form, hybrid, refined) over 300 paths (seed 97531): paths with
+// a depth jump > 2 ds, paths whose contact flag switches more than once, paths with a normal jump > 5 deg between
+// consecutive steps, paths with a depth jump > 1 % of the smaller radius, and the largest depth jump in units of ds.
+// Asserted: no GJK/EPA path with a jump > 2 ds; no refined path with flicker or a jump > 1 % of the smaller radius.
 //======================================================================================================================
 void testCylinderCylinderContinuityAlongPaths()
 {
@@ -3765,20 +3767,6 @@ void testCylinderCylinderContinuityAlongPaths()
    WALBERLA_CHECK_EQUAL(st["refined"].bigJump, 0); // no jump larger than 1 % of the smaller radius
 }
 
-//======================================================================================================================
-// Refined cylinder-cylinder detection (refineCylinderContact / cylinderCylinderContactRefined in
-// ClosedFormContactsCylinderCylinder.h) vs. GJK/EPA, sampled as the master comparison (seed 24680, uniform SO(3)).
-// Four detection variants are compared, all against GJK/EPA:
-//   raw      closed form alone;
-//   hybrid   closed form + GJK/EPA for "no scenario" (Tier 1) and special contacts (current production option);
-//   trust    closed form, "no scenario" trusted as "no contact" (no GJK/EPA at all; special contact kept as is);
-//   refined  closed form + support-function refinement (no GJK/EPA at all).
-// Reported: existence errors (missed / false contacts), depth errors > max(0.01, 5 %), max depth error, normal angle,
-// mean projection-overlap evaluations per refined call, and the time per call of each variant
-// (testRefinedCylinderContactVsGjk). Pass criterion (refined): no missed contacts, no false contacts, no depth error
-// > max(0.01, 5 %), and every contact point inside the intersection and not deeper than the depth in either body
-// (checked also for raw band-band-skewed).
-//======================================================================================================================
 //! Signed distance of point p to the surface of cylinder c (negative inside).
 real_t cylinderSignedDistance(const CylinderState& c, const Vec3& p)
 {
@@ -4282,6 +4270,20 @@ void evaluateBoxPairsDump()
    WALBERLA_CHECK_EQUAL(outsideNew, 0);
 }
 
+//======================================================================================================================
+// Refined cylinder-cylinder detection (refineCylinderContact / cylinderCylinderContactRefined in
+// ClosedFormContactsCylinderCylinder.h) vs. GJK/EPA, sampled as the master comparison (5000 pairs, seed 24680,
+// uniform SO(3)). Four detection variants are compared, all against GJK/EPA:
+//   raw      closed form alone;
+//   hybrid   closed form + GJK/EPA for "no scenario" (Tier 1) and special contacts (current production option);
+//   trust    closed form, "no scenario" trusted as "no contact" (no GJK/EPA at all; special contact kept as is);
+//   refined  closed form + support-function refinement (no GJK/EPA at all).
+// Reported: existence errors (missed / false contacts), depth errors > max(0.01, 5 %), max depth error, normal angle,
+// mean projection-overlap evaluations per refined call, and the time per call of each variant. Pass criterion
+// (refined): no missed contacts, no false contacts, no depth error > max(0.01, 5 %), and every contact point inside
+// the intersection (cylinderSignedDistance) and not deeper than the depth in either body; the inside check is also
+// asserted for raw band-band-skewed.
+//======================================================================================================================
 void testRefinedCylinderContactVsGjk()
 {
    FuzzRng                                  fuzz(24680);
@@ -4694,9 +4696,10 @@ void testCylinderNearParallelThresholdContinuity()
 
 //======================================================================================================================
 // Independent-reference dump (opt-in: runs only if ANTIDUNES_REFERENCE_DUMP is set to an output directory). The other
-// randomized tests treat GJK/EPA as the reference, but GJK/EPA is also the production path of the thesis's rod runs
-// (useAnalyticalContactDetection=false), so it needs an independent check. This writes random pairs (uniform SO(3),
-// FuzzRng::randomRotation) with the GJK/EPA, closed-form (raw, hybrid, refined) and SAT answers to CSV;
+// randomized tests treat GJK/EPA as the reference, but GJK/EPA is also a production path (the default,
+// useAnalyticalContactDetection=false, and the hybrid's fallback in the clogging runs), so it needs an independent
+// check. This writes random pairs (uniform SO(3), FuzzRng::randomRotation) with the GJK/EPA, closed-form (raw, hybrid,
+// refined) and SAT answers to CSV;
 // scripts/contact-validation/brute_force_reference.py (thesis repo) recomputes every depth from the support functions
 // alone and compares all methods against it.
 //======================================================================================================================
@@ -4857,8 +4860,9 @@ void replayPillarConfigurations()
 // Independent-reference dump for rod-pillar (solid CylindricalBoundary) and rod-wall (HalfSpace) contacts, the
 // obstacles of the clogging layouts. Opt-in like testIndependentReferenceDump (ANTIDUNES_REFERENCE_DUMP). Production
 // detection: SolidCylinderContactDetection (ParticleKernels.h, "pillar exterior" and Cylinder x HalfSpace), written
-// with and without refinement. scripts/contact-validation/brute_force_reference.py recomputes the depth from the
-// support functions, with the infinite pillar represented by a cylinder of half-length 1000.
+// with and without refinement. scripts/contact-validation/obstacle_reference.py (thesis repo) recomputes the depth from
+// the support functions: for the infinite pillar as the minimum projection overlap over the directions perpendicular to
+// its axis, for the wall exactly along its normal.
 //======================================================================================================================
 void testIndependentReferenceDumpObstacles()
 {
@@ -4915,8 +4919,9 @@ void testIndependentReferenceDumpObstacles()
          if (kind == "wall" && d3 * axis < real_t(0.2)) d3 = (d3 + axis).getNormalized();
          auto contactAtW = [&](real_t sep) {
             GjkResult tmp{ false, real_t(0), Vec3(real_t(0)), Vec3(real_t(0)) };
-            // sampling with the refined detection (validated against the reference); the legacy pillar detection misses
-            // contacts, which would bias the sampled overlaps towards large values
+            // sampling with the refined detection (validated against the reference); the unrefined pillar detection
+            // (refineCylinderContacts=false, the default) misses contacts, which would bias the sampled overlaps
+            // towards large values
             return (kind == "pillar") ? detect(origin + d3 * sep, rot, R, L, pillar, origin, tmp, true)
                                       : detect(origin + d3 * sep, rot, R, L, wall, origin, tmp, true);
          };

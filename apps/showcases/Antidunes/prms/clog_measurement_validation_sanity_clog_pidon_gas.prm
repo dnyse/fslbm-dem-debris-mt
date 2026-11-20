@@ -1,6 +1,6 @@
 // Sanity check of the ClogMeasurement evaluator (Evaluators.h) and of PIDParameters.enabled (Forcing.h) on the smallest
-// setup that produces an unambiguous clog; PID enabled (controlled-flume mode). Counterparts:
-// clog_measurement_validation_sanity_clog_pidoff_gas.prm and clog_measurement_validation_noclog_reference_gas.prm.
+// setup that produces an unambiguous clog; PID enabled (controlled-flume mode). Counterpart:
+// clog_measurement_validation_sanity_clog_pidoff_gas.prm.
 // Expected: clogUpstreamElevation/ExcessPressure rise relative to downstream as the jam forms, avgParticleTransportRate
 // drops, and the PID raises acceleration[0] to compensate.
 // Domain <384,40,90>, X periodic (recirculating current), Y walled, NoSlip top and bottom; cellsPerBlock <64,20,15>

@@ -118,8 +118,8 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
    }
 
    // --- Band-edge / special-contact candidate: P, the point on probe's rim closest to host's BAND
-   // (Kodam eq. 67-77, a quartic in sin(theta) solved in closed form by closestThetaOnCircleToLine
-   // -- see that function's own comment for the derivation). --------------------------------------
+   // (Kodam eq. 67-77, a quartic in sin(theta); solved here by closestThetaOnCircleToLine as a closed-form quartic in
+   // tan(theta/2) -- see that function's own comment for the derivation). ---------------------------
    Vec3         uP, vP;
    detail::perpendicularBasis(probe.axis(), uP, vP);
    const Vec3   capTop      = probe.pos + real_t(0.5) * probe.length * probe.axis();
@@ -207,7 +207,7 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
    }
 
    // Band-edge (eq. 79-81), CORRECTED per Guo et al.: Kodam's original delta_r < delta_a requirement
-   // is dropped entirely (their Fig. 7 shows a genuine band-edge contact where it doesn't hold); the
+   // is dropped entirely (Guo et al.'s Fig. 7 shows a genuine band-edge contact where it doesn't hold); the
    // "NOT face-edge" and "NOT special-contact" exclusions above (via the early returns) take its place.
    result.contact  = true;
    // overlap = delta_r(P), radial depth at the rim point closest to the host axis (Kodam et al. 2010
@@ -222,14 +222,15 @@ inline ContactResult rimVsFaceOrBand(const CylinderState& host, const CylinderSt
 }
 
 //! Cylinder-cylinder contact: dispatches across all 7 scenarios in Fig. 9 (face-face, face-band,
-//! face-edge, band-band parallel, band-band skewed, band-edge, edge-edge), in the order the paper
-//! presents them. `i`/`j` naming mirrors the paper; `ci` is the 1st argument, `cj` the 2nd.
+//! face-edge, band-band parallel, band-band skewed, band-edge, edge-edge) plus Guo et al.'s special contact,
+//! tested in the order face-face / band-band parallel, face-band, band-band skewed, face-edge / special contact /
+//! band-edge (both directions), edge-edge. `i`/`j` naming mirrors the paper; `ci` is the 1st argument, `cj` the 2nd.
 // useFastEdgeEdgeReference: forwarded to findRimCrossing's useFastReference for the edge-edge branch's two
 // rim-crossing calls (default false); affects only edge-edge.
 // maxIterations, quarticSolver, lazyThetaRef: forwarded ONLY to the edge-edge branch's two findRimCrossing calls, not
 // to rimVsFaceOrBand's quartic solves (band-edge/special-contact/face-edge), which use closestThetaOnCircleToLine's own
 // defaults (30 iterations, Ferrari). Every quartic solve of the dispatch therefore defaults to Ferrari, validated
-// across all scenarios by testCylinderCylinderFullComparisonAndHybridFeasibility (10000 trials); see also
+// across all scenarios by testCylinderCylinderFullComparisonAndHybridFeasibility (5000 trials); see also
 // QuarticSolverComparisonTest.cpp (synthetic quartics with known roots) and PaperAnalyticalContactTest.cpp's edge-edge
 // comparison (real geometry vs GJK/EPA). They are exposed so PaperAnalyticalContactTest.cpp can compare iteration
 // counts, solvers and reference choices on identical trials in one process; lazyThetaRef: see findRimCrossing.
@@ -263,8 +264,8 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
          result.overlap  = deltaAxial;                                     // eq. 28
          // eq. 29 defines this pointing i->j; negated to match this codebase's convention (normal
          // points from the 2nd argument toward the 1st, confirmed against production via
-         // testSphereSphereContact et al. -- see the band-band-skewed branch below, which already
-         // negates for the same reason).
+         // testSphereSphereContact et al. -- see the band-band-skewed branch below, which negates for
+         // the same reason).
          result.normal   = ci.R * Vec3(real_t(0), real_t(0), -math::sign(zIJ));
 
          result.point    = ci.pos + ci.R * faceFaceStyleContactPoint(relI, ci.radius, cj.length,
@@ -520,14 +521,15 @@ inline ContactResult cylinderCylinderContact(const CylinderState& ci, const Cyli
 //! non-contacts (normal broad-phase population); ParticleKernels.h's ContactDetectionStats::
 //! cylFallbackTier1GjkFoundContact/GjkFoundNoContact counters measure that split.
 //!
-//! special-contact: unconditional distrust. Its overlap formula (Guo et al. 2012, Table 1: axial distance from a
-//! single rim point to the host's face, delta_a) is Guo's fix for this configuration's DETECTION (not silently
+//! special-contact: unconditional distrust. Guo et al.'s overlap formula (2012, Table 1: axial distance from a
+//! single rim point to the host's face, delta_a) is their fix for this configuration's DETECTION (not silently
 //! dropped or misclassified as band-edge), not a validated magnitude. For testCylinderCylinderSpecialContact's
-//! geometry Kodam/Guo reports 0.181, GJK/EPA ~0.610, and a fully independent brute-force minimum-translation-distance
+//! geometry it gives 0.181, GJK/EPA ~0.610, and a fully independent brute-force minimum-translation-distance
 //! search over each cylinder's support function (testCylinderCylinderSpecialContactBruteForceMTD) 0.6095, i.e. Guo's
-//! formula underestimates by >3x. A 10000-trial fuzz run found this scenario wrong 93% of the time it fires, the
-//! largest concentrated error source of the raw dispatch; it is rare (under 2% of real contacts), so routing it to
-//! GJK/EPA costs almost nothing.
+//! formula underestimates by >3x. rimVsFaceOrBand replaces it by the deepest rim point inside the host (0.614 on that
+//! geometry), but the scenario is still routed to GJK/EPA. With Guo's formula a 10000-trial fuzz run found this
+//! scenario wrong 93% of the time it fires; it is rare (under 2% of real contacts), so routing it to GJK/EPA costs
+//! almost nothing.
 //!
 //! EVERY OTHER SCENARIO IS TRUSTED DIRECTLY. A magnitude cross-check against a looser circumscribing-sphere upper
 //! bound ("is MORE overlap possible than reported?") is not used: it pushes the GJK/EPA fallback rate to ~90%, and it
@@ -569,8 +571,10 @@ inline bool cylinderCylinderResultIsUncertain(const CylinderState& ci, const Cyl
 //  (a) refineCylinderContact: the closed-form scenarios that are not exact (edge-edge, band-edge, face-edge, special
 //      contact) get their depth and normal from a descent started at their own normal, which is typically close to the
 //      optimum. The exact scenarios (face-face, band-band parallel/skewed, face-band) are returned unchanged.
-//  (b) the "no scenario matched" case: a descent from a few seed directions. Any direction with D < 0 PROVES
-//      separation (early exit). If none is found, the pair is reported as a contact with the refined depth.
+//  (b) the "no scenario matched" case: a descent from the five seed directions (cylinderSeedDirections), then the
+//      non-smooth candidates (minimiseOverlapOnKinks) and the convex check (cylindersConvexOverlapCheck). Any
+//      direction with D < 0 PROVES separation (early exit). If none is found, the pair is reported as a contact with
+//      the refined depth.
 // A local descent can end in a local minimum of D; the result is therefore an UPPER bound of the true depth, and in
 // case (b) a pair could in principle be reported as touching although a separating direction exists elsewhere. Both are
 // measured against GJK/EPA and an independent brute-force reference in PaperAnalyticalContactTest.cpp.
@@ -583,8 +587,8 @@ inline real_t cylinderHalfWidth(const CylinderState& c, const Vec3& L)
    return real_t(0.5) * c.length * ca + c.radius * std::sqrt(std::max(real_t(0), real_t(1) - ca * ca));
 }
 
-//! Point of cylinder c farthest along the unit direction L (on an edge where the support set is a face or band segment,
-//! its midpoint along the degenerate direction).
+//! Point of cylinder c farthest along the unit direction L (where the support set is an end face or a band segment
+//! rather than a single point, its centre).
 inline Vec3 cylinderSupportPoint(const CylinderState& c, const Vec3& L)
 {
    const Vec3   a   = c.axis();
@@ -833,8 +837,9 @@ struct RefineTrace
 };
 
 //! Refined cylinder-cylinder contact (see the block comment above). `raw` is the closed-form result for (ci, cj).
-//! Exact scenarios pass through unchanged; inexact scenarios are refined from their own normal (plus the standard
-//! seeds); "no scenario" pairs are decided by the descent (separation proven if D < 0 is found).
+//! Exact scenarios pass through unchanged; inexact scenarios are accepted if a fast-path check finds their normal
+//! optimal, else refined by a descent from their own normal and the closest-axis-points direction; "no scenario"
+//! pairs are decided by the descent (separation proven if D < 0 is found).
 inline ContactResult refineCylinderContact(const CylinderState& ci, const CylinderState& cj, const ContactResult& raw,
                                            RefineTrace* trace = nullptr)
 {

@@ -19,8 +19,8 @@ DEMValidation{
     tiltEndDeg 40.0;
     tiltStepDeg 10.0;
 
-    // 0.3, same as the cylinder test: the same Cundall-Strack-vs-idealised-Coulomb friction gap
-    // (AnalyticalSolutions.h's calibration note) shows up here too -- observed empirically ~3-6% on
+    // 0.3: the Cundall-Strack-vs-idealised-Coulomb friction gap (AnalyticalSolutions.h's calibration
+    // note) shows up here -- observed empirically ~3-6% on
     // translational velocity and ~9-29% on angular velocity across this tilt sweep.
     toleranceRelError 0.3;
     vtkSpacing 0;

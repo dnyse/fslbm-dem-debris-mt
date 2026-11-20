@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bogner-like FREE floating box, three densities (0.25 / 0.5 / 0.75), DEEP basin, 150k steps, checkpointing ON.
 Follows the gen_bognerlike_box_scan.py set-up (real g_SI=9.81, box s=18 -> 18x36x18, long axis Y, heave + X/Y translation FREE, pitch/yaw pinned via
-pinRotationAxes <1,0,1>, roll about Y free) with three changes: (1) basin <96,45,60> and liquid depth 30 (was 40 / 20) so a sinking rho 0.75 box cannot touch the
+pinRotationAxes <1,0,1>, roll about Y free) with three changes: (1) basin <96,45,60> and liquid depth 30 so a sinking rho 0.75 box cannot touch the
 floor within the observed ~5-cell drop; (2) rho 0.5 added, ALL seeds 2.86 deg (Bogner's); (3) 150000 steps, storeSnapshot every 25000 steps (single rolling checkpoint, keepLastTwoSnapshots would need a per-generation resume prm) into a
 run-specific folder, plus a matching *_resume prm (loadSnapshot true, timesteps 400000). The eval sqlite (totalFluidMass + maxFluidPos_z every 250 steps) is KEPT by
 the job to check for water loss. Generates prms/bogner3_r{025,050,075}_deep{,_resume}_gas.prm, the rho 0.75 control variants
@@ -10,7 +10,7 @@ import math, re, sys
 sys.path.insert(0, ".")
 from gen_bognerlike_box_scan import square, clip_below, area
 RHOS = [0.25, 0.5, 0.75]; SEED = 2.86; S = 18.0; AVGD = 6.00146; FLOOR = 0.0600146; LIQ_FACTOR = 5.0
-WL0 = LIQ_FACTOR*AVGD + FLOOR   # 30.067 (absoluteLiquidHeight; the ref set had 3.3227*6.00146+0.06 = 20.0011)
+WL0 = LIQ_FACTOR*AVGD + FLOOR   # 30.067 (absoluteLiquidHeight)
 STEPS = 150000; RESUME_STEPS = 400000
 def heave(rho, alpha):
     lo, hi = WL0 - 2*S, WL0 + 2*S
@@ -84,7 +84,7 @@ SBATCH = """#!/bin/bash -l
 #   resume: cd <checkout>/apps/showcases/Antidunes && sbatch --export=ALL,B3_RHO=075,B3_RESUME=1 jobs/run_72_bogner3_deep.sbatch  (continues to 400000 from the newest checkpoint)
 # Results in pinscan_results/<jobid>/ (never overwritten, backup in ~/pinscan_backup), snapshots kept in build/.../snapshots_b3_r<RHO>/ (NOT deleted), eval sqlite kept.
 set -uo pipefail
-RHO="${B3_RHO:?set B3_RHO=025|050|075 via --export=ALL,B3_RHO=...}"; RESUME="${B3_RESUME:-0}"; VAR="${B3_VARIANT:-}"   # VAR="" | "_legacyrec" | "_nobogner"
+RHO="${B3_RHO:?set B3_RHO=025|050|075 via --export=ALL,B3_RHO=...}"; RESUME="${B3_RESUME:-0}"; VAR="${B3_VARIANT:-}"   # VAR="" | "_legacyrec" | "_nobogner" | "_bognergrav"
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
     REPO="$(cd "$SLURM_SUBMIT_DIR/../../.." && pwd)"
 else

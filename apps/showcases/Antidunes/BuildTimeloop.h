@@ -20,7 +20,8 @@
 //! \author Behzad Safaei <behzad.safaei@fau.de>
 //! \author Christoph Schwarzmeier <christoph.schwarzmeier@fau.de>
 //
-// Each function adds one logical group of sweeps/functions to the given timeloop.
+// Each add* function adds one logical group of sweeps/functions to the given timeloop; the other functions are
+// diagnostics and the wallOuterGhostLayer flag fix-up called from Antidunes.cpp.
 // Nothing here creates fields or particles. Those are assumed to already exist in SimObjs
 //======================================================================================================================
 
@@ -354,12 +355,12 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
    // (FlagFieldMapping, VtkWriter.h).
 }
 
-// Called by diagnoseNaNNormals every 1000 steps: counts the cells of the outer ghost layer (layer 2) beyond
-// non-periodic domain borders that carry liquid/interface/gas flags. A Border wall with walldistance -1 occupies only
-// ghost layer 1; layer 2 behind it gets the domain flag from fillWithDomain(nrOfGhostLayers) in mapParticlesOntoCells,
-// is not reset by initFlagsFromFillLevels (interior only) and is never communicated, so ObstacleFillLevelSweep (which
-// includes ghost layer 1) treats it as fluid next to the wall. Logs [GHOST2-FLUID label]: number of such cells, of
-// those with non-finite fill, and their fill range.
+// Called after flag initialisation (Antidunes.cpp) and by diagnoseNaNNormals every 1000 steps: counts the cells of
+// the outer ghost layer (layer 2) beyond non-periodic domain borders that carry liquid/interface/gas flags. A Border
+// wall with walldistance -1 occupies only ghost layer 1; layer 2 behind it gets the domain flag from
+// fillWithDomain(nrOfGhostLayers) in mapParticlesOntoCells, is not reset by initFlagsFromFillLevels (interior only)
+// and is never communicated, so ObstacleFillLevelSweep (which includes ghost layer 1) treats it as fluid next to the
+// wall. Logs [GHOST2-FLUID label]: number of such cells, of those with non-finite fill, and their fill range.
 inline void checkOuterGhostLayerFlags(const std::shared_ptr< SimulationObjects >& simObjs, const std::string& label)
 {
    uint_t nCells = 0, nFluid = 0, nNonFinite = 0;
@@ -550,7 +551,7 @@ inline void diagnoseNaNNormals(const std::shared_ptr< SimulationObjects >& simOb
 
 // Momentum budget diagnostics (ModelParameters.logMomentumBudget).
 // Rank-local {fluid Px, Py, Pz, fluid mass, bodies Px, Pz}: liquid + fill-weighted interface inner cells, and m*v of
-// the local non-ghost bodies.
+// the local non-ghost bodies with finite mass (invMass > 0).
 inline std::array< real_t, 6 > localFluidBodyMomentum(const std::shared_ptr< SimulationObjects >& simObjs)
 {
    real_t px = 0, py = 0, pz = 0, mass = 0;
@@ -733,7 +734,7 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
                                     "Communication: after smoothing sweep");
 
    // compute interface normals (using smoothed fill level field). With ObstacleNormalSweep +
-   // ObstacleFillLevelSweep running above, obstacle cells now carry meaningful fill, so we match the
+   // ObstacleFillLevelSweep running above, obstacle cells carry meaningful fill, so we match the
    // canonical FiniteDifferenceMethod flags (computeInInterfaceNeighbors, includeObstacleNeighbors,
    // modifyNearObstacles, computeInGhostLayer) = (true, true, true, true): obstacle-adjacent interface
    // cells get a complete gradient stencil instead of a degenerate (zero) normal at the contact line.
@@ -783,7 +784,8 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
 {
    WALBERLA_LOG_INFO_ON_ROOT("addSweepSurfaceDynamics");
 
-   // Debug probe: logs fixed watch cells (trackWatchCells) after every PDF-touching sweep below, during steps 425-444.
+   // Debug probe: logs fixed watch cells (trackWatchCells) after the sweeps below, during steps 425-444 (not after the
+   // weighted / interface-and-liquid excess mass variants).
    auto probeCrashCell = [simObjs](const char* label) {
       const uint_t t = *simObjs->currentMainStep;
       if (t < uint_t(425) || t > uint_t(444)) return;
@@ -794,9 +796,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                             Vector3< real_t >(real_t(18.5), real_t(34.5), real_t(26.5)) });
    };
 
-   // Domain-wide NaN scan after every PDF-touching sweep below (checkPdfNaN with its 3x3x3 neighbourhood dump), in the
-   // PhysicsParameters.denseNanScan* window. Silent unless a cell is non-finite; the result is ignored (no abort), so
-   // the stage-by-stage progression within the step stays visible.
+   // Domain-wide NaN scan at the same points as probeCrashCell (checkPdfNaN with its 3x3x3 neighbourhood dump), in the
+   // PhysicsParameters.denseNanScan* window. Silent unless a cell is non-finite or a precursor threshold fires; the
+   // result is ignored (no abort), so the stage-by-stage progression within the step stays visible.
    auto scanIntraStepNaN = [simParams, simObjs](const char* label) {
       if (!simParams->physics.denseNanScanEnabled) return;
       const uint_t t = *simObjs->currentMainStep;
@@ -808,7 +810,7 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
    };
 
    // add standard waLBerla boundary handling
-   // only relavant for onlyGasAndBoundary blocks (i.e. not interface, not inflow, not liquid)
+   // runs on every block except onlyGasAndBoundary blocks, which get the empty sweep
    timeloop->add() << Sweep(simObjs->antidunesBoundaryHandling->getBoundarySweep(), "Sweep: boundary handling",
                             Set< SUID >::emptySet(), StateSweep::onlyGasAndBoundary)
                    << Sweep(EmptySweep(), "Empty sweep: boundary handling", StateSweep::onlyGasAndBoundary)
@@ -819,7 +821,7 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                    << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 0); },
                                     "Momentum budget probe: after boundary handling");
 
-   // comopute force density field (acceleration applied to fluid and interface cells)
+   // compute force density field (acceleration applied to fluid and interface cells)
    const ForceDensityCodegenSweep< PdfField_T, FlagField_T, VectorFieldFlattened_T, ScalarField_T >
       forceDensityCodegenSweep(simObjs->forceDensityFieldID, simObjs->pdfFieldID, simObjs->flagFieldID,
                                simObjs->fillFieldID, simObjs->flagInfo, simObjs->acceleration);
@@ -888,7 +890,8 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
       typename LatticeModel_T::Sweep sweep_;
    };
 
-   // Debug probe: density of two fixed watch cells immediately before and after the generated collision, every step
+   // Debug probe: state (PDFs, density, fill, flag) of two fixed watch cells immediately before and after the generated
+   // collision, every step
    // (shows whether collide() also iterates obstacle cells, whose PDFs MovingParticleMapping leaves untouched).
    static const std::vector< Vector3< real_t > > collideProbeCells = {
       Vector3< real_t >(real_t(608.5), real_t(18.5), real_t(30.5)),
@@ -948,7 +951,7 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
 
    // reinitialize PDFs, i.e., refill cells that were converted from gas to interface
    // - when the flag "convertedFromGasToInterface" has been set (by CellConversionSweep)
-   // - according to the method specified with pdfRefillingModel_
+   // - always with EquilibriumRefillingSweep; ModelParameters.pdfRefillingModel is parsed but not used
    const walberla::free_surface::EquilibriumRefillingSweep< LatticeModel_T, FlagField_T > equilibriumRefillingSweep(
       simObjs->pdfFieldID, simObjs->flagFieldID, simObjs->flagInfo, true);
    timeloop->add() << Sweep(equilibriumRefillingSweep, "Sweep: EquilibriumRefilling", StateSweep::fullFreeSurface)
@@ -1067,11 +1070,12 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    // Map every sphere (bed type 0 + floating type 1) AND every floating box (type 3) / floating
    // cylinder (type 4) as a moving obstacle, so each is a full two-way-coupled floater — blocks the
    // fluid, receives a MEM hydrodynamic force via SimpleBB, and has its vacated cells reconstructed.
-   // Fixed pillars (type 2) are deliberately excluded here; they are mapped separately as static
-   // NoSlip/FreeSlip (see SetupStages). Must stay consistent with `floaterSelector` in SetupStages.
-   // Dormant (startInactive, not yet at settlingSteps) floaters are excluded too -- this is the
-   // per-step equivalent of SetupStages::mapParticlesOntoCells's init-time dormant guard; both must
-   // agree or a dormant floater would appear in the fluid the very first step after initialization.
+   // Fixed pillars (box pillars type 2, cylinder pillars) are excluded here; they are mapped separately as
+   // static NoSlip/FreeSlip (see SetupStages). Dormant (startInactive, not yet at settlingSteps) floaters
+   // are excluded too -- the per-step equivalent of the init-time dormant guard in
+   // SetupStages::mapParticlesOntoCells (`floaterSelector`); both must agree or a dormant floater would
+   // appear in the fluid the very first step after initialization. Note: `floaterSelector` selects types
+   // 1/3/4 only, i.e. bed spheres (type 0) are not mapped at initialisation, only from the first step on.
    auto dormantUIDs = simObjs->dormantFloaterUIDs;
    auto movingObstacleSelector = [dormantUIDs](const size_t particleIdx, const auto& ac) {
       const bool isSphere           = ac.getBaseShape(particleIdx)->getShapeType() == mesa_pd::data::Sphere::SHAPE_TYPE;
@@ -1154,7 +1158,7 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
          simObjs->blockForest, simObjs->pdfFieldID, simObjs->antidunesBoundaryHandling->getHandlingID(),
          simObjs->particleFieldID, simObjs->particleAccessor, AntidunesBoundaryHandling_T::movingObstacleFlagID,
          FormerMO_Flag,
-         movingObstacleSelector, // all spheres + floating boxes (not fixed pillars)
+         movingObstacleSelector, // all spheres + floating boxes/cylinders (not fixed pillars)
          strictlyConserveMomentum, simParams->model.mappingTieOffset, onOwnershipHandoff, onNewlyCovered),
       "Sweep (coupling): MovingParticleMapping")
    << AfterFunction(
@@ -1167,10 +1171,13 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    // EquilibriumReconstructor, which sets all 27 PDFs to f_i^eq(rho_avg, u_particle) >= 0. (Grad's moment
    // approximation adds a non-equilibrium term from neighbouring fluid velocities; near the contact line, with gas and
    // obstacle neighbours, that term can make f_i negative and the collision diverge.)
-   // Each FormerMO cell is classified by its D3Q27 non-obstacle neighbourhood B(x):
-   //   no liquid            ->  GAS        (fill 0)
-   //   no gas, no unknown   ->  LIQUID     (fill 1)
-   //   everything else      ->  INTERFACE  (fill = mean fill of the interface cells in B(x), seeded in pass 2)
+   // Each FormerMO cell is classified by its D3Q27 non-obstacle neighbourhood B(x) (default rule; see
+   // strictBognerClassification for Bogner's literal rule):
+   //   gas, no liquid, no unresolved same-pass neighbour     ->  GAS        (fill 0)
+   //   liquid, no gas, no unresolved same-pass neighbour     ->  LIQUID     (fill 1)
+   //   everything else                                       ->  INTERFACE  (fill seeded in pass 2: mean fill of the
+   //                                                             interface cells in B(x), 0.5 if none; see
+   //                                                             seedFillFromAllNeighbours)
    // useBognerReconstruction=false reconstructs every FormerMO cell as interface without fill seeding; the conversion
    // counters then stay zero. Held as a shared_ptr so the AfterFunction below can log and reset those counters.
    auto bognerReconstructionManager =
@@ -1190,7 +1197,7 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
          /* optimizeForSmallObstacleFraction */ false,
          simParams->model.useHydrostaticReconstruction,
          (*simObjs->acceleration)[2],                    // a_z (= -gravity), same value HydrostaticDensityFtor uses
-         simParams->staticReferenceHeight(),             // flat static reference H (same as SimpleBB)
+         simParams->staticReferenceHeight(),             // flat static H (SimpleBB's, unless useDynamicReferenceHeight)
          simParams->model.usePass3Reresolution);
    // ModelParameters.seedFillFromAllNeighbours (default false)
    bognerReconstructionManager->setSeedFillFromAllNeighbours(simParams->model.seedFillFromAllNeighbours);
@@ -1266,7 +1273,7 @@ void addAfterTimeStepStabilityChecker(const std::shared_ptr< const SimulationPar
 {
    WALBERLA_LOG_INFO_ON_ROOT("addAfterTimeStepStabilityChecker");
 
-   // logs data and aborts if it detects non-finite values in liquid or interfce cells
+   // logs data and aborts if it detects non-finite values in liquid or interface cells
    timeloop->addFuncAfterTimeStep(makeSharedFunctor(field::makeStabilityChecker< PdfField_T, FlagField_T >(
                                      simParams->cfgPtr, simObjs->blockForest, simObjs->pdfFieldID, simObjs->flagFieldID,
                                      walberla::free_surface::flagIDs::liquidInterfaceFlagIDs)),
@@ -1309,8 +1316,8 @@ void addAfterTimeStepDataEvaluators(const std::shared_ptr< const SimulationParam
    // clog measurement evaluator (optional "ClogMeasurement" prm block) -----------------------------------------
    if (simParams->evaluation.clogMeasurementEnabled)
    {
-      // Blockage-ratio inputs: the pillar geometry is passed in here so that ClogMeasurementEvaluator stays
-      // independent of CylinderPillarParams.
+      // Blockage-ratio inputs: the cylinder pillar geometry is passed in here so that ClogMeasurementEvaluator stays
+      // independent of CylinderPillarParams. Box pillars (PillarParams) are not passed.
       std::vector< Vector3< real_t > > pillarCenters;
       std::vector< real_t >            pillarRadii;
       for (const auto& pillar : simParams->cylinderPillars)
@@ -1372,7 +1379,7 @@ void addAfterTimeStepForcingAdjuster(const std::shared_ptr< const SimulationPara
 }
 
 // Optional sweep (ModelParameters.diagnosticSweepEnabled), once per main step on timeloopEval, i.e. after all LBM/DEM
-// and force computations of the step, within [diagnosticSweepFromStep, diagnosticSweepToStep):
+// and force computations of the step, within [diagnosticSweepFromStep, diagnosticSweepToStep) (ToStep 0 = no limit):
 //   1. drains and logs SimulationObjects::diagnosticEvents, filled by checks in ParticleKernels.h (PRE-REDUCE,
 //      RAW-HYDRO, VELOCITY-JUMP, MIGRATION-NAN) instead of logging at the point of detection;
 //   2. runs checkPdfNaN (SetupStages.h) once over all liquid/interface cells with the density window
@@ -1401,7 +1408,7 @@ void addAfterTimeStepDiagnosticSweep(const std::shared_ptr< const SimulationPara
       }
       events.clear();
 
-      // (2) Domain-wide density scan -- reuses checkPdfNaN entirely, same thresholds as denseNanScan.
+      // (2) Domain-wide density scan -- reuses checkPdfNaN with only the density window of the dense NaN scan.
       checkPdfNaN(simObjs, "DIAG-SWEEP-DENSITY", t, real_t(0), real_t(0), real_t(0),
                  simParams->physics.densityPrecursorLow, simParams->physics.densityPrecursorHigh,
                  simParams->physics.densityPrecursorLiquidOnly);

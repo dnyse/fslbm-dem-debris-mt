@@ -14,16 +14,16 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file ObstacleOwnershipHandoffTest.cpp
-//! Regression test for the obstacle-to-obstacle ownership handoff in lbm_mesapd_coupling::MovingParticleMapping.
-//! In a recorded crash, an obstacle cell passed directly from one rod to another (no liquid/interface state in
-//! between) and an odd-even (checkerboard) oscillation started in that step and grew until the blow-up. In the
-//! "cell is already an obstacle (maybe from another particle)" branch, MovingParticleMapping only updates
-//! (*particleField)(x,y,z) = particleUid and leaves the PDF field alone, so the new owner inherits whatever the
-//! previous owner's obstacle dynamics left in the cell.
+//! Regression test for the obstacle-to-obstacle ownership handoff in lbm_mesapd_coupling::MovingParticleMapping,
+//! where an obstacle cell passes directly from one particle to another (no liquid/interface state in between). In the
+//! "cell is already an obstacle (maybe from another particle)" branch, MovingParticleMapping itself only updates
+//! (*particleField)(x,y,z) = particleUid and leaves the PDF field alone, so without a callback the new owner inherits
+//! whatever the previous owner's obstacle dynamics left in the cell.
 //!
-//! Fix: on a genuine handoff (formerParticleUid != particleUid, not the routine same-owner re-confirmation of every
-//! step) MovingParticleMapping calls the optional onOwnershipHandoff_ callback (default no-op). Antidunes' callback in
-//! BuildTimeloop.h (prm switch useOwnershipHandoffPdfReset) resets the cell's PDF to D3Q27 rest equilibrium.
+//! On a genuine handoff (formerParticleUid != particleUid, not the routine same-owner re-confirmation of every step)
+//! of an inner cell, MovingParticleMapping calls the optional onOwnershipHandoff_ callback (default empty). Antidunes'
+//! callback in BuildTimeloop.h (prm switch useOwnershipHandoffPdfReset) resets the cell's PDF to D3Q27 rest
+//! equilibrium.
 //!
 //! The test drives the real MovingParticleMapping with two mesa_pd spheres: A maps a cell, a non-equilibrium PDF is
 //! written into it, then A moves away and B moves in before the next mapping call (a direct, same-step handoff).
@@ -31,9 +31,8 @@
 //! not the injected values, and the callback fired. A second check: the routine case (B re-confirming its own cell)
 //! must not reset the PDF, otherwise every covered cell would be frozen at equilibrium.
 //!
-//! Scope: the subsequent growth phase is not reproduced. Isolated collide iteration (CollideIsolatedObstacle*Test)
-//! does not diverge from the recorded seeds, so the growth presumably needs SimpleBB's per-step partial rewrite of
-//! an obstacle cell's fluid-facing links against a time-varying neighbour flow, which needs a small full scenario.
+//! Scope: only the handoff itself is tested, not any instability growing from an inherited PDF; isolated collide
+//! iteration (CollideIsolatedObstacle*Test) does not reproduce such growth.
 //======================================================================================================================
 
 // SimulationObjects.h (pulled in transitively by ParticleKernels.h) uses blockforest::SimpleCommunication

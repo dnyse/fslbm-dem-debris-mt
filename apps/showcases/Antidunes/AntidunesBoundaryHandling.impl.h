@@ -95,7 +95,7 @@ class BoundaryBlockDataHandling
                                              flagField, interfaceFlag, real_c(1.0));
       typename B::Outlet_T outlet(B::outletBoundaryID, B::outletFlagID, pdfField, flagField, domainMask);
       typename B::FreeSlip_T freeSlip(B::freeSlipBoundaryID, B::freeSlipFlagID, pdfField, flagField, domainMask);
-      // φ(x_b) accessor for the three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9): SimpleBB scales the
+      // φ(x_b) accessor for the three-phase MEM fill-weighting (Bogner 2017, Eq. 5.9): SimpleBB scales the
       // momentum-exchange force by the fill level of the near-boundary cell, so interface cells at a floater's
       // waterline do not contribute a full-liquid force. With useFillWeighting = false a null accessor is passed
       // and SimpleBB applies the unweighted two-phase MEM force.

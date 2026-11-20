@@ -216,7 +216,7 @@ inline auto createBox(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& c
    return p0;
 }
 
-// Fixed-mass cylinder using CylindricalBoundary shape — repurposed for solid exterior contact via
+// Fixed, infinite-mass cylinder using CylindricalBoundary shape — repurposed for solid exterior contact via
 // SolidCylinderContactDetection. axis should be normalised (e.g. Z-axis for a vertical pillar).
 // End caps are handled by the existing floor/ceiling HalfSpace planes.
 inline auto createCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center,

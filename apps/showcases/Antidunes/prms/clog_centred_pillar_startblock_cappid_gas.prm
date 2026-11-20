@@ -2,8 +2,8 @@
 // Centred pillar, extreme scale, capped PID, start block: as clog_centred_pillar_cappid_current_gas.prm, but the 100
 // spheres start as one block at the upstream end of the domain and are all released at step 500, like the hopper
 // start blocks, instead of the staggered release.
-// Domain <768,40,180>, X periodic, Y walled, NoSlip top and bottom. Z was doubled from 90 to 180 because at Z = 90 the
-// backed-up free surface upstream of the jam reached the ceiling; the pillar's BodyBC spans the full height.
+// Domain <768,40,180>, X periodic, Y walled, NoSlip top and bottom. Z = 180 keeps the backed-up free surface upstream
+// of the jam below the ceiling (at Z = 90 it reaches it); the pillar's BodyBC spans the full height.
 // Obstacle: one CylinderPillar at (384, 20), radius 12 (60 % of the 40 LU width), leaving two 8 LU slits that are
 // narrower than the 10 LU sphere diameter, so a single sphere cannot pass.
 // Physics: target velocity 0.04 (high enough to drive spheres into the slits), Re 3100, Fr 1.31, We 15.62,
@@ -216,15 +216,15 @@ EvaluationParameters
    ClogMeasurement
    {
       // pair 1: centreline of the left slit (Y 0..8)
-      upstreamPos       < 280, 4, 20 >;  // z 20 (was 40): pressure cell stays submerged downstream
-      downstreamPos      < 500, 4, 20 >;  // z 20 (was 40): pressure cell stays submerged downstream
+      upstreamPos       < 280, 4, 20 >;  // z 20: pressure cell stays submerged downstream
+      downstreamPos      < 500, 4, 20 >;  // z 20: pressure cell stays submerged downstream
       probeHalfWidthXY   2;
       flowRateEnabled    true;   // volumetric flow rate + wet area at the probe X planes (Evaluators.h flowRateAt)
       blockageRatioEnabled true;   // pillar + jam blockage at the probe planes
 
       // pair 2: centreline of the right slit (Y 32..40); probeHalfWidthXY 2 keeps both windows 2 LU off wall and pillar
-      pillarUpstreamPos    < 280, 36, 20 >;  // z 20 (was 40): pressure cell stays submerged downstream
-      pillarDownstreamPos  < 500, 36, 20 >;  // z 20 (was 40): pressure cell stays submerged downstream
+      pillarUpstreamPos    < 280, 36, 20 >;  // z 20: pressure cell stays submerged downstream
+      pillarDownstreamPos  < 500, 36, 20 >;  // z 20: pressure cell stays submerged downstream
    }
 }
 

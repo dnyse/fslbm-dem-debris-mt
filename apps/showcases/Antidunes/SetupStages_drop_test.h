@@ -712,8 +712,8 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
    WALBERLA_LOG_INFO_ON_ROOT("setupBoundaryHandling");
 
    // Live MEM reference height (ModelParameters.useDynamicReferenceHeight): seeded with the still-water level;
-   // with the toggle on, ParticleKernels' computeSubmergedVolumes() EMA-updates it every step from the floaters'
-   // fitted local waterlines. It only enters the force (SimpleBB's rhoHydStat), never the fluid. With the
+   // with the toggle on, ParticleKernels' computeSubmergedVolumes() EMA-updates it every step from the sphere
+   // floaters' fitted local waterlines (only when useMemOnlyBuoyancy=false, which gates that function). It only enters the force (SimpleBB's rhoHydStat), never the fluid. With the
    // toggle off it is never written and the static-height functor below is used.
    simObjs->memReferenceHeight = std::make_shared< real_t >(simParams->staticReferenceHeight());
 
@@ -730,7 +730,7 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
                               : " = absoluteLiquidHeight") + ")")));
 
    // useBognerThreePhaseMEM: a null functor selects SimpleBB's `hydrostaticDensityFct_ == nullptr` branch, i.e.
-   // no reference-height subtraction. Together with the (default) fill-weighting this is Bogner & Rude's
+   // no reference-height subtraction. Together with the (default) fill-weighting this is Bogner (2017),
    // Eq. 5.9: a phi(x_b)-weighted blend of the boundary-link PDFs and the gas equilibrium distribution.
    std::function< real_t(const Vector3< real_t >&) > hydrostaticFtor;
    if (!simParams->model.useBognerThreePhaseMEM)
@@ -807,9 +807,10 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
 // a stable fill-level / normal field around the contact line before the particle moves.
 //
 // Each released UID is also inserted into simObjs->freshlyActivatedFloaterUIDs (see SimulationObjects.h).
-// ComputeContacts (ParticleKernels.h) aborts with diagnostics if, in the next doDEMSubCycles() call, it finds a
-// contact involving such a UID, i.e. a floater released on top of an active neighbour. This uses the real
-// contact detection instead of a separate geometric check. The set is cleared at the end of that call.
+// ComputeContacts (ParticleKernels.h) aborts with diagnostics if, in the first sub-cycle of the next
+// doDEMSubCycles() call, it finds a contact involving such a UID, i.e. a floater released on top of an active
+// neighbour (contacts in later sub-cycles are only logged). This uses the real contact detection instead of a
+// separate geometric check. The set is cleared at the end of that call.
 void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams >& simParams,
                                    const std::shared_ptr< SimulationObjects >&       simObjs,
                                    const uint_t currentStep)
@@ -1079,8 +1080,7 @@ void checkHighAltitudeWater(const std::shared_ptr< SimulationObjects >& simObjs,
 }
 
 // Check the closed-interface-layer invariant: in FSLBM a liquid cell may never be a (D3Q27) neighbour of a gas
-// cell; an interface cell must separate them. A violation is a "hole" in the interface layer (the Fig. 4.12a
-// configuration). Counts the holes, logs the first one with its 3x3x3 neighbourhood and returns the global
+// cell; an interface cell must separate them. A violation is a "hole" in the interface layer. Counts the holes, logs the first one with its 3x3x3 neighbourhood and returns the global
 // count. Does not abort.
 uint_t checkClosedInterfaceLayer(const std::shared_ptr< SimulationObjects >& simObjs,
                                  const char* const location, const uint_t t)

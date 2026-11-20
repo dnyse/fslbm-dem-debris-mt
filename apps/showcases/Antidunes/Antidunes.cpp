@@ -157,8 +157,8 @@ int main(int argc, char** argv)
    WcTimingPool timingPool;
 
    // Watch cells for per-step PDF/density/flag tracing at a fragile free-surface contact-line
-   // configuration (checkPdfNaN dumps the first NaN's neighbourhood and aborts; trackWatchCells
-   // logs the watched cells' own history). Sampled every WATCH_FREQ steps; WATCH_DENSE_FROM enables
+   // configuration (checkPdfNaN dumps the first NaN's neighbourhood, after which the loop aborts;
+   // trackWatchCells logs the watched cells' own history). Sampled every WATCH_FREQ steps; WATCH_DENSE_FROM enables
    // per-step tracking from a given step on, disabled by default (past any realistic step count).
    std::vector< Vector3< real_t > > watchCells;
    for (real_t dz : { real_t(-1), real_t(0), real_t(1) })
@@ -191,8 +191,8 @@ int main(int argc, char** argv)
             "beginTimeStep + a particle count matching the expected population) or started fresh.");
    }
 
-   // One-time domain-wide density/NaN scan of the just-loaded checkpoint, before the main loop's
-   // first iteration touches anything -- reports the checkpoint's own saved fields.
+   // One-time domain-wide density/NaN scan of the initial fields (the loaded checkpoint on a resume),
+   // before the main loop's first iteration touches anything.
    {
       const bool checkpointHasNaN = checkPdfNaN(simObjs, "CHECKPOINT-LOAD", simObjs->beginTimeStep,
          real_t(0), real_t(0), real_t(0), simParams->physics.densityPrecursorLow,

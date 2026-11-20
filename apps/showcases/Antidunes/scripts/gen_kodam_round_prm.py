@@ -18,8 +18,6 @@ Changes towards the experiment:
  - A cylinder falls only 0.5 g t^2 = 2 mm in 430 steps, so a new spawn point keeps >= 10.5 mm horizontal distance from
    the previous three (circumscribed diameter 9.6 mm).
  - Settling tail 20000 steps (0.93 s) after the last release.
- - The particle loss under one-by-one release noted in gen_kodam_packing_prm.py was seen before the SyncNextNeighbors
-   fix in SetupStages*.h; delayed releases (e.g. the randomised 250-floater drop tests) have run without loss since.
 Usage (from apps/showcases/Antidunes): python3 scripts/gen_kodam_round_prm.py   ->  prms/DropTest_kodam_round_gas.prm
 """
 import math

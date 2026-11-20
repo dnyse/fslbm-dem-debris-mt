@@ -4,14 +4,15 @@
 // _half: released with the centre on the still-water level 60.0746 (half submerged), the same start for all three
 // densities, i.e. not at the rho 0.25/0.75 draft. Heave and X/Y translation free, roll about Y only
 // (pinRotationAxes <1,0,1>). Periodic in x and y (no N/S walls), no-slip T/B.
-// Basin <192,90,120>: the s=16 basin <96,45,60> doubled in every direction (Bogner doubles his 130x40x40 basin for
-// s=32), liquidHeightFactor 10 -> still-water level 60.0746. bedCopiesInX/Y = 2 (doubled with the domain) keep
+// Basin <192,90,120>: the s=16 basin <96,45,60> doubled in every direction (Bogner's own s=16
+// basin is 130x40x40), liquidHeightFactor 10 -> still-water level 60.0746. bedCopiesInX/Y = 2 (doubled with the domain) keep
 // avgParticleDiameter, dx_SI and dt_SI at the s=16 values (getAvgDiameterScalingFactor, Utility.h, scales with
 // domainSize / bedCopies), so gravityOverride 5.06585e-05 is still g_SI = 9.81 m/s^2. cellsPerBlock <32,15,15> ->
 // 6x6x8 = 288 processes.
 // _tau0526: relaxationRateOverride 1.90114068, i.e. tau = 0.526 (Bogner's value) instead of the water viscosity.
 // _sigma0: surface tension off. _strict: Bogner's classification rule for freed cells applied literally.
-// FormerMO fill seeding as before 2026-10-01 (seedSkipObstacleNeighbours false); momentum-budget diagnostic on.
+// seedSkipObstacleNeighbours false (obstacle-flagged interface neighbours count in the FormerMO fill seeding);
+// momentum-budget diagnostic on.
 // 100000 steps, checkpoint every 50000. VTK of the whole domain (velocity, fill_level, mapped_flag) only at the
 // fluid_field_snapshots steps (0 ... 99999). Eval and water height every 250 steps, density column over the
 // last 2000 steps.
@@ -93,7 +94,7 @@ FloatingBoxes
 
 ModelParameters
 {
-   seedSkipObstacleNeighbours false;   // FormerMO fill seeding as before 2026-10-01
+   seedSkipObstacleNeighbours false;   // obstacle-flagged interface neighbours count in the fill seeding
    strictBognerClassification true;   // _strict: Bogner's freed-cell rule literally
    logMomentumBudget true;   // [MOMENTUM-BUDGET] diagnostic
    pdfReconstructionModel        OnlyMissing;

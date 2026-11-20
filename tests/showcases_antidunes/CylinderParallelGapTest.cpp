@@ -1,8 +1,10 @@
 //======================================================================================================================
 //! \file CylinderParallelGapTest.cpp
-//! Regression test for a spurious overlap at cylinder-hopper release ([RELEASE-OVERLAP]): two parallel cylinders
-//! (radius 3, length 18, axis rotated onto world Y as in SetupStages.h) that are clearly separated (surface gaps 1, 2,
-//! 8, 15 LU) must not report a contact, with the analytic Kodam+Guo hybrid on and off.
+//! Regression test: two parallel cylinders (radius 3, length 18, axis rotated onto world Y as in SetupStages.h) that
+//! are clearly separated must not report a contact, with the analytic Kodam+Guo hybrid on and off. Fails on any
+//! contact in probe() (surface gaps 1, 2, 8, 15 LU, with and without 1e-9 rad rotation noise) or in monteCarlo()
+//! (gaps 1 and 8 LU, rotation sigma 0-1e-5 rad, position sigma 1e-6, 400 pairs each). probeAxes() and
+//! touchingAccuracy() only print.
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
@@ -83,8 +85,8 @@ void probeAxes(const char* na, const Vec3& a, const char* nb, const Vec3& b, rea
 
 #include <random>
 namespace walberla { namespace antidunes {
-// Monte Carlo: two parallel Y-axis rods (r=3, L=18) with perturbations as in the running simulation (quaternion
-// components ~1e-7, positions ~1e-6). Reports how often a separated pair is reported as touching.
+// Monte Carlo: two Y-axis rods (r=3, L=18), each rotated by small random angles (sigma rotSigma) about X, Y and Z and
+// shifted by position noise (sigma posSigma). Returns how often the separated pair is reported as touching.
 int monteCarlo(real_t centreDistance, bool analytic, double rotSigma, double posSigma, int trials, std::mt19937& gen)
 {
    std::normal_distribution< double > nd(0.0, 1.0);
@@ -113,8 +115,8 @@ int monteCarlo(real_t centreDistance, bool analytic, double rotSigma, double pos
 }}
 
 namespace walberla { namespace antidunes {
-// Accuracy near touching: analytic hybrid vs GJK/EPA reference for two near-parallel Y-axis rods, true surface gap
-// = centreDistance - 6.
+// Accuracy near touching (printed only): analytic hybrid vs GJK/EPA reference for two near-parallel Y-axis rods, true
+// surface gap = centreDistance - 6.
 void touchingAccuracy(real_t centreDistance, double rotSigma, bool tightLayer1, int trials, std::mt19937& gen)
 {
    std::normal_distribution< double > nd(0.0, 1.0);

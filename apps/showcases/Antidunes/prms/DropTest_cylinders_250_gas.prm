@@ -5,8 +5,6 @@
 // Cylinders: radius 1, length 12, densityRatio 0.6, axis <1, 0, 0> (set explicitly; FloatingCylinderParams defaults
 // to world Y), i.e. along the box's 12-long X dimension and inside its footprint, so the box spacing stays valid.
 // Cylinder x Cylinder contacts: closed form (Kodam/Guo) with GJK/EPA fallback for results flagged uncertain.
-//
-// Lineage: the first 25 of the 100 waves per column of DropTest_cylinders_gas.prm (1000 cylinders).
 // ─────────────────────────────────────────────────────────────────────────────
 
 BlockForestParameters
@@ -45,8 +43,8 @@ PhysicsParameters
 {
    enableWetting     false;
    timesteps         46000; // last release 36000 + 10000-step settling tail
-   Re                3100;    // no fluid; Re/Fr/We kept identical to the realgravity precedent so that
-   Fr                1.31;    // dt_SI, and with it the gravityOverride calibration, is the same
+   Re                3100;    // Re/Fr/We: no effect with useHardcodedUnits (the hardcoded nu_LU sets dt_SI) --
+   Fr                1.31;    // required by parser
    We                15.6188;
    useHardcodedUnits true;
    gravityOverride   2.1371500584054327e-05;  // true g = 9.81 m/s^2, see header
@@ -65,17 +63,16 @@ ParticleParameters
    useLubricationCorrection    false; // no fluid
    useNoSlipParticles          false;
    useParticleBed               false;
-   avgParticleDiameterOverride 8.001943372119138;   // as in the realgravity precedent; collision time = factor * this
-   dxSIOverride                0.000362694127490625; // as in the realgravity precedent (gravity calibration)
+   avgParticleDiameterOverride 8.001943372119138;   // collision time = collisionTimeFactor * this
+   dxSIOverride                0.000362694127490625; // gravity calibration, see header
 }
 
-// No Pillars / CylinderPillars / ArchTunnels: the container is the 6 domain walls created in setupParticles
+// No Pillars / CylinderPillars: the container is the 6 domain walls created in setupParticles
 // (SetupStages_drop_test.h).
 
 // 25 waves of 10: one floater per spawn column (X in {8, 24}, Y in {3, 9, 15, 21, 27}) at z = 170, near the ceiling,
 // a new wave every 1500 steps (settlingSteps 0, 1500, ..., 36000; all but the first wave startInactive). In 1500
-// steps a released floater falls 0.5 g t^2 = 24 LU, clear of the next release at the same point; 500 steps (2.7 LU,
-// less than the 3 LU box height) triggered [RELEASE-OVERLAP] (ParticleKernels.h).
+// steps a released floater falls 0.5 g t^2 = 24 LU, clear of the next release at the same point.
 FloatingCylinders
 {
    FloatingCylinder { position < 8, 3, 170 >; radius 1.0; length 12; axis < 1, 0, 0 >; densityRatio 0.6; settlingSteps 0; }

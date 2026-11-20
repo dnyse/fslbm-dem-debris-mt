@@ -46,7 +46,7 @@ PhysicsParameters
    Fr                1.31;
    We                15.6188;
    useHardcodedUnits false;
-   // no gravityOverride -- dynamically computed, see the extreme-clog prm's header
+   // no gravityOverride -- derived from U, Re and Fr (useHardcodedUnits false)
 }
 
 ParticleParameters
@@ -146,8 +146,8 @@ MeshOutputParameters
 }
 
 // VTK: the periodic fluid_field output is off (writeFrequency 0); fluid_field_snapshots writes the fluid only at the
-// listed steps (VTKParams::snapshotsEnabled, VtkWriter.h), and the floater/pillar point-data writers follow the same
-// list (addSnapshotAwareVTKWrite, BuildTimeloop.h). Fluid over the whole channel, floaters/pillars unfiltered.
+// listed steps (VTKParams::snapshotsEnabled, VtkWriter.h), and the floater point-data writers follow the same
+// list (addSnapshotAwareVTKWrite, BuildTimeloop.h). Fluid over the whole channel (pillars via mapped_flag).
 VTK
 {
    fluid_field

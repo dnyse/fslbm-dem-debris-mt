@@ -817,8 +817,8 @@ void testCylinderHalfSpaceContact()
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactNormal(), Vec3(real_t(0), real_t(0), real_t(1)));
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getContactPoint(), Vec3(real_t(0), real_t(0), real_t(0)));
 
-   // Swapped-argument overload must give the identical result (the generic HalfSpace overloads
-   // always internally reorder so the half-space is geo1, regardless of call order).
+   // Swapped-argument overload must give the identical result (the HalfSpace x Cylinder overload delegates to
+   // Cylinder x HalfSpace with the indices swapped).
    SolidCylinderContactDetection scd2;
    WALBERLA_CHECK(scd2(1, 0, wallShape, cylShape, ac));
    WALBERLA_CHECK_FLOAT_EQUAL(scd.getPenetrationDepth(), scd2.getPenetrationDepth());

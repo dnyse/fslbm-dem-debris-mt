@@ -255,8 +255,8 @@ class BedloadTransportEvaluator
 // gap beside a partial-width obstruction (Schalko, Follett & Nepf 2023, Water Resources Research), so a single
 // centreline profile does not represent the pillar face; see BuildTimeloop.h for the wiring.
 //
-// Elevation: fill level summed over z (skipping solid/moving-obstacle cells), averaged over a small xy window,
-// as in AverageDataSliceEvaluator; interface cells contribute their fractional fill.
+// Elevation: fill level summed over z (skipping solid/moving-obstacle cells, which AverageDataSliceEvaluator counts
+// as filled), averaged over a small xy window; interface cells contribute their fractional fill.
 //
 // Pressure: lattice pressure p = (rho-1)/3 at the probe cell, reported raw and as excess over the hydrostatic
 // reference rho_hyd(z) = 1 + 3*a_z*(z-H) (same formula as HydrostaticDensityFtor in DataInitialization.h,
@@ -400,7 +400,7 @@ class ClogMeasurementEvaluator
    // rather than the local wetted area; this makes the ratio comparable across runs.
    //
    // Pillar area is analytic from the fixed geometry (vertical circular prism over the full height, see
-   // createCylinder in SetupStages.h): the circle's y-chord at planeX, clipped to [0, channelWidthY_], times the
+   // createCylinder in Utility.h, called from SetupStages.h): the circle's y-chord at planeX, clipped to [0, channelWidthY_], times the
    // reference depth. Jam area counts moving-obstacle cells at or below the reference depth, averaged over the
    // same 2w+1 planes as flowRateAt, and excludes cells inside a pillar footprint (pillars are mesa_pd bodies
    // and may carry the moving-obstacle flag themselves). Units: cells^2 for the areas, ratio dimensionless.

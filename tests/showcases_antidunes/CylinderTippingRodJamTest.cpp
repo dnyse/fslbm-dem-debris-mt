@@ -1,14 +1,13 @@
 //======================================================================================================================
 //! \file CylinderTippingRodJamTest.cpp
-//! Reconstruction of a recorded crash in the half-density rod hopper with GJK/EPA-only cylinder-cylinder dispatch
-//! (useAnalyticalContactDetection=false): the [STALE-PARTICLE-IDX] guard in SimpleBB.h aborted after the
-//! hydrodynamic force/torque of two neighbouring rods jumped by roughly 10-30x within 100 steps, while one rod's
-//! tiltY diagnostic (ParticleKernels.h, atan2(R(0,2),R(0,0))) sat at ~167-171 deg, i.e. nearly axis-reversed.
-//! The exact quaternions were not logged, so the test approximates the configuration from what was:
+//! Approximates a recorded rod-hopper configuration (GJK/EPA-only cylinder-cylinder dispatch,
+//! useAnalyticalContactDetection=false) in which the hydrodynamic force/torque of two neighbouring rods grew by
+//! ~10-30x within 100 steps while one rod's tiltY diagnostic (ParticleKernels.h, atan2(R(0,2),R(0,0))) read ~167-171
+//! deg, i.e. nearly axis-reversed. Only positions and tiltY were logged, so the configuration is approximated:
 //!   - rod geometry: radius 3, length 18;
-//!   - the logged relative position at step 3100, magnitude ~5.93 LU (just under 2R = 6, barely touching if parallel);
+//!   - the logged centre positions at step 3100, separation ~5.93 LU (just under 2R = 6, barely touching if parallel);
 //!   - rod A at rest orientation (axis = world Y; its tiltY stayed below 10 deg);
-//!   - rod B swept through tilt theta in [0,180] deg about world X or Z, covering the observed range.
+//!   - rod B swept through tilt theta in [0,180] deg (2 deg steps) about world X or Z, covering the observed range.
 //!
 //! Question: is the force/torque explosion a GJK/EPA correctness bug, or a correctly detected genuine deep overlap
 //! (the rod tipped fast enough between DEM sub-cycles to penetrate deeply), i.e. a substep-resolution question?

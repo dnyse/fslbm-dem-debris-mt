@@ -11,8 +11,8 @@
 //!     avgParticleDiameterOverride 8.001943372119138, numSubCycles 10.
 //!   - the logged tiltY of the rod is -3.634916 deg at step 2700 and +167.240066 deg at step 2900, the only two logged
 //!     points either side of the flip: net ~170.87 deg over 200 main steps.
-//!   - the tilt sweep of CylinderTippingRodJamTest.cpp (same logged centre separation, rod A at rest) gives the
-//!     theta interval where the exact overlap exceeds 1 LU (the "dangerous arc").
+//!   - a tilt sweep as in CylinderTippingRodJamTest.cpp (same logged centres, rod A at rest, rod B tilted about world
+//!     X or Z in 1 deg steps) gives the theta interval where the exact overlap exceeds 1 LU (the "dangerous arc").
 //!
 //! Computed: assuming the net rotation happened at a uniform rate over the 200-step bracket (best case; any burstiness
 //! only makes the local rate faster), the number of sub-steps spent crossing the dangerous arc, compared with tc. This

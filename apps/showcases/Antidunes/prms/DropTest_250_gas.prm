@@ -6,13 +6,10 @@
 // parallel block decomposition on their own. Gravity acts along -Z (see DropTest.cpp's header). Box x Box contacts
 // use boxBoxSAT. Spawn grid and wave timing: see the FloatingBoxes block.
 //
-// Gravity: true g = 9.81 m/s^2. gravityOverride and dxSIOverride are copied from
-// box_sedimentation_showcase_analytical_125floaters_realgravity_gas.prm (gravityOverride = 9.81 dt_SI^2 / dx_SI, with
-// dt_SI set by Re/Fr/We/useHardcodedUnits and dx_SI, which are therefore kept identical). That file also checked the
-// LBM incompressibility bound (Buick & Greated 2000, Eq. 10) at domain height 180: 180 * gravityOverride = 0.00385,
+// Gravity: true g = 9.81 m/s^2. gravityOverride = 9.81 dt_SI^2 / dx_SI, with dx_SI = dxSIOverride and
+// dt_SI = nu_LU / nu_SI * dx_SI^2 (nu_LU = 0.000214026 from useHardcodedUnits, nu_SI = 1.0016e-6). LBM
+// incompressibility bound (Buick & Greated 2000, Eq. 10) at domain height 180: 180 * gravityOverride = 0.00385,
 // far below 1/3.
-//
-// Lineage: the first 25 of the 100 waves per column of DropTest_gas.prm (1000 cuboids, timesteps 158500).
 // ─────────────────────────────────────────────────────────────────────────────
 
 BlockForestParameters
@@ -51,8 +48,8 @@ PhysicsParameters
 {
    enableWetting     false;
    timesteps         46000; // last release 36000 + 10000-step settling tail
-   Re                3100;    // no fluid; Re/Fr/We kept identical to the realgravity precedent so that
-   Fr                1.31;    // dt_SI, and with it the gravityOverride calibration, is the same
+   Re                3100;    // Re/Fr/We: no effect with useHardcodedUnits (the hardcoded nu_LU sets dt_SI) --
+   Fr                1.31;    // required by parser
    We                15.6188;
    useHardcodedUnits true;
    gravityOverride   2.1371500584054327e-05;  // true g = 9.81 m/s^2, see header
@@ -71,17 +68,17 @@ ParticleParameters
    useLubricationCorrection    false; // no fluid
    useNoSlipParticles          false;
    useParticleBed               false;
-   avgParticleDiameterOverride 8.001943372119138;   // as in the realgravity precedent; collision time = factor * this
-   dxSIOverride                0.000362694127490625; // as in the realgravity precedent (gravity calibration)
+   avgParticleDiameterOverride 8.001943372119138;   // collision time = collisionTimeFactor * this
+   dxSIOverride                0.000362694127490625; // gravity calibration, see header
 }
 
-// No Pillars / CylinderPillars / ArchTunnels: the container is the 6 domain walls created in setupParticles
+// No Pillars / CylinderPillars: the container is the 6 domain walls created in setupParticles
 // (SetupStages_drop_test.h).
 
 // 25 waves of 10: one floater per spawn column (X in {8, 24}, Y in {3, 9, 15, 21, 27}) at z = 170, near the ceiling,
 // a new wave every 1500 steps (settlingSteps 0, 1500, ..., 36000; all but the first wave startInactive). In 1500
 // steps a released floater falls 0.5 g t^2 = 24 LU, clear of the next release at the same point; 500 steps (2.7 LU,
-// less than the 3 LU box height) triggered [RELEASE-OVERLAP] (ParticleKernels.h).
+// less than the 3 LU box height) would make releases overlap ([RELEASE-OVERLAP], ParticleKernels.h).
 FloatingBoxes
 {
    FloatingBox { position < 8, 3, 170 >; halfExtents < 6, 1, 1.5 >; densityRatio 0.6; settlingSteps 0; }

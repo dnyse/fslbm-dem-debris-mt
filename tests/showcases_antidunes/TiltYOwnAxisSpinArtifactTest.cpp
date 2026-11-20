@@ -1,14 +1,15 @@
 //======================================================================================================================
 //! \file TiltYOwnAxisSpinArtifactTest.cpp
-//! Companion to CylinderTippingRodJamTest.cpp / RodSpinSubstepResolutionTest.cpp, which read a logged tiltY change
-//! of -3.6 -> 167.2 deg as a physical topple. A fluid-free drop-test reproduction with the same rod geometry and
-//! contact settings showed tiltY jumps of > 100 deg within one 10-step window while the rod's position, velocity and
-//! contact force stayed smooth: the signature of a discontinuity in the diagnostic, not a real flip.
+//! Companion to CylinderTippingRodJamTest.cpp / RodSpinSubstepResolutionTest.cpp, which take a logged tiltY change of
+//! -3.6 -> 167.2 deg as a physical topple: shows that the tiltY diagnostic also jumps under a geometrically
+//! irrelevant spin of the rod about its own axis.
 //!
-//! Mechanism: tiltY = atan2(R(0,2), R(0,0)) (ParticleKernels.h) uses the world-X components of the local X and local Z
-//! axes. For a rod with its axis (local Z) along world Y, a spin about that axis is a geometric no-op (body of
+//! Mechanism: tiltY = atan2(R(0,2), R(0,0)) (ParticleKernels.h) uses the world-X components of the local Z and local X
+//! axes. For a rod with its axis (local Z) near world Y, a spin about that axis is a geometric no-op (body of
 //! revolution: shape, overlaps and contact state are invariant) but sweeps local X around the plane perpendicular to
-//! Y, the plane in which tiltY measures its angle. So an own-axis spin sweeps tiltY through the full +-180 deg range.
+//! the axis, so R(0,0) changes sign while R(0,2) stays small: for an axis tilted by `wobble` towards world X, tiltY
+//! sweeps between ~wobble and ~180 deg - wobble. Checked: as wobble -> 0, a single 0.5 deg spin step changes tiltY by
+//! > 80 deg.
 //======================================================================================================================
 #include <mesa_pd/data/DataTypes.h>
 #include <mesa_pd/data/shape/Cylinder.h>

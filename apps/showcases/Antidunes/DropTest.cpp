@@ -29,7 +29,8 @@
 //
 // VTK output does not use BuildTimeloop.h::addBeforeTimeStepVTKOutput (which needs LBM fields): one
 // domain_decomposition dump at start (as in BedGeneration.cpp) plus a floaterBox/floaterCylinder/floater/
-// floaterCapsule ParticleVtkOutput per shape present, with the same selectors as BuildTimeloop.h.
+// floaterCapsule ParticleVtkOutput per shape present, with the same particle selectors as BuildTimeloop.h (box and
+// cylinder outputs without its "sizeOrientation" tensor; BuildTimeloop.h has no capsule output).
 //======================================================================================================================
 
 #include "core/Environment.h"
@@ -154,7 +155,7 @@ int main(int argc, char** argv)
       writeFloaterBoxVtk = vtk::writeFiles(boxFloaterVTKOutput);
    }
 
-   // Cylinder floaters (type 4), same output as BuildTimeloop.h's "floaterCylinder" block.
+   // Cylinder floaters (type 4), same fields as BuildTimeloop.h's "floaterCylinder" block except "sizeOrientation".
    std::function< void() > writeFloaterCylinderVtk = []() {};
    if (!simParams->floatingCylinders.empty())
    {
@@ -293,7 +294,7 @@ int main(int argc, char** argv)
       writeFloaterCapsuleVtk = vtk::writeFiles(capsuleFloaterVTKOutput);
    }
 
-   // Main loop -- no LBM, no LBM-DEM coupling, no PID. Just wave release + DEM sub-cycles + VTK.
+   // Main loop -- no LBM, no LBM-DEM coupling, no PID. Just floater release + DEM sub-cycles + VTK.
    // ----------------------------------------------------------------------------------------------------------------
    WcTimingPool timingPool;
 

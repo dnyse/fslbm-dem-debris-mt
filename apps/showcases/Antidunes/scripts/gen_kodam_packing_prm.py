@@ -20,13 +20,10 @@ Approximations:
     Kodam's round container, so the bulk solid fraction (particle volume / (footprint area * fill height)) stays
     comparable; only the near-wall packing differs. gen_kodam_round_prm.py builds a round-container variant
     (ContainerCylinders block) from this file's output.
-  - Release: waves of 9 (one per reused spawn column) instead of one at a time. One-at-a-time attempts lost
-    particles during the run (250 -> 193 by step 23000), both with a unique random spawn point per particle and
-    with fixed spawn columns at a fast "demo" gravity (gravityOverride 0.005, ~250x real): the resulting impact
-    speeds (~1.3 LU/step) lie far outside the range the default contact calibration (collisionTimeFactor 4) had
-    been used at, while DropTest_cylinders_250_gas.prm at real gravity kept all 250 particles. (These losses predate
-    the SyncNextNeighbors fix, see gen_kodam_round_prm.py.) One-at-a-time release at real gravity would need ~1.5M
-    steps; small batches are not expected to change the final static packing materially.
+  - Release: waves of 9 (one per reused spawn column) instead of one at a time, which at real gravity would need
+    ~1.5M steps; small batches are not expected to change the final static packing materially. Real gravity rather
+    than a fast "demo" gravity (gravityOverride 0.005, ~250x real), whose impact speeds (~1.3 LU/step) lie far
+    outside the range the default contact calibration (collisionTimeFactor 4) is used at.
   - 1 LU = 1 mm: lengths read directly as millimetres, and gravityOverride is then real gravity at dt = 4.67e-5 s.
     avgParticleDiameterOverride / dxSIOverride are copied from DropTest_cylinders_250_gas.prm.
 
@@ -96,8 +93,8 @@ lines.append("// Fluid-free DEM recreation of Kodam et al. (2010) Part II Sec. 3
 lines.append(f"// {args.n} cylinders (R={R:g}, L={L:g} LU=mm, L/D={L/D:.4f}, matching Kodam's real 8.0/5.3mm exactly),")
 lines.append(f"// dropped in waves of up to {batch} (one per reused spawn column) into a square, area-matched stand-in")
 lines.append("// for Kodam's 50.6 mm round container. Friction and restitution from Kodam's Table 1 (0.5/0.85). Gravity")
-lines.append("// (real gravity) and wave timing as in DropTest_cylinders_250_gas.prm: a faster gravity lost particles,")
-lines.append("// and strict one-at-a-time release at real gravity would need ~1.5M steps (see gen_kodam_packing_prm.py).")
+lines.append("// (real gravity) and wave timing as in DropTest_cylinders_250_gas.prm; strict one-at-a-time release at real")
+lines.append("// gravity would need ~1.5M steps (see gen_kodam_packing_prm.py).")
 lines.append("// 1 LU = 1 mm. Only the near-wall packing differs from a round container; gen_kodam_round_prm.py builds")
 lines.append("// a round-container, one-at-a-time variant from this file.")
 lines.append("// Cylinder x Cylinder contacts: closed form (Kodam/Guo) with GJK/EPA fallback.")
@@ -142,7 +139,7 @@ lines.append("   Fr                1.31;")
 lines.append("   We                15.6188;")
 lines.append("   useHardcodedUnits true;")
 lines.append("   gravityOverride   2.1371500584054327e-05;  // as in DropTest_cylinders_250_gas.prm (real gravity);")
-lines.append("                                              // a faster gravity lost particles, see gen_kodam_packing_prm.py")
+lines.append("                                              // why not faster: see gen_kodam_packing_prm.py")
 lines.append("}")
 lines.append("")
 lines.append("ParticleParameters")

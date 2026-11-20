@@ -51,7 +51,7 @@ PhysicsParameters
    We                15.6188;
    useHardcodedUnits true;
    gravityOverride   2.1371500584054327e-05;  // as in DropTest_cylinders_250_gas.prm (real gravity);
-                                              // a faster gravity lost particles, see gen_kodam_packing_prm.py
+                                              // why not faster: see gen_kodam_packing_prm.py
 }
 
 ParticleParameters
@@ -76,7 +76,7 @@ ContainerCylinders
    ContainerCylinder { center < 26, 26, 80 >; radius 25.3; }  // Kodam's 50.6 mm container
 }
 
-// No Pillars / CylinderPillars / ArchTunnels; the 6 domain walls (SetupStages_drop_test.h) lie outside the round
+// No Pillars / CylinderPillars; the 6 domain walls (SetupStages_drop_test.h) lie outside the round
 // container.
 FloatingCylinders
 {

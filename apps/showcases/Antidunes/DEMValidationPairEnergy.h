@@ -14,8 +14,9 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file DEMValidationPairEnergy.h
-//! \brief Pairwise central head-on restitution/energy-conservation DEM validation scenarios: runPairRestitution,
-//! runCylinderPairEnergyFuzz, runCuboidPairEnergyFuzz, runEnergyConservation.
+//! \brief Pairwise collision DEM validation scenarios: central head-on restitution/energy conservation
+//! (runPairRestitution, runEnergyConservation) and oblique elastic energy fuzz (runCylinderPairEnergyFuzz,
+//! runCuboidPairEnergyFuzz).
 
 #pragma once
 
@@ -30,14 +31,14 @@ namespace dem_validation
 using namespace mesa_pd;
 
 //======================================================================================================================
-// 4-5: pairwise central head-on tests (all 6 shape-pair combinations)
+// 4-5: pairwise collision tests (head-on: all 6 shape-pair combinations; oblique fuzz: cylinder/cuboid pairs)
 //======================================================================================================================
 
 namespace detail
 {
 //! Creates a shape by name ("sphere"/"box"/"cylinder") centred at `pos`, moving at `vel`, oriented so
 //! that a pair of these shapes approaching head-on along world X makes CENTRAL, face-aligned contact
-//! (r x n = 0 on both sides -- no lever arm): box/cylinder are sized and oriented so the contact point
+//! (r x n = 0 on both sides -- no lever arm): box/cylinder are oriented so the contact point
 //! sits exactly on the line of centres (box: flat face perpendicular to X, unrotated; cylinder: axis
 //! along world Y, so its band's nearest surface point to a partner on the X-axis is exactly (radius,0,0)).
 inline size_t createPairMember(DEMEngine& engine, const std::string& shape, const Vec3& pos, const Vec3& vel,
@@ -178,7 +179,9 @@ inline bool runPairRestitution(const config::Config::BlockHandle& b)
 //!   pure     closed form without fallback (usePureAnalyticalCylinder)
 //!   refined  closed form + support-function refinement (refineCylinderContacts)
 //! Reported per mode: mean and max |KE_after/KE_before - 1| over the collisions that made contact, max relative
-//! momentum error, max penetration / radius, and collisions that never made contact although the other modes did.
+//! momentum error, max penetration / radius, and collisions that never made contact although the gjk mode did.
+//! Only the gjk and refined modes are gated (no collision over toleranceRelError, none missed vs. gjk); hybrid and
+//! pure are reported only.
 inline bool runCylinderPairEnergyFuzz(const config::Config::BlockHandle& b)
 {
    const real_t radius        = b.getParameter< real_t >("cylinderRadius", real_t(1));
@@ -300,8 +303,9 @@ inline bool runCylinderPairEnergyFuzz(const config::Config::BlockHandle& b)
 //! Cuboid version of runCylinderPairEnergyFuzz: oblique elastic (e = 1, mu = 0) collisions of two
 //! freely rotating cuboids with random orientations and lateral offsets, no gravity; kinetic energy must be conserved.
 //! Modes: "gjk" (GJK/EPA) and "sat" (closed-form separating-axis test, as in the drop tests). Checks in particular the
-//! SAT contact point (see detail::boxBoxContactPoint): a point on the line between the centres instead of at the
-//! touching features makes elastic collisions gain energy.
+//! SAT contact point (closed_form_contacts::detail::boxBoxContactPoint): a point on the line between the centres
+//! instead of at the touching features makes elastic collisions gain energy. Every mode is gated as in
+//! runCylinderPairEnergyFuzz.
 inline bool runCuboidPairEnergyFuzz(const config::Config::BlockHandle& b)
 {
    const Vec3   halfExt       = b.getParameter< Vec3 >("cuboidHalfExtents", Vec3(6, 1, real_t(1.5)));

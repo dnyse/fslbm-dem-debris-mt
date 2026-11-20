@@ -13,7 +13,7 @@
 //  You should have received a copy of the GNU General Public License along
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
-//! \file Boundary.h
+//! \file AntidunesBoundaryHandling.h
 //! \ingroup free_surface
 //! \author Martin Bauer
 //! \author Christoph Schwarzmeier <christoph.schwarzmeier@fau.de>
@@ -86,11 +86,12 @@ class AntidunesBoundaryHandling
                              std::function< real_t(const Vector3< real_t >&) > hydrostaticDensityFct,
                              bool useFillWeighting = true, bool useInterpolatedBounceBack = false);
 
-   // initialize fluid field from config file using (quotes indicate the string to be used in the file):
+   // initialize boundaries and fill level from config file using (quotes indicate the string to be used in the file):
    // - "CellInterval" (see src/geometry/initializer/BoundaryFromCellInterval.h)
    // - "Border" (see src/geometry/initializer/BoundaryFromDomainBorder.h)
    // - "Image" (see src/geometry/initializer/BoundaryFromImage.h)
-   // - "Body" (see src/geometry/initializer/OverlapFieldFromBody.h)
+   // - "Body" (fill level; see src/geometry/initializer/OverlapFieldFromBody.h)
+   // - "BodyBC" (boundary flags from a body; see src/geometry/initializer/BoundaryFromBody.h)
    inline void initFromConfig(const Config::BlockHandle& block);
 
    // initialize free surface object from geometric body (see src/geometry/initializer/OverlapFieldFromBody.h)

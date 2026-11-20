@@ -4,11 +4,11 @@
 //! obstacles. Cells are mapped as in lbm_mesapd_coupling::ParticleMapping: a lattice cell (dx = 1, centre at i+0.5) is
 //! obstacle iff its centre lies inside a body. A fluid cell is "pinched" when, for at least one of the 13 opposite
 //! direction pairs (d, -d) of the D3Q27 stencil, both neighbours are obstacle (a wall on two opposite sides one cell
-//! away; a recorded diverging fluid cell had such pairs, with 11 of 26 neighbours belonging to two different rods).
-//! A single convex body never creates a pinched cell; two bodies at a small gap do. Counts are taken for two rods
-//! (r=3, L=18, side by side, parallel or slightly tilted) and two spheres (same radius r=3, and same volume r=4.95),
-//! over gaps 0..2 cells with random sub-cell registration and orientation. Lubrication (LubricationCorrectionKernel,
-//! cut-off 2/3 cell) exists for sphere-sphere pairs only.
+//! away). Counts are taken for two rods (r=3, L=18, side by side, parallel or tilted by up to ~10 deg) and two spheres
+//! (same radius r=3, and same volume r=4.95), over gaps 0..2 cells with random sub-cell registration and orientation
+//! (300 placements per gap). Checks: a single rod or sphere (60 placements) never creates a pinched cell; summed over
+//! gaps <= 1 cell, two rods produce > 2x the pinched cells of two r=3 spheres and > 1.5x those of two same-volume
+//! spheres. Lubrication (LubricationCorrectionKernel, normal cut-off 2/3 cell) exists for sphere-sphere pairs only.
 //======================================================================================================================
 #include <core/Environment.h>
 #include <core/mpi/MPIManager.h>
@@ -51,8 +51,8 @@ Grid voxelize(const std::vector< Body >& bodies)
    return g;
 }
 
-//! number of fluid cells with an obstacle on two opposite sides (13 D3Q27 direction pairs); optional histogram
-//! by pair count
+//! number of fluid cells with an obstacle on two opposite sides (13 D3Q27 direction pairs); optionally also the number
+//! of cells with >= 3 such pairs
 int pinchedCells(Grid& g, int* atLeast3 = nullptr)
 {
    static std::vector< std::array< int, 3 > > half;
