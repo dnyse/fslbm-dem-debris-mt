@@ -9,25 +9,11 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# [Claude, 2026-10-01] Skin-adapted full-scale cylinder hopper: same 406 rods (r=3, L=18, D:L=1:3,
-# long axis along Y) pressed against the pillars, PID on, analytic cylinder contacts + owner-rank
-# tiebreak as the original `hopper_clog_cyl_frontblock_pidon_2node_gas.prm`/job, with
-# cylinderContactSkin 0.5 added (cd1b991b) and the row pitch widened 7->8 LU (via
-# `scripts/gen_hopper_clog_cyl_prm.py --pitch 8.0 --skin 0.5`) so the skin's own 1.0 LU rod-rod contact
-# threshold doesn't collide with the [RELEASE-OVERLAP] release-time guard the way it did at the
-# 24-rod test scale (job 4282206, failed in 97s). That guard-vs-skin interaction was then confirmed
-# fixed at 24 and 48 rods (jobs 4282267, 4282396: both full-length, exit 0, zero crash markers) --
-# this is the same fix applied directly to the real ~400-rod production scenario, per explicit
-# request ("adapt the original run 400 cylinder run to also work with this skin workaround").
-# See hopper_clog_box_startblock_skin0p5_cappid_gas.prm's own generated header for the full
-# geometry derivation. The un-skinned original sphere hopper took 1h48m for 60000 steps on 144
-# ranks; rods add contact cost and very verbose [CylComputation] diagnostics (expect a
-# multi-hundred-MB log), so 6h requested (same as the original cylinder job).
-# [Claude, 2026-10-03] capped-PID copy of run_144_hopper_clog_cyl_frontblock_pidon_2node_skin0p5_curvguard.sbatch (406 rods, 100000 steps;
-# 4284723 ran ~6.6 steps/s, so ~4.3 h plus VTK output)
-# [Claude, 2026-10-04] DRIFTING CUBOIDS (scripts/gen_hopper_stress_prms.py --box-startblock-only): cuboid twin of the start-block
-# rod run 4293495 (block x 8..232), 406 boxes 6x18x6, boxContactSkin 0.5, 150000 steps, release 500, VTK 0..149000,
-# wallOuterGhostLayer, probes z 20, blockage ratio. 6 h requested (4293494 took 4h39).
+# Hopper gap, drifting cuboids (prms/hopper_clog_box_startblock_skin0p5_cappid_gas.prm, from
+# scripts/gen_hopper_stress_prms.py --box-startblock-only): the drifting-rods start block (x 8..232) with every
+# rod replaced by a box 6 x 18 x 6 (406 boxes), boxContactSkin 0.5, capped PID, release at step 500, 150000
+# steps, probes at z = 20 with discharge and blockage ratio. 144 ranks / 2 nodes; 6 h requested (a 150000-step
+# hopper start-block run took ~4.7 h).
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
@@ -40,8 +26,8 @@ SH="$REPO/apps/showcases/Antidunes/antidunes.sh"
 PRM_DIR="$REPO/apps/showcases/Antidunes/prms"
 BIN_DIR="$REPO/build/apps/showcases/Antidunes"
 
-# [Claude, 2026-09-18] Never DELETE a previous run's output -- move aside instead (same filesystem
-# -> instant rename); archive/rescued_* is then moved off by hand.
+# Never delete a previous run's output: move leftovers aside (same filesystem, instant rename);
+# archive/rescued_* is moved off by hand.
 RESCUE="$BIN_DIR/archive/rescued_before_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"
 for dir in vtk-out eval snapshots; do
     if [[ -d "$BIN_DIR/$dir" ]]; then

@@ -9,25 +9,11 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# [Claude, 2026-10-01] Skin-adapted full-scale cylinder hopper: same 406 rods (r=3, L=18, D:L=1:3,
-# long axis along Y) pressed against the pillars, PID on, analytic cylinder contacts + owner-rank
-# tiebreak as the original `hopper_clog_cyl_frontblock_pidon_2node_gas.prm`/job, with
-# cylinderContactSkin 0.5 added (cd1b991b) and the row pitch widened 7->8 LU (via
-# `scripts/gen_hopper_clog_cyl_prm.py --pitch 8.0 --skin 0.5`) so the skin's own 1.0 LU rod-rod contact
-# threshold doesn't collide with the [RELEASE-OVERLAP] release-time guard the way it did at the
-# 24-rod test scale (job 4282206, failed in 97s). That guard-vs-skin interaction was then confirmed
-# fixed at 24 and 48 rods (jobs 4282267, 4282396: both full-length, exit 0, zero crash markers) --
-# this is the same fix applied directly to the real ~400-rod production scenario, per explicit
-# request ("adapt the original run 400 cylinder run to also work with this skin workaround").
-# See hopper_clog_mixed_startblock_skin0p5_cappid_gas.prm's own generated header for the full
-# geometry derivation. The un-skinned original sphere hopper took 1h48m for 60000 steps on 144
-# ranks; rods add contact cost and very verbose [CylComputation] diagnostics (expect a
-# multi-hundred-MB log), so 6h requested (same as the original cylinder job).
-# [Claude, 2026-10-03] capped-PID copy of run_144_hopper_clog_cyl_frontblock_pidon_2node_skin0p5_curvguard.sbatch (406 rods, 100000 steps;
-# 4284723 ran ~6.6 steps/s, so ~4.3 h plus VTK output)
-# [Claude, 2026-10-03] FIRST MIXED-FLOATER hopper trial (scripts/gen_hopper_stress_prms.py --mixed-only): start-block layout,
-# rows cycling 140 cylinders / 140 boxes / 315 spheres (R 3), 150000 steps, release 500, VTK at 0, wallOuterGhostLayer,
-# probes z 20, blockage ratio on; DEM-only release check passed locally (DropTest, 1500 steps, 8 ranks). 6 h requested.
+# Hopper gap, mixed floaters (prms/hopper_clog_mixed_startblock_skin0p5_cappid_gas.prm, from
+# scripts/gen_hopper_stress_prms.py --mixed-only): the drifting-rods start block (x 8..232) with the rows cycling
+# cylinder / box / sphere: 140 rods R 3, L 18, 140 boxes 6 x 18 x 6 and 315 spheres R 3, all with a 6 LU
+# cross-section. cylinderContactSkin and boxContactSkin 0.5 (mixed pairs have no skin), capped PID, release at
+# step 500, 150000 steps, probes at z = 20 with discharge and blockage ratio. 144 ranks / 2 nodes; 6 h requested.
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
@@ -40,8 +26,8 @@ SH="$REPO/apps/showcases/Antidunes/antidunes.sh"
 PRM_DIR="$REPO/apps/showcases/Antidunes/prms"
 BIN_DIR="$REPO/build/apps/showcases/Antidunes"
 
-# [Claude, 2026-09-18] Never DELETE a previous run's output -- move aside instead (same filesystem
-# -> instant rename); archive/rescued_* is then moved off by hand.
+# Never delete a previous run's output: move leftovers aside (same filesystem, instant rename);
+# archive/rescued_* is moved off by hand.
 RESCUE="$BIN_DIR/archive/rescued_before_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"
 for dir in vtk-out eval snapshots; do
     if [[ -d "$BIN_DIR/$dir" ]]; then

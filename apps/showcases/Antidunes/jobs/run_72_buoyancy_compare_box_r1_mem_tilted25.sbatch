@@ -9,11 +9,11 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# Diagnostic: same as run_72_buoyancy_compare_box_r1_mem.sbatch but initialTiltAngleDeg=25 (about
-# world Y) on the box -- see prms/buoyancy_compare_box_r1_mem_tilted25_gas.prm's own header for the
-# full hypothesis being tested (does tilting the box off-axis reduce the F_hydro_z noise the
-# axis-aligned box shows at R=1, THESIS_PLAN.md item 1b).
-# --constraint=el9 deliberately omitted (see run_72_bedgen_buoyancy_r1.sbatch's own header comment).
+# Diagnostic: MEM arm of the box buoyancy comparison at R = 1 with initialTiltAngleDeg 25 about world Y
+# (prms/buoyancy_compare_box_r1_mem_tilted25_gas.prm). Upright, the box faces pass through cell centres and the
+# box can map flush onto the floor with no fluid cell below it, which starves MEM-only buoyancy and makes
+# F_hydro_z noisy; the tilt avoids that mapping tie. 72 ranks / 1 node.
+# --constraint=el9 is omitted on purpose (see run_72_bedgen_buoyancy_r2.sbatch).
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then

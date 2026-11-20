@@ -22,10 +22,9 @@ settled fact — check with the author, or look in
 `/run/media/dhuber/data2/debris-clogging-archive/` (one `.tar.zst`/folder per run family; some have a
 `BACKUP_*.md` naming the exact job IDs and which thesis figure they feed) before trusting it blindly.
 
-Also: `THESIS_PLAN.md` (1 MB, the detailed development log) stops being updated in early October; a
-good number of the *final* configs referenced below are dated into November and are not narrated
-there. File naming and dates, cross-checked against the archive where possible, are the best
-available evidence for what's "final" versus "an earlier abandoned variant."
+Also: a good number of the *final* configs referenced below are dated into November and are not
+narrated in any development log. File naming and dates, cross-checked against the archive where
+possible, are the best available evidence for what's "final" versus "an earlier abandoned variant."
 
 ## Build
 
@@ -190,8 +189,8 @@ open any one of them to see the exact commands. **144 ranks / 2 nodes** for cent
 sbatch jobs/run_144_clog_centred_pillar_startblock_cappid.sbatch
 ```
 Config: `prms/clog_centred_pillar_startblock_cappid_gas.prm`. **Unconfirmed:** no dedicated
-clean-reference `.prm`/`.sbatch` exists under a "centred + clean/reference" name; per
-`THESIS_PLAN.md`'s 2026-10-02 entry the clean reference reuses earlier `clog_measurement_validation_*`
+clean-reference `.prm`/`.sbatch` exists under a "centred + clean/reference" name; the
+clean reference reportedly reuses earlier `clog_measurement_validation_*`
 jobs (4245061/4260083) from before this scenario was renamed to `startblock` — not re-verified here.
 
 ### Hopper gap (two wall pillars, 16 LU gap)

@@ -9,13 +9,11 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# [Claude, 2026-09-22] RERUN of the extreme-clog PID-ON scenario (job 4245629, source of the 'Clog Flow-Forcing Comparison' artifact) with the ClogMeasurement
-# flow-rate evaluator turned on (flowRateEnabled true, Evaluators.h flowRateAt -- didn't exist when 4245629 ran). Everything else identical: 144 ranks, extreme clog,
-# PID on, Z=180 domain. Time limit 3h15m (4245629 itself COMPLETED in 2h30m56s -- tightened from the original 6h budget to match). Queue: independent, ~/mt-dennys (free).
-# See prms/clog_centred_pillar_cappid_current_gas.prm.
-# [Claude, 2026-10-03] capped-PID copy of run_144_clog_measurement_validation_extreme_pidon_flowrate.sbatch
-# [Claude, 2026-10-04] CENTRED PILLAR, current settings (scripts/gen_hopper_stress_prms.py --centred-only): 4292673 +
-# 150000 steps, wallOuterGhostLayer, probes z 20, blockage ratio, VTK snapshots from 0. 6 h requested.
+# Centred pillar, extreme scale, capped PID, staggered release, with the settings of the hopper runs
+# (prms/clog_centred_pillar_cappid_current_gas.prm, from scripts/gen_hopper_stress_prms.py --centred-only):
+# 768 x 40 x 180 channel, pillar R 12 leaving two 8 LU slits, 100 spheres R 5 released in 10 batches, PID cap
+# 2.65e-6, flow rate and blockage ratio at the probes, 150000 steps. 144 ranks / 2 nodes; 6 h requested
+# (the staggered-release base scenario took ~2.5 h for 124750 steps).
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
@@ -42,8 +40,8 @@ echo "## clog measurement validation: extreme clog, PID on (fresh, 2-node/144-ra
 echo "############################################################"
 "$SH" --run --np 144 --prm "$PRM_DIR/clog_centred_pillar_cappid_current_gas.prm"
 
-# Prefer $HPCVAULT, decided and verified HERE (right before use) -- see the 288-rank sibling job's
-# own 2026-09-16 comment for the full rationale (autofs staleness, local-only is a last resort).
+# Archive to $HPCVAULT if it is writable right now (checked here, not at job start: autofs mounts can go stale);
+# the local archive under build/ is only a last-resort fallback.
 STAMP="$(date +%Y%m%d_%H%M%S)"
 VAULT_CANDIDATE="${HPCVAULT:-}/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_${STAMP}"
 if [[ -n "${HPCVAULT:-}" ]] && mkdir -p "$VAULT_CANDIDATE" 2>/dev/null \

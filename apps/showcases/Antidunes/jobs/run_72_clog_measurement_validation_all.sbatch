@@ -9,37 +9,21 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# Thesis item 3 (THESIS_PLAN.md) -- validates the new ClogMeasurementEvaluator (Evaluators.h) and the
-# new PIDParameters.enabled constant-forcing flag (Forcing.h) on a cheap two-pillar sanity scenario,
-# NOT yet item 4's real clogging scenarios. Runs all 3 prms back-to-back in ONE job (same run_case()
-# combined-job pattern as item 1a/1b's own sbatch scripts) so the allocation is only requested once:
+# Sanity check of the ClogMeasurement evaluator (Evaluators.h) and of the PIDParameters.enabled constant-forcing
+# flag (Forcing.h) on a cheap two-pillar scenario (384 x 40 x 90, pillars R 6 leaving a 6 LU gap, 12 spheres R 4
+# released from step 20000 on, once the flow has spun up). All three prms run back-to-back in one job so the
+# allocation is requested only once:
 #   1. no-clog reference (no floating spheres at all)
-#   2. sanity-clog, PID enabled (controlled-flume mode)
-#   3. sanity-clog, PID disabled (constant-forcing/fixed-hydraulic-gradient mode)
-# 72 processes (cellsPerBlock <64,20,15>, numBlocks <6,2,6>=72) -- matches this project's standard
-# single-node rank count. An earlier version of this file used only 8 ranks (cellsPerBlock
-# <48,40,90>, numBlocks <8,1,1>) on the theory that a small "sanity check" run should also request
-# few cores -- wrong: --partition=singlenode --nodes=1 already reserves a whole 72-core node
-# regardless of --ntasks, so 8 ranks just left 64 cores idle for zero benefit while making each rank
-# own ~9x more cells (slower wall-clock, not faster). Fixed to 72 ranks here.
-# Time limit 06:00:00: based on a REAL measured throughput from a comparable existing run
-# (cuboid_stillwater_gravity_comparison_3xsphere_d025, job 4035436, archived log: domain
-# <96,135,120>=1,555,200 cells / 72 ranks = 21600 cells/rank, steady-state 56.4ms/timestep --
-# excluding one-time setup) rather than a hand extrapolation -- this scenario's ~19200 cells/rank is
-# the same order of magnitude, so ~56500 steps * 56.4ms ~= 53 min/run * 3 runs ~= 2.6-2.9h, +~2x
-# buffer for this scenario's extra pillar/BodyBC and 12-floater DEM overhead (not present in that
-# reference run).
-# [Claude, 2026-09-14]: prms' release ladder pushed from t=5000 to t=20000 and timesteps 35000->56500
-# (see each prm's own header) -- flow wasn't spun up (meanVelocity_x still converging) when the first
-# sphere used to arrive at t=5000; time limit bumped from 04:00:00 accordingly.
+#   2. sanity clog, PID enabled (controlled-flume mode)
+#   3. sanity clog, PID disabled (constant forcing, fixed hydraulic gradient)
+# 72 ranks (cellsPerBlock <64,20,15>, 6 x 2 x 6 blocks): --nodes=1 on singlenode reserves a whole 72-core node
+# anyway, so fewer ranks would only leave cores idle and give each rank more cells.
+# 6 h requested: a comparable run (21600 cells/rank, 72 ranks) took 56.4 ms per step, so 56500 steps at ~19200
+# cells/rank take ~53 min per run, ~2.7 h for all three, doubled for the pillar BodyBC and floater DEM overhead.
 set -euo pipefail
 
-# [Claude, 2026-09-14]: this REPO derivation previously used 4 "../" (assuming sbatch was invoked
-# from inside jobs/), inconsistent with the rest of this project's scripts (e.g.
-# run_72_two_cylinder_floater.sbatch), which are always submitted with `sbatch` from
-# apps/showcases/Antidunes itself (same dir as antidunes.sh) -- so SLURM_SUBMIT_DIR sits only 3
-# levels below the repo root. Fixed to 3 "../" to match; `sbatch jobs/run_....sbatch` invoked from
-# Antidunes/ now works, consistent with every other script in this directory.
+# Submit with `sbatch jobs/...` from apps/showcases/Antidunes: SLURM_SUBMIT_DIR is then three levels below the
+# repo root.
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
     REPO="$(cd "$SLURM_SUBMIT_DIR/../../.." && pwd)"
 else

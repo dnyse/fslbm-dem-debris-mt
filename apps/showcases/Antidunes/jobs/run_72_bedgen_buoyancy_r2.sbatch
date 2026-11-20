@@ -9,14 +9,11 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# Thesis item 1b (THESIS_PLAN.md) -- scaling-reference bed generation for the R=1 resolution level.
-# See prms/BedGeneration_buoyancy_r2.prm's own header for the full derivation. Cheap, small run (this
-# bed is a pure SI-scaling reference -- useParticleBed=false in every Antidunes prm here means its
-# particles are never loaded into the actual physics). Uses antidunes.sh directly (not bypassed --
-# it handles module loading internally), unlike DropTest's own sbatch scripts.
-# --constraint=el9 deliberately omitted -- was rejecting ALL jobs cluster-wide with "Invalid feature
-# specification" earlier this session (a scheduler-side issue, unrelated to this script); every node
-# in the singlenode partition already carries that feature anyway (confirmed via sinfo).
+# Scaling-reference bed for the R = 2 level of the MEM vs. analytical buoyancy comparison
+# (prms/BedGeneration_buoyancy_r2.prm, writes spheres_out_buoyancy_r2.dat). The R = 2 buoyancy prms read only the
+# particle diameter and dx_SI from it (useParticleBed false), so its particles never enter the physics. Small
+# and cheap: 72 ranks, 30 min. Uses antidunes.sh, which loads the modules itself.
+# --constraint=el9 is omitted on purpose: every node of the singlenode partition carries that feature anyway.
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then

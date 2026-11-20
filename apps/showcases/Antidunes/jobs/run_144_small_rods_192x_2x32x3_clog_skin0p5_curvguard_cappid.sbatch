@@ -9,14 +9,10 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# [Claude, 2026-10-01] Doubling-in-X step after the clean 48-rod skin test (job 4282396, full
-# 51000 steps, exit 0, zero crash markers -- same result as the 24-rod test 4282267). Same
-# cylinderContactSkin 0.5, sealed-cell guard still off, same widened 8 LU row pitch -- now
-# 32 rows instead of 8 (2x32x3 = 192 rods), per explicit request ("we know the 48
-# cylinder works, then on two new freed directory run the 96 and the 192 version with the skin
-# activated"). 2h cap (4282396 ran 51000 steps well under 1h on 144 ranks; this grows the
-# floater count but not the domain/fluid work, so should stay well inside 2h).
-# [Claude, 2026-10-03] copy of run_144_small_rods_192x_2x32x3_clog_skin0p5_curvguard.sbatch for small_rods_192x_2x32x3_clog_skin0p5_curvguard_cappid_gas.prm (capped-PID test, THESIS_PLAN.md item 4); 100000 steps, 4 h (4284594 ran 51000 steps in ~1.2 h incl. build)
+# Hopper gap, 192 rods, capped PID (prms/small_rods_192x_2x32x3_clog_skin0p5_curvguard_cappid_gas.prm): 2 across
+# x 32 rows x 3 layers of rods R 3, L 18 (axis y) upstream of the 16 LU gap, cylinderContactSkin 0.5 with an
+# 8 LU row pitch, guardCurvatureInputs on, PID cap 2.65e-6. 100000 steps, 144 ranks / 2 nodes; 4 h requested
+# (the 51000-step uncapped version took ~1.2 h including the build).
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then

@@ -9,23 +9,16 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# [Claude, 2026-09-22] TILTED25 VARIANT (part of a chained R1->R2->R4 rerun, THESIS_PLAN.md): the box runs (both mem and analytic
-# arms) use the tilted25 prms -- initialTiltAngleDeg 25 on the FloatingBox -- instead of upright. Root cause: the untilted box sits
-# on a mapping tie (axis-aligned face planes through cell centres), which for R1/MEM left it flush on the floor with no fluid cell
-# underneath, starving MEM-only buoyancy (traced and fixed 2026-09-22, 'CORRECTION of the tie explanation'; proven once for R1/box/
-# MEM only, job 4232331, never applied to R2/R4 or the analytic arm before now). Sphere/cylinder prms are UNCHANGED (no tie problem
-# was ever observed for them). See scripts/gen_buoyancy_tilted25_box_prm.py.
-# Chained: R1 (no dependency) -> R2 (afterany R1) -> R4 (afterany R2), same checkout (mt-dennys-mirror, which already has all
-# three bed files spheres_out_buoyancy_r{1,2,4}.dat -- avoids a repeat of the earlier cross-mirror bed-file gap).
-# Time limit ADJUSTED from the last real run: job 4223072 (the R2 compare-all that actually COMPLETED) took 1:08:31 total for the 6 untilted runs; the
-# previous script's own 02:30:00 budget was padded well beyond that. Tightened to 01:30:00 (~22 min margin over the last measured total) so this gets scheduled sooner.
+# MEM vs. analytical buoyancy at R = 2: sphere, cylinder and box, each with MEM-only and analytical buoyancy,
+# run back-to-back in one job so the allocation is requested only once.
+# The box prms are the tilted25 variants (initialTiltAngleDeg 25, scripts/gen_buoyancy_tilted25_box_prm.py):
+# upright, the box sits on a mapping tie (face planes through cell centres) and can map flush onto the floor with
+# no fluid cell below it, which starves MEM-only buoyancy. The sphere and cylinder prms are upright.
+# R1, R2 and R4 can be chained (--dependency=afterany) in one checkout that holds all three bed files
+# spheres_out_buoyancy_r{1,2,4}.dat.
 
-# Thesis item 1b (THESIS_PLAN.md) -- MEM vs. analytical buoyancy comparison, R=2, all 3 shapes x 2
-# methods run back-to-back in ONE job (matches item 1a's own run_case() sbatch precedent) so the
-# node allocation only needs to be requested once, not 6 separate times. R=2: 72 ranks / 1 node,
-# cellsPerBlock <32,32,24> (8x baseline per-rank cells, single-node compromise). Time limit 02:30:00 = ~2.3x the extrapolated ~66min total
-# (6 x ~11min each, per THESIS_PLAN.md's own timing data) as a safety buffer.
-# --constraint=el9 deliberately omitted (see run_72_bedgen_buoyancy_r2.sbatch's own header comment).
+# R = 2: 72 ranks / 1 node, cellsPerBlock <32,32,24>; 1.5 h requested (~1 h 09 min measured for the 6 runs).
+# --constraint=el9 is omitted on purpose (see run_72_bedgen_buoyancy_r2.sbatch).
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then

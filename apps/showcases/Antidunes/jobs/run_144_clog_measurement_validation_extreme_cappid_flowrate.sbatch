@@ -9,11 +9,10 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# [Claude, 2026-09-22] RERUN of the extreme-clog PID-ON scenario (job 4245629, source of the 'Clog Flow-Forcing Comparison' artifact) with the ClogMeasurement
-# flow-rate evaluator turned on (flowRateEnabled true, Evaluators.h flowRateAt -- didn't exist when 4245629 ran). Everything else identical: 144 ranks, extreme clog,
-# PID on, Z=180 domain. Time limit 3h15m (4245629 itself COMPLETED in 2h30m56s -- tightened from the original 6h budget to match). Queue: independent, ~/mt-dennys (free).
-# See prms/clog_measurement_validation_extreme_cappid_2node_flowrate_gas.prm.
-# [Claude, 2026-10-03] capped-PID copy of run_144_clog_measurement_validation_extreme_pidon_flowrate.sbatch
+# Centred pillar, extreme scale, capped PID, staggered release, with the ClogMeasurement flow-rate evaluator
+# (prms/clog_measurement_validation_extreme_cappid_2node_flowrate_gas.prm): 768 x 40 x 180 channel, pillar R 12
+# leaving two 8 LU slits, 100 spheres R 5 in 10 release batches, PID cap 2.65e-6, 124750 steps.
+# 144 ranks / 2 nodes; 3.5 h requested (~2.5 h measured for this scenario).
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
@@ -40,8 +39,8 @@ echo "## clog measurement validation: extreme clog, PID on (fresh, 2-node/144-ra
 echo "############################################################"
 "$SH" --run --np 144 --prm "$PRM_DIR/clog_measurement_validation_extreme_cappid_2node_flowrate_gas.prm"
 
-# Prefer $HPCVAULT, decided and verified HERE (right before use) -- see the 288-rank sibling job's
-# own 2026-09-16 comment for the full rationale (autofs staleness, local-only is a last resort).
+# Archive to $HPCVAULT if it is writable right now (checked here, not at job start: autofs mounts can go stale);
+# the local archive under build/ is only a last-resort fallback.
 STAMP="$(date +%Y%m%d_%H%M%S)"
 VAULT_CANDIDATE="${HPCVAULT:-}/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_${STAMP}"
 if [[ -n "${HPCVAULT:-}" ]] && mkdir -p "$VAULT_CANDIDATE" 2>/dev/null \

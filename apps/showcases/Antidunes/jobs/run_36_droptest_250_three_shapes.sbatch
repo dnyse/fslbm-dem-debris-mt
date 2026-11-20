@@ -9,22 +9,18 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# [Claude, 2026-10-01] Rerun of the fluid-free 250-floater drop tests for thesis Section 5.2 (author's request), on the
-# current code (DropTest no-fluid fixes, sphere VTK output). Three cases, one after another, same container, release
-# positions and timing (prms/DropTest_250_*_gas.prm, all derived from DropTest_250_sat_gas.prm):
+# Fluid-free 250-floater drop tests (DropTest), one case per job, each in its own archive directory so outputs
+# cannot mix. The three main cases share container, release positions and timing:
 #   cylinders  DropTest_250_cylinders_gas.prm  250 cylinders (R 1, L 12), closed form with GJK/EPA fallback
 #   cuboids    DropTest_250_sat_gas.prm        250 cuboids (6 x 1 x 1.5 half-extents), plain SAT
 #   mixed      DropTest_250_mixed_gas.prm      84 cuboids, 83 cylinders, 83 spheres (R 2), cycled in release order
-# Each case runs in its own directory, so outputs cannot mix. The previous cuboid run took ~55 min on 36 ranks
-# (DropTest_250_sat_output_20260923).
-# [Claude, 2026-10-01, later] One case per job (author: 1 h limit, three separate jobs). Usage, from
-# apps/showcases/Antidunes of ~/mt-dennys-mirror2 (~/mt-dennys was in use by job 4282267):
+# Usage, from apps/showcases/Antidunes: build once in its own job (so the run jobs never build concurrently in
+# the same build directory), then one job per case:
 #   b=$(sbatch --parsable --time=00:30:00 --ntasks=8 jobs/run_36_droptest_250_three_shapes.sbatch build)
 #   for c in cylinders cuboids mixed; do sbatch --dependency=afterok:$b --job-name=antidunes-droptest-250-$c \
 #       jobs/run_36_droptest_250_three_shapes.sbatch $c; done
-# The mixed case needs --ntasks=24 (DropTest_250_mixed_gas.prm uses 2x2x6 blocks, see its header); mpirun uses
-# $SLURM_NTASKS.
-# The build runs once, in its own job, so the three run jobs never build concurrently in the same build directory.
+# mpirun uses $SLURM_NTASKS, so pass each case's process count with --ntasks: 36 by default, 24 for mixed
+# (2x2x6 blocks); the other cases' counts are noted below. The cuboid case took ~55 min on 36 ranks.
 set -euo pipefail
 
 module load gcc/11.5.0
@@ -74,16 +70,16 @@ case "$CASE" in
     cylinders) run_case cylinders DropTest_250_cylinders_gas.prm ;;
     cuboids)   run_case cuboids   DropTest_250_sat_gas.prm ;;
     mixed)     run_case mixed     DropTest_250_mixed_gas.prm ;;
-    # [Claude, 2026-10-01] randomised orientations/offsets, wood-like contact (prms/gen_droptest_250_random.py); 24 tasks
+    # randomised orientations/offsets, wood-like contact (prms/gen_droptest_250_random.py); 48 tasks
     random_cylinders) run_case random_cylinders DropTest_250_random_cylinders_gas.prm ;;
     random_cuboids)   run_case random_cuboids   DropTest_250_random_cuboids_gas.prm ;;
     random_mixed)     run_case random_mixed     DropTest_250_random_mixed_gas.prm ;;
-    # [Claude, 2026-10-03] Kodam et al. (2010b) packing with a round container, one-by-one release (scripts/gen_kodam_round_prm.py); 16 tasks
+    # Kodam et al. (2010) packing in a round container, one-by-one release (scripts/gen_kodam_round_prm.py); 16 tasks
     kodam_round)      run_case kodam_round      DropTest_kodam_round_gas.prm ;;
-    # [Claude, 2026-10-10] the same with kodamBandEdgeAxialCheck true (energy spike of 4292501); 16 tasks as 4292501
+    # the same with kodamBandEdgeAxialCheck true (checks the energy spike of kodam_round); 16 tasks
     kodam_round_axial) run_case kodam_round_axial DropTest_kodam_round_axial_gas.prm ;;
-    # [Claude, 2026-10-03] Kodam packing comparison, the four detection variants of thesis Sec. 5.2 (9 tasks each),
-    # rerun on the current code so that their wall-clock times are measured together
+    # Kodam packing comparison, the four contact-detection variants (9 tasks each), run on the same code so that
+    # their wall-clock times are comparable
     kodam_fallback)   run_case kodam_fallback   DropTest_kodam_packing_gas.prm ;;
     kodam_gjk)        run_case kodam_gjk        DropTest_kodam_packing_gjk_gas.prm ;;
     kodam_pure)       run_case kodam_pure       DropTest_kodam_packing_pureanalytical_gas.prm ;;

@@ -9,9 +9,10 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=dennys.huber@fau.de
 
-# [Claude, 2026-09-19] Cylinder hopper: 406 rods (r=3, L=18, D:L = 1:3, long axis along Y) pressed against the pillars, PID on, analytic cylinder contacts + owner-rank
-# tiebreak. See hopper_clog_cyl_frontblock_pidon_2node_gjk_gas.prm and scripts/gen_hopper_clog_cyl_prm.py. The sphere hopper took 1h48m for 60000 steps on 144 ranks; rods add
-# contact cost and very verbose [CylComputation] diagnostics (expect a multi-hundred-MB log), so 6 h requested.
+# Hopper gap, 406 rods pressed against the pillars, GJK/EPA-only rod-rod contacts, uncapped PID
+# (prms/hopper_clog_cyl_frontblock_pidon_2node_gjk_gas.prm): rods R 3, L 18 (axis y), longer than the 16 LU gap,
+# held fixed for 2000 steps, no contact skin; 60000 steps, 144 ranks / 2 nodes. 6 h requested: the sphere hopper
+# took 1 h 48 min for 60000 steps, and rods add contact cost and verbose diagnostics (multi-hundred-MB log).
 set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
@@ -24,9 +25,9 @@ SH="$REPO/apps/showcases/Antidunes/antidunes.sh"
 PRM_DIR="$REPO/apps/showcases/Antidunes/prms"
 BIN_DIR="$REPO/build/apps/showcases/Antidunes"
 
-# [Claude, 2026-09-18] Never DELETE a previous run's output. These jobs are chained in ONE checkout with --dependency, so a
-# predecessor that crashed or hit its time limit leaves vtk-out/eval/snapshots here -- the old `rm -rf` would have destroyed it.
-# Move them aside instead (same filesystem -> instant rename); archive/rescued_* is then moved off by hand.
+# Never delete a previous run's output: jobs chained with --dependency in one checkout can leave a crashed or
+# timed-out predecessor's vtk-out/eval/snapshots here. Move them aside (same filesystem, instant rename);
+# archive/rescued_* is moved off by hand.
 RESCUE="$BIN_DIR/archive/rescued_before_${SLURM_JOB_ID:-manual}_$(date +%Y%m%d_%H%M%S)"
 for dir in vtk-out eval snapshots; do
     if [[ -d "$BIN_DIR/$dir" ]]; then
@@ -48,8 +49,8 @@ RUN_RC=$?
 set -e
 echo "## run exited with status $RUN_RC -- archiving whatever output exists"
 
-# Prefer $HPCVAULT, decided and verified HERE (right before use) -- see the 288-rank sibling job's
-# own 2026-09-16 comment for the full rationale (autofs staleness, local-only is a last resort).
+# Archive to $HPCVAULT if it is writable right now (checked here, not at job start: autofs mounts can go stale);
+# the local archive under build/ is only a last-resort fallback.
 STAMP="$(date +%Y%m%d_%H%M%S)"
 VAULT_CANDIDATE="${HPCVAULT:-}/antidunes-archive/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_${STAMP}"
 if [[ -n "${HPCVAULT:-}" ]] && mkdir -p "$VAULT_CANDIDATE" 2>/dev/null \
