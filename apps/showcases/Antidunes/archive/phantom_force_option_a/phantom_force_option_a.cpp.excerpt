@@ -1,0 +1,77 @@
+// ARCHIVED 2026-11-20 from ParticleKernels.h together with the prm options usePhantomForceCorrection and
+// floaterRingBand, both of which had no effect (the F_pred computation below was already commented out, and
+// floaterRingBand was only printed). Reference only, not compiled. See ../ARCHIVE_README.md.
+
+// ---- AddExternalForces::setPhantomForceZ ----
+   // Option A: per-sphere tapered phantom force F_pred_z to subtract from the vertical MEM force. Set only when
+   // usePhantomForceCorrection is true; null otherwise. The map is currently never filled (its computation in
+   // computeSubmergedVolumes() is commented out), so the correction has no effect.
+   void setPhantomForceZ(const std::unordered_map< walberla::id_t, real_t >* pf) {
+      phantomForceZ_ = pf;
+   }
+
+
+// ---- AddExternalForces::operator(): Option A subtraction ----
+      // Option A: cancel the analytic phantom force in the vertical MEM component only. F_pred_z is the
+      // double-counted pile-up head (buoyancy the flat-reference subtraction failed to remove and the geometric
+      // channel already supplies), which the MEM leaks as a spurious upward lift.
+      // One-sided clamp: the phantom is an upward artefact, so the correction may only reduce a positive MEM
+      // force toward zero, never make it negative (near 50 % submersion F_pred can exceed the raw MEM force,
+      // which would sink the floater). Horizontal drag and fluctuations are untouched; F_pred -> 0 without
+      // pile-up. Particle-side only, no PDF feedback.
+      real_t phantomZ  = real_t(0); // clamped value actually subtracted
+      real_t rawFPred  = real_t(0); // unclamped F_pred, for the log (shows when the clamp saturates)
+      bool   fPredSeen = false;
+      // Disabled under useMemOnlyBuoyancy_ (the default), whose point is that buoyant support comes solely from
+      // the raw MEM force (Bogner & Rude 2013); this submergence-derived correction would reintroduce an extra
+      // channel. Applies whatever usePhantomForceCorrection is (that flag only decides whether phantomForceZ_ is
+      // set).
+      if (isFloater && phantomForceZ_ && !useMemOnlyBuoyancy_) {
+         auto itp = phantomForceZ_->find(ac.getUid(idx));
+         if (itp != phantomForceZ_->end()) {
+            rawFPred  = itp->second;
+            fPredSeen = true;
+            if (hydro_force[2] > real_t(0)) {
+               // F_pred can be negative in a local trough (localSurfaceZ below the flat reference, e.g. behind a
+               // pillar or in an antidune trough, deltaH < 0), outside the pile-up model; it must not add to the
+               // upward MEM force. Clamp to [0, hydro_force[2]].
+               phantomZ = std::clamp(rawFPred, real_t(0), hydro_force[2]);
+               hydro_force[2] -= phantomZ;
+            }
+         }
+      }
+
+// ---- FloaterForces::computeSubmergedVolumes: Option A F_pred computation (was commented out) ----
+         // --- PHANTOM FORCE (Option A), disabled. This function is skipped under useMemOnlyBuoyancy_ (the
+         // default), and even with useMemOnlyBuoyancy_=false this pile-up over-lift correction stays commented out.
+         // Kept for a possible revival of Option A.
+         /*
+         const real_t submFrac  = std::clamp(vSub / vFull, real_t(0), real_t(1));
+         constexpr real_t kneeSub = real_t(0.5);  // taper begins once the body is more than half submerged
+         const real_t tS        = std::clamp((submFrac - kneeSub) / (real_t(1) - kneeSub), real_t(0), real_t(1));
+         const real_t taper     = real_t(1) - (real_t(3) * tS * tS - real_t(2) * tS * tS * tS); // 1→0 smoothstep
+         const real_t az        = (*acceleration_)[2];
+         const real_t deltaH    = localSurfaceZ - surfaceHeight_;   // uncancelled head (LU), >0 when piled up
+         const real_t deltaP    = -az * deltaH;                     // excess pressure = |a_z|·Δh
+         const real_t rContact  = std::sqrt(std::max(real_t(0), h_cap * (real_t(2) * r - h_cap)));
+         const real_t aProj     = math::pi * rContact * rContact;   // wetted-cap projected disk area
+         const bool   openSurf  = (h_cap > real_t(0) && h_cap < real_t(2) * r); // straddling the surface
+         const real_t fPredRaw  = openSurf ? deltaP * aProj : real_t(0);        // untapered (for the log)
+         const real_t fPredZ    = fPredRaw * taper;                             // tapered → the Option A correction
+         phantomForceZ_[floaterUIDs_[fi]] = fPredZ;
+         */
+
+
+// ---- FloaterForces: [PhantomDecomp] log (was commented out) ----
+            // --- PHANTOM DECOMPOSITION log, disabled with the Option A computation above (whose variables it uses).
+            /*
+            WALBERLA_LOG_INFO_ON_ROOT("[PhantomDecomp] uid=" << floaterUIDs_[fi]
+               << "  deltaH=" << deltaH << " LU (localSurfaceZ=" << localSurfaceZ << " − flatRef=" << surfaceHeight_ << ")"
+               << "  |a_z|=" << -az
+               << "  deltaP=" << deltaP
+               << "  r_contact=" << rContact << "  A_proj=" << aProj
+               << "  openSurface=" << (openSurf ? "yes" : "no(closed)")
+               << "  submFrac=" << submFrac << "  taper=" << taper
+               << "  F_pred_raw=" << fPredRaw
+               << "  F_pred_z=" << fPredZ << " (tapered, >0 up)  [compare to measured F_hydro_z above/next]");
+            */

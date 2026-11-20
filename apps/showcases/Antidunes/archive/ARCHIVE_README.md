@@ -224,3 +224,12 @@ multiPointDeepOverlapStability/Fuzz, multiPointEdgeCases, contactStiffnessCalibr
 fallOntoPileStability, multiPointBoxContactFuzz; and `DEMValidationProductionCollisionReplay.h`) moved
 here as well; they use the pre-archive `DEMEngine` signature and would need adapting to compile again.
 Their prms were never git-tracked.
+
+## phantom_force_option_a/ (2026-11-20)
+
+`usePhantomForceCorrection` ("Option A": subtract a tapered pile-up phantom force F_pred_z from the vertical MEM
+force of floating spheres) and `floaterRingBand` removed from `ModelParameters`/`ParticleParameters`. Neither had
+an effect: the F_pred_z computation in `computeSubmergedVolumes` was already commented out, so the map the
+correction read stayed empty, and `floaterRingBand` was only printed in a log line. The phantom lift is handled at
+its source by the per-link fill weighting in SimpleBB (Bogner 2017, Eq. 5.9). The removed code, including the
+commented-out computation and its `[PhantomDecomp]` log, is in `phantom_force_option_a.cpp.excerpt`.

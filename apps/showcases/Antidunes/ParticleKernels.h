@@ -2509,13 +2509,6 @@ public:
       submergedVolumes_ = sv;
    }
 
-   // Option A: per-sphere tapered phantom force F_pred_z to subtract from the vertical MEM force. Set only when
-   // usePhantomForceCorrection is true; null otherwise. The map is currently never filled (its computation in
-   // computeSubmergedVolumes() is commented out), so the correction has no effect.
-   void setPhantomForceZ(const std::unordered_map< walberla::id_t, real_t >* pf) {
-      phantomForceZ_ = pf;
-   }
-
    void setBuoyancyCenterOffset(const std::unordered_map< walberla::id_t, Vector3< real_t > >* off) {
       buoyancyCenterOffset_ = off;
    }
@@ -2571,35 +2564,6 @@ public:
       auto hydro_torque = ac.getHydrodynamicTorque(idx);
       const Vector3< real_t > hydroForceRaw = hydro_force; // pre-scaling value, kept for the verification log
 
-      // Option A: cancel the analytic phantom force in the vertical MEM component only. F_pred_z is the
-      // double-counted pile-up head (buoyancy the flat-reference subtraction failed to remove and the geometric
-      // channel already supplies), which the MEM leaks as a spurious upward lift.
-      // One-sided clamp: the phantom is an upward artefact, so the correction may only reduce a positive MEM
-      // force toward zero, never make it negative (near 50 % submersion F_pred can exceed the raw MEM force,
-      // which would sink the floater). Horizontal drag and fluctuations are untouched; F_pred -> 0 without
-      // pile-up. Particle-side only, no PDF feedback.
-      real_t phantomZ  = real_t(0); // clamped value actually subtracted
-      real_t rawFPred  = real_t(0); // unclamped F_pred, for the log (shows when the clamp saturates)
-      bool   fPredSeen = false;
-      // Disabled under useMemOnlyBuoyancy_ (the default), whose point is that buoyant support comes solely from
-      // the raw MEM force (Bogner & Rude 2013); this submergence-derived correction would reintroduce an extra
-      // channel. Applies whatever usePhantomForceCorrection is (that flag only decides whether phantomForceZ_ is
-      // set).
-      if (isFloater && phantomForceZ_ && !useMemOnlyBuoyancy_) {
-         auto itp = phantomForceZ_->find(ac.getUid(idx));
-         if (itp != phantomForceZ_->end()) {
-            rawFPred  = itp->second;
-            fPredSeen = true;
-            if (hydro_force[2] > real_t(0)) {
-               // F_pred can be negative in a local trough (localSurfaceZ below the flat reference, e.g. behind a
-               // pillar or in an antidune trough, deltaH < 0), outside the pile-up model; it must not add to the
-               // upward MEM force. Clamp to [0, hydro_force[2]].
-               phantomZ = std::clamp(rawFPred, real_t(0), hydro_force[2]);
-               hydro_force[2] -= phantomZ;
-            }
-         }
-      }
-
       // Submersion-scaled hydrodynamic force (V_sub/V_full). The MEM (SimpleBB) treats near-boundary cells as full
       // liquid, so the emerged part of a floater can see a phantom upward force (refilled vacated cells, raised
       // surface under-counted by the flat hydrostatic reference rho_hyd(z) = 1 + 3 a_z (z - h_liquid)).
@@ -2607,7 +2571,7 @@ public:
       if (isFloater) {
          submFrac = (vFull > real_t(0)) ? std::clamp(vSub / vFull, real_t(0), real_t(1)) : real_t(0);
          // Deliberately OFF: the phantom lift is corrected at its source by the per-link fill weighting phi(x_b)
-         // in SimpleBB (Bogner & Rude 2013, Eq. 5.9). submFrac is still computed for the [FloaterForces] log.
+         // in SimpleBB (Bogner 2017, Eq. 5.9). submFrac is still computed for the [FloaterForces] log.
          // hydro_force  *= submFrac;
          // hydro_torque *= submFrac;
       }
@@ -2682,11 +2646,6 @@ public:
             << "  F_buoy+grav_z=" << bodyForce[2] << " (>0 up)"
             << "  F_drive_xy=(" << bodyForce[0] << "," << bodyForce[1] << ")"
             << "  F_hydro=(" << hydro_force[0] << "," << hydro_force[1] << "," << hydro_force[2] << ")"
-            << (fPredSeen ? "  [phantomCorr F_pred_raw=" + std::to_string(rawFPred)
-                                + " F_pred_applied(clamped)=" + std::to_string(phantomZ)
-                                + (std::abs(rawFPred - phantomZ) > real_t(1e-9) ? " SATURATED" : "")
-                                + " subtracted from F_hydro_z (was " + std::to_string(hydroForceRaw[2]) + ")]"
-                          : "")
             << "  [submScale=" << submFrac << " applied to F_hydro_raw=("
             << hydroForceRaw[0] << "," << hydroForceRaw[1] << "," << hydroForceRaw[2] << ")]"
             << "  F_contact+lub=(" << fContact[0] << "," << fContact[1] << "," << fContact[2] << ")"
@@ -2764,7 +2723,6 @@ private:
    bool                                                     driveFloatersByMass_;
    const std::unordered_map< walberla::id_t, real_t >*     submergedVolumes_;
    // Option A vertical MEM correction; null = disabled
-   const std::unordered_map< walberla::id_t, real_t >*     phantomForceZ_ = nullptr;
    const std::unordered_map< walberla::id_t, Vector3< real_t > >* buoyancyCenterOffset_;
    const std::unordered_map< walberla::id_t, real_t >*     comOffsetZ_ = nullptr; // per box/cylinder COM offset
 
@@ -3083,7 +3041,6 @@ public:
       , useLubricationCorrection(simParams->particle.useLubricationCorrection)
       , evalFrequency_(simParams->evaluation.evaluationFrequency)
       , stepCounter_(simObjs->beginTimeStep) // absolute (resume-safe): step numbers in logs match the original run
-      , ringBand_(simParams->particle.floaterRingBand)
       , planeFitRadiusFactor_(simParams->model.floaterPlaneFitRadiusFactor)
       , boxPlaneFitBandFactor_(simParams->model.boxPlaneFitBandFactor)
       , surfaceHeight_(simParams->staticReferenceHeight())
@@ -3187,11 +3144,8 @@ public:
             pinnedRotationAxes_[floaterUIDs_[fi]] = simParams->floatingSpheres[fi].pinRotationAxes;
       }
 
-      usePhantomForceCorrection_ = simParams->model.usePhantomForceCorrection;
       useMemOnlyBuoyancy_        = simParams->model.useMemOnlyBuoyancy;
       useFullVolumeAnalyticBuoyancy_ = simParams->model.useFullVolumeAnalyticBuoyancy;
-      WALBERLA_LOG_INFO_ON_ROOT("[FloaterForces] phantom-force correction (Option A): "
-         << (usePhantomForceCorrection_ ? "ON (F_hydro_z −= tapered F_pred_z)" : "OFF"));
       WALBERLA_LOG_INFO_ON_ROOT("[FloaterForces] buoyancy model: "
          << (simParams->model.useMemOnlyBuoyancy
                 ? "MEM-ONLY (default; Bogner & Rude 2013 -- MEM/hydro_force alone supplies buoyancy, "
@@ -3240,10 +3194,6 @@ public:
       WALBERLA_LOG_INFO_ON_ROOT("[BoxBuoyancy] V_sub method (box + cylinder): "
          << "SAMPLING (12³ points)"
          << "  pinned-position floaters: " << pinnedBoxPositions_.size());
-
-      // Report the sphere buoyancy sampling mode (full-box plane fit vs. contact ring).
-      WALBERLA_LOG_INFO_ON_ROOT("[FloaterBuoyancy] sphere V_sub sampling: floaterRingBand=" << ringBand_
-         << (ringBand_ > real_t(1e5) ? "  (OLD full-box plane-fit)" : "  (contact-ring restriction)"));
 
       WALBERLA_LOG_INFO_ON_ROOT("[DynamicH] MEM reference height: "
          << (useDynamicReferenceHeight_ ? "DYNAMIC (EMA-tracked from floaters' fitted local waterlines, alpha=0.2)"
@@ -3544,8 +3494,6 @@ public:
       addExternalForces.setSubmergedVolumes(&submergedVolumes_);
       addExternalForces.setBuoyancyCenterOffset(&buoyancyCenterOffset_);
       addExternalForces.setComOffsetZ(&boxComOffsetZ_);
-      // Option A: pass the phantom-force map only when the correction is enabled; null skips the subtraction.
-      addExternalForces.setPhantomForceZ(usePhantomForceCorrection_ ? &phantomForceZ_ : nullptr);
       addExternalForces.setStepInfo(&stepCounter_);
 
       const bool logForcesThisStep = (stepCounter_ % evalFrequency_ == uint_t(0));
@@ -4227,25 +4175,6 @@ public:
 
          submergedVolumes_[floaterUIDs_[fi]] = vSub;
 
-         // --- PHANTOM FORCE (Option A), disabled. This function is skipped under useMemOnlyBuoyancy_ (the
-         // default), and even with useMemOnlyBuoyancy_=false this pile-up over-lift correction stays commented out.
-         // Kept for a possible revival of Option A.
-         /*
-         const real_t submFrac  = std::clamp(vSub / vFull, real_t(0), real_t(1));
-         constexpr real_t kneeSub = real_t(0.5);  // taper begins once the body is more than half submerged
-         const real_t tS        = std::clamp((submFrac - kneeSub) / (real_t(1) - kneeSub), real_t(0), real_t(1));
-         const real_t taper     = real_t(1) - (real_t(3) * tS * tS - real_t(2) * tS * tS * tS); // 1→0 smoothstep
-         const real_t az        = (*acceleration_)[2];
-         const real_t deltaH    = localSurfaceZ - surfaceHeight_;   // uncancelled head (LU), >0 when piled up
-         const real_t deltaP    = -az * deltaH;                     // excess pressure = |a_z|·Δh
-         const real_t rContact  = std::sqrt(std::max(real_t(0), h_cap * (real_t(2) * r - h_cap)));
-         const real_t aProj     = math::pi * rContact * rContact;   // wetted-cap projected disk area
-         const bool   openSurf  = (h_cap > real_t(0) && h_cap < real_t(2) * r); // straddling the surface
-         const real_t fPredRaw  = openSurf ? deltaP * aProj : real_t(0);        // untapered (for the log)
-         const real_t fPredZ    = fPredRaw * taper;                             // tapered → the Option A correction
-         phantomForceZ_[floaterUIDs_[fi]] = fPredZ;
-         */
-
          if (stepCounter_ % evalFrequency_ == uint_t(0))
          {
             // Net VERTICAL force from buoyancy + gravity (the same expression AddExternalForces applies),
@@ -4274,18 +4203,6 @@ public:
                << "  (oldFixedRef=" << surfaceHeight_ << ", now unused for force)"
                << "  (expect submersion ~densityRatio×100% and centreDepth~0 at equilibrium)");
 
-            // --- PHANTOM DECOMPOSITION log, disabled with the Option A computation above (whose variables it uses).
-            /*
-            WALBERLA_LOG_INFO_ON_ROOT("[PhantomDecomp] uid=" << floaterUIDs_[fi]
-               << "  deltaH=" << deltaH << " LU (localSurfaceZ=" << localSurfaceZ << " − flatRef=" << surfaceHeight_ << ")"
-               << "  |a_z|=" << -az
-               << "  deltaP=" << deltaP
-               << "  r_contact=" << rContact << "  A_proj=" << aProj
-               << "  openSurface=" << (openSurf ? "yes" : "no(closed)")
-               << "  submFrac=" << submFrac << "  taper=" << taper
-               << "  F_pred_raw=" << fPredRaw
-               << "  F_pred_z=" << fPredZ << " (tapered, >0 up)  [compare to measured F_hydro_z above/next]");
-            */
          }
       }
 
@@ -4777,13 +4694,11 @@ private:
    // keyed by UID; populated by both compute* methods
    std::unordered_map< walberla::id_t, real_t >       submergedVolumes_;
    // keyed by UID; tapered F_pred_z per sphere (Option A vertical MEM correction); currently never filled
-   std::unordered_map< walberla::id_t, real_t >       phantomForceZ_;
    // box/cylinder C_b − C_com (world frame), for the righting torque
    std::unordered_map< walberla::id_t, Vector3< real_t > > buoyancyCenterOffset_;
    // per-floater COM offset below the centroid (body z, const), for the pendulum righting torque
    std::unordered_map< walberla::id_t, real_t >       boxComOffsetZ_;
    // Option A: subtract F_pred_z from the vertical MEM force
-   bool                                               usePhantomForceCorrection_{ false };
    // (default) true → skip computeSubmergedVolumes()/computeSubmergedVolumesBox() in doDEMSubCycles: no vSub, no
    // righting torque, as in Bogner & Rude (2013) (buoyant support and righting moment come solely from the raw
    // MEM force/torque). false → run them (Antidunes' extended split).
@@ -4834,8 +4749,6 @@ private:
    uint_t                                             evalFrequency_;
    uint_t                                             stepCounter_;
    bool                                               simParams_shadowEnabled_ = false;
-   // sphere V_sub contact-ring half-width (prm floaterRingBand); currently only reported in the constructor log
-   real_t                                             ringBand_;
    // sphere surface plane-fit lateral reach, in units of r (prm floaterPlaneFitRadiusFactor)
    real_t                                             planeFitRadiusFactor_;
    // box/cylinder plane-fit shell reach, in units of max(halfExtents) (prm boxPlaneFitBandFactor)

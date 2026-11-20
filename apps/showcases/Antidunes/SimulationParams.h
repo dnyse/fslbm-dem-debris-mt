@@ -259,7 +259,6 @@ struct ParticleParams {
    bool        useLubricationCorrection;
    bool        useNoSlipParticles;
    bool        useParticleBed;
-   real_t      floaterRingBand;   // Default 1.5. Only printed in the [FloaterBuoyancy] constructor log
                                   // (ParticleKernels.h); the sphere V_sub plane fit does not read it.
    // Both > 0: the SI scaling skips inFileName's header (getAvgDiameterScalingFactor, Utility.h) and uses
    // avgParticleDiameterOverride [LU] (sets liquidHeight, floorHeight, particleFixingHeight) and dxSIOverride [m/LU]
@@ -284,7 +283,6 @@ struct ParticleParams {
       , useLubricationCorrection { b.getParameter< bool >       ("useLubricationCorrection") }
       , useNoSlipParticles       { b.getParameter< bool >       ("useNoSlipParticles") }
       , useParticleBed           { b.getParameter< bool >       ("useParticleBed", true) }
-      , floaterRingBand          { b.getParameter< real_t >     ("floaterRingBand", real_t(1.5)) }
       , avgParticleDiameterOverride { b.getParameter< real_t >  ("avgParticleDiameterOverride", real_c(0)) }
       , dxSIOverride                { b.getParameter< real_t >  ("dxSIOverride", real_c(0)) }
       , collisionTimeFactor         { b.getParameter< real_t >  ("collisionTimeFactor", real_c(4)) }
@@ -699,12 +697,6 @@ struct ModelParams {
    //         steps (BuildTimeloop.h, diagnoseNaNNormals). Diagnostic only, full field scan per step. Default false.
    bool        diagnoseNaNNormals;
 
-   // true -> AddExternalForces subtracts the per-floater phantom force F_pred_z (pile-up head dP * A_proj * taper)
-   //         from the vertical MEM force, only when useMemOnlyBuoyancy=false. Currently a no-op: the F_pred_z
-   //         computation in computeSubmergedVolumes (ParticleKernels.h) is commented out, so the map stays empty.
-   //         false (default) -> no correction.
-   bool        usePhantomForceCorrection;
-
    // true -> the MEM hydrostatic reference height H (SimpleBB's rhoHydStat, force side only) is tracked live: each step
    //         the fitted local waterlines of the sphere floaters are averaged and EMA-blended (alpha 0.2) into one
    //         shared H (computeSubmergedVolumes, ParticleKernels.h, so only updated when useMemOnlyBuoyancy=false). An
@@ -996,7 +988,6 @@ struct ModelParams {
       , guardCurvatureInputs        { b.getParameter< bool >       ("guardCurvatureInputs", false) }
       , wallOuterGhostLayer         { b.getParameter< bool >       ("wallOuterGhostLayer", false) }
       , diagnoseNaNNormals          { b.getParameter< bool >       ("diagnoseNaNNormals", false) }
-      , usePhantomForceCorrection   { b.getParameter< bool >       ("usePhantomForceCorrection", false) }
       , useDynamicReferenceHeight   { b.getParameter< bool >       ("useDynamicReferenceHeight", false) }
       , staticReferenceHeightOverride{ b.getParameter< real_t >    ("staticReferenceHeightOverride", real_t(-1)) }
       , floaterPlaneFitRadiusFactor  { b.getParameter< real_t >    ("floaterPlaneFitRadiusFactor", real_t(1.8)) }
