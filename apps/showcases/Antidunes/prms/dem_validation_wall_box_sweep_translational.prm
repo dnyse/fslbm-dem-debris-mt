@@ -20,6 +20,9 @@ DEMValidation{
     tiltStepDeg 5.0;
 
     toleranceRelError 0.02;
+    // expectFail true: the translational effective mass is the documented counterexample (the _rotational variant
+    // passes); the run exits 0 only if the sweep fails.
+    expectFail true;
     vtkSpacing 0;
     outputBaseName wall_impact_box_kodam_sweep_translational;
 }

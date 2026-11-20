@@ -118,7 +118,9 @@ with the author before relying on either guess.
 
 Entry point: the standalone `DEMValidation` executable (fluid-free, DEM-only — see its own file
 header). The `[DEMValidation]` block's `testCase` key selects the scenario (full list in
-`DEMValidation.cpp`'s `main()`); for this result it's `wallImpactCylinder` / `wallImpactBox`.
+`DEMValidation.cpp`'s `main()`); for this result it's `wallImpactCylinder` / `wallImpactBox`. The `_translational`
+prms and `dem_validation_wall_cylinder_kodam_test1.prm` set `expectFail true`: they are the counterexample and must
+fail, so they exit 0 when the check reports FAIL and 1 if it unexpectedly passes.
 
 ```bash
 build/apps/showcases/Antidunes/DEMValidation prms/dem_validation_wall_cylinder_kodam_sweep_translational.prm

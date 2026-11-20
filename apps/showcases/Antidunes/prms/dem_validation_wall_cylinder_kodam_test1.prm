@@ -41,6 +41,9 @@ DEMValidation{
     // (the tangential-spring-vs-idealised-Coulomb gap), so this replica should hold to a much tighter bound
     // if the underlying contact/integration is correct.
     toleranceRelError 0.02;
+    // expectFail true: translational effective mass at dt = collisionTime/50 is the documented counterexample
+    // (FAIL 20/32; the passing configuration is _rotmass); the run exits 0 only if the sweep fails.
+    expectFail true;
     vtkSpacing 0;
     outputBaseName wall_impact_cylinder_kodam_test1;
 }

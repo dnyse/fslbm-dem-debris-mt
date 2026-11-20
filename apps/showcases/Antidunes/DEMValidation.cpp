@@ -48,6 +48,9 @@ int main(int argc, char** argv)
 
    const config::Config::BlockHandle block = cfg->getBlock("DEMValidation");
    const std::string testCase              = block.getParameter< std::string >("testCase");
+   // expectFail true: the prm is a documented counterexample that must fail (e.g. the translational-effective-mass
+   // wall-impact sweeps); the run then exits 0 only if the check fails, and 1 if it unexpectedly passes.
+   const bool expectFail = block.getParameter< bool >("expectFail", false);
 
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] running testCase=" << testCase);
 
@@ -74,8 +77,11 @@ int main(int argc, char** argv)
                                                 "cuboidPairEnergyFuzz, packing, angleOfRepose, "
                                                 "packingSingleShape, rotatingDrum.");
 
-   WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] FINAL RESULT for " << testCase << ": " << (pass ? "PASS" : "FAIL"));
-   return pass ? EXIT_SUCCESS : EXIT_FAILURE;
+   WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] FINAL RESULT for "
+                             << testCase << ": " << (pass ? "PASS" : "FAIL")
+                             << (expectFail ? (pass ? " (expectFail true: UNEXPECTED PASS)" : " (expected, expectFail true)")
+                                            : ""));
+   return (pass != expectFail) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 } // namespace antidunes
