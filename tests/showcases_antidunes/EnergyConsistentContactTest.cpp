@@ -1,19 +1,28 @@
 //======================================================================================================================
 //! \file EnergyConsistentContactTest.cpp
-//! Feng-style ENERGY-CONSISTENT (ECC) normal contact for two cylinders vs the contact models we use today -- a reference implementation that lives ONLY in this test (nothing here is used by the simulation).
+//! Feng-style energy-consistent (ECC) normal contact for two cylinders vs the contact models of the simulation. The
+//! ECC model is a reference implementation that exists only in this test.
 //!
-//! Feng (2023, Acta Mech. Sin. 39, 722343), Sect. 6: the normal contact force must derive from a scalar contact-energy potential w(x1,theta1,x2,theta2) (F = -dw/dx, moments = -dw/dtheta); with the
-//! MINKOWSKI OVERLAP delta_M (minimal translation that separates the bodies, ref. [132]) as the overlap and w = 1/2 k delta_M^2 the model is energy-conserving for any convex shape.
+//! Feng (2023, Acta Mech. Sin. 39, 722343), Sect. 6: the normal force must derive from a contact-energy potential
+//! w(x1,theta1,x2,theta2) (F = -dw/dx, moments = -dw/dtheta); with the Minkowski overlap delta_M (minimal separating
+//! translation, ref. [132]) and w = 1/2 k delta_M^2 the model is energy-conserving for any convex shape.
 //! For two cylinders (axis a_i, half length H, radius R; support function h_i(n) = H|n.a_i| + R sqrt(1-(n.a_i)^2)):
-//!     delta_M = min_n s(n),  s(n) = h_1(n) + h_2(n) - (x2-x1).n,   n* = argmin   (body 2 is pushed along +n*, body 1 along -n*)
-//!     F_2 = +k delta n*,  F_1 = -k delta n*,   torque_i = -k delta g_i (a_i x n*),   g_i = H sgn(c_i) - R c_i / sqrt(1-c_i^2),  c_i = n*.a_i     (envelope theorem)
-//! i.e. the force acts along the Minkowski normal at the two SUPPORT (witness) points; because the witness points differ by a vector parallel to n* the pair can equivalently act at their midpoint.
-//! NOTE: for rods the generic optimum lies on a KINK of the support function (n perpendicular to an axis = line contact, n along an axis = cap contact); there the potential is not differentiable in the orientation
-//! and the torque is a sub-gradient. We pick the element that keeps the two witness points on a common line parallel to n* and puts the resultant at the centre of the contact patch (closest points of the two
-//! support sets in the plane perpendicular to n*; centre of the overlap for parallel lines/discs) -- the 'centroid of the contact area' choice of Feng's contact-area/volume models.
-//! We (1) verify the analytic force/torque against finite-difference gradients of w (proof that the model is conservative), (2) compare normal / overlap / lever arm with what the simulation
-//! uses today -- GJK/EPA (useAnalyticalContactDetection=false) and the closed-form Kodam+Guo hybrid (=true) -- on random pairs, (3) run elastic rod-rod impacts and measure the energy that each model
-//! creates or destroys (an undamped spring must return exactly the kinetic energy it received), (4) measure normal jumps along a smooth relative motion.
+//!     delta_M = min_n s(n),  s(n) = h_1(n) + h_2(n) - (x2-x1).n,  n* = argmin
+//!     (body 2 pushed along +n*, body 1 along -n*)
+//!     F_2 = +k delta n*,  F_1 = -k delta n*,  torque_i = -k delta g_i (a_i x n*),
+//!     g_i = H sgn(c_i) - R c_i / sqrt(1-c_i^2),  c_i = n*.a_i   (envelope theorem)
+//! The force acts along n* at the two support (witness) points; they differ by a vector parallel to n*, so it can act
+//! at their midpoint equivalently.
+//! For rods the generic optimum lies on a kink of the support function (n perpendicular to an axis = line contact, n
+//! along an axis = cap contact), where w is not differentiable in the orientation and the torque is a sub-gradient.
+//! The element chosen keeps the witness points on a common line parallel to n* and puts the resultant at the centre of
+//! the contact patch (closest points of the two support sets in the plane perpendicular to n*; centre of the overlap
+//! for parallel lines/discs), the "centroid of the contact area" choice of Feng's contact-area/volume models.
+//! Checks: (1) analytic force/torque vs finite-difference gradients of w (the model is conservative); (2) normal,
+//! overlap and lever arm vs GJK/EPA (useAnalyticalContactDetection=false) and the closed-form Kodam+Guo hybrid (=true)
+//! on random pairs; (3) elastic rod-rod impacts: energy created or destroyed by each model (an undamped spring must
+//! return the kinetic energy it received); (4) effective mass at the ECC contact point vs the translational
+//! reduced mass.
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
@@ -91,7 +100,8 @@ V pointSupport(const V& x, const V& a, const V& n) { const double c = dot(n, a),
 V perpUnit(const V& n, const V& a) { return unit(n - a * dot(n, a)); }
 V capCentre(const V& x, const V& a, const V& n) { return x + a * (kH * (dot(n, a) >= 0 ? 1.0 : -1.0)); }
 V clampDisc(const V& q, const V& c, const V& a) { V v = q - c; v = v - a * dot(v, a); const double l = norm(v); return l > kR ? c + v * (kR / l) : c + v; }
-//! closest points of two segments (p1 + t d1, |t| <= h1) and (p2 + u d2, |u| <= h2); for (near-)parallel segments: centre of the overlap
+//! closest points of two segments (p1 + t d1, |t| <= h1) and (p2 + u d2, |u| <= h2); for (near-)parallel segments:
+//! centre of the overlap
 void segSeg(const V& p1, const V& d1, const V& p2, const V& d2, V& q1, V& q2)
 {
    const V r = p1 - p2; const double a = 1.0, b = dot(d1, d2), c = 1.0, d = dot(d1, r), e = dot(d2, r), den = a * c - b * b;
@@ -110,7 +120,8 @@ void segSeg(const V& p1, const V& d1, const V& p2, const V& d2, V& q1, V& q2)
    }
    q1 = p1 + d1 * t; q2 = p2 + d2 * u;
 }
-//! witness (contact-patch) points of the two bodies for the Minkowski normal n (body 1 supports along +n, body 2 along -n)
+//! witness (contact-patch) points of the two bodies for the Minkowski normal n
+//! (body 1 supports along +n, body 2 along -n)
 void witnessPoints(const V& x1, const V& a1, const V& x2, const V& a2, const V& n, V& p1, V& p2)
 {
    const SupType t1 = supType(n, a1), t2 = supType(n * -1.0, a2);
@@ -161,7 +172,8 @@ mesa_pd::Rot3 rotToAxis(const V& axis)
    return rot;
 }
 
-//! contact of the simulation's own detection (GJK/EPA or the closed-form hybrid) + a linear spring F = k*depth along its normal at its contact point, applied to both bodies at that single point
+//! contact from the simulation's detection (GJK/EPA or closed-form hybrid) + linear spring F = k*depth along its
+//! normal, applied to both bodies at its single contact point
 Force simForce(const V& x1, const V& a1, const V& x2, const V& a2, double k, bool analytic)
 {
    Force f; if (norm(x2 - x1) > 2.0 * std::hypot(kR, kH) + 1e-9) return f;
@@ -194,8 +206,9 @@ int main(int argc, char** argv)
    const double meff = 0.5 * kMass, tc = 32.0, k = meff * 3.14159265358979323846 * 3.14159265358979323846 / (tc * tc);   // undamped spring with contact time tc (dt_DEM = 0.1)
    auto randAxis = [&]() { return unit(V{ nd(gen), nd(gen), nd(gen) }); };
 
-   // ---------------------------------------------------------------- (1) analytic ECC force/torque == gradient of w = 1/2 k delta_M^2 (finite differences)
-   //   generic optima sit on a KINK of the support function (line/cap contact), so the smooth formula is only checked on rim-rim (tip-to-tip) configurations, built explicitly
+   // ---- (1) analytic ECC force/torque == finite-difference gradient of w = 1/2 k delta_M^2
+   //   generic optima sit on a kink of the support function, so the smooth formula is checked only on explicitly
+   //   built rim-rim (tip-to-tip) configurations
    {
       int n = 0, ok = 0; double worstF = 0, worstT = 0;
       for (int t = 0; t < 400 && n < 60; ++t)
@@ -222,7 +235,7 @@ int main(int argc, char** argv)
       check(n >= 20 && ok >= int(0.9 * n), "analytic ECC force/torque must equal the gradient of the potential (smooth rim-rim cases)");
    }
 
-   // ---------------------------------------------------------------- (2) what the simulation reports today vs ECC, same random shallow/deep pairs
+   // ---- (2) simulation contact models vs ECC, random shallow/deep pairs
    {
       struct Acc { int n = 0; double angMean = 0, angMax = 0, depthErrMean = 0, depthErrMax = 0, torqueErrMean = 0, pointErr = 0, gapMax = 0; int flipped = 0, missed = 0; };
       const char* names[2] = { "GJK/EPA (analytic off)", "closed-form hybrid (analytic on)" };
@@ -254,7 +267,7 @@ int main(int argc, char** argv)
       }
    }
 
-   // ---------------------------------------------------------------- (3) elastic rod-rod impacts: energy created/destroyed by each model (undamped spring, must be 0)
+   // ---- (3) elastic rod-rod impacts: energy created/destroyed by each model (undamped spring, must be 0)
    {
       const double dt = 0.1;
       struct Res { double mean = 0, worst = 0; int n = 0; double meanAbs = 0; int contacts = 0; double maxDepth = 0; };
@@ -296,7 +309,8 @@ int main(int argc, char** argv)
       }
    }
 
-   // ---------------------------------------------------------------- (4) shape-specific effective mass at the ECC contact point (what useRotationalEffectiveMass would use) vs the translational reduced mass the stiffness is calibrated with
+   // ---- (4) shape-specific effective mass at the ECC contact point (as useRotationalEffectiveMass would use) vs the
+   //          translational reduced mass the stiffness is calibrated with
    {
       auto invIw = [&](const V& a, const V& r) { const V ra = r - a * dot(r, a); return dot(r, r) < 1e-30 ? 0.0 : (dot(ra, ra) / kIperp + dot(r, a) * dot(r, a) / kIax); };   // r^T I_w^-1 r for a vector r
       std::vector< double > ratio; int used = 0;

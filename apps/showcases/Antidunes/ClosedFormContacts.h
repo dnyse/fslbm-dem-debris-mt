@@ -14,45 +14,36 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file ClosedFormContacts.h
-//! \brief Closed-form (non-GJK/EPA) contact-detection algorithms taken directly from published
-//!        papers, for the shape pairs SolidCylinderContactDetection (ParticleKernels.h) currently
-//!        resolves via the generic GJK/EPA fallback: Box x Box and Cylinder x Cylinder.
+//! \brief Closed-form (non-GJK/EPA) contact-detection algorithms from published papers, for the shape pairs
+//!        SolidCylinderContactDetection (ParticleKernels.h) otherwise resolves via the generic GJK/EPA fallback:
+//!        Box x Box and Cylinder x Cylinder.
 //!
-//! Renamed from PaperAnalyticalContacts.h (namespace paper_analytical ->
-//! closed_form_contacts) and split into 4 files by theme -- this header is now a thin aggregator,
-//! kept so every external #include "PaperAnalyticalContacts.h" site needed only a filename update,
-//! not a restructure:
+//! Thin aggregator of the four themed headers:
 //!   - ClosedFormContactsInfra.h: the shared ContactResult return type.
 //!   - ClosedFormContactsBoxPoint.h: Box x Box (Gottschalk/Lin/Manocha 1996 SAT + this codebase's own
-//!     contact-point construction and vertex-only multi-point contact).
+//!     contact-point construction).
 //!   - ClosedFormContactsCylinderPlaneGeometry.h: CylinderState, the quartic/ellipse/rim-crossing
 //!     solvers, Cylinder x Plane, Cylinder x Sphere.
 //!   - ClosedFormContactsCylinderCylinder.h: Cylinder x Cylinder (depends on the geometry file above).
 //!
-//! USED BY THE SIMULATION, opt-in: ParticleKernels.h's ComputeContacts includes this header and calls
-//! cylinderCylinderContact/cylinderCylinderResultIsUncertain directly, gated behind the runtime prm
-//! flag ModelParameters.useAnalyticalContactDetection (default false -- GJK/EPA-only unless a scenario
-//! explicitly turns this on). When on, a result cylinderCylinderResultIsUncertain flags still falls
-//! back to GJK/EPA UNLESS ModelParameters.usePureAnalyticalCylinder is ALSO set, which trusts the flagged
-//! analytical answer with no safety net -- see ComputeContacts::operator()'s own comment for the exact
-//! tiering. PaperAnalyticalContactTest.cpp additionally compares these closed forms against
-//! SolidCylinderContactDetection's GJK/EPA results directly, standalone from the production dispatch.
+//! Use in the simulation is opt-in: ParticleKernels.h's ComputeContacts calls
+//! cylinderCylinderContact/cylinderCylinderResultIsUncertain only if ModelParameters.useAnalyticalContactDetection
+//! is set (default false, GJK/EPA only). A result flagged by cylinderCylinderResultIsUncertain still falls back to
+//! GJK/EPA unless ModelParameters.usePureAnalyticalCylinder is also set, which trusts the flagged analytical answer
+//! with no safety net; see ComputeContacts::operator() for the exact tiering. PaperAnalyticalContactTest.cpp compares
+//! these closed forms against SolidCylinderContactDetection's GJK/EPA results standalone.
 //!
 //! -------------------------------------------------------------------------------------------------
 //! Box x Box: Gottschalk, S., Lin, M. C., & Manocha, D. (1996). "OBBTree: A Hierarchical Structure
 //! for Rapid Interference Detection." SIGGRAPH 1996 Proceedings, 171-180. Section 5, "Fast Overlap
 //! Test for OBBs" (the 15-axis separating-axis-theorem test).
 //!
-//! The paper itself only derives a BOOLEAN overlap test (is there a separating axis, yes/no). The
-//! minimum-translation-vector extension used here to also produce a penetration depth and contact
-//! normal -- track the axis with the SMALLEST overlap instead of exiting on the first separating
-//! axis found -- is the standard textbook extension of the same separating-axis theorem (see e.g.
-//! Ericson, "Real-Time Collision Detection", 2004, ch. 4), not an additional result the 1996 paper
-//! itself derives. A supplementary contact-POINT construction (also not from the paper) is provided
-//! too, restricted to the one well-defined axis component -- the same restriction
-//! ContactDetectionTest.cpp's testBoxBoxContact already applies to the GJK/EPA result, since a
-//! flush face-face contact has no unique contact point in the first place (confirmed there by
-//! cross-checking against pybullet, which picks a different, equally valid, point on the same
+//! The paper derives only a BOOLEAN overlap test. The minimum-translation-vector extension used here for a
+//! penetration depth and normal (track the axis with the SMALLEST overlap instead of exiting on the first
+//! separating axis) is the standard textbook extension of the same theorem (e.g. Ericson, "Real-Time Collision
+//! Detection", 2004, ch. 4), not a result of the 1996 paper. The contact-POINT construction is not from the paper
+//! either. A flush face-face contact has no unique contact point (ContactDetectionTest.cpp's testBoxBoxContact
+//! applies the same restriction to the GJK/EPA result; pybullet picks a different, equally valid point on the same
 //! shared face).
 //!
 //! -------------------------------------------------------------------------------------------------
@@ -61,54 +52,31 @@
 //! simulations. Part I - Contact detection algorithms." Chemical Engineering Science, 65(22),
 //! 5852-5862. All "(eq. N)" comments below refer to this paper's equation numbers.
 //!
-//! Validation caveat (from the companion Part II paper, Chemical Engineering Science 65(22),
-//! 5863-5871): Part II validates the cylinder-PLANE algorithm directly against a closed-form
-//! analytical rebound formula (single cylinder bouncing off a wall). It does NOT validate
-//! cylinder-CYLINDER contact geometry (overlap/normal/point) against any direct ground truth --
-//! the only cylinder-cylinder-contact-bearing experiment (250 cylinders packed in a container) is
-//! validated against an AGGREGATE bulk measurement (fill height, bulk solid fraction), not against
-//! individual contact geometry. So "this is the published algorithm" is a stronger claim than "this
-//! algorithm's cylinder-cylinder branch has been independently ground-truthed" -- keep that
-//! distinction in mind when reading the test comparisons below.
+//! Validation caveat (companion Part II paper, Chemical Engineering Science 65(22), 5863-5871): Part II validates
+//! the cylinder-PLANE algorithm directly against a closed-form rebound formula (single cylinder bouncing off a
+//! wall). It does NOT validate cylinder-CYLINDER contact geometry (overlap/normal/point) against direct ground
+//! truth; its only cylinder-cylinder experiment (250 cylinders packed in a container) is compared with AGGREGATE
+//! bulk measurements (fill height, bulk solid fraction). "This is the published algorithm" is therefore a stronger
+//! claim than "its cylinder-cylinder branch has been independently ground-truthed".
 //!
-//! CORRECTIONS: Guo, Y., Wassgren, C., Ketterhagen, W., Hancock, B., & Curtis, J. (2012). "Some
+//! Corrections: Guo, Y., Wassgren, C., Ketterhagen, W., Hancock, B., & Curtis, J. (2012). "Some
 //! computational considerations associated with discrete element modeling of cylindrical particles."
-//! Powder Technology, 228, 193-198. An overlapping author team's own follow-up to Kodam et al. (2010),
-//! documenting real classification bugs in the original face-edge/band-edge/band-band-skewed dispatch
-//! logic ("undetected or wrongly detected contacts can lead to large overlaps") and one whole scenario
-//! Kodam et al. never defined at all (their Fig. 8 "special contact"). This file now implements Guo et
-//! al.'s corrected criteria (see rimVsFaceOrBand() and the band-band-skewed exclusion below) in place
-//! of Kodam et al.'s original ones.
+//! Powder Technology, 228, 193-198. A follow-up by an overlapping author team documenting classification bugs in
+//! Kodam et al.'s face-edge/band-edge/band-band-skewed dispatch ("undetected or wrongly detected contacts can lead
+//! to large overlaps") and a scenario Kodam et al. never defined (their Fig. 8 "special contact"). This file
+//! implements Guo et al.'s corrected criteria (see rimVsFaceOrBand() and the band-band-skewed exclusion) in place of
+//! Kodam et al.'s originals; Kodam's original dispatch gives false negatives for overlapping, obliquely tilted
+//! pairs that GJK/EPA detects (PaperAnalyticalContactTest.cpp).
 //!
-//! HISTORY (kept for context, since this is exactly the kind of thing worth being able to point to):
-//! an earlier version of this file used Kodam et al.'s ORIGINAL (uncorrected) face-edge/band-edge
-//! dispatch logic and was demonstrated by PaperAnalyticalContactTest.cpp to produce false negatives
-//! -- reporting no contact for genuinely overlapping, oblique-tilted cylinder pairs that GJK/EPA
-//! correctly detects. Applying Guo et al.'s corrections (this version) targets exactly that class of
-//! scenario-boundary misclassification; see PaperAnalyticalContactTest.cpp's own comments for which
-//! specific previously-failing cases now pass and which, if any, still don't.
-//!
-//! Two sub-problems in the paper (band-edge, eq. 74-77; edge-edge point location, eq. 82-85) reduce
-//! to a fourth-order polynomial in sin(theta). An earlier version of this file avoided hand-
-//! transcribing that quartic (risk of an undetected sign/coefficient error with no compiler-
-//! verified reference) and instead solved the equivalent 1D minimization numerically: a coarse
-//! uniform scan over theta followed by golden-section refinement (up to ~1500 evaluations per
-//! candidate contact). That numeric approach turned out to be a genuine performance problem at
-//! scale -- dense scenarios with many simultaneous Cylinder x Cylinder contacts ran ~6x slower per
-//! step than an equivalent Box x Box scenario purely because of this search.
-//!
-//! This version replaces it with the actual closed form: closestThetaOnCircleToLine derives the
-//! quartic coefficients directly from the geometry (see that function's own comment for the
-//! algebra) and solves them via Ferrari's method (solveQuarticFerrari, O(1), no iteration) --
-//! the current production default, after QuarticSolverComparisonTest.cpp found it matches the
-//! originally-used Durand-Kerner iteration's accuracy at a fraction of the cost; Durand-Kerner and
-//! Aberth-Ehrlich remain available for comparison (see QuarticSolverMethod's own comment).
-//! closestThetaOnCircleToPoint (used by the edge-edge alternating-projection loop) turned out to
-//! have an even simpler exact answer -- a single atan2, no polynomial at all, since its objective is
-//! a pure first-harmonic trig function of theta. Both closed forms were validated against the
-//! previous golden-section implementation across thousands of randomized configurations before
-//! replacing it (matching to floating-point precision in every trial), the "compiler-verified
-//! reference" the original numeric approach didn't have.
+//! Two sub-problems (band-edge, eq. 74-77; edge-edge point location, eq. 82-85) reduce to a fourth-order
+//! polynomial in sin(theta). closestThetaOnCircleToLine derives the quartic coefficients directly from the
+//! geometry (algebra in its own comment) and solves them with Ferrari's method (solveQuarticFerrari, O(1), no
+//! iteration), the default; QuarticSolverComparisonTest.cpp found it as accurate as Durand-Kerner iteration at a
+//! fraction of the cost. Durand-Kerner and Aberth-Ehrlich remain for comparison (see QuarticSolverMethod).
+//! closestThetaOnCircleToPoint (edge-edge alternating-projection loop) has a simpler exact answer, a single
+//! atan2, since its objective is a pure first-harmonic trig function of theta. Both closed forms match a
+//! golden-section reference minimisation to floating-point precision across thousands of randomised
+//! configurations.
 //======================================================================================================================
 
 #pragma once

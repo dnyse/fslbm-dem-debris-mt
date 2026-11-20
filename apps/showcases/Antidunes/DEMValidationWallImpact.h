@@ -14,8 +14,7 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file DEMValidationWallImpact.h
-//! \brief Single-body and GJK-vs-analytical wall-impact DEM validation scenarios -- split out of
-//! DEMValidationScenarios.h 2026-10-29. runWallImpactSphere/Cylinder/Box,
+//! \brief Single-body and GJK-vs-analytical wall-impact DEM validation scenarios: runWallImpactSphere/Cylinder/Box,
 //! runGjkVsAnalyticalCylinderWallCheck, runBoxFaceDropRestitution, runBoxInclineSlideStraightness.
 
 #pragma once
@@ -109,8 +108,8 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
    const real_t dt            = b.getParameter< real_t >("dt", collisionTime / real_t(50));
    const real_t tolerance     = b.getParameter< real_t >("toleranceRelError", real_t(0.15));
    const real_t speed         = b.getParameter< real_t >("impactSpeed", real_t(1));
-   // Default 1.0 (equal tangential/normal, this app's own general oblique-impact sweep). Kodam et al.
-   // (2010) Part II's actual Test 1 protocol is PURELY NORMAL (zero tangential component, zero initial
+   // Default 1.0 (equal tangential/normal, this app's general oblique-impact sweep). Kodam et al.
+   // (2010) Part II's Test 1 protocol is PURELY NORMAL (zero tangential component, zero initial
    // spin, frictionless) -- see dem_validation_wall_cylinder_kodam_test1.prm, which sets this to 0.
    const real_t tangentialFraction = b.getParameter< real_t >("tangentialSpeedFraction", real_t(1));
    const real_t tiltStartDeg  = b.getParameter< real_t >("tiltStartDeg", real_t(0));
@@ -118,13 +117,11 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
    const real_t tiltStepDeg   = b.getParameter< real_t >("tiltStepDeg", real_t(15));
    const uint_t vtkSpacing    = b.getParameter< uint_t >("vtkSpacing", uint_t(0));
    const std::string outBase  = b.getParameter< std::string >("outputBaseName", "wall_impact_cylinder");
-   // useRotationalEffectiveMass (see ModelParameters' own doc comment, SimulationParams.h, and
-   // computeRotationalEffectiveMass, ParticleKernels.h): LinearSpringDashpot's stiffness/damping are
-   // calibrated ONCE from the plain TRANSLATIONAL effective mass, which is only exact when the contact
-   // point has zero lever arm about the line of centres -- exactly true at tilt=0/90 (on-axis contact)
-   // and increasingly false at intermediate tilts, matching this test's own observed error pattern
-   // (clean at 0/90, worst in the middle). Default false reproduces every existing prm's exact prior
-   // behaviour; the Kodam-replica diagnostic run turns this on to test whether it explains the gap.
+   // useRotationalEffectiveMass (see ModelParameters, SimulationParams.h, and computeRotationalEffectiveMass,
+   // ParticleKernels.h): LinearSpringDashpot's stiffness/damping are calibrated ONCE from the plain TRANSLATIONAL
+   // effective mass, which is only exact when the contact point has zero lever arm about the line of centres --
+   // true at tilt=0/90 (on-axis contact) and increasingly false at intermediate tilts, matching this test's error
+   // pattern (clean at 0/90, worst in the middle). Default false (translational effective mass).
    const bool useRotationalEffectiveMass = b.getParameter< bool >("useRotationalEffectiveMass", false);
 
    detail::PassFailAccumulator acc;
@@ -136,9 +133,8 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
    for (real_t tiltDeg = tiltStartDeg; tiltDeg <= tiltEndDeg + real_t(1e-9); tiltDeg += tiltStepDeg)
    {
       const detail::YRotation yrot(detail::degToRad(tiltDeg));
-      // Cylinder's own support() gives the exact "reach" toward the wall for this tilt, matching the
-      // formula production contact detection uses -- see AnalyticalSolutions.h's boxCornerWallImpact
-      // comment for the same reasoning applied to the box case.
+      // Cylinder's support() gives the exact "reach" toward the wall for this tilt, the formula production
+      // contact detection uses (same reasoning as AnalyticalSolutions.h's boxCornerWallImpact).
       const Vec3   bfDir  = yrot.mat.getTranspose() * (-wallNormal);
       const Vec3   lowest = yrot.mat * refShape.support(bfDir);
       const real_t reach  = -lowest[2];
@@ -172,18 +168,14 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
                                                              Vec3(0), wallPos, wallNormal, e, mu);
 
       const std::string caseTag = "wallImpactCylinder tilt=" + std::to_string(tiltDeg) + "deg";
-      // velocityScale/angularVelocityScale: see logCaseResult's own header comment
-      // (DEMValidationInfra.h) for the general rationale (mixed absolute+relative tolerance, standard
-      // practice for a quantity whose reference crosses zero). Scale chosen as 10% of the impact speed --
-      // verified directly against the thesis's own committed Kodam-sweep .dat files (not fitted to this
-      // specific run) that this value sits in the middle of a window (0.07-0.15x the impact speed) wide
-      // enough to flip ONLY the single spurious rotational-effective-mass failure at tilt=85deg (where the
-      // absolute residual, ~0.0014, is unremarkable across the whole sweep) and nothing else -- in
-      // particular it does NOT flip any of the translational effective mass's genuine lever-arm failures,
-      // whose absolute residual is an order of magnitude larger and comparable in size across most of the
-      // sweep, not concentrated at the zero-crossing. angularVelocityScale converts the same 10%-of-speed
-      // idea into raw angular-velocity units via r=sqrt(R^2+(L/2)^2) (Kodam et al. 2010 Part II, their own
-      // Eq. 4), the lever-arm length this test's own dimensionless angular-speed convention already uses.
+      // velocityScale/angularVelocityScale: mixed absolute+relative tolerance (see logCaseResult,
+      // DEMValidationInfra.h). Scale = 10% of the impact speed, in the middle of the window (0.07-0.15x the impact
+      // speed, checked against the thesis's Kodam-sweep .dat files) that flips ONLY the spurious
+      // rotational-effective-mass failure at tilt=85deg (absolute residual ~0.0014, unremarkable across the sweep)
+      // and none of the translational effective mass's genuine lever-arm failures, whose absolute residual is an
+      // order of magnitude larger and spread over most of the sweep. angularVelocityScale converts the same scale to
+      // angular-velocity units via r=sqrt(R^2+(L/2)^2) (Kodam et al. 2010 Part II, Eq. 4), the lever arm of this
+      // test's dimensionless angular-speed convention.
       const real_t leverArm = std::sqrt(radius * radius + length * length / real_t(4));
       detail::logCaseResult(caseTag, simVel, analytic.postVelocityA, simAngVel, analytic.postAngularVelocityA,
                              tolerance, acc, real_t(0.1) * speed, real_t(0.1) * speed / leverArm);
@@ -193,13 +185,11 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
                                                             analytic.postAngularVelocityA, inertiaWorld);
       detail::logEnergyBudget(caseTag, keAfter, keExpected, acc, tolerance);
 
-      // DIRECT comparison against Kodam et al. (2010) Part II's own stated numeric result (p. 5866): at
-      // face-on (0deg) and band-on (90deg), the dimensionless rebound speed Vz+/Vz- equals EXACTLY the
-      // restitution coefficient (their reported value: 0.85). This checks the simulated ratio against
-      // that PAPER-STATED number directly -- independent of this file's own analytical solver -- rather
-      // than only cross-checking against a formula we derived ourselves. Only meaningful at frictionless
-      // 0/90deg (see dem_validation_wall_cylinder_kodam_test1.prm); silently skipped otherwise since
-      // Kodam's paper gives no other explicit numeric target across the sweep.
+      // DIRECT comparison against Kodam et al. (2010) Part II's stated numeric result (p. 5866): at face-on
+      // (0deg) and band-on (90deg), the dimensionless rebound speed Vz+/Vz- equals EXACTLY the restitution
+      // coefficient (their value: 0.85), independent of this file's analytical solver. Only meaningful at
+      // frictionless 0/90deg (see dem_validation_wall_cylinder_kodam_test1.prm); skipped otherwise, since the
+      // paper gives no other explicit numeric target across the sweep.
       if (std::abs(mu) < real_t(1e-9) &&
           (std::abs(tiltDeg) < real_t(1e-6) || std::abs(tiltDeg - real_t(90)) < real_t(1e-6)))
       {
@@ -221,19 +211,17 @@ inline bool runWallImpactCylinder(const config::Config::BlockHandle& b)
    return acc.allPassed();
 }
 
-//! Diagnostic-only cross-check (not itself a pass/fail validation experiment against a literature
-//! result -- a self-consistency check between two of OUR OWN geometric methods): does mesa_pd's
-//! generic iterative GJK/EPA solver agree with the exact closed-form Cylinder x HalfSpace contact
-//! geometry that production actually uses (SolidCylinderContactDetection's cyl.support()-based
-//! formula, ParticleKernels.h -- algebraically identical to closed_form_contacts::rimPointTowardPlane,
-//! ClosedFormContactsCylinderPlaneGeometry.h, the formula AnalyticalSolutions.h::cylinderWallImpact
-//! uses as wallImpactCylinder's own analytical reference)?
+//! Diagnostic cross-check (a self-consistency check between two geometric methods of this codebase, not a
+//! validation against a literature result): does mesa_pd's generic iterative GJK/EPA solver agree with the
+//! exact closed-form Cylinder x HalfSpace contact geometry that production uses (SolidCylinderContactDetection's
+//! cyl.support()-based formula, ParticleKernels.h -- algebraically identical to
+//! closed_form_contacts::rimPointTowardPlane, ClosedFormContactsCylinderPlaneGeometry.h, which
+//! AnalyticalSolutions.h::cylinderWallImpact uses as wallImpactCylinder's analytical reference)?
 //!
-//! A true HalfSpace has NO support() function at all (mesa_pd::data::HalfSpace.h) -- GJK/EPA cannot
-//! run on a Cylinder x HalfSpace pair in this codebase AT ALL, by construction, not by configuration
-//! choice. This test approximates the wall as a very large, thin FloatingBox (which DOES have
-//! support(), so GJK/EPA is well-defined) purely to get an independent third answer for the SAME
-//! cylinder geometry, at the SAME tilt angles wallImpactCylinder's own Kodam-replica sweep uses.
+//! A HalfSpace has NO support() function (mesa_pd::data::HalfSpace.h), so GJK/EPA cannot run on a
+//! Cylinder x HalfSpace pair by construction. The wall is approximated by a very large, thin FloatingBox (which
+//! has support()) to get an independent third answer for the same cylinder geometry, at the tilt angles of
+//! wallImpactCylinder's Kodam-replica sweep.
 inline bool runGjkVsAnalyticalCylinderWallCheck(const config::Config::BlockHandle& b)
 {
    const real_t radius       = b.getParameter< real_t >("cylinderRadius", real_t(4));
@@ -314,17 +302,14 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
    const real_t dt            = b.getParameter< real_t >("dt", collisionTime / real_t(50));
    const real_t tolerance     = b.getParameter< real_t >("toleranceRelError", real_t(0.2));
    const real_t speed         = b.getParameter< real_t >("impactSpeed", real_t(1));
-   // Mirrors wallImpactCylinder's own tangentialSpeedFraction (above): default 1.0 keeps
-   // every existing prm's exact prior behaviour (equal tangential/normal, this app's own general oblique-impact
-   // sweep); set to 0.0 for a Kodam-et-al.-Test-1-style purely normal impact, now available for the box the same
-   // way it already was for the cylinder (author: "can you recreate the kodam version for the cuboids").
+   // Mirrors wallImpactCylinder's tangentialSpeedFraction (above): default 1.0 (equal tangential/normal, the
+   // general oblique-impact sweep); 0.0 for a Kodam-et-al.-Test-1-style purely normal impact.
    const real_t tangentialFraction = b.getParameter< real_t >("tangentialSpeedFraction", real_t(1));
    const real_t tiltStartDeg  = b.getParameter< real_t >("tiltStartDeg", real_t(5));
    const real_t tiltEndDeg    = b.getParameter< real_t >("tiltEndDeg", real_t(40));
    const real_t tiltStepDeg   = b.getParameter< real_t >("tiltStepDeg", real_t(10));
    const uint_t vtkSpacing    = b.getParameter< uint_t >("vtkSpacing", uint_t(0));
-   // was not wired for the box (always the plain translational effective mass); default false keeps
-   // the previous behaviour.
+   // useRotationalEffectiveMass: see runWallImpactCylinder; default false (translational effective mass).
    const bool   useRotationalEffectiveMass = b.getParameter< bool >("useRotationalEffectiveMass", false);
    const std::string outBase  = b.getParameter< std::string >("outputBaseName", "wall_impact_box");
 
@@ -343,14 +328,12 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
       const Vec3   lowest = yrot.mat * corner;
       const real_t reach  = -lowest[2];
       // A pure Y-axis tilt never changes a point's world Y (rotation about Y leaves Y invariant) or its
-      // contribution to world Z (which depends only on body X/Z), so the "lowest" support corner is
-      // always TIED between its +Y and -Y twin -- the true first contact is the full bottom EDGE
-      // spanning Y, matching Housner's 2D rocking-block corner exactly in the X-Z cross-section, not a
-      // single 3D corner. support()'s arbitrary tie-break otherwise injects a spurious Y lever arm (and,
-      // via the K matrix's rotational coupling, corrupts the X-Z answer too) that the true symmetric
-      // edge contact does not have -- confirmed empirically (a non-zero-Y support point predicted a
-      // physically impossible negative post-bounce Z-velocity). Analytical contact point is the same
-      // corner projected onto the Y=0 symmetry plane.
+      // contribution to world Z (which depends only on body X/Z), so the "lowest" support corner is always TIED
+      // between its +Y and -Y twin: the true first contact is the full bottom EDGE spanning Y, Housner's 2D
+      // rocking-block corner in the X-Z cross-section, not a single 3D corner. support()'s arbitrary tie-break would
+      // inject a spurious Y lever arm (and, via the K matrix's rotational coupling, corrupt the X-Z answer too; a
+      // non-zero-Y support point predicts a physically impossible negative post-bounce Z-velocity). The analytical
+      // contact point is therefore the corner projected onto the Y=0 symmetry plane.
       const Vec3 analyticCornerBF(corner[0], real_t(0), corner[2]);
 
       DEMEngine engine(dt, e, mu, poisson, collisionTime, real_t(0),
@@ -385,18 +368,13 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
                                                               e, mu);
 
       const std::string caseTag = "wallImpactBox tilt=" + std::to_string(tiltDeg) + "deg";
-      // velocityScale/angularVelocityScale: same mixed-tolerance fix and 10%-of-
-      // impact-speed scale as runWallImpactCylinder above (see that call site's own comment and
-      // logCaseResult's header comment, DEMValidationInfra.h, for the general rationale). Checked first
-      // against this box sweep's own committed .dat files: at this scale NONE of the currently logged
-      // checks change (the box's rotational effective mass already passes all 57/57, so there is no
-      // spurious failure here to fix; the translational effective mass's own near-100%-error band around
-      // 50-60deg has an absolute residual, ~0.054, large enough that no reasonable scale choice rescues
-      // it -- consistent with that band being a genuine lever-arm deficiency, not a denominator artefact
-      // alone). Applied anyway for consistency with the cylinder test and to guard a future finer sweep
-      // that might land closer to the box's own zero-crossing (~53.5deg). leverArm uses the same
-      // diagonal-in-the-tilt-plane convention as this file's own dimensionless angular-speed
-      // normalisation (figures/wall-impact/data via scripts/figures/wall_impact_kodam.py's R_BOX).
+      // velocityScale/angularVelocityScale: same mixed tolerance and 10%-of-impact-speed scale as
+      // runWallImpactCylinder. On this box sweep it changes no check: the rotational effective mass passes all
+      // 57/57, and the translational effective mass's near-100%-error band around 50-60deg has an absolute residual
+      // (~0.054) that no reasonable scale rescues -- a genuine lever-arm deficiency, not a denominator artefact.
+      // Applied for consistency and for finer sweeps closer to the box's zero-crossing (~53.5deg). leverArm uses
+      // the diagonal-in-the-tilt-plane convention of the dimensionless angular-speed normalisation
+      // (figures/wall-impact/data via scripts/figures/wall_impact_kodam.py's R_BOX).
       const real_t leverArm = std::sqrt(halfExtents[0] * halfExtents[0] + halfExtents[2] * halfExtents[2]);
       detail::logCaseResult(caseTag, simVel, analytic.postVelocityA, simAngVel, analytic.postAngularVelocityA,
                              tolerance, acc, real_t(0.1) * speed, real_t(0.1) * speed / leverArm);
@@ -418,16 +396,14 @@ inline bool runWallImpactBox(const config::Config::BlockHandle& b)
 
 //! Literal replica of Mack et al. (2011)'s single-cube coefficient-of-restitution drop test methodology
 //! (Powder Technology 214:431-442, Section 2.4: e = sqrt(h1/h0), measured for real hexahedra as e=0.54,
-//! the default below) -- but FACE-first (flush, zero tilt), not corner-first like wallImpactBox's own
-//! sweep (which starts at tiltStartDeg=5 and never exercises the flush case). This is deliberately the
-//! EXACT degenerate configuration that Cylinder/Box::support()'s tie-break bug (fixed 2026-09-13, see
-//! DEM_VALIDATION_MATH_REFERENCE.md's box-support() note) corrupted: pre-fix, a flush box's support()
-//! picked an arbitrary corner instead of the true face centre, injecting a spurious lever arm/torque even
-//! though the true physics here is a trivial 1-DOF normal bounce by symmetry -- analyticVel =
-//! (0,0,+e*impactSpeed), analyticAngVel = (0,0,0) exactly, no AnalyticalSolutions.h call needed. Any
-//! nonzero simulated angular velocity, or a normal-velocity ratio deviating from the input e, is
-//! therefore a direct regression signal for that bug, not a friction/calibration artifact -- there is no
-//! tangential velocity here to mobilise frictionCoefficient at all.
+//! the default below) -- but FACE-first (flush, zero tilt), not corner-first like wallImpactBox's sweep (which
+//! starts at tiltStartDeg=5 and never exercises the flush case). This is the degenerate configuration in which
+//! Cylinder/Box::support() must return the face centre rather than an arbitrary corner; an arbitrary corner would
+//! inject a spurious lever arm/torque although the physics is a trivial 1-DOF normal bounce by symmetry --
+//! analyticVel = (0,0,+e*impactSpeed), analyticAngVel = (0,0,0) exactly, no AnalyticalSolutions.h call needed. Any
+//! nonzero simulated angular velocity, or a normal-velocity ratio deviating from the input e, is therefore a
+//! regression signal for that tie-break, not a friction/calibration artefact (no tangential velocity here to
+//! mobilise frictionCoefficient).
 inline bool runBoxFaceDropRestitution(const config::Config::BlockHandle& b)
 {
    const Vec3   halfExtents   = b.getParameter< Vec3 >("boxHalfExtents", Vec3(1, 1, 1));
@@ -498,20 +474,19 @@ inline bool runBoxFaceDropRestitution(const config::Config::BlockHandle& b)
 //! 7-8): a cube resting FACE-flush (not corner-first) on a plane inclined steeper than the friction angle
 //! should slide straight down-slope with no lateral deviation -- their own single-contact-point DEM-Cube
 //! version showed the contact force "jumping" between corners as the box translates, injecting a
-//! spurious lateral force/torque, fixed there by a multiple-contact-point model. This is the SAME family
-//! of degenerate flush-contact tie-break bug fixed in Cylinder/Box::support() this session
-//! (2026-09-13) -- a box resting flush on a tilted plane is exactly the configuration where the old
-//! support() implementation picked an arbitrary corner instead of the true face centre. The plane is
+//! spurious lateral force/torque, fixed there by a multiple-contact-point model. A box resting flush on a
+//! tilted plane is the configuration in which Cylinder/Box::support() must return the face centre rather than an
+//! arbitrary corner (the same flush-contact tie-break as runBoxFaceDropRestitution). The plane is
 //! tilted about world X, so by symmetry the box's world-X position AND the two OUT-OF-PLANE angular
 //! velocity components (wY, wZ, which would only appear from an asymmetric/"jumping" contact point) must
-//! stay EXACTLY zero for all time -- no closed-form dynamics needed, just mirror symmetry -- so any
-//! nonzero drift there is a direct regression signal for that bug. The IN-PLANE pitch component (wX,
+//! stay EXACTLY zero for all time (mirror symmetry, no closed-form dynamics needed), so any nonzero drift there
+//! is a regression signal for that tie-break. The IN-PLANE pitch component (wX,
 //! rotation about the incline's own tilt axis) is NOT expected to be zero throughout: the box is released
 //! through a small gap and free-falls under world gravity (not purely along the tilted wall normal)
 //! before first contact, so a real, physically legitimate settling/rocking transient in wX is expected
-//! immediately after impact (confirmed empirically: it decays from a transient ~0.07 rad/s down to
-//! ~0.007 rad/s by the last 20% of a 2000-step run) -- only checked in the last `steadyStateFraction` of
-//! the run, where it should have damped down close to zero for genuine steady sliding.
+//! immediately after impact (it decays from ~0.07 rad/s to ~0.007 rad/s by the last 20% of a 2000-step run), so
+//! wX is checked only in the last `steadyStateFraction` of the run, where it should be close to zero for steady
+//! sliding.
 inline bool runBoxInclineSlideStraightness(const config::Config::BlockHandle& b)
 {
    const Vec3   halfExtents  = b.getParameter< Vec3 >("boxHalfExtents", Vec3(1, 1, 1));

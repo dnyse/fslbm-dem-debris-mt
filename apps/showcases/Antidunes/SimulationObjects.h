@@ -87,31 +87,22 @@ struct SimulationObjects
    // floaterBoxUIDs[bi] = UID of floating box bi (matches simParams->floatingBoxes[bi]).
    // floaterCylinderUIDs[ci] = UID of floating cylinder ci (matches simParams->floatingCylinders[ci]).
    // floaterCapsuleUIDs[pi] = UID of floating capsule pi (matches simParams->floatingCapsules[pi]).
-   // All populated by setupParticles via an indexed creation loop + allReduce(SUM) so that every
-   // rank holds the correct UID for every floater regardless of which rank owns each particle.
+   // Filled by setupParticles (indexed creation + allReduce(SUM)), so every rank knows every floater's UID.
    std::vector< walberla::id_t >                               floaterUIDs;
    std::vector< walberla::id_t >                               floaterBoxUIDs;
    std::vector< walberla::id_t >                               floaterCylinderUIDs;
    std::vector< walberla::id_t >                               floaterCapsuleUIDs;
 
-   // UIDs of floaters currently "dormant" (startInactive, not yet at settlingSteps): excluded from
-   // fluid mapping (SetupStages::floaterSelector / BuildTimeloop::movingObstacleSelector) and DEM
-   // contact (ComputeContacts/ComputeLubrication pair selector, ComputeTunnelContacts) until
-   // releaseSettledFloatingSpheres clears their UID at settlingSteps. Shared (not owned by
-   // ParticleKernels) because SetupStages.h and BuildTimeloop.h's sweep-registration lambdas need it
-   // too, and both run before ParticleKernels is constructed.
+   // UIDs of dormant floaters (startInactive, before settlingSteps): excluded from fluid mapping
+   // (SetupStages::floaterSelector, BuildTimeloop::movingObstacleSelector) and DEM contact until
+   // releaseSettledFloatingSpheres removes them. Shared because SetupStages.h and BuildTimeloop.h need it before
+   // ParticleKernels is constructed.
    std::shared_ptr< std::unordered_set< walberla::id_t > >     dormantFloaterUIDs =
       std::make_shared< std::unordered_set< walberla::id_t > >();
 
-   // UIDs of floaters released from their dormant/settling phase THIS main step -- i.e. this is
-   // the very first doDEMSubCycles() call in which they participate in real contact detection.
-   // ComputeContacts (ParticleKernels.h) hard-aborts, with full diagnostic detail from the same
-   // exact GJK/EPA/analytical detection path used for real physics, if a genuine contact is found
-   // for a UID in this set -- proof (not an approximation) that a floater was released directly on
-   // top of an already-active neighbour. Populated by SetupStages::releaseSettledFloatingSpheres,
-   // cleared unconditionally at the end of each doDEMSubCycles() call (ParticleKernels.h) so it
-   // only ever covers the one main step immediately following release. Debug/validation tool, not
-   // a permanent production guard -- see the calling prm's own header.
+   // UIDs of floaters released in this main step (SetupStages::releaseSettledFloatingSpheres). ComputeContacts
+   // (ParticleKernels.h) aborts with diagnostics if one of them is in genuine contact, i.e. was released on top of
+   // an active neighbour. Cleared at the end of every doDEMSubCycles(). Debug/validation aid.
    std::shared_ptr< std::unordered_set< walberla::id_t > >     freshlyActivatedFloaterUIDs =
       std::make_shared< std::unordered_set< walberla::id_t > >();
 
@@ -121,14 +112,9 @@ struct SimulationObjects
    FlagInfo_T flagInfo;
 
    // Diagnostic sweep event collector ---------------------------------------------------------------------------------
-   // A shared, append-only buffer that any per-sub-cycle diagnostic in ParticleKernels.h can push a
-   // lightweight record into (cheap -- one push_back, no string formatting) instead of calling
-   // WALBERLA_LOG_WARNING directly at the point of detection. BuildTimeloop.h's
-   // addAfterTimeStepDiagnosticSweep (gated by ModelParameters::diagnosticSweepEnabled, off by
-   // default) drains and logs this buffer once per main step, then clears it, so all of this
-   // diagnostic output funnels through one togglable place instead of being wired inline. Empty /
-   // zero-cost whenever diagnosticSweepEnabled is false, since every push site is gated by that
-   // same flag.
+   // Append-only buffer for per-sub-cycle diagnostics in ParticleKernels.h (one push_back instead of logging at the
+   // point of detection). BuildTimeloop.h's addAfterTimeStepDiagnosticSweep drains, logs and clears it once per main
+   // step. Every push site is gated by ModelParameters::diagnosticSweepEnabled, so it stays empty when that is off.
    struct DiagnosticEvent
    {
       uint_t             mainStep{ uint_t(0) };
@@ -150,22 +136,18 @@ struct SimulationObjects
    const std::string                pidStateFile{ "pidState.file" };
 
    uint_t                           beginTimeStep;
-   // Live main-loop step counter, updated once per iteration at the top of Antidunes.cpp's timeloop
-   // (before timeloopFSLBM->singleStep() runs, so every before-time-step VTK/sweep callback sees the
-   // current step). Lets setup-time code (e.g. BuildTimeloop.h's addBeforeTimeStepVTKOutput windowed-
-   // frequency gate) capture a live, always-current step value without needing the main loop's own
-   // local variable.
+   // Live main-loop step counter, set at the top of each iteration in Antidunes.cpp (before timeloopFSLBM runs), so
+   // callbacks registered at setup time (e.g. windowed VTK output) can read the current step.
    shared_ptr< uint_t >             currentMainStep = std::make_shared< uint_t >(uint_t(0));
    shared_ptr< PIDController >      pidController;
    shared_ptr< Vector3< real_t > >  acceleration;
    shared_ptr< Vector3< real_t > >  meanVelocity;
    shared_ptr< real_t >             totalFluidMass;
 
-   // Live MEM hydrostatic reference height (ModelParameters.useDynamicReferenceHeight). Seeded to the flat
-   // absoluteLiquidHeight and EMA-updated from floaters' fitted local waterlines in ParticleKernels'
-   // computeSubmergedVolumes(). Read fresh per boundary link by HydrostaticDensityFtor — force-side only,
-   // never touches the fluid/PDF fields (see SimpleBB.h: rhoHydStat only modifies local pdf copies used for
-   // forceMEM, after the field write). Null / unused when the toggle is off (static flat H).
+   // Live MEM hydrostatic reference height (ModelParameters.useDynamicReferenceHeight): seeded to the static
+   // reference height and EMA-updated from the floaters' fitted local waterlines in ParticleKernels'
+   // computeSubmergedVolumes(). Read per boundary link by HydrostaticDensityFtor; force side only (SimpleBB.h applies
+   // rhoHydStat to local PDF copies used for forceMEM). Unused when the toggle is off.
    shared_ptr< real_t >             memReferenceHeight;
 
    shared_ptr< DataCols >           dataCols;

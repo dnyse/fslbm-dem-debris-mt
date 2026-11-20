@@ -14,40 +14,29 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file LiquidPromoteRelaxClassificationTest.cpp
-//! [Claude, 2026-11-12] Full-grid (not single-cell) stress test of ModelParameters.strictBognerRelaxInterface
-//! (the new "Round 0/1/2" liquid-promote-then-relax classification, PdfReconstructionManager.h), built on the
-//! same pure decision functions BognerStateClassificationTest.cpp already unit-tests, now driven over REAL 3D
-//! sphere/cylinder/cuboid floater releases at sizes matching this thesis's own prm files (not toy numbers):
-//! sphere radius 4-5 LU (prms/clog_centred_pillar_startblock_cappid_gas.prm), cylinder radius 3 / length 18 LU
+//! Full-grid stress test of ModelParameters.strictBognerRelaxInterface (the Round 0/1/2 liquid-promote-then-relax
+//! classification in PdfReconstructionManager.h). Like BognerStateClassificationTest.cpp it calls the pure decision
+//! functions (classifyFormerObstacleCellStrict, classifyFormerObstacleCell, isPass3Candidate), here over hand-built 3D
+//! flag grids in which a sphere, cylinder or cuboid floater moves and releases cells. Floater sizes follow the prm
+//! files: sphere radius 4-5 LU (prms/clog_centred_pillar_startblock_cappid_gas.prm), cylinder radius 3 / length 18 LU
 //! (prms/hopper_clog_cyl_startblock_skin0p5_cappid_gas.prm), box half-extents <9,18,9> LU
-//! (prms/bogner3_r025_deep_resume_gas.prm).
+//! (prms/bogner3_r025_deep_resume_gas.prm). The ambient field is liquid below / interface / gas above, either a flat
+//! waterline or a moving wave-front height field. Not covered: BoundaryHandling/StructuredBlockForest integration,
+//! MPI block boundaries, ghost-layer communication timing and the real ParticleFunctions containment.
 //!
-//! This is a pure-function-level test (same convention as BognerStateClassificationTest.cpp): it drives
-//! classifyFormerObstacleCellStrict/classifyFormerObstacleCell/isPass3Candidate directly over a hand-built 3D
-//! flag grid with a single flat ambient interface (liquid below/interface row/gas above, matching
-//! chapters/02_background/float_obj/coupling.tex's own verified convention), not a full BoundaryHandling/
-//! StructuredBlockForest integration sweep -- see the final report for what that leaves untested (MPI block
-//! boundaries, ghost-layer communication timing, real ParticleFunctions containment).
+//! Five classification strategies are run per scenario:
+//!   (a) pure strict Bogner (Round 0)
+//!   (b) + strictBognerNoLiquidAtGas (Round 0+1)
+//!   (c) + strictBognerRelaxInterface (Round 0+1+2)
+//!   (d) legacy non-strict Pass 2 + Pass-3 re-resolution
+//!   (e) legacy Pass 2 only (usePass3Reresolution = false, the production default)
+//! The only assertion: (c) never leaves a liquid cell touching a gas cell. The violation counts of the other strategies
+//! are logged only.
 //!
-//! For every scenario, five classification strategies are run and compared:
-//!   (a) PURE strict Bogner only (Round 0, no fix at all)            -- expected to VIOLATE the invariant
-//!   (b) + strictBognerNoLiquidAtGas (Round 0+1)                     -- expected safe (not asserted, logged)
-//!   (c) + strictBognerRelaxInterface (Round 0+1+2, the new toggle)  -- asserted safe, fewer interface cells
-//!   (d) legacy non-strict Pass-2 + Pass-3 re-resolution (bundled on) -- expected to also sometimes VIOLATE
-//!   (e) legacy Pass-2 only, Pass-3 explicitly off (usePass3Reresolution unset/false) -- the actual
-//!       non-strict sequential rule every one of this thesis's reported clogging and equilibrium prm
-//!       runs used (confirmed: usePass3Reresolution never set true in any of them) -- measured only,
-//!       not asserted, like (b) and (d)
-//!
-//! For every strategy OTHER than (c) itself, an additional "out-of-place interface" count is also
-//! measured per scenario and summed over all scenarios: the number of released cells that strategy
-//! classifies INTERFACE while (c) strictBognerRelaxInterface's own result for the SAME scenario
-//! classifies that same cell LIQUID or GAS instead. This generalizes the "avoidably interface"
-//! concept already used for cell (4,4) in scripts/figures/coupling_classification.py
-//! (round2_relax/caution_cells there) into a reusable per-strategy test metric: it makes visible,
-//! with a real number, how much of a strategy's own "0 violations" (where that holds) is actually
-//! just over-classifying cells as interface rather than genuinely resolving them. Measured only,
-//! like the violation counts for (b), (d), (e) -- no new hard assertion.
+//! Also logged, for every strategy other than (c): the "out-of-place interface" count, i.e. released cells the
+//! strategy classifies INTERFACE while (c) classifies the same cell LIQUID or GAS. It shows how much of a strategy's
+//! safety comes from over-classifying cells as interface (the "avoidably interface" cell (4,4) in the thesis figure
+//! script coupling_classification.py).
 //======================================================================================================================
 
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/PdfReconstructionManager.h"
@@ -78,30 +67,23 @@ constexpr MockFlag OBSTACLE                = MockFlag(1) << 4;
 struct Vec3 { double x, y, z; };
 struct IVec3 { int x, y, z; };
 
-// [Claude, 2026-11-12, instrumentation for the (4,4)-counterexample re-verification requested by the
-// author] Global counters/examples for cells where Round 0 pure strict Bogner's REAL (non-same-step)
-// neighbourhood shows neither real liquid nor real gas evidence at all (hasGas==false && hasLiquid==
-// false going into classifyStrictBognerNeighbourhood). Under the current classifyStrictBognerNeighbourhood
-// ordering (`if (!hasLiquid) return Gas; if (!hasGas) return Liquid; return Interface;`), this case takes
-// the FIRST branch and is assigned GAS directly -- never INTERFACE -- which is structurally different from
-// scripts/figures/coupling_classification.py's bogner_together() (`if hasG and not hasL: G; elif hasL and
-// not hasG: L; else: I`), whose else-branch sends the SAME zero-evidence case to INTERFACE instead (exactly
-// what happens to cell (4,4) in that figure's three-cell-move worked example).
+// Zero-evidence instrumentation: released cells whose real (non-same-step) neighbourhood has neither liquid nor gas
+// (hasGas == hasLiquid == false in Round 0). classifyStrictBognerNeighbourhood (`if (!hasLiquid) return Gas; if
+// (!hasGas) return Liquid; return Interface;`) assigns them GAS, whereas bogner_together() in the thesis figure script
+// coupling_classification.py (`if hasG and not hasL: G; elif hasL and not hasG: L; else: I`) assigns INTERFACE, as for
+// cell (4,4) in its three-cell-move example.
 uint_t g_zeroEvidenceCount = 0;
-uint_t g_zeroEvidenceMismatchVsRelax = 0; // pure's Gas call disagrees with strictBognerRelaxInterface's own final answer
+uint_t g_zeroEvidenceMismatchVsRelax = 0; // Round-0 GAS differs from relax result
 struct ZeroEvidenceExample { std::string scenario; IVec3 cell; MockFlag pureResult; MockFlag relaxResult; };
 std::vector< ZeroEvidenceExample > g_zeroEvidenceExamples;
 uint_t g_scenarioIndex = 0;
 bool g_dumpedFullExample = false;
-// [Claude, 2026-11-12] Extra instrumentation: of the zero-evidence cells (forced to GAS by Round 0's
-// literal first-branch-wins rule), how many directly touch a genuinely-evidenced LIQUID cell in Round
-// 0's own output -- i.e. actually contribute to a real liquid/gas-contact violation, as opposed to
-// merely being "forced" without consequence.
+// Of the zero-evidence cells (set to GAS in Round 0), how many touch a LIQUID cell in Round 0's output, i.e. cause
+// a liquid/gas contact.
 uint_t g_zeroEvidenceCausesViolation = 0;
 
 // ---------------------------------------------------------------------------------------------
-// A plain 3D grid of MockFlags, big enough to hold the whole floater plus a comfortable ambient
-// margin on every side -- no out-of-range handling needed anywhere below.
+// A plain 3D grid of MockFlags, large enough to hold the floater plus an ambient margin on every side.
 // ---------------------------------------------------------------------------------------------
 struct Grid
 {
@@ -114,8 +96,7 @@ struct Grid
    MockFlag  get(int x, int y, int z) const { return data[idx(x, y, z)]; }
 };
 
-// Single flat ambient interface at z == waterlineZ, liquid below, gas above -- exactly the
-// convention verified in chapters/02_background/float_obj/coupling.tex this session.
+// Single flat ambient interface at z == waterlineZ, liquid below, gas above.
 MockFlag ambientFlag(int z, int waterlineZ)
 {
    if (z < waterlineZ) return LIQUID;
@@ -124,24 +105,19 @@ MockFlag ambientFlag(int z, int waterlineZ)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Wave-front height fields: instead of a single flat waterlineZ, the local ambient waterline
-// index is now a function of (x,y) -- still a single-interface-row column (fed straight into
-// ambientFlag above), but the column height itself can tilt, curve, and carry more than one
-// independent lobe, modelling a moving/deforming free-surface front rather than rigid-body motion.
+// Wave-front height fields: the local waterline height is a continuous function of (x,y) (tilted, curved, or with
+// several lobes), classified by ambientFlagWave below, to model a moving/deforming free-surface front.
 // ---------------------------------------------------------------------------------------------
 
-// A locally raised or lowered Gaussian lobe of the free-surface height field -- the building
-// block for composing wave fronts with more than one independent crest/trough.
+// A locally raised or lowered Gaussian lobe of the free-surface height field.
 double gaussianLobe(double x, double y, double cx, double cy, double amp, double sigma)
 {
    const double dx = x - cx, dy = y - cy;
    return amp * std::exp(-(dx * dx + dy * dy) / (2.0 * sigma * sigma));
 }
 
-// Tilted-plane wave front: an angled (not axis-aligned) water-surface height field, so a sweeping
-// front intersects a body on more than one side at once instead of releasing cells only along a
-// single directional trailing edge (cf. the pure-translation scenarios above). Returns the REAL
-// (continuous) height, not a per-column rounded index -- see ambientFlagWave below for why.
+// Tilted-plane wave front, so a sweeping front intersects a body on more than one side at once. Returns the
+// continuous height (see ambientFlagWave).
 double tiltedWaterlineHeight(double x, double y, double wz0, double cx, double cy, double slopeX, double slopeY)
 {
    return wz0 + slopeX * (x - cx) + slopeY * (y - cy);
@@ -153,10 +129,8 @@ double curvedWaterlineHeight(double x, double y, double wz0, double cx, double c
    return wz0 + gaussianLobe(x, y, cx, cy, amp, sigma);
 }
 
-// Two-lobe wave front: an advancing crest on one side of the body superposed with a receding
-// trough on the other, in the SAME height field -- so a single step can raise the ambient
-// surface on the windward side while lowering it on the leeward side, i.e. two disconnected
-// release "fronts" active on the same body at once.
+// Two-lobe wave front: a crest on one side of the body and a trough on the other in the same height field, so one
+// step can raise the surface windward and lower it leeward (two disconnected release fronts).
 double twoLobeWaterlineHeight(double x, double y, double wz0, double crestCx, double crestCy, double crestAmp,
                                double troughCx, double troughCy, double troughAmp, double sigma)
 {
@@ -164,20 +138,14 @@ double twoLobeWaterlineHeight(double x, double y, double wz0, double crestCx, do
               + gaussianLobe(x, y, troughCx, troughCy, troughAmp, sigma);
 }
 
-// Interface half-width (LU) used ONLY for the continuous wave-front ambient classification below.
-// The flat-waterline ambientFlag() above gets away with a single-cell-wide (0.5) interface band
-// because every column shares the exact same integer threshold. That band is NOT wide enough once
-// the surface tilts or curves: a cell diagonally adjacent to a neighbouring column whose threshold
-// differs can then land on the wrong side of a too-thin band and touch liquid directly against
-// gas -- a pure artefact of the ambient-field construction, not a finding about the classification
-// engines under test. Numerically verified (this session) against every tilt/curve/two-lobe slope
-// used below that a half-width of 1.5 LU leaves zero such ambient-only violations with margin.
+// Interface half-width (LU) for the wave-front ambient classification only. A one-cell band suffices for the flat
+// waterline, but on a tilted or curved surface diagonal neighbours in adjacent columns can then put ambient liquid
+// directly against ambient gas, an artefact of the set-up rather than of the engines under test. For all slopes used
+// below, 1.5 LU leaves no such ambient-only violations.
 constexpr double WAVE_INTERFACE_HALF_WIDTH = 1.5;
 
-// Continuous wave-front ambient classification: classify directly from the cell-centre's REAL
-// (continuous) height above/below the local wave surface, instead of ambientFlag's per-column
-// nearest-integer snap, so the interface band stays a connected sheet wide enough to keep liquid
-// and gas apart everywhere the front is tilted or curved (see WAVE_INTERFACE_HALF_WIDTH above).
+// Wave-front ambient classification from the cell centre's continuous height relative to the local surface, so the
+// interface band stays a connected sheet that separates liquid from gas (see WAVE_INTERFACE_HALF_WIDTH).
 template< typename HeightFn >
 MockFlag ambientFlagWave(double x, double y, int z, HeightFn heightAt)
 {
@@ -189,8 +157,8 @@ MockFlag ambientFlagWave(double x, double y, int z, HeightFn heightAt)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Floater shapes, cell-centre-inside-shape membership (matches this thesis's own MEM mapping rule,
-// sec:mem-mapping / src/mesa_pd/common/Contains.h convention: centre test, not voxel-overlap).
+// Floater shapes with cell-centre-inside-shape membership (the MEM mapping rule, cf. src/mesa_pd/common/Contains.h:
+// centre test, not voxel overlap).
 // ---------------------------------------------------------------------------------------------
 bool insideSphere(Vec3 c, Vec3 centre, double radius)
 {
@@ -198,7 +166,7 @@ bool insideSphere(Vec3 c, Vec3 centre, double radius)
    return dx * dx + dy * dy + dz * dz < radius * radius;
 }
 
-// Cylinder, axis along +Y (matches FloatingCylinder's own axis<0,1,0> convention in the real prms).
+// Cylinder, axis along +Y (FloatingCylinder axis <0,1,0> in the prms).
 bool insideCylinderY(Vec3 c, Vec3 centre, double radius, double length)
 {
    const double dx = c.x - centre.x, dz = c.z - centre.z;
@@ -206,8 +174,7 @@ bool insideCylinderY(Vec3 c, Vec3 centre, double radius, double length)
    return std::abs(c.y - centre.y) < length * 0.5;
 }
 
-// Axis-aligned-in-its-own-frame box, rotated by `rotDeg` about the Y axis (a simple, representative
-// rotation -- enough to exercise "not axis-aligned" releases without a full quaternion stack).
+// Box rotated by `rotDeg` about the Y axis, enough to exercise non-axis-aligned releases.
 bool insideBoxRotY(Vec3 c, Vec3 centre, Vec3 halfExtents, double rotDeg)
 {
    const double rad = rotDeg * 3.14159265358979323846 / 180.0;
@@ -219,15 +186,11 @@ bool insideBoxRotY(Vec3 c, Vec3 centre, Vec3 halfExtents, double rotDeg)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Decision engines, all built directly on the SAME pure functions PdfReconstructionManager.h
-// exposes (classifyFormerObstacleCellStrict / classifyFormerObstacleCell / isPass3Candidate) --
-// no re-implementation of the classification RULES themselves, only of the decide-then-apply
-// orchestration around them, faithfully mirroring PdfReconstructionManager.h's own structure.
+// Decision engines built on the pure functions of PdfReconstructionManager.h (classifyFormerObstacleCellStrict /
+// classifyFormerObstacleCell / isPass3Candidate); only the decide-then-apply orchestration around them is
+// re-implemented here, following PdfReconstructionManager.h.
 // ---------------------------------------------------------------------------------------------
 
-// Round 0: pure strict Bogner, decide-then-apply over every newly-uncovered cell. Same-step
-// neighbours (still newlyUncovered, not yet in `decided`) are reported as FORMER_OBSTACLE, which
-// classifyFormerObstacleCellStrict's own B(x) excludes entirely -- exactly Bogner's literal rule.
 const char* flagName(MockFlag f)
 {
    if (f == LIQUID) return "LIQUID";
@@ -238,10 +201,8 @@ const char* flagName(MockFlag f)
    return "NONE(0)";
 }
 
-// [Claude, 2026-11-12] Instrumentation: dump the literal evidence a zero-evidence cell's 26-neighbour
-// D3Q27 scan returns under the SAME exclusion rule roundZeroPureStrictBogner's own `nbr` lambda uses
-// (same-step/newly-uncovered -> FORMER_OBSTACLE, out-of-range -> FORMER_OBSTACLE, else the real ambient
-// flag) -- concrete evidence for task (4) rather than assertion.
+// Logs the 26 neighbour flags of a released cell as roundZeroPureStrictBogner's `nbr` lambda sees them (same-step or
+// out-of-range -> FORMER_OBSTACLE, else the ambient flag).
 void dumpNeighbourEvidence(const char* label, const Grid& ambientPlusObstacle, const std::vector< bool >& isUncovered,
                             const IVec3& c)
 {
@@ -263,6 +224,8 @@ void dumpNeighbourEvidence(const char* label, const Grid& ambientPlusObstacle, c
          }
 }
 
+// Round 0: pure strict Bogner, decide-then-apply over every newly uncovered cell. Same-step neighbours are reported
+// as FORMER_OBSTACLE, which classifyFormerObstacleCellStrict excludes from B(x), as in Bogner's rule.
 std::vector< MockFlag > roundZeroPureStrictBogner(const Grid& ambientPlusObstacle, const std::vector< IVec3 >& uncovered,
                                                    std::vector< IVec3 >* zeroEvidenceCellsOut = nullptr)
 {
@@ -281,12 +244,7 @@ std::vector< MockFlag > roundZeroPureStrictBogner(const Grid& ambientPlusObstacl
          return ambientPlusObstacle.get(nx, ny, nz);
       };
       const auto state = classifyFormerObstacleCellStrict< MockFlag >(nbr, LIQUID, GAS, FORMER_OBSTACLE, OBSTACLE, hasGas, hasLiquid);
-      // [Claude, 2026-11-12] Instrumentation: hasGas==false && hasLiquid==false is the "zero real
-      // evidence at all" case -- B(x) contains neither a real liquid nor a real gas neighbour (every
-      // informative neighbour was same-step/FORMER_OBSTACLE-excluded, or out of range). This is the
-      // case the author's counterexample (cell (4,4), scripts/figures/coupling_classification.py's
-      // three-cell move) puts into bogner_together()'s else-branch -> INTERFACE. Record every
-      // occurrence so the caller can report real counts, not an assertion about whether it happens.
+      // Zero-evidence case: B(x) holds neither a liquid nor a gas neighbour. Recorded for the instrumentation.
       if (!hasGas && !hasLiquid && zeroEvidenceCellsOut != nullptr) zeroEvidenceCellsOut->push_back(c);
       decided[ambientPlusObstacle.idx(c.x, c.y, c.z)] =
          (state == BognerNeighbourhoodState::Gas) ? GAS : (state == BognerNeighbourhoodState::Liquid) ? LIQUID : INTERFACE;
@@ -294,8 +252,8 @@ std::vector< MockFlag > roundZeroPureStrictBogner(const Grid& ambientPlusObstacl
    return decided;
 }
 
-// Round 1: promote any Round-0 LIQUID cell touching GAS (real neighbours, OBSTACLE-covered ones
-// excluded) to INTERFACE. Mirrors PdfReconstructionManager.h's strictBognerNoLiquidAtGas loop.
+// Round 1: turn any Round-0 LIQUID cell touching GAS into INTERFACE (OBSTACLE neighbours do not count). Mirrors the
+// strictBognerNoLiquidAtGas loop in PdfReconstructionManager.h.
 void roundOnePromoteLiquidTouchingGas(const Grid& ambientPlusObstacle, const std::vector< IVec3 >& uncovered,
                                        std::vector< MockFlag >& decided)
 {
@@ -320,8 +278,8 @@ void roundOnePromoteLiquidTouchingGas(const Grid& ambientPlusObstacle, const std
    }
 }
 
-// Round 2: relax any cell currently INTERFACE back to GAS/LIQUID if its real (post-Round-1)
-// neighbourhood shows only one phase. Mirrors the new strictBognerRelaxInterface pass.
+// Round 2: relax an INTERFACE cell to GAS/LIQUID if its post-Round-1 neighbourhood shows only one phase. Mirrors
+// the strictBognerRelaxInterface pass.
 void roundTwoRelaxInterface(const Grid& ambientPlusObstacle, const std::vector< IVec3 >& uncovered,
                              std::vector< MockFlag >& decided, uint_t& relaxedToGas, uint_t& relaxedToLiquid)
 {
@@ -351,10 +309,8 @@ void roundTwoRelaxInterface(const Grid& ambientPlusObstacle, const std::vector< 
    decided = result;
 }
 
-// Legacy non-strict Pass 2 (sequential, ascending z-outer/y/x-inner -- the real non-OMP build's
-// deterministic order, confirmed this session against src/field/iterators/IteratorMacros.h) then
-// Pass 3 (decide-then-apply against the frozen post-Pass-2 snapshot). Mirrors the existing,
-// currently-default production path.
+// Legacy non-strict Pass 2 (sequential, z outer / y / x inner: the non-OpenMP order of
+// src/field/iterators/IteratorMacros.h), then Pass 3 (decide-then-apply against the frozen post-Pass-2 snapshot).
 std::vector< MockFlag > legacyPass2Pass3(const Grid& ambientPlusObstacle, std::vector< IVec3 > uncovered)
 {
    std::sort(uncovered.begin(), uncovered.end(), [](const IVec3& a, const IVec3& b) {
@@ -387,8 +343,7 @@ std::vector< MockFlag > legacyPass2Pass3(const Grid& ambientPlusObstacle, std::v
       if (isPass3Candidate(state, hasGas, hasLiquid, hasUnknown)) candidates.push_back({ c, hasGas, hasLiquid, hasUnknown });
    }
 
-   // Pass 3: frozen post-Pass-2 snapshot (every cell in `decided` is now final from Pass 2's own
-   // perspective); re-run the SAME classifier, decide-then-apply.
+   // Pass 3: re-run the same classifier against the frozen post-Pass-2 snapshot, decide-then-apply.
    std::vector< MockFlag > frozen = decided;
    std::vector< MockFlag > afterPass3 = decided;
    for (auto& cand : candidates)
@@ -399,7 +354,7 @@ std::vector< MockFlag > legacyPass2Pass3(const Grid& ambientPlusObstacle, std::v
          const int nx = cand.c.x + dx, ny = cand.c.y + dy, nz = cand.c.z + dz;
          if (!ambientPlusObstacle.inRange(nx, ny, nz)) return FORMER_OBSTACLE;
          const size_t ni = ambientPlusObstacle.idx(nx, ny, nz);
-         if (isUncovered[ni]) return frozen[ni]; // ALWAYS a real, final Pass-2 flag by now
+         if (isUncovered[ni]) return frozen[ni]; // always a final Pass-2 flag by now
          return ambientPlusObstacle.get(nx, ny, nz);
       };
       const auto state = classifyFormerObstacleCell< MockFlag >(nbr, LIQUID, GAS, FORMER_OBSTACLE, OBSTACLE, hasGas,
@@ -410,13 +365,8 @@ std::vector< MockFlag > legacyPass2Pass3(const Grid& ambientPlusObstacle, std::v
    return afterPass3;
 }
 
-// Legacy non-strict Pass 2 ONLY (same sequential, ascending z-outer/y/x-inner scan order and
-// undecided-same-step-neighbour-falls-back-to-FORMER_OBSTACLE evidence rule as legacyPass2Pass3 above),
-// but WITHOUT the Pass-3 local re-resolution step -- i.e. usePass3Reresolution left/forced false, the
-// production default (PdfReconstructionManager.h ~L345/L578). Confirmed this session: every one of this
-// thesis's actual reported clogging and equilibrium prm runs left usePass3Reresolution unset (false), so
-// THIS is the strategy those runs actually executed -- legacyPass2Pass3 above (which bundles Pass-3 on)
-// does not represent them.
+// Legacy non-strict Pass 2 only: as legacyPass2Pass3 but without Pass 3, i.e. usePass3Reresolution = false, the
+// production default in PdfReconstructionManager.h.
 std::vector< MockFlag > legacyPass2Only(const Grid& ambientPlusObstacle, std::vector< IVec3 > uncovered)
 {
    std::sort(uncovered.begin(), uncovered.end(), [](const IVec3& a, const IVec3& b) {
@@ -443,14 +393,13 @@ std::vector< MockFlag > legacyPass2Only(const Grid& ambientPlusObstacle, std::ve
       const size_t ci = ambientPlusObstacle.idx(c.x, c.y, c.z);
       decided[ci] = (state == BognerNeighbourhoodState::Gas) ? GAS : (state == BognerNeighbourhoodState::Liquid) ? LIQUID : INTERFACE;
       isDecided[ci] = true;
-      // No Pass-3 loop here at all -- this IS the difference from legacyPass2Pass3 above.
+      // No Pass-3 loop: the only difference from legacyPass2Pass3.
    }
    return decided;
 }
 
-// Count genuine liquid-directly-touching-gas violations (26-neighbour sense) across the WHOLE
-// grid, using `decided` for cells released this step and the grid's own ambient/obstacle flags
-// everywhere else.
+// Count liquid-touching-gas violations (26-neighbourhood) over the whole grid, using `decided` for cells released
+// this step and the grid's ambient/obstacle flags elsewhere. Counts (liquid cell, gas neighbour) pairs.
 uint_t countViolations(const Grid& ambientPlusObstacle, const std::vector< MockFlag >& decided)
 {
    auto flagAt = [&](int x, int y, int z) -> MockFlag {
@@ -476,8 +425,7 @@ uint_t countViolations(const Grid& ambientPlusObstacle, const std::vector< MockF
    return violations;
 }
 
-// [Claude, 2026-11-12] Instrumentation: does `decided`'s own call for cell c (using the same
-// flagAt fallback-to-ambient convention as countViolations) directly touch a real LIQUID neighbour?
+// Does cell c have a LIQUID neighbour (same flagAt convention as countViolations)?
 bool touchesLiquid(const Grid& ambientPlusObstacle, const std::vector< MockFlag >& decided, const IVec3& c)
 {
    auto flagAt = [&](int x, int y, int z) -> MockFlag {
@@ -504,15 +452,8 @@ uint_t countInterface(const std::vector< IVec3 >& uncovered, const Grid& g, cons
    return n;
 }
 
-// Out-of-place interface: generalizes the "avoidably interface" idea used for cell (4,4) in
-// scripts/figures/coupling_classification.py (round2_relax/caution_cells there) into a reusable
-// per-strategy test metric. A released cell is "out of place" under `strategyDecided` if that
-// strategy classifies it INTERFACE while the known-safe ground truth `groundTruthDecided` (always
-// strictBognerRelaxInterface's own final result for the SAME scenario) classifies the SAME cell
-// LIQUID or GAS instead -- i.e. the strategy was unnecessarily cautious on a cell the safe strategy
-// itself proves could have been resolved. This is a measurement, not a new hard assertion: it
-// exists to make visible how much of a strategy's own "0 violations" (if any) is actually just
-// over-classifying cells as interface rather than genuinely resolving them.
+// Out-of-place interface: released cells that `strategyDecided` classifies INTERFACE while `groundTruthDecided`
+// (the strictBognerRelaxInterface result of the same scenario) classifies them LIQUID or GAS. Measured, not asserted.
 uint_t countOutOfPlaceInterface(const std::vector< IVec3 >& uncovered, const Grid& g,
                                  const std::vector< MockFlag >& strategyDecided,
                                  const std::vector< MockFlag >& groundTruthDecided)
@@ -529,24 +470,18 @@ uint_t countOutOfPlaceInterface(const std::vector< IVec3 >& uncovered, const Gri
 }
 
 // ---------------------------------------------------------------------------------------------
-// Scenario harness: build before/after obstacle membership for a shape + move, derive
-// newly-uncovered/newly-covered, run all four strategies, report.
+// Scenario harness: build before/after obstacle membership for a shape and move, derive the newly uncovered cells,
+// run all five strategies, report.
 // ---------------------------------------------------------------------------------------------
 struct ScenarioResult { uint_t nUncovered, pureViolations, noLiquidAtGasViolations, relaxViolations, legacyViolations,
                         pass2OnlyViolations, pureInterface, relaxInterface, legacyInterface, pass2OnlyInterface,
-                        // Out-of-place interface counts (this scenario): released cells a strategy calls
-                        // INTERFACE that strictBognerRelaxInterface's own result for the SAME scenario calls
-                        // LIQUID or GAS instead -- not computed for strictBognerRelaxInterface itself (it IS
-                        // the ground truth here).
+                        // Out-of-place interface counts (not computed for strictBognerRelaxInterface, the
+                        // reference).
                         pureOutOfPlaceInterface, noLiquidAtGasOutOfPlaceInterface, legacyOutOfPlaceInterface,
                         pass2OnlyOutOfPlaceInterface,
-                        // [Claude, 2026-11-12] Instrumentation requested by the author re: the (4,4) counterexample:
-                        // how many released cells this scenario had zero real (non-same-step) liquid/gas evidence
-                        // under pure Round-0 strict Bogner, and of those, how many got a DIFFERENT final phase from
-                        // strictBognerRelaxInterface's own ground truth for the same cell (a genuine, not just
-                        // "out of place interface", mismatch -- since classifyStrictBognerNeighbourhood's zero-
-                        // evidence case resolves straight to GAS, never to INTERFACE, it can never show up in the
-                        // pureOutOfPlaceInterface metric above no matter what).
+                        // Zero-evidence cells in Round 0, and how many of them end in a different phase than
+                        // under strictBognerRelaxInterface. They are set to GAS, never INTERFACE, so they cannot
+                        // appear in pureOutOfPlaceInterface.
                         nZeroEvidence, nZeroEvidenceMismatch; };
 
 template< typename BeforeFn, typename AfterFn >
@@ -564,9 +499,7 @@ ScenarioResult runScenario(int nx, int ny, int nz, int waterlineZ, BeforeFn insi
             after[grid.idx(x, y, z)]  = insideAfter(c);
             grid.at(x, y, z) = before[grid.idx(x, y, z)] ? OBSTACLE : ambientFlag(z, waterlineZ);
          }
-   // ambientPlusObstacle: ambient flags everywhere not covered by the BEFORE shape; the AFTER
-   // shape's own interior (whether newly covered or still covered) reported as OBSTACLE for every
-   // decision engine's "currently solid" exclusion, via a second grid snapshot.
+   // grid: BEFORE shape as OBSTACLE, ambient elsewhere. afterGrid: the same for the AFTER shape.
    Grid afterGrid(nx, ny, nz);
    std::vector< IVec3 > uncovered, covered;
    for (int z = 0; z < nz; ++z)
@@ -580,10 +513,8 @@ ScenarioResult runScenario(int nx, int ny, int nz, int waterlineZ, BeforeFn insi
          }
    WALBERLA_UNUSED(covered);
 
-   // Build the single "ambientPlusObstacle" grid every engine reads non-same-step evidence from:
-   // ambient flag where neither before nor after covers the cell, OBSTACLE where `after` still/newly
-   // covers it (so a true remaining-obstacle or newly-covered neighbour is correctly excluded), and
-   // left at its ambient value (never queried directly) for the newly-uncovered cells themselves.
+   // Evidence grid read by every engine: OBSTACLE where the AFTER shape covers the cell, ambient elsewhere (the
+   // ambient value of the released cells themselves is never read).
    Grid evidence(nx, ny, nz);
    for (int z = 0; z < nz; ++z)
       for (int y = 0; y < ny; ++y)
@@ -620,16 +551,13 @@ ScenarioResult runScenario(int nx, int ny, int nz, int waterlineZ, BeforeFn insi
    r.pass2OnlyViolations = countViolations(evidence, pass2Only);
    r.pass2OnlyInterface  = countInterface(uncovered, evidence, pass2Only);
 
-   // Out-of-place interface: measured against strictBognerRelaxInterface's own result (withRelax)
-   // for this SAME scenario, for every strategy other than itself.
+   // Out-of-place interface, measured against the strictBognerRelaxInterface result (withRelax).
    r.pureOutOfPlaceInterface         = countOutOfPlaceInterface(uncovered, evidence, pure, withRelax);
    r.noLiquidAtGasOutOfPlaceInterface = countOutOfPlaceInterface(uncovered, evidence, withPromote, withRelax);
    r.legacyOutOfPlaceInterface       = countOutOfPlaceInterface(uncovered, evidence, legacy, withRelax);
    r.pass2OnlyOutOfPlaceInterface    = countOutOfPlaceInterface(uncovered, evidence, pass2Only, withRelax);
 
-   // [Claude, 2026-11-12] Instrumentation (author request): real count of zero-real-evidence released
-   // cells under pure Round-0 strict Bogner, and how many of those disagree with strictBognerRelaxInterface's
-   // own ground truth for the SAME cell once the full picture is known.
+   // Zero-evidence cells in Round 0 and their mismatches with the strictBognerRelaxInterface result.
    r.nZeroEvidence = uint_t(zeroEvidenceCells.size());
    uint_t mismatch = 0;
    for (auto& c : zeroEvidenceCells)
@@ -662,13 +590,10 @@ ScenarioResult runScenario(int nx, int ny, int nz, int waterlineZ, BeforeFn insi
 }
 
 // ---------------------------------------------------------------------------------------------
-// Wave-driven scenario harness: the SAME four-strategy comparison as runScenario above, but the
-// ambient liquid/gas evidence a newly-uncovered cell sees comes from a MOVING/DEFORMING free-
-// surface height field (tilted, curved, crest-then-trough, two-lobe) instead of a single flat
-// waterline -- while the body itself can still translate/rotate between before and after, exactly
-// as in runScenario (a wave-struck floater is not held perfectly fixed). beforeWL/afterWL give
-// the local waterline Z index (an int, same single-interface-row convention as ambientFlag) as a
-// function of a cell's (x,y) centre coordinates, evaluated BEFORE/AFTER the step respectively.
+// Wave-driven scenario harness: the same five-strategy comparison as runScenario, but the ambient field comes from a
+// moving free-surface height field instead of a flat waterline; the body can still move between before and after.
+// beforeWL/afterWL return the continuous local waterline height at a cell's (x,y) centre before/after the step,
+// classified by ambientFlagWave.
 // ---------------------------------------------------------------------------------------------
 template< typename BeforeFn, typename AfterFn, typename BeforeWLFn, typename AfterWLFn >
 ScenarioResult runScenarioWave(int nx, int ny, int nz, BeforeWLFn beforeWL, AfterWLFn afterWL,
@@ -698,8 +623,7 @@ ScenarioResult runScenarioWave(int nx, int ny, int nz, BeforeWLFn beforeWL, Afte
          }
    WALBERLA_UNUSED(covered);
 
-   // Evidence grid: the AFTER body shape as OBSTACLE, the AFTER wave field everywhere else --
-   // the post-step ambient reality every decision engine reads non-same-step evidence from.
+   // Evidence grid: the AFTER body shape as OBSTACLE, the AFTER wave field elsewhere.
    Grid evidence(nx, ny, nz);
    for (int z = 0; z < nz; ++z)
       for (int y = 0; y < ny; ++y)
@@ -737,15 +661,13 @@ ScenarioResult runScenarioWave(int nx, int ny, int nz, BeforeWLFn beforeWL, Afte
    r.pass2OnlyViolations = countViolations(evidence, pass2Only);
    r.pass2OnlyInterface  = countInterface(uncovered, evidence, pass2Only);
 
-   // Out-of-place interface: measured against strictBognerRelaxInterface's own result (withRelax)
-   // for this SAME scenario, for every strategy other than itself.
+   // Out-of-place interface, measured against the strictBognerRelaxInterface result (withRelax).
    r.pureOutOfPlaceInterface         = countOutOfPlaceInterface(uncovered, evidence, pure, withRelax);
    r.noLiquidAtGasOutOfPlaceInterface = countOutOfPlaceInterface(uncovered, evidence, withPromote, withRelax);
    r.legacyOutOfPlaceInterface       = countOutOfPlaceInterface(uncovered, evidence, legacy, withRelax);
    r.pass2OnlyOutOfPlaceInterface    = countOutOfPlaceInterface(uncovered, evidence, pass2Only, withRelax);
 
-   // [Claude, 2026-11-12] Instrumentation (author request): same zero-real-evidence count/mismatch
-   // tracking as runScenario above, for the wave-driven scenarios.
+   // Zero-evidence tracking as in runScenario.
    r.nZeroEvidence = uint_t(zeroEvidenceCells.size());
    uint_t mismatch = 0;
    for (auto& c : zeroEvidenceCells)
@@ -793,7 +715,7 @@ void reportAndCheck(const char* name, const ScenarioResult& r, uint_t& totalScen
            << " (interface=" << r.pass2OnlyInterface << ", outOfPlaceInterface=" << r.pass2OnlyOutOfPlaceInterface << ")"
            << " | pure zero-real-evidence cells=" << r.nZeroEvidence << " (mismatch vs relax ground truth="
            << r.nZeroEvidenceMismatch << ")");
-   // The one hard safety assertion this whole file exists to make:
+   // The only assertion of this test:
    WALBERLA_CHECK_EQUAL(r.relaxViolations, uint_t(0), name << ": strictBognerRelaxInterface must NEVER leave a liquid"
                                                             " cell directly touching a gas cell");
 }
@@ -878,10 +800,8 @@ int main(int argc, char** argv)
       }
    }
 
-   // ---- Two spheres approaching/overlapping the same patch of waterline simultaneously ----
-   // (as in this thesis's own clogging/jam scenarios, e.g. FloatingSphere entries spaced 12 LU
-   // apart in clog_centred_pillar_startblock_cappid_gas.prm) -- released cells from BOTH spheres
-   // can be same-step neighbours of each other near the gap between them.
+   // ---- Two spheres closing in on each other at the waterline (cf. FloatingSphere entries 12 LU apart in ----
+   // clog_centred_pillar_startblock_cappid_gas.prm): released cells of both spheres can be same-step neighbours.
    {
       const int N = 30, WZ = 15;
       const double R = 5.0;
@@ -899,9 +819,7 @@ int main(int argc, char** argv)
       }
    }
 
-   // ---- Randomised multi-sphere jam patch: several floaters of varying size moving in random ----
-   // directions near the same stretch of waterline, closer to an actual clogging snapshot than
-   // any single-floater case above.
+   // ---- Randomised jam patch: four spheres of random size moving in random directions near the waterline. ----
    {
       std::mt19937 rng(1337);
       std::uniform_real_distribution< double > posXY(6.0, 34.0), zOff(-2.0, 2.0), radiusD(3.0, 5.0),
@@ -941,19 +859,14 @@ int main(int argc, char** argv)
       << " cells classified INTERFACE that strictBognerRelaxInterface itself resolved to LIQUID/GAS ===");
 
    // =============================================================================================
-   // WAVE-FRONT scenarios: the before/after obstacle-liquid-interface-gas state is now driven by a
-   // MOVING/DEFORMING free-surface front (tilted, curved, crest-then-trough, two-lobe) rather than
-   // purely by the floater's own rigid translation/rotation -- while the body itself still nudges
-   // slightly between steps, as a real wave-struck floater would. Separate counters so the new
-   // category's own pass/fail is visible alongside the combined total with the 43 scenarios above.
+   // WAVE-FRONT scenarios: the ambient field is driven by a moving free-surface front (tilted, curved,
+   // crest-then-trough, two-lobe) while the body moves slightly. Separate counters, plus a combined total.
    // =============================================================================================
    walberla::uint_t waveScenarios = 0, pureBadWave = 0, legacyBadWave = 0, pass2OnlyBadWave = 0;
    // Out-of-place interface running totals (summed across every wave-driven scenario below).
    walberla::uint_t pureOOPWave = 0, noLiquidAtGasOOPWave = 0, legacyOOPWave = 0, pass2OnlyOOPWave = 0;
 
-   // ---- Tilted wave front (not axis-aligned) sweeping across sphere R=5 at an angle, so it ----
-   // intersects the body on multiple sides at once rather than releasing cells only along one
-   // directional trailing edge. Body also nudges slightly, as a struck floater would.
+   // ---- Tilted wave front sweeping across sphere R=5, intersecting it on several sides; body moves slightly. ----
    {
       const int N = 28, WZ = 14;
       const Vec3 centre{ 14, 14, 14 };
@@ -973,8 +886,7 @@ int main(int argc, char** argv)
       }
    }
 
-   // ---- Curved (Gaussian-ridge) wave front sweeping across cylinder R=3 L=18, a non-planar ----
-   // front rather than a flat tilted plane, amplitude growing between before/after as it sweeps.
+   // ---- Curved (Gaussian-ridge) wave front across cylinder R=3 L=18, amplitude changing between before/after. ----
    {
       const int N = 30, WZ = 15;
       const Vec3 centre{ 15, 15, 15 };
@@ -993,8 +905,8 @@ int main(int argc, char** argv)
       }
    }
 
-   // ---- Crest advances then, in the NEXT step, a trough recedes over the same side of the ----
-   // body: covered-then-uncovered across two consecutive steps rather than monotonic release.
+   // ---- A crest advances, then in the next step a trough recedes over the same side of the body ----
+   // (covered, then uncovered, over two consecutive steps).
    // Sphere case:
    {
       const int N = 28, WZ = 14;
@@ -1044,9 +956,8 @@ int main(int argc, char** argv)
       }
    }
 
-   // ---- Simultaneous, disconnected release patches on the SAME body: a windward side still ----
-   // being covered by an advancing crest while the leeward side is uncovered by a receding
-   // trough, both lobes active in the same single step -- more than one release "front" at once.
+   // ---- Disconnected release patches on one body in one step: crest advancing windward, trough ----
+   // receding leeward.
    // Sphere case:
    {
       const int N = 30, WZ = 15;
@@ -1125,15 +1036,8 @@ int main(int argc, char** argv)
       << " | legacy Pass-2-only (no Pass-3)=" << (pass2OnlyOOP + pass2OnlyOOPWave)
       << " cells classified INTERFACE that strictBognerRelaxInterface itself resolved to LIQUID/GAS ===");
 
-   // [Claude, 2026-11-12] Instrumentation (author request, re-verifying the (4,4) counterexample):
-   // real count, across all 61 scenarios (43 rigid-body + 18 wave-driven), of released cells whose
-   // REAL (non-same-step) D3Q27 neighbourhood shows neither a real liquid nor a real gas cell at all
-   // under pure Round-0 strict Bogner -- the exact situation cell (4,4) is in, in the figure's three-
-   // cell-move worked example. classifyStrictBognerNeighbourhood's `if (!hasLiquid) return Gas; ...`
-   // ordering sends this case straight to GAS, never INTERFACE, so it structurally can never appear in
-   // the "out-of-place interface" metric above (that metric only counts cells a strategy calls
-   // INTERFACE) -- a genuine mismatch here would instead show up as a silent wrong-phase call, visible
-   // only via this separate counter or as a knock-on violation count.
+   // Zero-evidence report over all scenarios (the situation of cell (4,4) in the figure script). These cells are set
+   // to GAS, not INTERFACE, so a wrong call shows up only here or as a violation, never as out-of-place interface.
    WALBERLA_LOG_INFO_ON_ROOT("=== ZERO-REAL-EVIDENCE INSTRUMENTATION (author's (4,4) counterexample re-check): "
       << g_zeroEvidenceCount << " released cells, across all " << (totalScenarios + waveScenarios)
       << " scenarios, had zero real (non-same-step) liquid/gas evidence under pure Round-0 strict Bogner | "

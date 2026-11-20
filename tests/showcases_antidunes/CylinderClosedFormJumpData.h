@@ -1,6 +1,8 @@
-// GENERATED from the floater-history of job 4251049 (analytic hybrid, collisionTimeFactor 1): the two rods (uid ...486 = "A", ...489 = "B", rank 67) that were launched at step 3493,
-// steps 3484..3489, one row per sub-cycle: owner-copy pose of each rod as logged (position and quaternion with the CSV's 6 significant digits) and the contact the closed-form dispatch
-// REPORTED for the pair (scenario, overlap, normal) in that sub-cycle. reportedUidAIsA: whether the logged contact row had uidA = rod A (i.e. the pair's canonical order).
+// Generated from a recorded floater history (analytic hybrid dispatch, collisionTimeFactor 1): two rods, "A" and "B",
+// over steps 3484..3489, one row per sub-cycle. Each row holds the logged owner-copy pose of both rods (position and
+// quaternion, 6 significant digits as in the CSV) and the contact the closed-form dispatch reported for the pair in
+// that sub-cycle (scenario, overlap, normal). reportedUidAIsA: the logged contact row had uidA = rod A (canonical
+// pair order).
 #pragma once
 struct LoggedPoseRow { int step, sub; double a[7], b[7]; const char* scenario; double overlap; double n[3]; bool reportedUidAIsA; };
 static const LoggedPoseRow kLoggedRows[] = {

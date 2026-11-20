@@ -14,35 +14,23 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file CylinderCylinderContactBenchmark.cpp
-//! Microbenchmark, NOT a correctness test (see PaperAnalyticalContactTest.cpp for that): times each
-//! of PaperAnalyticalContacts.h's 8 named cylinder-cylinder analytical sub-cases (face-face,
-//! band-band-parallel, face-band, band-band-skewed, face-edge, special-contact, band-edge, edge-edge),
-//! the GJK/EPA fallback path (SolidCylinderContactDetection, the same production code the fallback
-//! actually calls), and cylinderCylinderResultIsUncertain() itself, in a tight repeated-call loop with
-//! FIXED geometry per case (so what's measured is pure per-call algorithmic cost, not broad-phase,
-//! MPI, or particle-storage/allocation overhead -- ParticleStorage/bodies for the GJK cases are built
-//! ONCE outside the timed loop). Also benchmarks box-box SAT and box-box GJK/EPA at the widerstacks
-//! scenario's own box size (12x2x3 LU) for a same-methodology comparison against the cylinder numbers.
+//! Microbenchmark, not a correctness test (see PaperAnalyticalContactTest.cpp): times each of the 8 named
+//! cylinder-cylinder closed-form sub-cases of ClosedFormContactsCylinderCylinder.h (face-face, band-band-parallel,
+//! face-band, band-band-skewed, face-edge, special-contact, band-edge, edge-edge), the GJK/EPA fallback
+//! (SolidCylinderContactDetection, the production code the fallback calls) and cylinderCylinderResultIsUncertain(),
+//! each in a tight loop with fixed geometry, so only per-call algorithmic cost is measured (no broad phase, MPI or
+//! allocation; ParticleStorage/bodies for the GJK cases are built once outside the timed loop). Box-box SAT and
+//! box-box GJK/EPA are timed at the widerstacks box size (12x2x3 LU) for comparison.
 //!
-//! WHY THIS EXISTS: this session's own widerstacks-shape-ablation runs found something the user
-//! called "crazy" -- a box-version run FORCED through GJK/EPA for every Box x Box pair (job 4192137,
-//! useAnalyticalContactDetection=false) ran ~2x FASTER per step (steps 40000-45000: ~30 steps/sec)
-//! than a cylinder-version run using the STANDARD hybrid path (analytical-first, GJK/EPA only as a
-//! fallback; job 4192276, same step range: ~15.9 steps/sec) -- i.e. the path that's supposed to avoid
-//! the "expensive" iterative solver most of the time was still slower than the path that always pays
-//! for it. Geometry classification alone (SetupStages.h's blockSyncExtension calc) doesn't explain
-//! this: box and cylinder have almost identical circumscribed radii for this scenario's piece sizes
-//! (~6.27 vs ~6.16 LU) and use the same sync algorithm. This benchmark isolates the one remaining
-//! candidate: is the cylinder-cylinder ANALYTICAL dispatch itself (not the fallback) the actual
-//! bottleneck -- i.e. is classifying and closed-form-solving a cylinder-cylinder pair, even when it
-//! successfully avoids GJK, more expensive per call than box-box SAT AND (surprisingly) more
-//! expensive than box-box's own GJK/EPA path?
+//! Motivation: in the widerstacks shape ablation a box run forced through GJK/EPA for every box-box pair
+//! (useAnalyticalContactDetection=false) ran ~2x faster per step (~30 steps/s) than a cylinder run on the hybrid
+//! path (closed form first, GJK/EPA as fallback; ~15.9 steps/s). The circumscribed radii (~6.27 vs ~6.16 LU) and the
+//! sync algorithm are nearly the same, so the benchmark asks whether the cylinder-cylinder closed-form dispatch
+//! itself, even when it avoids GJK, costs more per call than box-box SAT and box-box GJK/EPA.
 //!
-//! NOT wired into the simulation and NOT a correctness check -- reuses (does not modify)
-//! PaperAnalyticalContacts.h and ParticleKernels.h's SolidCylinderContactDetection exactly as
-//! PaperAnalyticalContactTest.cpp does; gjkCylCyl/gjkBoxBox/HybridResult are duplicated here (not
-//! shared with that file) for the same reason that file gives for defining them locally in the first
-//! place: keeping PaperAnalyticalContacts.h free of any dependency on ParticleKernels.h.
+//! Uses ClosedFormContacts*.h and SolidCylinderContactDetection unmodified; gjkCylCyl/gjkBoxBox/HybridResult are
+//! duplicated from PaperAnalyticalContactTest.cpp, which keeps them out of the headers so that ClosedFormContacts*.h
+//! does not depend on ParticleKernels.h.
 //======================================================================================================================
 
 #include "lbm/blockforest/communication/SimpleCommunication.h"
@@ -79,8 +67,8 @@ using Mat3 = mesa_pd::Mat3;
 using Rot3 = mesa_pd::Rot3;
 
 //======================================================================================================================
-// Duplicated from PaperAnalyticalContactTest.cpp (see that file's own comment on
-// cylinderCylinderContactHybrid for why these live outside PaperAnalyticalContacts.h).
+// Duplicated from PaperAnalyticalContactTest.cpp (see its comment on cylinderCylinderContactHybrid for why these
+// live outside ClosedFormContacts*.h).
 //======================================================================================================================
 struct GjkResult
 {
@@ -88,8 +76,8 @@ struct GjkResult
    real_t penetrationDepth;
 };
 
-//! Duplicated from PaperAnalyticalContactTest.cpp's own rot3FromMatrix -- see that file's copy for
-//! the derivation (standard matrix-to-quaternion conversion, largest-diagonal-term-safe variant).
+//! Duplicated from PaperAnalyticalContactTest.cpp's rot3FromMatrix (standard matrix-to-quaternion conversion,
+//! largest-diagonal-term-safe variant).
 Rot3 rot3FromMatrix(const Mat3& m)
 {
    const real_t w = std::sqrt(std::max(real_t(0), real_t(1) + m(0, 0) + m(1, 1) + m(2, 2))) / real_t(2);
@@ -126,14 +114,10 @@ struct TimingResult
    uint64_t    iterations;
 };
 
-// Every fn() below calls an `inline` header function (PaperAnalyticalContacts.h /
-// SolidCylinderContactDetection) with fixed inputs and returns a value that would otherwise go
-// unused -- an optimizer is entitled to prove the whole call has no observable effect and delete it
-// outright, which would silently turn a timed loop into an empty one. Storing each result's address
-// through a `volatile` pointer forces the compiler to actually materialize it every iteration,
-// without needing a type-erased result or a benchmarking library. Correctness (do the analytical
-// scenario/contact-flag checks below still pass) is verified by the WALBERLA_CHECK_EQUAL/WALBERLA_CHECK
-// calls placed OUTSIDE each timed block -- this sink exists purely to make the timing honest.
+// Every fn() calls an inline header function (ClosedFormContacts*.h / SolidCylinderContactDetection) with fixed
+// inputs; its unused result would let the optimizer delete the call. Storing the result's address through a
+// volatile pointer forces it to be computed every iteration. Correctness (scenario/contact flag) is checked by
+// WALBERLA_CHECK* calls outside each timed block.
 volatile const void* g_optimizationSink = nullptr;
 
 template< typename Fn >
@@ -196,10 +180,8 @@ int main(int argc, char** argv)
    constexpr uint64_t N = 500000;
    std::vector< TimingResult > results;
 
-   // ---- Cylinder x Cylinder, analytical dispatch only (cylinderCylinderContact), one geometry per
-   // named sub-case -- EXACT geometries copied from PaperAnalyticalContactTest.cpp's own
-   // testCylinderCylinder* functions, so these are known-good, already-validated inputs for each case,
-   // not hand-picked-for-this-benchmark geometry that might accidentally miss the intended branch.
+   // ---- Cylinder x Cylinder, closed-form dispatch only (cylinderCylinderContact), one geometry per named sub-case,
+   // copied from PaperAnalyticalContactTest.cpp's testCylinderCylinder* functions (validated to hit that branch).
    {
       CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.5), real_t(2) };
       CylinderState cj{ Vec3(real_t(0), real_t(0), real_t(1.5)), Mat3(), real_t(0.5), real_t(2) };
@@ -260,7 +242,7 @@ int main(int argc, char** argv)
       results.push_back(r);
    }
    {
-      // testCylinderCylinderEdgeEdgeGenuine's geometry -- see that test for provenance of the matrices.
+      // geometry of testCylinderCylinderEdgeEdgeGenuine (see there for the matrices' provenance)
       const Mat3 rotICols(real_t(-0.390898), real_t(-0.198955), real_t(0.898675), real_t(0.196307),
                            real_t(0.935875), real_t(0.292579), real_t(-0.899257), real_t(0.290784),
                            real_t(-0.326775));
@@ -272,11 +254,7 @@ int main(int argc, char** argv)
       CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), rotI.getMatrix(), real_t(1.44446), real_t(1.30996) };
       CylinderState cj{ Vec3(real_t(2.11131), real_t(0.251881), real_t(0.154264)), rotJ.getMatrix(), real_t(1.22407),
                          real_t(2.5082) };
-      // "original" pinned EXPLICITLY to the literal pre-this-session baseline (DurandKerner,
-      // lazyThetaRef=false) -- the file's own defaults for quarticSolver/lazyThetaRef changed to
-      // Ferrari/true later in this session, so leaving this call on cylinderCylinderContact(ci,cj,false)
-      // (2-arg, relying on defaults) would have silently turned this into a duplicate of the Ferrari +
-      // lazyThetaRef entry below instead of the baseline it's meant to be.
+      // baseline: Durand-Kerner, lazyThetaRef=false, passed explicitly because the defaults are Ferrari/true
       const auto r = timeIt("edge-edge (original: old ref, Durand-Kerner, eager)", N, [&]() {
          return cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::DurandKerner, false);
       });
@@ -286,11 +264,9 @@ int main(int argc, char** argv)
          "edge-edge");
       results.push_back(r);
 
-      // Simplification #1 (this session): same geometry, useFastEdgeEdgeReference=true, solver/laziness
-      // pinned to the ORIGINAL Durand-Kerner/eager settings so this isolates ONLY the fast-reference
-      // effect -- see PaperAnalyticalContacts.h's findRimCrossing's own comment and
-      // PaperAnalyticalContactTest.cpp's testEdgeEdgeFastReferenceAccuracy10k for the accuracy
-      // comparison this speed number should always be read alongside.
+      // useFastEdgeEdgeReference=true with the baseline solver/laziness, isolating the fast-reference effect. Read
+      // together with findRimCrossing's comment (ClosedFormContactsCylinderPlaneGeometry.h) and the accuracy
+      // comparison in PaperAnalyticalContactTest.cpp's testEdgeEdgeThreeWayAccuracy10k.
       const auto rFast = timeIt("edge-edge (fast ref only, opt-in)", N, [&]() {
          return cylinderCylinderContact(ci, cj, true, 30, detail::QuarticSolverMethod::DurandKerner, false);
       });
@@ -300,19 +276,15 @@ int main(int argc, char** argv)
          "edge-edge");
       results.push_back(rFast);
 
-      // The file's ACTUAL current default (this session's end state): Ferrari + lazyThetaRef, called
-      // exactly as production would (no arguments beyond ci/cj) -- this is what a plain
-      // cylinderCylinderContact(ci, cj) call anywhere else in this codebase actually runs today.
+      // current default (Ferrari + lazyThetaRef), called as production does: cylinderCylinderContact(ci, cj)
       const auto rProductionDefault =
          timeIt("edge-edge (CURRENT file default: Ferrari + lazyThetaRef)", N,
                 [&]() { return cylinderCylinderContact(ci, cj); });
       WALBERLA_CHECK_EQUAL(std::string(cylinderCylinderContact(ci, cj).scenario), "edge-edge");
       results.push_back(rProductionDefault);
 
-      // Solver-choice variants (this session's Ferrari/Aberth-Ehrlich addition) -- same edge-edge
-      // geometry, old (line-based) reference and 30-iteration budget held fixed, only the quartic
-      // solver itself swapped. See QuarticSolverComparisonTest.cpp for the synthetic-quartic
-      // time/accuracy comparison that motivated checking real geometry too.
+      // Solver variants: same geometry, line-based reference and 30 iterations, only the quartic solver swapped.
+      // QuarticSolverComparisonTest.cpp has the synthetic-quartic time/accuracy comparison.
       const auto rFerrari = timeIt("edge-edge (Ferrari solver, opt-in)", N, [&]() {
          return cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::Ferrari);
       });
@@ -330,11 +302,9 @@ int main(int argc, char** argv)
          "edge-edge");
       results.push_back(rAberthEhrlich);
 
-      // lazyThetaRef (this session's follow-up) -- Ferrari solver, but thetaRef's own quartic is only
-      // computed if point A or B's containment check ever produces more than one candidate, which
-      // testThetaRefTieBreakNecessity10k found is NEVER true on real geometry (0/832 calls). Same
-      // geometry as production default (Ferrari, 30 iter, old useFastEdgeEdgeReference semantics --
-      // lazyThetaRef only changes WHEN thetaRef is computed, not which reference it computes).
+      // lazyThetaRef: Ferrari, but thetaRef's quartic is computed only if point A's or B's containment check gives
+      // more than one candidate (never on real geometry per testThetaRefTieBreakNecessity10k, 0/832 calls).
+      // lazyThetaRef changes only when thetaRef is computed, not which reference.
       const auto rLazyThetaRef = timeIt("edge-edge (Ferrari + lazyThetaRef, opt-in)", N, [&]() {
          return cylinderCylinderContact(ci, cj, false, 30, detail::QuarticSolverMethod::Ferrari, true);
       });
@@ -345,8 +315,8 @@ int main(int argc, char** argv)
       results.push_back(rLazyThetaRef);
    }
 
-   // ---- cylinderCylinderResultIsUncertain() alone -- the cheap classification gate every analytical
-   // result passes through to decide whether to trust it or fall back to GJK/EPA.
+   // ---- cylinderCylinderResultIsUncertain() alone: the gate that decides whether a closed-form result is trusted
+   // or GJK/EPA is called.
    {
       CylinderState ci{ Vec3(real_t(0), real_t(0), real_t(0)), Mat3(), real_t(0.5), real_t(2) };
       CylinderState cj{ Vec3(real_t(0), real_t(0), real_t(1.5)), Mat3(), real_t(0.5), real_t(2) };
@@ -356,10 +326,8 @@ int main(int argc, char** argv)
       results.push_back(r);
    }
 
-   // ---- Cylinder x Cylinder, GJK/EPA fallback path (production SolidCylinderContactDetection,
-   // exactly what the hybrid dispatcher calls on a fallback) -- geometry from
-   // testHybridTier1TriggersOnMissedContact, a real tier-1 (analytical-found-nothing) fallback case.
-   // ParticleStorage/bodies built ONCE, outside the timed loop.
+   // ---- Cylinder x Cylinder, GJK/EPA fallback (SolidCylinderContactDetection, as called by the hybrid dispatch),
+   // geometry of testHybridTier1TriggersOnMissedContact (closed form finds nothing). Bodies built once.
    {
       auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
       mesa_pd::data::ParticleAccessor ac(ps);
@@ -382,8 +350,7 @@ int main(int argc, char** argv)
       results.push_back(r);
    }
 
-   // ---- Box x Box, SAT (analytical, same methodology as above) -- widerstacks scenario's own box
-   // size (halfExtents<6,1,1.5> -> full edge <12,2,3>), two boxes overlapping face-to-face along x.
+   // ---- Box x Box, SAT, widerstacks box size (halfExtents <6,1,1.5>, edges <12,2,3>), face-to-face overlap along x.
    {
       const Vec3 posA(real_t(0), real_t(0), real_t(0));
       const Vec3 posB(real_t(11), real_t(0), real_t(0)); // 1 LU overlap along x (edge length 12 each)
@@ -394,9 +361,7 @@ int main(int argc, char** argv)
       results.push_back(r);
    }
 
-   // ---- Box x Box, GJK/EPA (production SolidCylinderContactDetection's Box overload) -- SAME
-   // geometry as the SAT case above, so this is a direct apples-to-apples comparison of "GJK/EPA cost
-   // for this scenario's own box size" against every cylinder-cylinder number above.
+   // ---- Box x Box, GJK/EPA (Box overload of SolidCylinderContactDetection), same geometry as the SAT case.
    {
       auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
       mesa_pd::data::ParticleAccessor ac(ps);

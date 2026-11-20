@@ -14,8 +14,7 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file DEMValidationPairEnergy.h
-//! \brief Pairwise central head-on restitution/energy-conservation DEM validation scenarios --
-//! split out of DEMValidationScenarios.h 2026-10-29. runPairRestitution,
+//! \brief Pairwise central head-on restitution/energy-conservation DEM validation scenarios: runPairRestitution,
 //! runCylinderPairEnergyFuzz, runCuboidPairEnergyFuzz, runEnergyConservation.
 
 #pragma once
@@ -146,9 +145,8 @@ inline bool runPairRestitution(const config::Config::BlockHandle& b)
       // Exact closed form for a CENTRAL (r x n = 0, guaranteed by createPairMember's geometry),
       // FRICTIONLESS (mu == 0, this test's default) head-on collision: total KE splits into COM-frame
       // translation (unchanged -- momentum conservation fixes the COM velocity) plus relative-motion KE,
-      // which scales by e^2. Only claimed exact when mu is actually 0 -- with friction on, rotational
-      // coupling makes the energy budget depend on the same friction-model details already discussed for
-      // the wall-impact tests, so the check is skipped rather than silently claiming false precision.
+      // which scales by e^2. Exact only for mu = 0: with friction, rotational coupling makes the energy budget
+      // depend on the friction-model details discussed for the wall-impact tests, so the check is skipped.
       if (std::abs(mu) < real_t(1e-9))
       {
          const real_t mA = engine.ac().getMass(idxA), mB = engine.ac().getMass(idxB);
@@ -170,17 +168,17 @@ inline bool runPairRestitution(const config::Config::BlockHandle& b)
    return acc.allPassed();
 }
 
-//! Energy conservation of OBLIQUE cylinder-cylinder collisions under each cylinder detection mode
-//! (thesis Section 5.2, "continuity"). Two free cylinders with uniformly random orientations collide with a random
-//! lateral offset (so that rims, bands and faces all meet), e = 1, mu = 0, no gravity: the kinetic energy after the
-//! collision must equal the energy before. A detection that jumps in depth or normal while the bodies move injects or
-//! removes energy. The SAME set of initial conditions is run with each mode:
+//! Energy conservation of OBLIQUE cylinder-cylinder collisions under each cylinder detection mode (thesis
+//! sec:results-contact-behaviour, continuity). Two free cylinders with uniformly random orientations collide with a
+//! random lateral offset (so that rims, bands and faces all meet), e = 1, mu = 0, no gravity: the kinetic energy after
+//! the collision must equal the energy before. A detection that jumps in depth or normal while the bodies move
+//! injects or removes energy. The SAME set of initial conditions is run with each mode:
 //!   gjk      GJK/EPA only (useAnalyticalContactDetection false)
 //!   hybrid   closed form + GJK/EPA fallback (default analytical mode)
 //!   pure     closed form without fallback (usePureAnalyticalCylinder)
 //!   refined  closed form + support-function refinement (refineCylinderContacts)
-//! Reported per mode: mean and max |KE_after/KE_before - 1| over the collisions that made contact, max relative momentum
-//! error, max penetration / radius, and collisions that never made contact although the other modes did.
+//! Reported per mode: mean and max |KE_after/KE_before - 1| over the collisions that made contact, max relative
+//! momentum error, max penetration / radius, and collisions that never made contact although the other modes did.
 inline bool runCylinderPairEnergyFuzz(const config::Config::BlockHandle& b)
 {
    const real_t radius        = b.getParameter< real_t >("cylinderRadius", real_t(1));
@@ -301,9 +299,9 @@ inline bool runCylinderPairEnergyFuzz(const config::Config::BlockHandle& b)
 
 //! Cuboid version of runCylinderPairEnergyFuzz: oblique elastic (e = 1, mu = 0) collisions of two
 //! freely rotating cuboids with random orientations and lateral offsets, no gravity; kinetic energy must be conserved.
-//! Modes: "gjk" (GJK/EPA) and "sat" (closed-form separating-axis test, as in the drop tests). Written to test whether
-//! the energy gain seen in the randomised cuboid drop tests comes from the SAT contact point (placed on the line between
-//! the centres, not at the contact).
+//! Modes: "gjk" (GJK/EPA) and "sat" (closed-form separating-axis test, as in the drop tests). Checks in particular the
+//! SAT contact point (see detail::boxBoxContactPoint): a point on the line between the centres instead of at the
+//! touching features makes elastic collisions gain energy.
 inline bool runCuboidPairEnergyFuzz(const config::Config::BlockHandle& b)
 {
    const Vec3   halfExt       = b.getParameter< Vec3 >("cuboidHalfExtents", Vec3(6, 1, real_t(1.5)));
@@ -351,8 +349,7 @@ inline bool runCuboidPairEnergyFuzz(const config::Config::BlockHandle& b)
    {
       for (const auto& in : inits)
       {
-         // modes: gjk (GJK/EPA), sat (plain SAT, as in the drop tests). The "fraige" and "multipoint" modes were
-         // archived, see archive/unused_contact_methods/.
+         // modes: gjk (GJK/EPA), sat (plain SAT, as in the drop tests)
          DEMEngine engine(dt, real_t(1), real_t(0), poisson, collisionTime, real_t(0), real_t(10) * reach,
                           /*useAnalyticalContactDetection=*/mode != "gjk");
          const size_t A = engine.addBox(Vec3(-sep0 / 2, 0, 0) - in.offset * real_t(0.5), Vec3(speed / 2, 0, 0), in.rotA,
@@ -440,11 +437,10 @@ inline bool runEnergyConservation(const config::Config::BlockHandle& b)
    const std::string outBase   = b.getParameter< std::string >("outputBaseName", "energy_conservation");
 
    detail::PassFailAccumulator acc;
-   // Feng (2023)'s ECC criterion: e=1, mu=0, no gravity -- total KE must be conserved across an
-   // elastic collision. This is the theoretically rigorous minimum bar for a contact model, and
-   // specifically stresses Box x Box / Cylinder x Cylinder, the two pairs ComputeContacts resolves via
-   // the generic GJK/EPA fallback (no analytic overload) rather than a closed form -- see
-   // ParticleKernels.h's own comment on SolidCylinderContactDetection.
+   // Feng (2023)'s ECC criterion: e=1, mu=0, no gravity -- total KE must be conserved across an elastic
+   // collision, the minimum bar for a contact model. Stresses in particular Box x Box / Cylinder x Cylinder, which
+   // ComputeContacts resolves via the generic GJK/EPA fallback (no analytic overload) by default -- see
+   // ParticleKernels.h on SolidCylinderContactDetection.
    const real_t e = real_t(1), mu = real_t(0);
 
    for (const auto& pr : detail::allShapePairs())

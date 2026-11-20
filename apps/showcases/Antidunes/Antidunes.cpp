@@ -109,11 +109,9 @@ int main(int argc, char** argv)
 
    // Communicate after initialization
    // ----------------------------------------------------------------------------------------------------------------------------------
-   // particleFieldID is included here to match BuildTimeloop.h's own per-step communication of it
-   // alongside flagFieldID -- omitting it leaves a rank that only sees a floater as a GHOST with a
-   // correctly-communicated "obstacle" flag but a stale/uncommunicated particleField entry, until
-   // the first per-step coupling sweep runs. On a checkpoint resume this can hit the SimpleBB.h MEM
-   // force sweep's stale-particle-idx guard on the very first post-load step.
+   // particleFieldID is communicated together with flagFieldID, as in BuildTimeloop.h's per-step communication;
+   // otherwise a ghost floater's particleField entry stays stale until the first coupling sweep, which on a resume
+   // trips SimpleBB.h's stale-particle-idx guard on the first step.
    WALBERLA_LOG_INFO_ON_ROOT("Initial communication");
    Communication_T(simObjs->blockForest, simObjs->flagFieldID, simObjs->fillFieldID, simObjs->forceDensityFieldID,
                     simObjs->particleFieldID)();
@@ -170,10 +168,7 @@ int main(int argc, char** argv)
    constexpr uint_t WATCH_FREQ      = 1000;   // periodic sampling, cheap enough to run routinely
    constexpr uint_t WATCH_DENSE_FROM = 1000000000;
 
-   // Probe region for the FSLBM/DEM coupling stages around a specific, already-resolved
-   // hopper-clogging crash cell. Disabled by default (FROM > TO), same convention as
-   // WATCH_DENSE_FROM above; re-enable by setting a real step range if that investigation needs
-   // revisiting.
+   // Probe region for the FSLBM/DEM coupling stages around a fixed set of cells. Disabled by default (FROM > TO).
    std::vector< Vector3< real_t > > hopperCrashCells;
    for (real_t y = real_t(5.5); y <= real_t(35.5); y += real_t(1))
       for (real_t z : { real_t(17.5), real_t(18.5), real_t(19.5), real_t(20.5) })
@@ -218,8 +213,7 @@ int main(int argc, char** argv)
 
       const bool watchNow = (t % WATCH_FREQ == uint_c(0)) || (t >= WATCH_DENSE_FROM);
 
-      // Independent, prm-toggleable per-step NaN scan window (denseNanScanEnabled/From/ToStep in
-      // PhysicsParameters) -- see PhysicsParams' own comment for why this is separate from watchNow.
+      // Per-step NaN scan window (PhysicsParameters.denseNanScan*), independent of watchNow.
       const bool denseNanScanNow = simParams->physics.denseNanScanEnabled &&
          t >= simParams->physics.denseNanScanFromStep && t < simParams->physics.denseNanScanToStep;
       const bool nanScanNow = watchNow || denseNanScanNow;
@@ -258,7 +252,7 @@ int main(int argc, char** argv)
       timeloopEval->singleStep(timingPool, true);
       if (hopperProbeNow) trackWatchCells(simObjs, "HOPPER-after-timeloopEval", t, hopperCrashCells);
 
-      // extra end-of-step fluid sanity sweep (ModelParameters/PhysicsParameters fluidSanity*, default off)
+      // extra end-of-step fluid sanity sweep (PhysicsParameters fluidSanity*, default off)
       if (simParams->physics.fluidSanityEnabled && t >= simParams->physics.fluidSanityFromStep && t < simParams->physics.fluidSanityToStep &&
           (simParams->physics.fluidSanityEveryNSteps <= uint_t(1) || t % simParams->physics.fluidSanityEveryNSteps == uint_t(0)))
          fluidSanitySweep(simObjs, simParams, t);

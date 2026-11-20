@@ -139,8 +139,7 @@ void setupSimState(const std::shared_ptr< const SimulationParams >& simParams, c
                                     simParams->pid.minActuatingVariable,
                                     simParams->pid.maxActuatingVariable);
 
-   // Initialize meanVelocity and totalFluidMass as zero
-   // They will be later computed during evalutation stages
+   // meanVelocity and totalFluidMass start at zero; they are computed in the evaluation stages
    simObjs->meanVelocity = std::make_shared< Vector3< real_t > >(real_c(0));
    simObjs->totalFluidMass = std::make_shared< real_t >(real_c(0));
    simObjs->dataCols = std::make_shared< DataCols >();
@@ -236,7 +235,7 @@ void setupSurfaceGeometryFields(const std::shared_ptr< const SimulationParams >&
       WALBERLA_ABORT("enableWetting cannot be enabled (TODO: use GenerticSurfaceGeometryHandler)")
    }
 
-   // NOTE: obstacleNormalField is populated by ObstacleNormalSweep every timestep (always run, not gated on enableWetting).
+   // obstacleNormalField is filled by ObstacleNormalSweep every timestep (not gated on enableWetting)
    simObjs->normalFieldID =         field::addToStorage< VectorField_T >(bf, "Normal field", Vector3< real_t >(real_c(0)), field::fzyx, uint_c(1));
    simObjs->obstacleNormalFieldID = field::addToStorage< VectorField_T >(bf, "Obstacle normal field", Vector3< real_t >(real_c(0)), field::fzyx, uint_c(1));
    simObjs->smoothFillFieldID =     field::addToStorage< ScalarField_T >(bf, "Smooth fill level field", real_c(0), field::fzyx, uint_c(1));
@@ -265,17 +264,9 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       mesa_pd::mpi::ClearGhostOwnerSync{}(*simObjs->particleAccessor);
 
       // count and validate particles loaded from snapshot ---------------------------------------
-      // The static_cast<Sphere*> + avg-diameter consistency check below only makes sense when the
-      // checkpointed particleStorage actually holds a settled BED of spheres (useParticleBed=true)
-      // to validate against spheres_out.dat's header-derived avgParticleDiameter -- it was never
-      // exercised any other way before. In a floater-only scenario (useParticleBed=false, e.g. the
-      // mixed-shape sphere/box/cylinder showcases), particleStorage holds whatever shapes the
-      // floaters are; blindly static_cast-ing a Box/Cylinder's BaseShape to Sphere* and calling
-      // getRadius() on it is undefined behaviour (reads garbage as a radius), which corrupts
-      // avgParticleDiameterTest and made the very first attempt to loadSnapshot a mixed-shape
-      // checkpoint abort with "Particle diameters not correct." even though nothing was actually
-      // wrong. Guarding on useParticleBed keeps the original bed-consistency check fully intact
-      // for bed-based runs while skipping it (just counting particles, any shape, no cast) here.
+      // The Sphere cast and the diameter check only apply to a checkpointed sphere bed (useParticleBed=true).
+      // In floater-only runs the storage also holds boxes/cylinders, for which static_cast<Sphere*> is
+      // undefined behaviour, so particles are only counted.
       if (simParams->particle.useParticleBed)
       {
          real_t avgParticleDiameterTest = real_c(0);
@@ -364,9 +355,8 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
                              numParticles, maxParticleHeight, simParams->computed.particleScalingFactor);
 
          WALBERLA_LOG_INFO_ON_ROOT("Max particle height " << maxParticleHeight);
-         // TODO: these checks assume DEM dynamics are active; with useNoSlipParticles=true,
-         // fixingHeightFactor is set large to fix all particles, making particleFixingHeight >> maxParticleHeight
-         // and causing a false abort. Skip them when useNoSlipParticles=true.
+         // These checks assume active DEM dynamics: with useNoSlipParticles=true, fixingHeightFactor is set large
+         // to fix all particles, so particleFixingHeight >> maxParticleHeight would cause a false abort.
          if (!simParams->particle.useNoSlipParticles)
          {
             if ((simParams->computed.sinusOffset + simParams->computed.sinusAmplitude) > maxParticleHeight)
@@ -413,14 +403,9 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       createPlane(*simObjs->particleStorage, bf->getDomain().maxCorner(), Vector3< real_t >(0, -1, 0));
    }
 
-   // Pillars are GLOBAL/FIXED (Utility.h's createBox/createCylinder) and, per BlockForestDataHandling's
-   // own `if (GLOBAL) continue;` guard in both serialize() and deserialize(), are explicitly EXCLUDED
-   // from checkpoint save/load -- unlike floaters (see the loadSnapshot guard around the floater
-   // creation loops below), they are correctly recreated fresh from this same prm-declared config on
-   // EVERY run, load or not, since their position never changes and re-deriving it from the (byte-
-   // identical, same-prm) config is exactly equivalent to restoring it. Logged here (previously silent,
-   // unlike floaters' own "Created floating ..." lines) so a checkpoint-resume run's log directly shows
-   // the reconstructed position for the same kind of verification floaters already get.
+   // Pillars are GLOBAL/FIXED (createBox/createCylinder in Utility.h). BlockForestDataHandling skips GLOBAL
+   // particles in serialize()/deserialize(), so pillars are not checkpointed and are recreated from the prm on
+   // every run, including resumes. Their positions are logged for verification.
    for (const auto& pillar : simParams->pillars)
    {
       auto p = createBox(*simObjs->particleStorage, pillar.center, real_t(2) * pillar.halfExtents);
@@ -436,26 +421,16 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          << " radius=" << pillar.radius);
    }
 
-   // Floater creation (spheres/boxes/cylinders below) is SKIPPED when resuming from a checkpoint.
-   // Unlike the GLOBAL pillars/planes/arch-tunnels above (excluded from checkpoint serialization --
-   // BlockForestDataHandling.cpp's `if (GLOBAL) continue;` -- so recreating them fresh is correct by
-   // design), floaters are ordinary particles fully captured in particleStorageFile; re-running this
-   // loop on a loaded checkpoint would insert a second particle with an already-restored UID and abort.
+   // Floater creation (spheres/boxes/cylinders below) is skipped when resuming from a checkpoint: floaters are
+   // ordinary particles restored from particleStorageFile, and creating them again would duplicate UIDs and abort.
    //
-   // KNOWN LIMITATION: floaterUIDs/floaterBoxUIDs/floaterCylinderUIDs/dormantFloaterUIDs are only
-   // populated by the creation loops below, so skipping them here leaves those empty on a loaded run,
-   // and releaseSettledFloatingSpheres() then has nothing to act on. Harmless if every floater's
-   // settlingSteps had already passed when the checkpoint was taken (the common case), but a floater
-   // still dormant (FIXED) at checkpoint time stays parked forever after such a resume -- its dormant
-   // state IS restored correctly, it just never gets released without the bookkeeping arrays. Not
-   // fixed here: needs a way to re-identify a restored particle's prm-declared floater index without
-   // relying on position (particles move), e.g. a persisted per-particle index/settlingSteps property.
+   // KNOWN LIMITATION: floaterUIDs/floaterBoxUIDs/floaterCylinderUIDs/dormantFloaterUIDs are only filled by the
+   // creation loops, so on a resumed run releaseSettledFloatingSpheres() has nothing to act on. A floater still
+   // dormant (FIXED) at checkpoint time is restored as such but never released. Fixing this needs a persisted
+   // per-particle floater index (position cannot identify a particle, since particles move).
    if (bfParams.loadSnapshot)
    {
-      // Sized (to the prm-declared counts) but left as the invalid UID (0) -- see this block's own
-      // opening comment for why: correct indexed access for any downstream code that iterates these
-      // arrays by the same prm-declared size, just with no valid UID to act on (matching
-      // dormantFloaterUIDs being left empty too).
+      // sized to the prm-declared counts but filled with the invalid UID 0, so indexed access stays valid
       simObjs->floaterUIDs.assign(simParams->floatingSpheres.size(), walberla::id_t(0));
       simObjs->floaterBoxUIDs.assign(simParams->floatingBoxes.size(), walberla::id_t(0));
       simObjs->floaterCylinderUIDs.assign(simParams->floatingCylinders.size(), walberla::id_t(0));
@@ -469,12 +444,10 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    }
    else
    {
-   // Indexed loop so each sphere's UID is captured at the correct index fi.
-   // The owning rank (the one whose subdomain contains pos) creates the particle and records its UID.
-   // allReduceInplace(SUM) broadcasts each UID to all other ranks (no double-counting because only
-   // one rank owns each position).  ParticleKernels uses simObjs->floaterUIDs directly instead of
-   // trying to infer the mapping from local particle ordering, which breaks for multiple spheres
-   // distributed across different ranks.
+   // Indexed loop so each sphere's UID is stored at its index fi. The rank whose subdomain contains pos creates
+   // the particle and records the UID; allReduceInplace(SUM) then broadcasts it (only one rank owns each
+   // position). ParticleKernels uses simObjs->floaterUIDs directly, since the local particle ordering does not
+   // give this mapping when spheres are distributed over several ranks.
    simObjs->floaterUIDs.assign(simParams->floatingSpheres.size(), walberla::id_t(0));
    for (size_t fi = 0; fi < simParams->floatingSpheres.size(); ++fi)
    {
@@ -491,10 +464,9 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          p->setType(1);
          p->setInteractionRadius(fsp.radius);
          p->setLinearVelocity(mesa_pd::Vec3(fsp.initialVelocity[0], fsp.initialVelocity[1], fsp.initialVelocity[2]));
-         // Hold the sphere fixed during the settling phase so the FSLBM can establish a stable
-         // fill-level distribution around the contact line before the sphere starts moving.
-         // pinPosition holds only the TRANSLATIONAL DOFs (done each DEM sub-cycle in ParticleKernels);
-         // it must NOT set the FIXED flag too, same mutual-exclusion rule as boxes/cylinders.
+         // Hold the sphere FIXED during the settling phase so the FSLBM can establish a stable fill-level
+         // distribution around the contact line first. pinPosition holds only the translational DOFs (applied
+         // each DEM sub-cycle in ParticleKernels) and must not be combined with FIXED (same for boxes/cylinders).
          if (fsp.settlingSteps > 0 && !fsp.pinPosition)
             mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
          simObjs->floaterUIDs[fi] = p->getUid();
@@ -506,18 +478,15 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          << " pinPosition=" << (fsp.pinPosition ? "true" : "false"));
    }
    mpi::allReduceInplace(simObjs->floaterUIDs, mpi::SUM);
-   // Register startInactive spheres as dormant -- AFTER the UID sync above, so every rank inserts the
-   // same, now-fully-resolved UID (this loop itself needs no communication: floatingSpheres[fi] is
-   // parsed identically from the same prm on every rank).
+   // Register startInactive spheres as dormant after the UID sync, so every rank inserts the same resolved UID
+   // (floatingSpheres is parsed identically on every rank, so no communication is needed).
    for (size_t fi = 0; fi < simParams->floatingSpheres.size(); ++fi)
       if (simParams->floatingSpheres[fi].startInactive)
          simObjs->dormantFloaterUIDs->insert(simObjs->floaterUIDs[fi]);
 
-   // Floating boxes (type 3) — same indexed-UID pattern as floating spheres.
-   // interactionRadius = circumscribed-sphere half-diagonal so getParticleCellBB produces a
-   // conservative but correct cell bounding box for the shape-generic MEM cell test.
-   // FloatingBox is freely rotating; the base Box::updateMassAndInertia sets the correct
-   // slice-based V_sub estimate in computeSubmergedVolumesBox() stays valid.
+   // Floating boxes (type 3), same indexed-UID pattern as floating spheres. interactionRadius is the
+   // circumscribed half-diagonal, so getParticleCellBB yields a conservative cell bounding box for the
+   // shape-generic MEM cell test. FloatingBox rotates freely and uses Box::updateMassAndInertia.
    simObjs->floaterBoxUIDs.assign(simParams->floatingBoxes.size(), walberla::id_t(0));
    for (size_t bi = 0; bi < simParams->floatingBoxes.size(); ++bi)
    {
@@ -538,9 +507,8 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          p->getBaseShapeRef()->updateMassAndInertia(fbp.densityRatio);
          p->setOwner(mpi::MPIManager::instance()->rank());
          p->setType(3);
-         // + 2 * boxContactSkin: bounds the circumscribing radius of the inflated box (see
-         // ModelParameters::boxContactSkin), same simple safe over-approximation used for the
-         // cylinder's own circumR a few blocks below.
+         // + 2 * boxContactSkin bounds the circumscribed radius of the inflated box (see
+         // ModelParameters::boxContactSkin); same over-approximation as circumR for cylinders below.
          p->setInteractionRadius(halfDiag + real_t(2) * simParams->model.boxContactSkin);
          if (std::abs(fbp.initialTiltAngleDeg) > real_t(1e-10))
          {
@@ -551,9 +519,8 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
             tiltAxis = (tiltAxis.length() > real_t(1e-12)) ? tiltAxis / tiltAxis.length() : mesa_pd::Vec3(0, 1, 0);
             p->setRotation(mesa_pd::Rot3(tiltAxis, angle));
          }
-         // pinPosition holds only the TRANSLATIONAL DOFs (done each DEM sub-cycle in ParticleKernels);
-         // it must NOT set the FIXED flag, which would also freeze rotation. settlingSteps still uses
-         // FIXED (full freeze) but is mutually exclusive with pinPosition.
+         // pinPosition holds only the translational DOFs (applied each DEM sub-cycle in ParticleKernels); FIXED
+         // would also freeze rotation. settlingSteps uses FIXED (full freeze) and excludes pinPosition.
          if (fbp.settlingSteps > 0 && !fbp.pinPosition)
             mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
          simObjs->floaterBoxUIDs[bi] = p->getUid();
@@ -569,10 +536,10 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       if (simParams->floatingBoxes[bi].startInactive)
          simObjs->dormantFloaterUIDs->insert(simObjs->floaterBoxUIDs[bi]);
 
-   // Floating cylinders / logs (type 4) — same indexed-UID pattern as spheres and boxes.
-   // The mesa_pd Cylinder's axis is its BODY z-axis; the initial rotation aligns body-z with the
-   // requested world `axis` (default <0,1,0> = spanwise log), then applies the optional extra tilt
-   // about the world Y-axis. interactionRadius = circumscribed-sphere radius sqrt(r² + (L/2)²).
+   // Floating cylinders / logs (type 4), same indexed-UID pattern as spheres and boxes. The mesa_pd Cylinder's
+   // axis is its body z-axis; the initial rotation aligns body-z with the world `axis` (default <0,1,0>, a
+   // spanwise log) and then applies the optional tilt about the world y-axis.
+   // interactionRadius = circumscribed-sphere radius sqrt(r² + (L/2)²).
    simObjs->floaterCylinderUIDs.assign(simParams->floatingCylinders.size(), walberla::id_t(0));
    for (size_t ci = 0; ci < simParams->floatingCylinders.size(); ++ci)
    {
@@ -602,10 +569,10 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       {
          auto p = simObjs->particleStorage->create(false);
          p->setPosition(pos);
-         // EXPERIMENTAL toggle (ModelParameters.useCapsuleShapeForCylinders,
-         // default false): a Capsule (cylinder + hemispherical end caps) has the same (radius, length)
-         // constructor signature and the same body-z axis convention as Cylinder, so nothing else in
-         // this loop (position, rotation, interactionRadius, FIXED flag, settlingSteps) needs to change.
+         // ModelParameters.useCapsuleShapeForCylinders (experimental, default false): a Capsule (cylinder with
+         // hemispherical end caps) has the same (radius, length) constructor and body-z axis convention as
+         // Cylinder, so nothing else in this loop (position, rotation, interactionRadius, FIXED flag,
+         // settlingSteps) needs to change.
          if (simParams->model.useCapsuleShapeForCylinders)
             p->setBaseShape(std::make_shared< mesa_pd::data::Capsule >(fcp.radius, fcp.length));
          else
@@ -615,8 +582,7 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
          p->setType(4);
          p->setInteractionRadius(circumR);
          p->setRotation(rot);
-         // Same settling semantics as boxes: FIXED (full freeze) unless pinPosition holds the
-         // translational DOFs instead (rotation free, applied each DEM sub-cycle in ParticleKernels).
+         // same settling semantics as boxes: FIXED (full freeze) unless pinPosition holds the translational DOFs
          if (fcp.settlingSteps > 0 && !fcp.pinPosition)
             mesa_pd::data::particle_flags::set(p->getFlagsRef(), mesa_pd::data::particle_flags::FIXED);
          simObjs->floaterCylinderUIDs[ci] = p->getUid();
@@ -632,12 +598,11 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    for (size_t ci = 0; ci < simParams->floatingCylinders.size(); ++ci)
       if (simParams->floatingCylinders[ci].startInactive)
          simObjs->dormantFloaterUIDs->insert(simObjs->floaterCylinderUIDs[ci]);
-   } // end of "if (!bfParams.loadSnapshot)" -- see its own opening comment above
+   } // end of !bfParams.loadSnapshot
 
    // choose particle sync algorithm -----------------------------------------------------
-   // blockSyncExtension must be >= the largest floater extent so that SyncNextNeighbors
-   // ghost-copies each floater to every block its body physically overlaps.
-   // For spheres: extent = radius. For boxes: extent = circumscribed half-diagonal.
+   // blockSyncExtension must be >= the largest floater extent so that ghost copies reach every block a floater
+   // overlaps: sphere radius, box half-diagonal, cylinder circumscribed radius (including the contact skin).
    real_t blockSyncExtension = real_c(2.5);
    for (const auto& fsp : simParams->floatingSpheres)
       blockSyncExtension = std::max(blockSyncExtension, fsp.radius);
@@ -655,9 +620,8 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       blockSyncExtension = std::max(blockSyncExtension, circumR);
    }
    WALBERLA_LOG_INFO_ON_ROOT("blockSyncExtension = " << blockSyncExtension);
-   // maxParticleDiameter determines which sync algorithm is safe (SyncNextNeighbors vs
-   // SyncGhostOwners). Use 2×circumscribed radius for each floater type so that particles
-   // large enough to span 2+ blocks always get SyncGhostOwners.
+   // maxParticleDiameter selects the sync algorithm (SyncNextNeighbors vs SyncGhostOwners); 2x the
+   // circumscribed radius of each floater type, so particles spanning two or more blocks get SyncGhostOwners.
    real_t maxParticleDiameter = simParams->computed.avgParticleDiameter * real_c(1.1);
    for (const auto& fsp : simParams->floatingSpheres)
       maxParticleDiameter = std::max(maxParticleDiameter, fsp.radius * real_c(2));
@@ -675,12 +639,11 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
       maxParticleDiameter = std::max(maxParticleDiameter, circumR * real_c(2));
    }
 
-   // SyncNextNeighbors only exchanges with neighbouring ranks. Each floater is ghosted to every
-   // block within its circumscribed radius + blockSyncExtension; if that reach exceeds the block width in a direction
-   // with at least three blocks, a floater can hold a ghost two blocks away, and after it migrates its new owner sends
-   // to a non-neighbour rank, whose buffer lacks the leading dummy byte ("Received invalid notification type",
-   // reproduced locally). The former test below alone (diameter < 2 * minBlock - extension) did not catch this; such
-   // cases now use SyncGhostOwners.
+   // SyncNextNeighbors only exchanges with neighbouring ranks. Each floater is ghosted to every block within its
+   // circumscribed radius + blockSyncExtension; if that reach exceeds the block width in a direction with at least
+   // three blocks, a floater can hold a ghost two blocks away, and after it migrates its new owner sends to a
+   // non-neighbour rank ("Received invalid notification type"). The diameter test below does not catch this,
+   // so such cases use SyncGhostOwners.
    const real_t particleSyncReach = real_c(0.5) * maxParticleDiameter + blockSyncExtension;
    bool         ghostsStayWithinNeighbours = true;
    for (uint_t d = 0; d < 3; ++d)
@@ -709,21 +672,12 @@ void setupParticles(const std::shared_ptr< const SimulationParams >& simParams, 
    WALBERLA_LOG_INFO_ON_ROOT("Synchronizing particles");
    simObjs->syncCall();
 
-   // mesa_pd's SyncGhostOwners::checkAndResolveOverlap() only sends a new ghost copy to ranks in
-   // domain.getNeighborProcesses() -- ranks topologically one hop away in the block graph from
-   // wherever a particle is currently known, not every rank whose subdomain actually falls within
-   // its interactionRadius+dx. A large floater can physically overlap ranks multiple hops away from
-   // its owning rank. During a continuous run this is never a problem past the first step: ghost
-   // state accumulates and is incrementally re-verified every timestep, converging to the particle's
-   // full multi-hop footprint. On BOTH a checkpoint resume (ghost state wiped, a single sync call
-   // before the first FSLBM sweep) and a fresh start (a floater whose multi-hop footprint already
-   // spans more than one hop at creation, governed by blockSyncExtension, not raw geometric size), a
-   // single syncCall() can leave ranks 2+ hops away with zero knowledge of the floater, producing
-   // SimpleBB.h's "[STALE-PARTICLE-IDX]" hard abort on the very first step that touches it. Calling
-   // syncCall() repeatedly lets each round's newly-created ghosts become the seed for the next
-   // round's neighbor-of-neighbor propagation, converging to the true multi-hop footprint -- 4 rounds
-   // is a generous margin over the 2 hops needed in practice, and cheap relative to the rest of setup
-   // (a one-time cost, not a per-step one).
+   // Repeat the sync: SyncGhostOwners::checkAndResolveOverlap() only sends new ghost copies to
+   // domain.getNeighborProcesses(), i.e. ranks one hop from where the particle is already known, but a large
+   // floater can overlap ranks several hops away. In a running simulation the ghost set grows over successive
+   // steps; at a fresh start or a checkpoint resume a single sync can leave ranks two or more hops away without
+   // a ghost, which triggers the "[STALE-PARTICLE-IDX]" abort in SimpleBB.h on the first step. Each round seeds
+   // the next; 4 rounds cover the 2 hops needed in practice (one-time setup cost).
    for (uint_t round = uint_t(0); round < uint_t(4); ++round) simObjs->syncCall();
 
    // create particle field (mapping of particle UIDs to lbm cells)
@@ -735,11 +689,10 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
 {
    WALBERLA_LOG_INFO_ON_ROOT("setupBoundaryHandling");
 
-   // Live MEM reference height (ModelParameters.useDynamicReferenceHeight): seed to the flat still-water
-   // level; ParticleKernels' computeSubmergedVolumes() EMA-updates it every step from the floaters' fitted
-   // local waterlines when the toggle is on. Force-side only (SimpleBB's rhoHydStat never touches the
-   // fluid), so this is safe regardless of the toggle — when off, the pointer is simply never written to
-   // and the static-height functor overload below is used instead.
+   // Live MEM reference height (ModelParameters.useDynamicReferenceHeight): seeded with the still-water level;
+   // with the toggle on, ParticleKernels' computeSubmergedVolumes() EMA-updates it every step from the floaters'
+   // fitted local waterlines. It only enters the force (SimpleBB's rhoHydStat), never the fluid. With the
+   // toggle off it is never written and the static-height functor below is used.
    simObjs->memReferenceHeight = std::make_shared< real_t >(simParams->staticReferenceHeight());
 
    WALBERLA_LOG_INFO_ON_ROOT("[MEM reference height] "
@@ -754,10 +707,9 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
                                    + std::to_string(simParams->computed.absoluteLiquidHeight)
                               : " = absoluteLiquidHeight") + ")")));
 
-   // useBognerThreePhaseMEM: pass a null functor so SimpleBB's `hydrostaticDensityFct_ == nullptr`
-   // branch is taken -- no static/dynamic H subtraction at all. Combined with the (already-default)
-   // fill-weighting below, this is exactly Bogner & Rude's Eq. 5.9: a phi(x_b)-weighted blend of the
-   // real boundary-link PDFs and the gas-equilibrium distribution, nothing else.
+   // useBognerThreePhaseMEM: a null functor selects SimpleBB's `hydrostaticDensityFct_ == nullptr` branch, i.e.
+   // no reference-height subtraction. Together with the (default) fill-weighting this is Bogner & Rude's
+   // Eq. 5.9: a phi(x_b)-weighted blend of the boundary-link PDFs and the gas equilibrium distribution.
    std::function< real_t(const Vector3< real_t >&) > hydrostaticFtor;
    if (!simParams->model.useBognerThreePhaseMEM)
    {
@@ -776,11 +728,10 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
    // initialize BCs from config (NoSlip top/bottom, CellInterval pillar defined in Antidunes.prm)
    simObjs->antidunesBoundaryHandling->initFromConfig(simParams->cfgPtr->getOneBlock("BoundaryParameters"));
 
-   // Auto NoSlip walls on non-periodic LATERAL faces (X = E/W, Y = N/S), so the walls always stay
-   // consistent with BlockForestParameters.periodicity — no manual prm sync. A non-periodic face with
-   // NO boundary condition has undefined PDFs → NaN (the exact y-boundary NaN seen when periodicity was
-   // <1,0,0> but the N/S walls had been removed). Periodic faces are left wrapped (no wall). The prm
-   // still declares top/bottom (Z, never periodic); re-adding an existing wall here is idempotent.
+   // NoSlip walls on non-periodic lateral faces (x: W/E, y: N/S), so the walls always match
+   // BlockForestParameters.periodicity. A non-periodic face without a boundary condition has undefined PDFs and
+   // produces NaN. Periodic faces stay wrapped. Top/bottom (z, never periodic) come from the prm; setting an
+   // existing wall again is idempotent.
    {
       auto&       bh = *simObjs->antidunesBoundaryHandling;
       const auto& bf = *simObjs->blockForest;
@@ -798,18 +749,11 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
 {
    WALBERLA_LOG_INFO_ON_ROOT("mapParticlesOntoCells");
 
-   // ParticleMappingKernel/MovingParticleMappingKernel below only ever claim a cell that
-   // boundaryHandling->isDomain() already reports true (MovingParticleMapping.h's own "no else -> will
-   // not overwrite pre-existing boundary cells"), but domain_ isn't set yet here: setupBoundaryHandling()
-   // only ran initFromConfig() (Border NoSlip), and initFlagsFromFillLevel() -- which classifies the
-   // rest of the field as liquid/interface/gas, all part of domain_ -- runs AFTER this function in
-   // Antidunes.cpp. Every other caller of these mapping kernels (ParticleMapping.cpp,
-   // MovingParticleMappingMEM.cpp, SettlingSphereMEM.cpp, etc.) calls handling->fillWithDomain() before
-   // mapping for exactly this reason -- Antidunes never did, so this one-time setup mapping has always
-   // silently mapped zero cells for any floater. Harmless on a fresh start (the very next per-step
-   // mapping in timeloopAfterDEM fixes the one-step gap before it matters); fatal on a checkpoint resume
-   // with active floaters present. fillWithDomain() only touches genuinely empty cells, so adding it
-   // unconditionally here is safe and doesn't overwrite the Border-NoSlip flags already set.
+   // Mark the remaining cells as domain first: the mapping kernels below only claim cells for which isDomain()
+   // is true, and at this point only initFromConfig() has run (initFlagsFromFillLevel() follows in
+   // Antidunes.cpp). Without this the setup mapping maps no floater cells, which is fatal on a checkpoint resume
+   // with active floaters (other users of these kernels call fillWithDomain() for the same reason).
+   // fillWithDomain() only touches empty cells and keeps the boundary flags already set.
    for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
    {
       auto* handling = blockIt->getData< AntidunesBoundaryHandling_T::BoundaryHandling_T >(
@@ -817,12 +761,10 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
       handling->fillWithDomain(handling->getFlagField()->nrOfGhostLayers());
    }
 
-   // Select all floaters: type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder.
-   // Fixed obstacles (pillars, walls) are mapped separately as static NoSlip/FreeSlip. Dormant
-   // (startInactive, not yet at settlingSteps) floaters are excluded too -- they are not "in the
-   // simulation" yet, so must not claim fluid cells (this is what lets several floaters share the
-   // exact same spawn position without conflicting). Must stay consistent with movingObstacleSelector
-   // in BuildTimeloop.h (the per-step equivalent of this init-time mapping).
+   // Select floaters: type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder. Fixed
+   // obstacles (pillars, walls) are mapped separately as static NoSlip/FreeSlip. Dormant floaters (startInactive,
+   // before settlingSteps) are excluded so they do not claim fluid cells; this lets several floaters share one
+   // spawn position. Must stay consistent with movingObstacleSelector in BuildTimeloop.h (per-step mapping).
    auto dormantUIDs = simObjs->dormantFloaterUIDs;
    auto floaterSelector = [dormantUIDs](const size_t particleIdx, const auto& ac)
    {
@@ -831,7 +773,7 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
       return dormantUIDs->count(ac.getUid(particleIdx)) == 0;
    };
 
-   // map particles onto LBM domain (this is for initilization. iterations happen in timeloopAfterParticles)
+   // map particles onto the LBM domain (initialisation only; the per-step mapping runs in timeloopAfterDEM)
    if (simParams->particle.useNoSlipParticles) {
       // sets noSlip flag (in flagField through boundaryhandling) for all cells inside the particle
       lbm_mesapd_coupling::ParticleMappingKernel< AntidunesBoundaryHandling_T::BoundaryHandling_T >
@@ -841,7 +783,7 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
                                              AntidunesBoundaryHandling_T::noSlipFlagID);
    }
    else {
-      // same as above but it also stores the UID of the particle in particleFieldID (but no hydro forces are computed here)
+      // same as above, but also stores the particle UID in particleFieldID (no hydrodynamic forces computed here)
       lbm_mesapd_coupling::MovingParticleMappingKernel< AntidunesBoundaryHandling_T::BoundaryHandling_T >
          kernel(simObjs->blockForest, simObjs->antidunesBoundaryHandling->getHandlingID(), simObjs->particleFieldID,
                 simParams->model.mappingTieOffset);
@@ -851,26 +793,20 @@ void mapParticlesOntoCells(const std::shared_ptr< const SimulationParams >& simP
    }
 }
 
-// Called every timestep: releases any floating sphere or box whose settlingSteps have elapsed.
-// During the settling phase the floater is held FIXED so the FSLBM can establish a stable
-// fill-level / normal field around the contact line before the particle starts moving.
+// Called every timestep: releases each floating sphere, box and cylinder whose settlingSteps is reached (clears
+// FIXED and removes it from the dormant set). While settling, the floater is held FIXED so the FSLBM can establish
+// a stable fill-level / normal field around the contact line before the particle moves.
 //
-// Each release also inserts the UID into simObjs->freshlyActivatedFloaterUIDs, a debug/validation
-// hook (see that member's own doc comment, SimulationObjects.h) for a "flying floater" bug traced
-// to floaters being released directly on top of an already-active neighbour: rather than a
-// separate, necessarily-approximate geometric check here, this lets the floater fall into the
-// REAL contact detection it was excluded from while dormant (ComputeContacts, ParticleKernels.h,
-// same GJK/EPA/analytical dispatch used for actual physics) on the very next doDEMSubCycles() call
-// -- exact, not approximated, and with zero extra geometry code. ComputeContacts hard-aborts, with
-// full diagnostic detail, if it finds a genuine contact involving a UID in that set; the set is
-// cleared unconditionally at the end of that same doDEMSubCycles() call either way.
+// Each released UID is also inserted into simObjs->freshlyActivatedFloaterUIDs (see SimulationObjects.h).
+// ComputeContacts (ParticleKernels.h) aborts with diagnostics if, in the next doDEMSubCycles() call, it finds a
+// contact involving such a UID, i.e. a floater released on top of an active neighbour. This uses the real
+// contact detection instead of a separate geometric check. The set is cleared at the end of that call.
 void releaseSettledFloatingSpheres(const std::shared_ptr< const SimulationParams >& simParams,
                                    const std::shared_ptr< SimulationObjects >&       simObjs,
                                    const uint_t currentStep)
 {
-   // Release each floater INDIVIDUALLY by UID. The old code matched on type only, so the first
-   // sphere reaching its settlingSteps unset FIXED on EVERY type-1 sphere — staggered release
-   // schedules (rows dropped at 30k/40k/50k) all fired at once. floaterUIDs[i] ↔ floatingSpheres[i].
+   // Release each floater individually by UID (floaterUIDs[i] <-> floatingSpheres[i]), so staggered release
+   // schedules work.
    for (size_t i = 0; i < simParams->floatingSpheres.size(); ++i)
    {
       const auto& fsp = simParams->floatingSpheres[i];
@@ -953,23 +889,17 @@ void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs,
       const auto* pdfField  = blockIt->getData< const PdfField_T  >(simObjs->pdfFieldID);
       const auto* flagField = blockIt->getData< const FlagField_T >(simObjs->flagFieldID);
       const auto* fillField = blockIt->getData< const ScalarField_T >(simObjs->fillFieldID);
-      // Force-density field, printed alongside PDFs below: the generated Cumulant collision kernel
-      // reads this directly (folded into velocity and every higher-order cumulant) as an input
-      // entirely separate from the PDF field -- structurally invisible to every PDF-based
-      // NaN/precursor check.
+      // Force-density field: read directly by the generated cumulant collision kernel, separately from the
+      // PDFs, so PDF-based NaN/precursor checks cannot see it.
       const auto* forceField = blockIt->getData< const VectorFieldFlattened_T >(simObjs->forceDensityFieldID);
-      // particleField_ owning UID: lets a cube trace show whether a cell's obstacle-ownership stamp
-      // is stable or flip-flopping between two nearby floaters across steps, independent of the flag
-      // classification above (a cell can be OBST-flagged by one uid one step and a different uid the
-      // next without the flag itself ever changing category).
+      // Owning UID from particleField: shows whether a cell's obstacle ownership flips between nearby floaters
+      // across steps, which the flag classification alone does not reveal.
       const auto* particleFieldPtr =
          blockIt->getData< const lbm_mesapd_coupling::ParticleField_T >(simObjs->particleFieldID);
-      // Curvature/normal fields: the FD curvature method this codebase uses
-      // (CurvatureSweepFiniteDifferences, Bogner's least-stable of the three methods he compared) can
-      // enter a self-sustaining, non-converging oscillation when spurious currents from curvature
-      // error perturb the interface layer, which changes the curvature computation again (Bogner
-      // 2017, Section 4.4.3.1, p.99). Logging these lets a cube trace show whether curvature/normal
-      // values are already degenerate/unstable at this cell before a density collapse.
+      // Curvature/normal fields: the finite-difference curvature method used here
+      // (CurvatureSweepFiniteDifferences, the least stable of the three methods Bogner compared) can enter a
+      // self-sustaining oscillation when spurious currents perturb the interface layer (Bogner 2017,
+      // Section 4.4.3.1, p.99). Logging them shows whether they are already degenerate before a density collapse.
       const auto* curvatureField = blockIt->getData< const ScalarField_T >(simObjs->curvatureFieldID);
       const auto* normalField    = blockIt->getData< const VectorField_T >(simObjs->normalFieldID);
       const auto* obstacleNormalField =
@@ -977,9 +907,7 @@ void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs,
 
       const auto liquidFlag    = flagField->getFlag(walberla::free_surface::flagIDs::liquidFlagID);
       const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
-      // richer classification (was INTERFACE/LIQUID/OTHER, lumping GAS and
-      // OBSTACLE together) -- matches checkPdfNaN's own classify() so a cube trace can distinguish
-      // a genuinely-gas cell from an obstacle-covered one.
+      // classification as in checkPdfNaN's classify(), distinguishing gas cells from obstacle cells
       const auto gasFlag       = flagField->getFlag(walberla::free_surface::flagIDs::gasFlagID);
       const auto obstacleMask  = flagField->getMask(simObjs->flagInfo.getObstacleIDSet());
       const FlagUID formerMOuid("former moving obstacle");
@@ -1048,19 +976,12 @@ void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs,
    }
 }
 
-// Per explicit request ("create a box around all the cylinders in the crash
-// area, log out their values and see the crash evolution"): logs EVERY OBSTACLE-or-INTERFACE cell
-// inside a fixed world-space box, once per MAIN step (the fluid field only changes once per main
-// step -- see CLAUDE.md's per-timestep execution order; sub-cycle resolution would multiply row
-// count 10x for zero additional fluid-state information), to a per-rank CSV. Complements
-// trackWatchCells' handful of hardcoded single cells with the FULL spatial evolution of a region
-// known to contain a recurring crash's rods -- restricted to OBST/INTF cells (not every cell in the
-// box) to keep row count bounded (a 2-3-rod-sized box is a few thousand cells, not tens of
-// thousands). Gated by ModelParameters.logFluidBoxHistory (+ Min/Max/StartStep/EndStep,
-// SimulationParams.h); each rank opens (and truncates) its own CSV on first call via a function-
-// local static, mirroring FloaterHistoryLogger's per-rank-file convention (ParticleKernels.h) but
-// without needing its own class since this is called from exactly one place (BuildTimeloop.h's
-// addAfterTimeStepDiagnosticSweep).
+// ModelParameters.logFluidBoxHistory (+ Min/Max/StartStep/EndStep, SimulationParams.h): logs every obstacle or
+// interface cell inside a fixed world-space box once per main step to a per-rank CSV, to follow the spatial
+// evolution of a region (e.g. around a crash). Once per main step suffices since the fluid field only changes
+// once per main step; restricting to OBST/INTF cells keeps the row count bounded. Each rank opens and truncates
+// its own CSV on the first call (function-local static), as FloaterHistoryLogger does (ParticleKernels.h).
+// Called from addAfterTimeStepDiagnosticSweep (BuildTimeloop.h).
 void logFluidBoxHistory(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
                         const std::string& baseFolder,
                         const Vector3< real_t >& boxMin, const Vector3< real_t >& boxMax)
@@ -1138,21 +1059,15 @@ void logFluidBoxHistory(const std::shared_ptr< SimulationObjects >& simObjs, con
               << rho << ',' << fill << ',' << maxAbsPdf << '\n';
       }
    }
-   // Flush every call (once per main step, not per cell), same crash-survivability rationale as
-   // FloaterHistoryLogger -- this run can WALBERLA_ABORT/MPI_ABORT at any point.
+   // flush on every call (once per main step) so the data survives an abort, as in FloaterHistoryLogger
    file.flush();
 }
 
-// Per explicit request to investigate the sphere/cylinder/cuboid still-water
-// equilibrium position bias (settles consistently HIGHER -- less submerged -- than the naive
-// constant-density Archimedes target, growing with density ratio): logs EVERY cell (all flags, not
-// just OBST/INTF -- unlike logFluidBoxHistory above) along the full domain height at one fixed
-// world (x, y) column, once per MAIN step, to a per-rank CSV. Point of this: get the ACTUAL
-// far-field density profile rho(z), to check whether the settled fluid is hydrostatically
-// stratified under the gravity body force (weakly-compressible LBM: p = cs^2*rho, so rho should
-// decrease with height) rather than the uniform rho=1 the simple Archimedes target assumes -- and,
-// independently, to get a precise fill-level-based free-surface height instead of guessing at a
-// "waterline". Gated by ModelParameters.logDensityColumn (+ X/Y/StartStep/EndStep, SimulationParams.h).
+// ModelParameters.logDensityColumn (+ X/Y/StartStep/EndStep, SimulationParams.h): logs every cell (all flags) of
+// one world (x, y) column over the full domain height once per main step to a per-rank CSV. This gives the
+// far-field density profile rho(z), to check whether the fluid is hydrostatically stratified under gravity
+// (weakly compressible LBM, p = cs^2*rho) rather than at the uniform rho=1 assumed by a simple Archimedes
+// estimate, and a fill-level-based free-surface height. Used for the still-water equilibrium of floaters.
 void logDensityColumn(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
                       const std::string& baseFolder, const real_t columnX, const real_t columnY)
 {
@@ -1315,23 +1230,16 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
       for (cell_idx_t iy = 0; iy < cell_idx_c(pdfField->ySize()) && !blockDone; ++iy)
       for (cell_idx_t ix = 0; ix < cell_idx_c(pdfField->xSize()) && !blockDone; ++ix)
       {
-         // Only liquid/interface cells are fatal: a NaN there is genuine corruption. NaN PDFs in gas
-         // cells at the obstacle waterline are expected (and harmless — SimpleBB skips those dry links);
-         // they are NOT scanned here. (The confirmation that they exist was done; see git history.)
+         // Only liquid/interface cells are checked: a NaN there is genuine corruption. NaN PDFs in gas cells at an
+         // obstacle's waterline are expected and harmless (SimpleBB skips those dry links).
          if (!flagField->isFlagSet(ix, iy, iz, liquidFlag) &&
              !flagField->isFlagSet(ix, iy, iz, interfaceFlag)) continue;
 
-         // Low-rho PRECURSOR check (PhysicsParams.lowRhoPrecursorThreshold, 0 = off): the per-PDF
-         // isfinite scan below only catches a cell that has ALREADY gone non-finite -- by definition
-         // one step too late to see how it got there. This catches the step BEFORE that: a cell whose
-         // aggregate density is still finite but has drained to a suspiciously small value (candidate
-         // for the "drained interface cell, rho->0" state SimpleBB.h's own dry-link comment describes
-         // as expected/benign at a floater's waterline -- the open question this exists to answer is
-         // whether a cell that goes on to actually blow up is distinguishable, in the steps
-         // beforehand, from the many that presumably drain harmlessly). Throttled to the first 20 hits
-         // per rank so a run where this fires often (many ordinary draining interface cells) doesn't
-         // flood the log -- this is meant for a targeted, windowed rerun (denseNanScanEnabled +
-         // From/ToStep bracketing an already-known crash), not routine production use.
+         // Low-rho precursor (PhysicsParams.lowRhoPrecursorThreshold, 0 = off): flags cells whose density is still
+         // finite but below the threshold, i.e. before the isfinite scan below would catch them. Drained interface
+         // cells (rho -> 0) at a floater's waterline are expected (see SimpleBB.h); this shows whether a cell that
+         // later blows up can be told apart from those. Throttled to 20 hits per rank; meant for targeted reruns
+         // (denseNanScanEnabled + From/ToStep around a known crash), not production.
          if (lowRhoPrecursorThreshold > real_t(0))
          {
             real_t rhoPrecheck = real_t(0);
@@ -1354,15 +1262,10 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
             }
          }
 
-         // High-velocity PRECURSOR check (PhysicsParams.highVelocityPrecursorThreshold, 0 = off): the
-         // symmetric counterpart to the low-rho check above -- a blowup does not always show up as a
-         // cell draining toward rho=0 first; it can equally show up as an unrealistically large but
-         // still-finite velocity for a step or two (the classic LBM divergence precursor: local Mach
-         // number pushed far past the scheme's stability bound) before the PDFs actually overflow to
-         // Inf/NaN. Uses PdfField_T::getVelocity(), which for this project's compressible cumulant
-         // model divides by the cell's own actual rho (not an assumed 1) -- see PdfField.h's own
-         // getVelocity() implementation. Same throttling (first 20 hits per rank) and same intended
-         // usage (a targeted, windowed rerun) as the low-rho check.
+         // High-velocity precursor (PhysicsParams.highVelocityPrecursorThreshold, 0 = off): a blow-up can also
+         // show as a large but finite velocity (local Mach number beyond the stability bound) before the PDFs
+         // overflow. getVelocity() divides by the cell's actual rho (compressible model). Same throttling and
+         // intended use as the low-rho check.
          if (highVelocityPrecursorThreshold > real_t(0))
          {
             const Vector3< real_t > velPrecheck = pdfField->getVelocity(ix, iy, iz);
@@ -1420,7 +1323,7 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
             }
          }
 
-         // Population PRECURSOR check (PhysicsParams.populationPrecursorThreshold, 0 = off): see that parameter's doc comment.
+         // population precursor check (PhysicsParams.populationPrecursorThreshold, 0 = off), see its doc comment
          if (populationPrecursorThreshold > real_t(0))
          {
             real_t maxAbs = real_t(0); uint_t maxIdx = uint_t(0);
@@ -1444,7 +1347,8 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
                      if (dz > 0 || (dz == 0 && dy > 0) || (dz == 0 && dy == 0 && dx > 0))
                         pinchedPairs += (o1 && ((flagField->get(ix - dx, iy - dy, iz - dz) & obstacleMask) != flag_t(0)));
                   }
-                  // recent-history / dynamics context of the neighbourhood: cells a rod has just LEFT (former moving obstacle), interface/gas neighbours, fastest neighbouring fluid cell, owners of the obstacle neighbours
+                  // neighbourhood context: former-moving-obstacle cells (just left by a body), interface/gas
+                  // neighbours, fastest fluid neighbour, owners of the obstacle neighbours
                   uint_t fmoNeighbours = 0, interfaceNeighbours = 0, gasNeighbours = 0; real_t maxNbrSpeed = real_t(0); std::set< walberla::id_t > owners;
                   for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
                   {
@@ -1505,14 +1409,9 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
             break;
          }
 
-         // VELOCITY-derived NaN check, distinct from the raw-PDF isfinite scan
-         // just above: getVelocity() = momentum/density. If a cell's individual PDFs are ALL
-         // technically finite (e.g. all exactly 0) but happen to sum to exactly zero density, the
-         // division produces 0/0 = NaN velocity WITHOUT any single f_i ever being non-finite -- the
-         // scan above cannot see this case at all. Found via mean-velocity chain-of-custody analysis
-         // (THESIS_PLAN.md, step-444 crash investigation): the ONLY consumer that ever sees the
-         // failure is Forcing.h's MeanVelocityComputer, which sums getVelocity() over every
-         // liquid/interface cell -- exactly the quantity checked here.
+         // Velocity-derived NaN check: getVelocity() = momentum/density gives 0/0 = NaN if all PDFs are finite but
+         // sum to zero density, which the isfinite scan above cannot see. MeanVelocityComputer (Forcing.h) sums
+         // getVelocity() over all liquid/interface cells, so such a cell would corrupt the mean velocity.
          if (!blockDone)
          {
             const Vector3< real_t > velCheck = pdfField->getVelocity(ix, iy, iz);
@@ -1584,23 +1483,17 @@ bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs,
    return globalNaN > uint_t(0);
 }
 
-// Narrow, reactive safety net for the hopper-clogging collide-stage NaN (THESIS_PLAN.md): root cause
-// is that an obstacle-flagged cell's PDF array can end up genuinely all-zero -- streamReconstructAdvect
-// never writes PDFs for obstacle cells (only carries the fill level forward), and the scratch buffer
-// sweep ping-pongs with is cloneUninitialized() (never explicitly seeded, unlike the real field's own
-// equilibrium fill at setup) -- so a cell never refreshed by SimpleBB's per-link bounce-back (one
-// facing another obstacle, not real fluid) can sit on untouched memory that reads back as 0.0. collide
-// then computes m_000=0 -> xi_0=1/m_000=inf -> every downstream cumulant collapses to NaN.
+// Repairs obstacle cells with degenerate PDFs (non-finite or non-positive density). streamReconstructAdvect never
+// writes PDFs of obstacle cells (it only carries the fill level), and its ping-pong scratch buffer comes from
+// cloneUninitialized(), so an obstacle cell that SimpleBB's bounce-back never refreshes (e.g. one facing only other
+// obstacle cells) can hold all-zero PDFs. collide then computes m_000=0 -> xi_0=1/m_000=inf and every cumulant
+// becomes NaN.
 //
-// Unlike checkPdfNaN above (which only scans liquid/interface cells and aborts), this scans OBSTACLE
-// cells and REPAIRS a degenerate one in place -- resetting it to the D3Q27 rest-equilibrium
-// distribution (rho=1, u=0, standard D3Q27 weights) -- since nothing downstream ever reads an obstacle
-// cell's own stored PDF except collide itself: SimpleBB::treatDirection only reads the FLUID-side
-// cell's PDF; PdfReconstructionManager's seedConvertedCellFill derives fill from neighbour averaging,
-// not this cell's frozen history; MovingParticleMapping's transition code never touches pdfField at
-// all. Only touches a cell that is ALREADY non-finite or non-positive -- the vast majority of obstacle
-// cells (including ones actively receiving legitimate SimpleBB writes every step) are never modified.
-// Returns the number of cells repaired on this rank (for logging by the caller).
+// Unlike checkPdfNaN (liquid/interface cells, aborts), this scans obstacle cells and resets a degenerate one to
+// the D3Q27 rest equilibrium (rho=1, u=0). Nothing but collide reads an obstacle cell's own PDFs:
+// SimpleBB::treatDirection reads the fluid-side cell, PdfReconstructionManager's seedConvertedCellFill averages
+// neighbours, and MovingParticleMapping does not touch the PDF field. Healthy cells are never modified.
+// Returns the number of cells repaired on this rank.
 inline uint_t repairDegenerateObstacleCells(const std::shared_ptr< SimulationObjects >& simObjs, const char* const location, const uint_t t)
 {
    uint_t totalRepaired = 0;
@@ -1645,10 +1538,12 @@ inline uint_t repairDegenerateObstacleCells(const std::shared_ptr< SimulationObj
    return totalRepaired;
 }
 
-// FLUID SANITY SWEEP (PhysicsParams::fluidSanity*): per-step range check of every LIQUID/INTERFACE cell (gas, obstacle, former-moving-obstacle and boundary cells are never checked; fluidSanityLiquidOnly also drops the interface
-// cells), see the parameters' doc comment (SimulationParams.h). Returns the GLOBAL number of violating cells.
-// Log throttling: the first 30 violating steps are always printed, afterwards only steps whose count at least doubles vs. the last printed one (or every 100th step), so a benign steady-state violation cannot fill the budget
-// and hide the escalation.
+// Fluid sanity sweep (PhysicsParams::fluidSanity*, see SimulationParams.h): per-step range check of every liquid
+// and interface cell (fluidSanityLiquidOnly drops interface cells; gas, obstacle, former-moving-obstacle and
+// boundary cells are never checked). Returns the global number of violating cells.
+// Log throttling: the first 30 violating steps are printed, afterwards only steps whose count at least doubles
+// relative to the last printed one (or every 100th step), so a steady benign violation cannot use up the budget
+// and hide an escalation.
 inline bool fluidSanityShouldLog(uint_t& printed, uint_t& lastCount, const uint_t count, const uint_t t, const uint_t cap)
 {
    if (printed >= cap) return false;
@@ -1740,7 +1635,7 @@ inline uint_t fluidSanitySweep(const std::shared_ptr< SimulationObjects >& simOb
             if (tol >= real_t(0) && (isInterface ? (fill < -tol || fill > real_t(1) + tol) : (fill < real_t(1) - tol || fill > real_t(1) + tol))) { ++cat.fillBad; bad = true; }
             if (P.fluidSanityMaxExcessMass > real_t(0) && std::abs(excess) > P.fluidSanityMaxExcessMass) { ++cat.excess; bad = true; }
             if (doJumps)
-            {   // largest jump to a checked (liquid/interface) FACE neighbour inside this block (block-boundary faces are skipped: the ghost-layer PDFs are one half-step older than the interior)
+            {   // largest jump to a checked face neighbour inside this block (ghost-layer PDFs are half a step older)
                real_t dU = real_t(0), dRho = real_t(0);
                static const int nb[6][3] = { { -1, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, { 0, 1, 0 }, { 0, 0, -1 }, { 0, 0, 1 } };
                for (const auto& d : nb)
@@ -1756,7 +1651,7 @@ inline uint_t fluidSanitySweep(const std::shared_ptr< SimulationObjects >& simOb
             }
          }
          if (P.fluidSanityCheckTopology && !isInterface)
-         {   // a LIQUID cell must not touch a gas cell (the interface layer is one cell thick over the full D3Q27 stencil)
+         {   // a liquid cell must not touch a gas cell (closed interface layer over the D3Q27 stencil)
             bool touchesGas = false;
             for (int dz = -1; dz <= 1 && !touchesGas; ++dz) for (int dy = -1; dy <= 1 && !touchesGas; ++dy) for (int dx = -1; dx <= 1 && !touchesGas; ++dx)
                if ((dx != 0 || dy != 0 || dz != 0) && flagField->isFlagSet(ix + dx, iy + dy, iz + dz, gasFlag)) touchesGas = true;
@@ -1785,7 +1680,8 @@ inline uint_t fluidSanitySweep(const std::shared_ptr< SimulationObjects >& simOb
          << ", liquid touching gas " << g[10]);
    if (g[0] > uint_t(0) && P.fluidSanityAbortAbove > uint_t(0) && g[0] > P.fluidSanityAbortAbove)
       WALBERLA_ABORT("[FLUID-SANITY] aborting at t=" << t << ": " << g[0] << " violating cells > fluidSanityAbortAbove=" << P.fluidSanityAbortAbove);
-   // global extrema time series (independent of violations): lets the growth of max|u| / rho excursions be read off BEFORE a threshold is crossed
+   // global extrema time series, independent of violations: shows the growth of max|u| / rho before a
+   // threshold is crossed
    if (P.fluidSanityStatsEveryNSteps > uint_t(0) && t % P.fluidSanityStatsEveryNSteps == uint_t(0))
    {
       uint_t nChecked = checked; mpi::allReduceInplace(nChecked, mpi::SUM);
@@ -1798,11 +1694,9 @@ inline uint_t fluidSanitySweep(const std::shared_ptr< SimulationObjects >& simOb
    return g[0];
 }
 
-// checkPdfNaN stops at the first bad cell per block, which is fine for its own abort-and-report
-// purpose but hides how many bad cells actually exist per block. Same scan, no early exit, listing
-// every LIQ/INTF cell with a non-finite PDF (world coordinate + rho only, to keep output compact
-// across many ranks). Called right before aborting on a checkPdfNaN==true result, to see the true
-// extent of the corruption instead of one artifact-of-iteration-order cell per block.
+// Same scan as checkPdfNaN but without its early exit per block: lists every liquid/interface cell with a
+// non-finite PDF (world and block-local coordinates only, to keep the output compact). Called before aborting
+// on a checkPdfNaN hit, to show the full extent of the corruption.
 void listAllBadCellsNoEarlyExit(const std::shared_ptr< SimulationObjects >& simObjs, const char* const location)
 {
    for (auto blockIt = simObjs->blockForest->begin(); blockIt != simObjs->blockForest->end(); ++blockIt)
@@ -1831,15 +1725,10 @@ void listAllBadCellsNoEarlyExit(const std::shared_ptr< SimulationObjects >& simO
    }
 }
 
-// ModelParameters.highAltitudeWaterScanEnabled/highAltitudeWaterThresholdZ: scans every LOCAL cell
-// whose world-Z exceeds thresholdZ and warns immediately if it is liquid or interface -- see
-// ModelParams' own doc comment (SimulationParams.h) for why this exists (neither waLBerla's
-// CellConversionSweep nor this project's own wrapping of it logs anything at all when a gas cell
-// converts, so a "how did water get up there" crash has no log trail to follow otherwise). Local
-// cells only (matches checkPdfNaN's own convention) so a ghost-layer ownership boundary never
-// double-counts one real conversion as two warnings. Does NOT abort -- purely observational, meant
-// to be read back after the run (or grepped live) to find the exact step/cell a conversion first
-// happened at, at a height where it needn't have.
+// ModelParameters.highAltitudeWaterScanEnabled/highAltitudeWaterThresholdZ (see SimulationParams.h): warns for
+// every local liquid or interface cell above thresholdZ. CellConversionSweep logs nothing when a gas cell
+// converts, so this gives the step and cell where water first appears at an unexpected height. Local cells only
+// (as in checkPdfNaN), so one conversion is not reported twice across a ghost layer. Does not abort.
 void checkHighAltitudeWater(const std::shared_ptr< SimulationObjects >& simObjs,
                             const char* const location, const uint_t t, const real_t thresholdZ)
 {
@@ -1851,8 +1740,7 @@ void checkHighAltitudeWater(const std::shared_ptr< SimulationObjects >& simObjs,
       const auto interfaceFlag = flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID);
       const auto& aabb = blockIt->getAABB();
 
-      // Skip this block entirely if its own Z-extent never reaches the threshold -- cheap early-out,
-      // avoids the per-cell loop for every block below the watched altitude on every step.
+      // skip blocks that lie entirely below the threshold
       if (aabb.zMax() <= thresholdZ) continue;
 
       for (cell_idx_t iz = 0; iz < cell_idx_c(flagField->zSize()); ++iz)
@@ -1879,12 +1767,10 @@ void checkHighAltitudeWater(const std::shared_ptr< SimulationObjects >& simObjs,
    }
 }
 
-// Verify the "closed interface layer" invariant: in FSLBM a liquid cell may NEVER be a (D3Q27)
-// neighbour of a gas cell — they must always be separated by an interface cell. A violation is a
-// "hole" in the interface layer (the Fig. 4.12a configuration). This scans every liquid cell for a
-// gas neighbour, counts the holes, and logs the first one's location + its 3x3x3 neighbourhood.
-// Does NOT abort — it is meant to reveal whether/when the invariant breaks relative to the NaN.
-// Returns the global number of holes found.
+// Check the closed-interface-layer invariant: in FSLBM a liquid cell may never be a (D3Q27) neighbour of a gas
+// cell; an interface cell must separate them. A violation is a "hole" in the interface layer (the Fig. 4.12a
+// configuration). Counts the holes, logs the first one with its 3x3x3 neighbourhood and returns the global
+// count. Does not abort.
 uint_t checkClosedInterfaceLayer(const std::shared_ptr< SimulationObjects >& simObjs,
                                  const char* const location, const uint_t t)
 {
@@ -1959,23 +1845,18 @@ uint_t checkClosedInterfaceLayer(const std::shared_ptr< SimulationObjects >& sim
    return globalHoles;
 }
 
-// Measure the azimuthal asymmetry of each floater's wetted vs. dry surface — the diagnostic for the
-// lateral drift introduced by the SimpleBB dry-link guard.
+// Measures the azimuthal asymmetry of the wetted vs. dry surface of each floating sphere (floaterUIDs), a
+// diagnostic for lateral drift caused by the SimpleBB dry-link guard.
 //
-// Rationale: the MEM bounce-back integrates the hydrodynamic force only over WET links (fluid-side
-// cell carries a valid PDF). The guard SKIPS dry links (gas / NaN fluid-side cell at the waterline)
-// — both the force contribution AND the bounce-back reflection. For a floating sphere the dry set is
-// the cap above the waterline; if it is azimuthally SYMMETRIC its horizontal components cancel and
-// the net hydrodynamic force is purely vertical. If the dry set is LOPSIDED (because waterline cells
-// collapse to gas asymmetrically — e.g. driven by the streamwise flow under liquid promotion), the
-// wetted-surface force integral acquires a net HORIZONTAL component → the sphere drifts sideways.
-// The all-interface reconstruction never starves cells to gas at the contact line, so its dry set
-// stays symmetric and no drift appears.
+// The MEM force is integrated only over wet links (fluid-side cell carries a valid PDF); the guard skips dry
+// links (gas / NaN fluid-side cell at the waterline) for both the force and the bounce-back. For a floating
+// sphere the dry set is the cap above the waterline. If it is azimuthally symmetric, its horizontal components
+// cancel; if waterline cells turn into gas asymmetrically (e.g. under streamwise flow), the wetted-surface force
+// gains a net horizontal component and the sphere drifts sideways.
 //
-// For each floater we scan its obstacle cells (particleField == floater UID) and, over the D3Q27
-// fluid neighbours, accumulate the outward link offsets split into WET (liquid/interface) and DRY
-// (gas) sets. The horizontal magnitude of the DRY-set vector is the lateral-bias signal. Reduced to
-// root and logged; does not abort.
+// For each floater, the outward link offsets from its obstacle cells (particleField == UID) to D3Q27 fluid
+// neighbours are summed separately for wet (liquid/interface) and dry (gas) links; the horizontal part of the
+// dry sum is the lateral-bias signal. Reduced to root and logged; does not abort.
 void logFloaterLinkBalance(const std::shared_ptr< SimulationObjects >& simObjs,
                            const char* const location, const uint_t t)
 {
@@ -2052,9 +1933,8 @@ void logFloaterLinkBalance(const std::shared_ptr< SimulationObjects >& simObjs,
 
    WALBERLA_ROOT_SECTION()
    {
-      // Per-floater detail only for the ones that actually show a bias; an unconditional line per
-      // floater here would add up to hundreds of thousands of log lines over a full run with
-      // hundreds of floaters. A one-line summary is always printed so a clean run stays visible.
+      // Per-floater lines only for floaters showing a bias (one line per floater per call would flood the log);
+      // a one-line summary is always printed.
       constexpr real_t tiltWarnThreshold = real_t(0.5);
       real_t maxTilt = real_t(0);
       uint_t nFlagged = uint_t(0);

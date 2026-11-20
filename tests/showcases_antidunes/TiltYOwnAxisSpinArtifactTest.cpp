@@ -1,24 +1,14 @@
 //======================================================================================================================
 //! \file TiltYOwnAxisSpinArtifactTest.cpp
-//! Follow-up to CylinderTippingRodJamTest.cpp / RodSpinSubstepResolutionTest.cpp, prompted by a LOCAL reproduction
-//! attempt of job 4255679 (DropTest_hopper_cyl_repro_gjk_gas.prm: same rod geometry/spacing/contact-model settings,
-//! a small slice of the real hopper, no fluid). That repro ran clean (as expected -- the STALE-PARTICLE-IDX guard is
-//! a fluid-side bookkeeping check, and DropTest has no fluid), but its own [CylForces] log showed several rods'
-//! tiltY diagnostic (ParticleKernels.h: atan2(R(0,2),R(0,0))) jump by >100 deg within a single 10-step window (e.g.
-//! uid=53: -5.2 -> -163.3 deg in steps 1930->1940) while that SAME rod's position, velocity, and contact force all
-//! stayed smooth and small through the exact same window -- no physical signature of a violent event at all. That
-//! is the signature of a DIAGNOSTIC discontinuity, not a real flip, and it directly undermines the "toppling rod"
-//! premise of the two earlier tests (both used the real crashed run's own tiltY=-3.6->167.2 deg reading, over steps
-//! 2700->2900, as evidence uid 888 physically toppled).
+//! Companion to CylinderTippingRodJamTest.cpp / RodSpinSubstepResolutionTest.cpp, which read a logged tiltY change
+//! of -3.6 -> 167.2 deg as a physical topple. A fluid-free drop-test reproduction with the same rod geometry and
+//! contact settings showed tiltY jumps of > 100 deg within one 10-step window while the rod's position, velocity and
+//! contact force stayed smooth: the signature of a discontinuity in the diagnostic, not a real flip.
 //!
-//! This test isolates the mechanism directly: tiltY = atan2(R(0,2), R(0,0)) uses R(0,0) and R(0,2), the world-X
-//! components of the LOCAL X and LOCAL Z axes. For a cylinder at rest with its own physical axis (local Z, this
-//! project's own convention) along world Y, a rotation ABOUT THAT SAME AXIS (a pure spin about the rod's own long
-//! axis) is physically a complete no-op -- a cylinder is a body of revolution, its shape, its overlap with any other
-//! body, and its true contact state are all exactly invariant under it -- but it sweeps the LOCAL X axis all the way
-//! around the plane perpendicular to Y, which is exactly the plane atan2(R(0,2),R(0,0)) is measuring an angle
-//! within. So a full, physically meaningless own-axis spin should sweep tiltY through the FULL +-180 deg range, with
-//! the exact-ground-truth ALWAYS reporting zero shape change.
+//! Mechanism: tiltY = atan2(R(0,2), R(0,0)) (ParticleKernels.h) uses the world-X components of the local X and local Z
+//! axes. For a rod with its axis (local Z) along world Y, a spin about that axis is a geometric no-op (body of
+//! revolution: shape, overlaps and contact state are invariant) but sweeps local X around the plane perpendicular to
+//! Y, the plane in which tiltY measures its angle. So an own-axis spin sweeps tiltY through the full +-180 deg range.
 //======================================================================================================================
 #include <mesa_pd/data/DataTypes.h>
 #include <mesa_pd/data/shape/Cylinder.h>
@@ -35,14 +25,12 @@ namespace walberla { namespace antidunes {
 using Mat3 = mesa_pd::Mat3;
 using Vec3 = mesa_pd::Vec3;
 
-//! same formula as ParticleKernels.h's own tiltY diagnostic
+//! same formula as the tiltY diagnostic in ParticleKernels.h
 double tiltYDeg(const Mat3& R) { return std::atan2(double(R(0, 2)), double(R(0, 0))) * 180.0 / walberla::math::pi; }
 
-//! rotation matrix for a rod whose own axis (local Z) is world Y tilted by a small, FIXED `wobbleDeg` about world
-//! X (representing the small residual transverse wobble any real settling rod has -- never exactly zero), then
-//! spun by `spin` about that (fixed, tilted) axis. Columns = local X,Y,Z expressed in world coordinates. Physically:
-//! the rod's shape/overlap-with-anything-else depends ONLY on the axis direction (fixed here), never on `spin` --
-//! a cylinder is a body of revolution, so varying `spin` alone is an exact geometric no-op.
+//! rotation matrix for a rod whose axis (local Z) is world Y tilted by a small fixed `wobbleDeg` (the residual
+//! transverse wobble of a settling rod), then spun by `spin` about that tilted axis. Columns = local X,Y,Z in world
+//! coordinates. The rod's geometry depends only on the axis direction, never on `spin`.
 Mat3 rodAtSpin(double wobbleDeg, double spin)
 {
    const double w = wobbleDeg * walberla::math::pi / 180.0;
@@ -70,12 +58,8 @@ int main(int argc, char** argv)
    auto check = [&](bool ok, const std::string& what) { if (!ok) { ++failures; std::cout << "FAIL: " << what << std::endl; } };
    std::cout << std::fixed << std::setprecision(3);
 
-   // For a FIXED transverse axis wobble (the rod's TRUE axis direction, hence its true shape/overlap with anything
-   // else, is completely determined by this one number and never changes across a spin sweep at fixed wobble),
-   // sweep `spin` -- about that fixed axis, a real but physically meaningless degree of freedom for a body of
-   // revolution -- through a full turn and find the largest tiltY change produced by a single small (0.5 deg) spin
-   // step. Repeated at several wobble magnitudes to show this is a genuine mathematical singularity (sensitivity
-   // diverges as wobble -> 0), not an artifact of one particular wobble choice.
+   // At fixed wobble (fixed geometry), sweep `spin` in 0.5 deg steps and record the largest tiltY change per step.
+   // Repeated for several wobbles to show a genuine singularity (sensitivity diverges as wobble -> 0).
    double worstJumpOverall = 0.0;
    for (double wobbleDeg : { 5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.02 })
    {
@@ -97,9 +81,9 @@ int main(int argc, char** argv)
                 << std::setw(7) << minTilt << ", " << std::setw(7) << maxTilt << "] deg,  largest jump for a single "
                    "0.5 deg spin step=" << std::setw(7) << biggestJump << " deg (at spin~" << biggestJumpAtSpin << " deg)\n";
    }
-   // The single-sample jump asymptotically approaches (but, by construction of a finite 0.5 deg sampling grid
-   // across a true discontinuity, never quite reaches) 90 deg as wobble -> 0 -- itself the signature of a genuine
-   // step discontinuity in the continuum limit. 80 deg is a conservative, comfortably-cleared threshold.
+   // R(0,0) = sin(spin) cos(wobble) vanishes exactly on grid points (spin = 0, 180, 360 deg), where tiltY = 90 deg, so
+   // the single-step jump approaches, but never reaches, 90 deg as wobble -> 0 (a step discontinuity in the limit).
+   // Threshold 80 deg.
    check(worstJumpOverall > 80.0, "as the axis wobble shrinks, a single 0.5 deg change in the (physically "
                                     "meaningless) spin angle must approach a step discontinuity in tiltY, "
                                     "consistent with the real repro's >100 deg jumps within one 10-step (i.e. "

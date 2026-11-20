@@ -50,12 +50,9 @@ void writeCheckpoint(const std::shared_ptr<const SimulationParams>& simParams, c
       WALBERLA_ROOT_SECTION()
       {
          std::filesystem::create_directories(snapshotDir);
-         // setupBlockForest (SetupStages.h) only writes blockForestFile ("blockForest.file") on a
-         // fresh start that also stores -- during a resume, that file is never (re)written, so a
-         // keepUnique/alternateGeneration subfolder would otherwise lack its own copy and fail to
-         // load on its own. The block decomposition never changes during a run, so a plain copy from
-         // the shared base folder (where it always exists) is valid and cheap; copied on every
-         // checkpoint call rather than once, for simplicity, since the source never changes.
+         // setupBlockForest (SetupStages.h) writes blockForestFile only on a fresh start, so a keepUnique /
+         // alternateGeneration subfolder needs its own copy to be loadable. The block decomposition never changes
+         // during a run, so the file is copied from the base folder on every checkpoint.
          const std::string& baseBlockForestFile = simParams->blockForest.snapshotBaseFolder + "/" + simObjs->blockForestFile;
          const std::string& subfolderBlockForestFile = snapshotDir + "/" + simObjs->blockForestFile;
          if (std::filesystem::exists(baseBlockForestFile))

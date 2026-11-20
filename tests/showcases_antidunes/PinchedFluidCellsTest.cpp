@@ -1,11 +1,14 @@
 //======================================================================================================================
 //! \file PinchedFluidCellsTest.cpp
-//! Geometric precondition of the fluid-side instability seen in the cylinder hopper (THESIS_PLAN.md, class (B)): fluid cells that are SQUEEZED BETWEEN TWO OBSTACLES.
-//! Cells are mapped exactly like lbm_mesapd_coupling::ParticleMapping does it: a lattice cell (dx = 1, centre at i+0.5) is obstacle iff its centre lies inside a body. A fluid cell is "pinched" when for
-//! at least one of the 13 opposite direction pairs (d, -d) of the D3Q27 stencil BOTH neighbours are obstacle, i.e. it has a wall on two opposite sides at distance one cell (the fluid cell that exploded in job
-//! 4251066 had such pairs, e.g. (1,-1,-1)/(-1,1,1) and (1,1,-1)/(-1,-1,1), and 11 of 26 neighbours were obstacle cells of two different rods).
-//! A single convex body never creates a pinched cell; two bodies at a small gap do. We count them for two rods (r=3, L=18, side by side, parallel or slightly tilted) and for two spheres (same radius r=3, and
-//! the same VOLUME r=4.95), over gaps 0..2 cells with random sub-cell registration and orientation. Lubrication (LubricationCorrectionKernel, cut-off 2/3 cell) exists for sphere-sphere pairs only.
+//! Geometric precondition of a fluid-side instability seen in the cylinder hopper: fluid cells squeezed between two
+//! obstacles. Cells are mapped as in lbm_mesapd_coupling::ParticleMapping: a lattice cell (dx = 1, centre at i+0.5) is
+//! obstacle iff its centre lies inside a body. A fluid cell is "pinched" when, for at least one of the 13 opposite
+//! direction pairs (d, -d) of the D3Q27 stencil, both neighbours are obstacle (a wall on two opposite sides one cell
+//! away; a recorded diverging fluid cell had such pairs, with 11 of 26 neighbours belonging to two different rods).
+//! A single convex body never creates a pinched cell; two bodies at a small gap do. Counts are taken for two rods
+//! (r=3, L=18, side by side, parallel or slightly tilted) and two spheres (same radius r=3, and same volume r=4.95),
+//! over gaps 0..2 cells with random sub-cell registration and orientation. Lubrication (LubricationCorrectionKernel,
+//! cut-off 2/3 cell) exists for sphere-sphere pairs only.
 //======================================================================================================================
 #include <core/Environment.h>
 #include <core/mpi/MPIManager.h>
@@ -48,7 +51,8 @@ Grid voxelize(const std::vector< Body >& bodies)
    return g;
 }
 
-//! number of fluid cells with an obstacle on two opposite sides (over the 13 direction pairs of D3Q27); optionally histogram by the number of such pairs
+//! number of fluid cells with an obstacle on two opposite sides (13 D3Q27 direction pairs); optional histogram
+//! by pair count
 int pinchedCells(Grid& g, int* atLeast3 = nullptr)
 {
    static std::vector< std::array< int, 3 > > half;

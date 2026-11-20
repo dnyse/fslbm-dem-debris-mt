@@ -1,22 +1,23 @@
 //======================================================================================================================
 //! \file CylinderNearParallelSkewedTest.cpp
-//! Regression test for the false band-band-skewed contacts that aborted the cylinder hopper ([RELEASE-OVERLAP], job 4248725).
+//! Regression test for false band-band-skewed contacts between separated near-parallel rods ([RELEASE-OVERLAP]).
 //!
-//! Kodam et al. (2010), Part I, Section 3.2.4.2 (Eqs. 55-66): for two cylinders with SKEWED axes the shortest line between the two infinite
-//! centrelines has length d = |x_cyl_j^i . r_hat| with r_hat = (e_i x e_j)/|e_i x e_j| (Eqs. 55-56) and touches the centrelines at
-//! l_i*, l_j* (Eqs. 59-60, Vega & Lago 1994). Contact requires ALL of  d < R_i+R_j,  |l_i*| < L_i/2,  |l_j*| < L_j/2  (Eq. 63).
+//! Kodam et al. (2010), Part I, Section 3.2.4.2 (Eqs. 55-66): for two cylinders with skewed axes the shortest line
+//! between the infinite centrelines has length d = |x_cyl_j^i . r_hat|, r_hat = (e_i x e_j)/|e_i x e_j| (Eqs. 55-56),
+//! and touches them at l_i*, l_j* (Eqs. 59-60, Vega & Lago 1994). Contact requires d < R_i+R_j, |l_i*| < L_i/2 and
+//! |l_j*| < L_j/2 (Eq. 63).
 //!
-//! For NEARLY parallel axes (tilt theta ~ 1e-6 rad, i.e. ordinary floating-point rotation noise of a body that was placed axis-aligned)
-//! the lines cross theta-close to each other only very FAR along the axes (|l*| ~ separation/theta ~ 1e6 LU), so Eq. 63's l* conditions
-//! correctly REJECT. The implementation (PaperAnalyticalContacts.h, band-band-skewed) used to replace l* by 0 whenever
-//! 1-(e_i.e_j)^2 < 1e-10 ("guard against division by ~0") -- which makes both l* conditions vacuously true, while d = |x . r_hat| with an
-//! arbitrary noise direction r_hat can be as small as 0. Result: two rods clearly SEPARATED by a gap were reported as overlapping by up
-//! to R_i+R_j = 6 LU. This test
-//!   (1) implements Kodam Eqs. 55-66 literally (with the exact l* of Eq. 59, no guard) as an independent reference,
-//!   (2) shows the reference rejects the separated near-parallel pairs (so the PAPER is fine, the guard was the bug),
-//!   (3) requires closed_form_contacts::cylinderCylinderContact and the production dispatch (analytic on, tight layer-1 on/off) to agree,
-//!   (4) requires genuinely overlapping near-parallel pairs to still be detected with the right overlap,
-//!   (5) requires the dispatch's capsule bound (a contact is impossible if the axis SEGMENTS are farther apart than R_i+R_j).
+//! For nearly parallel axes (tilt ~1e-6 rad, floating-point noise of an axis-aligned body) the lines come close only
+//! far along the axes (|l*| ~ separation/theta ~ 1e6 LU), so Eq. 63 correctly rejects. A "division by ~0" guard that
+//! sets l* = 0 when 1-(e_i.e_j)^2 < 1e-10 (band-band-skewed branch, ClosedFormContactsCylinderCylinder.h) makes both
+//! l* conditions vacuously true while d with a noise direction r_hat can be ~0, so separated rods are reported as
+//! overlapping by up to R_i+R_j = 6 LU. This test
+//!   (1) implements Kodam Eqs. 55-66 literally (exact l* of Eq. 59, no guard) as an independent reference,
+//!   (2) shows the reference rejects separated near-parallel pairs (the paper's equations are correct),
+//!   (3) requires closed_form_contacts::cylinderCylinderContact and the production dispatch (analytic on, tight
+//!       layer-1 on/off) to agree with it,
+//!   (4) requires genuinely overlapping near-parallel pairs to be detected with the right overlap,
+//!   (5) requires the dispatch's capsule bound (no contact if the axis segments are farther apart than R_i+R_j).
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
@@ -64,8 +65,8 @@ double kodamBandBandSkewed(const Rod& i, const Rod& j, double& liStar, double& l
    const Vec3 ei = i.axis, ej = j.axis, x = j.pos - i.pos;        // x = x_cyl_j^i (cylinder j's position seen from i)
    liStar = ljStar = d = 0.0;
    const Vec3 cr = ei % ej; const double crLen = cr.length();
-   if (crLen < 1e-15) return -1.0;                                  // exactly parallel: Eq. 55 undefined (the parallel branch, Eq. 52, applies instead)
-   const Vec3 rHat = cr / real_t(crLen);                            // Eq. 55 (manual normalisation: getNormalized() asserts |v| > ~1e-8 in debug builds)
+   if (crLen < 1e-15) return -1.0;                                  // exactly parallel: Eq. 55 undefined (parallel branch, Eq. 52)
+   const Vec3 rHat = cr / real_t(crLen);                            // Eq. 55 (manual normalisation: getNormalized() asserts |v| > ~1e-8 in debug)
    d = std::abs(x * rHat);                                         // Eq. 56
    const double c = ei * ej;
    ljStar = ((c * (ei * x)) - (ej * x)) / (1.0 - c * c);           // Eq. 59
@@ -115,7 +116,7 @@ int main(int argc, char** argv)
    const Vec3 Xa(1, 0, 0), Za(0, 0, 1);
    const Vec3 base(real_t(249), real_t(30), real_t(49.13));
 
-   // ---- (A) deterministic minimal reproducer: tilt about Z, separation along X => r_hat = +-Z is PERPENDICULAR to the separation, d = 0 ----
+   // ---- (A) minimal reproducer: tilt about Z, separation along X => r_hat = +-Z is perpendicular to it, d = 0 ----
    for (double tilt : { 1e-7, 1e-6, 2e-6, 5e-6, 1e-5, 3e-5, 1e-4, 1e-3 })
       for (double gap : { 0.05, 0.1, 0.5, 2.0 })
       {
@@ -132,7 +133,7 @@ int main(int argc, char** argv)
          check(!o.dispatchTight,  tag.str() + ": production dispatch (analytic + useTightLayer1) reports a contact between SEPARATED rods");
       }
 
-   // ---- (B) Monte Carlo: random tilt axis/magnitude, random position noise, separated by gap > 0 (any direction in the XZ plane) ----
+   // ---- (B) Monte Carlo: random tilt axis/magnitude, position noise, gap > 0 in any XZ-plane direction ----
    {
       std::mt19937 gen(4711); std::normal_distribution< double > nd(0.0, 1.0); std::uniform_real_distribution< double > ud(0.0, 6.283185307179586);
       int nFalse = 0, nTrials = 0;
@@ -145,7 +146,7 @@ int main(int argc, char** argv)
                const Vec3 tiltAxisA(real_t(nd(gen)), real_t(nd(gen)), real_t(nd(gen))), tiltAxisB(real_t(nd(gen)), real_t(nd(gen)), real_t(nd(gen)));
                const Rod a = tiltedRod(base, tiltAxisA.getNormalized(), tilt * nd(gen));
                const Rod b = tiltedRod(base + sep * real_t(2 * kR + gap + 1e-3), tiltAxisB.getNormalized(), tilt * nd(gen));
-               // gap measured between the true (axis-aligned) rods; the sub-1e-3 tilt effect on the surface distance is < 9*1e-4 = 9e-4 < 1e-3 margin above
+               // gap between the axis-aligned rods; the tilt shifts the surface by < 9*1e-4 = 9e-4 < 1e-3 margin
                const auto o = evaluate(a, b);
                ++nTrials;
                if (o.paper || o.dispatch || o.dispatchTight || o.kodam) ++nFalse;
@@ -154,7 +155,7 @@ int main(int argc, char** argv)
       check(nFalse == 0, "Monte Carlo: " + std::to_string(nFalse) + " of " + std::to_string(nTrials) + " separated near-parallel pairs reported as touching");
    }
 
-   // ---- (C) genuinely overlapping near-parallel rods must STILL be detected, with the right overlap (= 2R - centre distance) ----
+   // ---- (C) overlapping near-parallel rods must still be detected with overlap 2R - centre distance ----
    for (double tilt : { 0.0, 1e-7, 1e-6, 1e-5, 1e-4 })
       for (double overlap : { 0.1, 0.5, 1.0 })
       {
@@ -166,8 +167,8 @@ int main(int argc, char** argv)
          check(o.dispatch && std::abs(o.dispatchOverlap - overlap) < 1e-3, tag.str() + ": dispatch overlap " + std::to_string(o.dispatchOverlap) + " != " + std::to_string(overlap));
       }
 
-   // ---- (D) capsule bound: the two axis SEGMENTS are 40 LU apart, so NO analytic result may be accepted (defence in depth against ANY future
-   //          dispatch bug), checked through the dispatch with several tilts/orientations ----
+   // ---- (D) capsule bound: axis segments 40 LU apart, so no analytic result may be accepted (defence in depth),
+   //          checked through the dispatch for several tilts ----
    for (double tilt : { 0.0, 1e-6, 1e-3, 0.3 })
    {
       const Rod a{ base, Vec3(0, 1, 0) };

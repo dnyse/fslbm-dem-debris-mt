@@ -173,15 +173,9 @@ class AntidunesBoundaryHandling
          // reset "near boundary" flags
          handling->refresh();
 
-         // Guard against a STALE "near boundary" flag on gas cells.
-         // BoundaryHandling::refresh() only updates the near-boundary flag on DOMAIN (liquid/interface)
-         // cells. When an interface cell that was marked near-boundary converts to GAS
-         // (CellConversionSweep), refresh() skips it (it is no longer a domain cell), so the
-         // near-boundary flag is left set. The boundary treat-loop would then process that gas cell and
-         // SimpleBB would read its invalid (-nan) PDF — the "dry-link" NaN. Here we detect
-         // (gas && nearBoundary), warn, and clear the flag BEFORE the treat-loop runs, so the gas cell
-         // is never treated. This removes the cause (the stale flag) rather than catching the symptom
-         // downstream in SimpleBB.
+         // Clear stale "near boundary" flags on gas cells before the treat-loop runs. refresh() only updates
+         // domain (liquid/interface) cells, so an interface cell that converted to gas keeps its near-boundary
+         // flag; the treat-loop would then process it and SimpleBB would read the gas cell's invalid (NaN) PDF.
          {
             auto* const flagField         = handling->getFlagField();
             const auto  nearBoundaryFlag  = handling->getNearBoundaryFlag();

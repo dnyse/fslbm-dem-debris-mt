@@ -15,38 +15,29 @@
 //
 //! \file DropTest.cpp
 //
-// Fluid-free, DEM-only drop test (cuboids, cylinders, spheres, capsules) at real multi-process
-// block-forest scale -- validates DEM contact/parallel-decomposition behaviour independent of any
-// fluid coupling. Originally built to isolate a STALE-PARTICLE-IDX desync bug from the fluid
-// coupling (root-caused and fixed, see THESIS_PLAN.md); still useful as a fluid-free regression check.
+// Fluid-free, DEM-only drop test (cuboids, cylinders, spheres, capsules) on a real multi-process block forest: checks
+// DEM contact and parallel-decomposition behaviour independently of the fluid coupling.
 //
-// Reuses Antidunes' own production DEM machinery unmodified: setupBlockForest, setupParticles,
-// releaseSettledFloatingSpheres (from SetupStages_drop_test.h, a copy of SetupStages.h with one
-// addition, X-wall creation -- see that file's own header comment for why it's a copy) and
-// ParticleKernels::doDEMSubCycles for contact detection/resolution/integration. No LBM fields are
-// ever created; safe because doDEMSubCycles' only fluid-dependent code
-// (computeSubmergedVolumes()/computeSubmergedVolumesBox()) is gated behind
-// ModelParameters.useMemOnlyBuoyancy (default true, must stay true here) -- with it true, gravity is
-// applied as plain density-weighted mass*gravity along Z (X/Y instead carry the production sim's
-// non-density-weighted driving-force term, so Z must stay the gravity axis here).
+// Uses the production DEM code: setupBlockForest, setupParticles, releaseSettledFloatingSpheres (from
+// SetupStages_drop_test.h, a variant of SetupStages.h with X walls, container cylinders and capsules; see its header)
+// and ParticleKernels::doDEMSubCycles. No LBM fields are created; this is safe because the only fluid-dependent code
+// in doDEMSubCycles (computeSubmergedVolumes()/computeSubmergedVolumesBox()) is skipped with
+// ModelParameters.useMemOnlyBuoyancy=true (the default, required here). Gravity then acts as density-weighted
+// mass*gravity along Z, while X/Y carry the production driving-force term, so Z must stay the gravity axis.
 //
-// setupSimState() is deliberately NOT called (it unconditionally constructs a PIDController, useless
-// for a non-flow-driven drop test); this file sets beginTimeStep/acceleration directly instead.
+// setupSimState() is not called (it constructs a PIDController); beginTimeStep and acceleration are set directly.
 //
-// VTK output is minimal and NOT BuildTimeloop.h::addBeforeTimeStepVTKOutput (which needs real
-// LBM/FlagField fields): one domain_decomposition dump at start (as BedGeneration.cpp also does),
-// plus a floaterBox/floaterCylinder/floater/floaterCapsule ParticleVtkOutput block per shape present
-// (same selectors/writers as BuildTimeloop.h's own blocks), each a no-op if the prm has no floaters
-// of that shape.
+// VTK output does not use BuildTimeloop.h::addBeforeTimeStepVTKOutput (which needs LBM fields): one
+// domain_decomposition dump at start (as in BedGeneration.cpp) plus a floaterBox/floaterCylinder/floater/
+// floaterCapsule ParticleVtkOutput per shape present, with the same selectors as BuildTimeloop.h.
 //======================================================================================================================
 
 #include "core/Environment.h"
 #include "core/waLBerlaBuildInfo.h"
 
-// Both needed only because SetupStages_drop_test.h (a full copy of SetupStages.h) still defines
-// setupLBMFields/setupSurfaceGeometryFields/setupBoundaryHandling/mapParticlesOntoCells -- ordinary
-// (non-template) functions this file never CALLS but that must still fully compile. Antidunes.cpp
-// gets these two transitively via BuildTimeloop.h, which DropTest.cpp deliberately doesn't include.
+// Needed only because SetupStages_drop_test.h still defines setupLBMFields/setupSurfaceGeometryFields/
+// setupBoundaryHandling/mapParticlesOntoCells, which are never called here but must compile. Antidunes.cpp gets these
+// headers through BuildTimeloop.h, which this file does not include.
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 #include "lbm/free_surface/dynamics/ExcessMassDistributionModel.h"
 
@@ -92,8 +83,7 @@ int main(int argc, char** argv)
    // ----------------------------------------------------------------------------------------------------------------
    setupBlockForest(simParams, simObjs);
 
-   // Minimal sim-state init -- NOT setupSimState() (SetupStages_drop_test.h), which unconditionally
-   // constructs a PIDController: meaningless here (no flow to drive) and an avoidable link dependency.
+   // Minimal sim-state init instead of setupSimState(), which constructs a PIDController (no flow to drive here).
    simObjs->beginTimeStep = uint_t(0);
    simObjs->acceleration =
       std::make_shared< Vector3< real_t > >(real_t(0), real_t(0), -simParams->computed.gravity);
@@ -103,14 +93,10 @@ int main(int argc, char** argv)
    // DEM ---------------------------------------------------------------------------------------------------------
    ParticleKernels< ParticleAccessor_T > particleKernels(simParams, simObjs);
 
-   // Minimal VTK: domain decomposition (once) + floaterBox only (periodic).
+   // Minimal VTK: domain decomposition (once) and the floater outputs (periodic).
    // ----------------------------------------------------------------------------------------------------------------
-   // NOT wrapped in WALBERLA_ROOT_SECTION -- createVTKOutput_DomainDecomposition's write() is a
-   // COLLECTIVE call (every rank contributes its own local block's info); an earlier version of this
-   // code incorrectly called it root-only, which deadlocked at any process count > 1 (rank 0 blocks
-   // forever waiting for contributions from ranks that skip the call entirely, while those ranks race
-   // ahead into the main loop and hit a different collective -- classic MPI collective mismatch).
-   // Matches BedGeneration.cpp's own reference usage, which also calls this unconditionally.
+   // Not inside WALBERLA_ROOT_SECTION: createVTKOutput_DomainDecomposition's write() is collective (every rank
+   // contributes its blocks), so calling it on root only deadlocks. Same as BedGeneration.cpp.
    auto vtkDomainOutput = walberla::vtk::createVTKOutput_DomainDecomposition(
       simObjs->blockForest, "domain_decomposition", 1, simParams->vtk.baseFolder, "simulation_step");
    vtkDomainOutput->write();
@@ -139,8 +125,7 @@ int main(int argc, char** argv)
             return static_cast< const mesa_pd::data::Box* >(shape.get())->getEdgeLength();
          }
       };
-      // Transpose of the body->world rotation matrix, matching BuildTimeloop.h's own floaterBox
-      // output exactly -- see that file's comment for why (ParaView Tensor Glyph column-major order).
+      // Transposed body->world rotation, as in BuildTimeloop.h's floaterBox output (Tensor Glyph is column-major).
       struct SelectParticleRotationMatrix
       {
          using return_type = std::array< real_t, 9 >;
@@ -169,9 +154,7 @@ int main(int argc, char** argv)
       writeFloaterBoxVtk = vtk::writeFiles(boxFloaterVTKOutput);
    }
 
-   // Cylinder floaters (type 4) -- same treatment as the box block above, mirroring
-   // BuildTimeloop.h's own "floaterCylinder" VTK block (SelectCylinderGlyphScale/rotation-selector
-   // pattern) exactly, so this fluid-free tool renders cylinders identically to production.
+   // Cylinder floaters (type 4), same output as BuildTimeloop.h's "floaterCylinder" block.
    std::function< void() > writeFloaterCylinderVtk = []() {};
    if (!simParams->floatingCylinders.empty())
    {
@@ -196,8 +179,7 @@ int main(int argc, char** argv)
                                  real_t(2) * shape->getRadius());
          }
       };
-      // (R * Rx(+90))^T = Rx(-90) * R^T -- glyph-local Y is the cylinder axis, body-local Z is; see
-      // BuildTimeloop.h's own identical selector for the full derivation.
+      // (R * Rx(+90))^T = Rx(-90) * R^T: the glyph's axis is its local Y, the cylinder's its local Z (BuildTimeloop.h).
       struct SelectParticleRotationMatrix
       {
          using return_type = std::array< real_t, 9 >;
@@ -256,11 +238,8 @@ int main(int argc, char** argv)
       writeFloaterSphereVtk = vtk::writeFiles(sphereFloaterVTKOutput);
    }
 
-   // Capsule ("pill") floaters (type 5) -- same treatment as the
-   // cylinder block above, except the glyph: ParaView's Tensor Glyph filter has no native capsule
-   // source, so this renders each capsule as a same-radius/same-length CYLINDER glyph -- a visual
-   // stand-in only (the physics is the real Capsule shape; only the rendered rims are flat instead of
-   // rounded). Good enough to confirm position/orientation/falling/resting behaviour by eye.
+   // Capsule floaters (type 5): like the cylinder block, rendered as same-radius/same-length cylinder glyphs because
+   // Tensor Glyph has no capsule source (visual stand-in only; the physics uses the real Capsule shape).
    std::function< void() > writeFloaterCapsuleVtk = []() {};
    if (!simParams->floatingCapsules.empty())
    {
@@ -285,8 +264,7 @@ int main(int argc, char** argv)
                                  real_t(2) * shape->getRadius());
          }
       };
-      // Same (R * Rx(+90))^T construction as the cylinder block -- glyph-local Y is the capsule's own
-      // axis, body-local Z is; see BuildTimeloop.h's cylinder selector for the full derivation.
+      // Same (R * Rx(+90))^T construction as the cylinder block (glyph axis local Y, capsule axis local Z).
       struct SelectParticleRotationMatrix
       {
          using return_type = std::array< real_t, 9 >;

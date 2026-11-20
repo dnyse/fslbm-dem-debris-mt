@@ -78,20 +78,16 @@
 namespace walberla {
 namespace antidunes {
 
-// Shared geometry for CylindricalBoundary CONTAINMENT mode (mesa_pd::data::CylindricalBoundary::
-// isContainment() -- see that shape's own doc comment). Used by every Sphere/Box/Cylinder x
-// CylindricalBoundary overload in SolidCylinderContactDetection below to find a body's own FARTHEST
-// point from the tube's axis (the mirror image of the pillar overloads' CLOSEST-point search), so a
-// body poking outside the tube gets pushed back toward the axis instead of repelled from it.
+// Shared geometry for CylindricalBoundary CONTAINMENT mode (CylindricalBoundary::isContainment()). The
+// Sphere/Box/Cylinder x CylindricalBoundary overloads below use it to find a body's FARTHEST point from the
+// tube axis (mirror of the pillar overloads' closest-point search), so a body poking outside the tube is
+// pushed back toward the axis.
 namespace containment_detail {
 
-// Farthest point (from a target axis line) on a circle (circleCenter, radius, spanned by
-// orthonormal u/v that are perpendicular to axisDir), restricted to the "solid" half of a plane
-// through clipOrigin with normal clipNormal (zero clipNormal = no restriction, matching
-// CylindricalBoundary::hasHalfClip()==false). Reuses the same closed-form quartic solver
-// (farthestThetaOnCircleToLine) already used for the unrestricted case elsewhere in this codebase,
-// and the same "circle crosses a plane" closed form (amplitude/phase solve) already used for the
-// springing-line-restricted cylinder-rim search that used to live only in ComputeTunnelContacts.
+// Farthest point (from a target axis line) on a circle (circleCenter, radius, spanned by orthonormal u/v
+// perpendicular to axisDir), restricted to the solid half of the plane through clipOrigin with normal
+// clipNormal (zero clipNormal = no restriction, i.e. CylindricalBoundary::hasHalfClip()==false). Uses the
+// closed-form solver farthestThetaOnCircleToLine and the closed-form circle/plane crossing (amplitude/phase).
 struct CircleFarthestResult
 {
    mesa_pd::Vec3 point;
@@ -123,11 +119,11 @@ inline CircleFarthestResult circleFarthestFromAxisClipped(
 
    if (!hasClip || onSolidSide(candidate)) return { candidate, radialSq(candidate), true };
 
-   // Unconstrained farthest point is on the wrong side of the clip -- restrict to the (up to two)
-   // points where this circle crosses the clip plane.
+// Unconstrained farthest point is on the clipped-away side: restrict to the (up to two) points where the
+// circle crosses the clip plane.
    const real_t A1 = u * clipNormal, A2 = v * clipNormal;
    const real_t Amag = std::sqrt(A1 * A1 + A2 * A2);
-   if (Amag < real_t(1e-12)) return { candidate, real_t(0), false }; // circle's plane || clip plane, whole circle on the wrong side
+   if (Amag < real_t(1e-12)) return { candidate, real_t(0), false }; // circle plane || clip plane: all on wrong side
 
    const real_t rhs = ((clipOrigin - circleCenter) * clipNormal) / circleRadius;
    if (std::abs(rhs) > Amag) return { candidate, real_t(0), false }; // whole circle on the wrong side
@@ -140,8 +136,8 @@ inline CircleFarthestResult circleFarthestFromAxisClipped(
    return (r1 > r2) ? CircleFarthestResult{ e1, r1, true } : CircleFarthestResult{ e2, r2, true };
 }
 
-// Axial coordinate of a world point relative to the CylindricalBoundary's own position, i.e. what
-// CylindricalBoundary::getAxialMin()/getAxialMax() are measured against.
+// Axial coordinate of a world point relative to the CylindricalBoundary position (the reference of
+// CylindricalBoundary::getAxialMin()/getAxialMax()).
 inline real_t axialCoord(const mesa_pd::Vec3& worldPoint, const mesa_pd::Vec3& cbPos, const mesa_pd::Vec3& axis)
 {
    return (worldPoint - cbPos) * axis;
@@ -149,23 +145,16 @@ inline real_t axialCoord(const mesa_pd::Vec3& worldPoint, const mesa_pd::Vec3& c
 
 } // namespace containment_detail
 
-// Subclass that hides the hollow-cylinder overload of AnalyticContactDetection with exterior
-// (solid cylinder) contact math. DoubleCast deduces the concrete functor type, so C++ overload
-// resolution picks this method instead of the base-class version.
+// Hides the hollow-cylinder overload of AnalyticContactDetection with exterior (solid cylinder) contact math;
+// DoubleCast deduces the concrete functor type, so overload resolution picks the methods here.
 //
-// Base class is GeneralContactDetection (not AnalyticContactDetection): pairs without an exact
-// analytic overload — Box×Box, Cylinder×Box, Cylinder×Cylinder, Cylinder×Ellipsoid — fall through
-// to its GJK/EPA path, which works on any convex shape via support() and produces the same
-// contactNormal/penetrationDepth convention as the analytic functions (asserted float-equal in
-// tests/mesa_pd/collision_detection/EPA.cpp). Analytic overloads (sphere-sphere, sphere-box,
-// sphere-halfspace, …) still win overload resolution, so the bed-sphere hot path is unchanged.
-// Cylinder×HalfSpace has its OWN overload below (same support()-based formula as Box×HalfSpace) —
-// it used to fall through to the base's generic HalfSpace-vs-anything template instead, but that
-// template's contactNormal comes out as -wallNormal (into the wall), the OPPOSITE sign from every
-// other HalfSpace pair in this class (Sphere and Box both give +wallNormal, out of the wall — see
-// detectSphereHalfSpaceCollision and the Box overload below). Discovered while writing
-// tests/showcases_antidunes/ContactDetectionTest.cpp testCylinderHalfSpaceContact; fixed here to
-// match the proven-correct Sphere/Box convention rather than left as a silent inconsistency.
+// Base class is GeneralContactDetection: pairs without an analytic overload (Box x Box, Cylinder x Box,
+// Cylinder x Cylinder, Cylinder x Ellipsoid) fall through to its GJK/EPA path, which uses the same
+// contactNormal/penetrationDepth convention as the analytic functions (asserted in
+// tests/mesa_pd/collision_detection/EPA.cpp). Analytic overloads (sphere-sphere, sphere-box, sphere-halfspace)
+// still win overload resolution. Cylinder x HalfSpace has its own overload below because the base's generic
+// HalfSpace template returns contactNormal = -wallNormal, opposite to the Sphere/Box HalfSpace convention
+// (+wallNormal, out of the wall); see ContactDetectionTest.cpp testCylinderHalfSpaceContact.
 class SolidCylinderContactDetection : public mesa_pd::collision_detection::GeneralContactDetection
 {
 public:
@@ -186,26 +175,18 @@ public:
 
       if (cb.isContainment())
       {
-         // Same envelope-safety scale as the pillar-exterior overloads' maxOverlap (see that
-         // overload's own comment) -- bounds how much force a single degenerate/runaway overlap can
-         // inject, here for the arch/tunnel containment branch.
+         // Envelope-safety cap: bounds the force a single degenerate/runaway overlap can inject.
          const real_t maxOverlap = real_t(1.0);
 
-         // Axial (X-along-axis) gate: skip entirely if the sphere's own axial extent doesn't
-         // overlap the tube's bounded span at all (unbounded axialMin/axialMax makes this vacuous,
-         // reproducing the old infinite-tube behaviour).
+         // Axial gate: skip if the sphere's axial extent misses the tube's span (vacuous for unbounded
+         // axialMin/axialMax).
          const real_t axialC = containment_detail::axialCoord(posSphere, posCyl, axis);
          if (axialC + s.getRadius() < cb.getAxialMin() || axialC - s.getRadius() > cb.getAxialMax())
             return false;
 
-         // Radial pre-gate: mirrors the axial gate above -- needed because multiple tubes can share
-         // the same axial span (e.g. this bridge's 3 arches all span the same X-range). Without this,
-         // a body merely within that SHARED span, but nowhere near THIS tube's own axis, still gets a
-         // huge, spurious overlap computed against it (found directly: job 4141165 logged overlap=
-         // 15.75, 251% of interaction radius, for a box ~26 LU away from the arch it was "contained"
-         // by in Y-Z). dist-effR is a valid lower bound on the body's true minimum distance to the
-         // axis for any shape (its own reach is always an upper bound from its centre) -- the same
-         // bound ComputeTunnelContacts already used for the identical problem.
+         // Radial pre-gate: several tubes can share the same axial span (e.g. the 3 arches of a bridge), so
+         // a body near another tube must not get a spurious huge overlap against this one. dist - effR is a
+         // lower bound on the body's minimum distance to the axis for any shape.
          {
             const mesa_pd::Vec3 relCenter  = posSphere - posCyl;
             const real_t        distCenter = (relCenter - (relCenter * axis) * axis).length();
@@ -222,12 +203,8 @@ public:
          real_t overlap = farthestRadial - cb.getRadius(); // > 0 -> pokes outside the tube
          if (overlap <= real_t(0)) return false;           // safely inside
 
-         // SAFETY: same envelope clamp as the pillar-exterior overloads above (see that overload's
-         // own comment, job 4140767 postmortem) -- a body whose farthest point is wildly outside the
-         // tube (already-corrupted state from elsewhere, e.g. a prior runaway contact) must not feed
-         // an unbounded spring force back into the sim. Found necessary directly: job 4141165 logged
-         // a Box x arch [DEM-WATCH] overlap of 15.75 (251% of interaction radius) completely
-         // unclamped through this branch before this fix.
+         // SAFETY: clamp the overlap (as the Box/Cylinder pillar-exterior overloads do) so a body wildly
+         // outside the tube (already-corrupted state) cannot feed an unbounded spring force into the sim.
          const bool envelopClamped = overlap > maxOverlap;
          if (envelopClamped)
          {
@@ -288,14 +265,13 @@ public:
       return operator()(idx2, idx1, s, cb, ac);
    }
 
-   // Box vs HalfSpace — rotation-aware: normal is transformed to body frame via R^T before
-   // calling support() in body frame and rotating the result back to world frame.
-   // Same penetrationDepth / contactNormal / contactPoint convention as Sphere-HalfSpace:
-   //   penetrationDepth < 0  → penetrating (contact active)
+   // Box vs HalfSpace, rotation-aware: the wall normal is transformed to the body frame (R^T) for support()
+   // and the result rotated back. Same convention as Sphere-HalfSpace:
+   //   penetrationDepth < 0  -> penetrating (contact active)
    //   contactNormal = hs.getNormal() (points into the domain, away from the wall)
    //   contactPoint on the wall surface (deepest box corner projected onto the plane)
-   // boxContactSkin wrapper (see ModelParameters::boxContactSkin): detect with the inflated box
-   // (each half-extent + m), mirroring cylinderContactSkin's own Cylinder x HalfSpace wrapper above.
+   // boxContactSkin (ModelParameters::boxContactSkin): detect with the inflated box (each half-extent + m),
+   // as cylinderContactSkin does in the Cylinder x HalfSpace overload below.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Box& bx,
@@ -343,13 +319,9 @@ public:
       return operator()(idx2, idx1, bx, hs, ac);
    }
 
-   // Cylinder vs HalfSpace — identical formula/convention to Box vs HalfSpace above (Cylinder has
-   // its own exact support() too). Added as an explicit override instead of letting this pair fall
-   // through to GeneralContactDetection's generic HalfSpace-vs-anything template: that generic path
-   // returns contactNormal = -wallNormal (into the wall), the opposite sign from every other
-   // HalfSpace pair here. See the class-level comment above and
-   // tests/showcases_antidunes/ContactDetectionTest.cpp testCylinderHalfSpaceContact for the
-   // derivation that surfaced the mismatch.
+   // Cylinder vs HalfSpace: same formula/convention as Box vs HalfSpace (Cylinder has an exact support()).
+   // Explicit override because the base's generic HalfSpace template returns contactNormal = -wallNormal
+   // (see the class comment and ContactDetectionTest.cpp testCylinderHalfSpaceContact).
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Cylinder& cyl,
@@ -396,18 +368,14 @@ public:
       return operator()(idx2, idx1, cyl, hs, ac);
    }
 
-   // Box vs CylindricalBoundary (solid exterior) — ROTATION-AWARE. Works in the box BODY frame so it
-   // is correct for any orientation (the previous version used a world-axis-aligned bounding box and
-   // silently let a rotated box pierce the cylinder). The cylinder centre/axis are transformed by Rᵀ,
-   // the closest point on the oriented box is found by clamping to the half-extents, the radial
-   // distance to the (infinite) cylinder axis gives the penetration, and the normal/contact point are
-   // transformed back to world.
-   //   penetrationDepth = radial_dist - cylinder_radius  (< 0 → penetrating)
+   // Box vs CylindricalBoundary (solid exterior), rotation-aware: works in the box body frame. The cylinder
+   // centre/axis are transformed by R^T, the closest box point to the (infinite) axis is found by clamping to
+   // the half-extents, the radial distance gives the penetration, and normal/contact point are rotated back.
+   //   penetrationDepth = radial_dist - cylinder_radius  (< 0 -> penetrating)
    //   contactNormal points radially outward from the cylinder axis toward the box (world frame)
    //   contactPoint = closest point on the box surface, world frame
-   // boxContactSkin wrapper (see ModelParameters::boxContactSkin): detect with the inflated box
-   // (each half-extent + m); containment mode (arch/tunnel scenarios) is left unchanged, mirroring
-   // cylinderContactSkin's own Cylinder x CylindricalBoundary wrapper above.
+   // boxContactSkin (ModelParameters::boxContactSkin): detect with the inflated box (each half-extent + m);
+   // containment mode (arch/tunnel) is not inflated, as in the Cylinder x CylindricalBoundary overload below.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Box& bx,
@@ -440,13 +408,9 @@ public:
       {
          const real_t maxOverlap = real_t(1.0); // same envelope-safety scale as the pillar overload
 
-         // Radial pre-gate: needed because multiple tubes can share the same axial span (e.g. this
-         // bridge's 3 arches all span the same X-range) -- without this, a body merely within that
-         // SHARED span, but nowhere near THIS tube's own axis, still gets a huge, spurious overlap
-         // computed against it (found directly: job 4141165 logged overlap=15.75, 251% of
-         // interaction radius, for a box ~26 LU away from the arch it was "contained" by in Y-Z).
-         // Uses the conservative interaction-radius bound (always >= the box's true reach from its
-         // centre), same as ComputeTunnelContacts' own identical gate.
+         // Radial pre-gate: several tubes can share the same axial span (e.g. the 3 arches of a bridge), so a
+         // body near another tube must not get a spurious huge overlap against this one. Uses the
+         // interaction radius as a conservative bound on the box's reach from its centre.
          {
             const real_t        effR      = ac.getInteractionRadius(idx1);
             const auto&         axisCheck = cb.getAxis();
@@ -455,18 +419,15 @@ public:
             if (distCenter - effR > cb.getRadius()) return false;
          }
 
-         // Farthest point from the axis is always a corner: radial-distance-to-a-line is a convex
-         // function of the box's body-frame point, and a convex function maximized over a convex
-         // polytope always attains its max at a vertex -- check all 8, keep the largest (that also
-         // satisfies the half-clip, if any -- e.g. an arch tunnel is only solid above its own
-         // springing line).
+         // The farthest point from the axis is a corner (radial distance to a line is convex, so its max over
+         // a convex polytope is at a vertex): check all 8 and keep the largest that satisfies the half-clip,
+         // if any (e.g. an arch tunnel is solid only above its springing line).
          const auto&   axis = cb.getAxis();
          const mesa_pd::Vec3& clipN = cb.getHalfClipNormal();
          real_t        farthestRadialSq = real_t(-1);
          mesa_pd::Vec3 worstCorner;
-         // Runner-up corner (top-2 tracking, single pass): populated whenever a SECOND corner also
-         // pokes past the tube radius independently of the worst one -- see hasSecondaryContact()'s
-         // own comment for why this matters (an elongated box wedged so two corners breach at once).
+         // Runner-up corner (top-2 tracking, single pass), used when a second corner also breaches the tube
+         // radius (an elongated box wedged with two corners out); see hasSecondaryContact().
          real_t        secondRadialSq = real_t(-1);
          mesa_pd::Vec3 secondCorner;
          real_t        axialLo = std::numeric_limits<real_t>::infinity();
@@ -501,9 +462,7 @@ public:
          real_t overlap = farthestRadial - cb.getRadius();
          if (overlap <= real_t(0)) return false; // safely inside
 
-         // SAFETY: same envelope clamp as the pillar-exterior overloads (see that overload's own
-         // comment, job 4140767 postmortem) -- caps how much force a single degenerate/runaway
-         // overlap can inject.
+         // SAFETY: envelope clamp, caps the force a single degenerate/runaway overlap can inject.
          const bool envelopClamped = overlap > maxOverlap;
          if (envelopClamped)
          {
@@ -531,9 +490,8 @@ public:
          getContactNormal()    = -outHat; // points inward, toward the axis
          getContactPoint()     = worstCorner;
 
-         // Secondary contact: see hasSecondaryContact()'s own comment. Only counts if the runner-up
-         // corner ALSO genuinely pokes past the radius on its own (not merely "next largest" -- an
-         // ordinary single-corner contact must not spuriously report a second one).
+         // Secondary contact (see hasSecondaryContact()): only if the runner-up corner itself pokes past the
+         // radius, so an ordinary single-corner contact never reports a second one.
          if (secondRadialSq > cb.getRadius() * cb.getRadius())
          {
             real_t secondOverlap = std::sqrt(secondRadialSq) - cb.getRadius();
@@ -561,9 +519,9 @@ public:
       d = (dl > real_t(1e-10)) ? d / dl : mesa_pd::Vec3(real_t(0), real_t(0), real_t(1));
       const mesa_pd::Vec3 a0 = Rt * (cylCenter - c); // a point on the axis (the cylinder centre), body frame
 
-      // Closest point on the oriented box to the INFINITE axis line: project the current estimate onto
-      // the line, clamp the nearest line point into the box, refine once. (Using the far cylinder centre
-      // directly would bias the clamp toward the wrong box corner for a rotated/elongated box.)
+      // Closest point on the oriented box to the infinite axis line: project the current estimate onto the
+      // line, clamp that line point into the box, refine once. (Clamping the cylinder centre directly would
+      // bias toward the wrong corner for a rotated/elongated box.)
       mesa_pd::Vec3 boxPt(real_t(0), real_t(0), real_t(0));
       for (int it = 0; it < 2; ++it)
       {
@@ -582,21 +540,11 @@ public:
       real_t penetrationDepth = dist - cb.getRadius();
       if (penetrationDepth < getContactThreshold())
       {
-         // SAFETY: a body large enough to ENVELOP the thin pillar (axis inside the box) yields a
-         // near-radius penetration with a degenerate normal, which the spring-dashpot turns into a
-         // catastrophic force that blows up the coupled fluid (global NaN). Bound the reported overlap
-         // so the contact stays a finite restoring push, and warn so the pathological geometry is visible.
-         // 1.5 -> 1.0 (job 4140767 postmortem, floater-history CSV): the box-cylinder(pillar) clamp
-         // firing at 1.5 LU for 5 consecutive sub-cycles in a row, simultaneous with an unclamped
-         // box-box collision on the same body, injected forces up to ~500 -- more than enough to
-         // launch the body and corrupt the fluid. An initial attempt at 0.3 LU (~5% of this
-         // scenario's own floater interaction radius, 6.26 LU) turned out to clamp genuinely
-         // NON-degenerate contacts too -- testCylinderPillarContact/testCylinderPillarBruteForceCrossCheck
-         // (ContactDetectionTest.cpp) hand-verify a perfectly ordinary 0.5 LU overlap with a
-         // well-defined normal, no envelope at all, and this file's own [DEM-WATCH] calibration
-         // confirms genuine launch-causing hits reach 0.68-0.77 LU (~7-8%) even under normal physics.
-         // 1.0 LU stays safely above that legitimate range (so ordinary deep contacts are never
-         // clamped) while still cutting the worst-case injected force by a third versus 1.5.
+         // SAFETY: a body enveloping the thin pillar (axis inside the box) yields a near-radius penetration
+         // with a degenerate normal, which the spring-dashpot turns into a force that blows up the coupled
+         // fluid (global NaN). The overlap is clamped to 1.0 LU and a warning logged. 1.0 LU stays above the
+         // deepest legitimate contacts seen in [DEM-WATCH] (0.68-0.77 LU) and the 0.5 LU overlap verified in
+         // testCylinderPillarContact, so ordinary deep contacts are never clamped.
          const real_t maxOverlap = real_t(1.0);
          bool envelopClamped = false;
          if (penetrationDepth < -maxOverlap)
@@ -636,11 +584,10 @@ public:
       return operator()(idx2, idx1, bx, cb, ac);
    }
 
-   // Sphere vs finite Cylinder (floating log) — ANALYTIC, because the log sits on/next to thousands
-   // of bed spheres and running GJK/EPA per bed-sphere pair per sub-cycle is both slower and noisier
-   // than the closed form. Works in the cylinder body frame (axis = body z), so it is correct for any
-   // orientation. Convention identical to sphere-sphere:
-   //   penetrationDepth < 0 → penetrating; contactNormal points from the CYLINDER (idx2) to the
+   // Sphere vs finite Cylinder (floating log), analytic: the log lies among many bed spheres and GJK/EPA per
+   // pair per sub-cycle is slower and noisier than the closed form. Works in the cylinder body frame
+   // (axis = body z). Convention identical to sphere-sphere:
+   //   penetrationDepth < 0 -> penetrating; contactNormal points from the CYLINDER (idx2) to the
    //   SPHERE (idx1), world frame; contactPoint = mid-overlap point on the cylinder surface.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
@@ -711,15 +658,14 @@ public:
       return operator()(idx2, idx1, s, cyl, ac);
    }
 
-   // Finite Cylinder (floating log) vs CylindricalBoundary (solid pillar, infinite along its axis) —
-   // ROTATION-AWARE, mirrors the Box×CylindricalBoundary overload above: the pillar axis is
-   // transformed into the log's body frame, the closest point of the log to that line is found by a
-   // project-and-clamp fixed-point iteration (radial + axial clamp instead of the box corner clamp),
-   // and the radial distance to the axis gives the penetration.
-   //   penetrationDepth = radial_dist - pillar_radius (< 0 → penetrating)
+   // Finite Cylinder (floating log) vs CylindricalBoundary (solid pillar, infinite along its axis),
+   // rotation-aware, analogous to Box x CylindricalBoundary: the pillar axis is transformed into the log's
+   // body frame, the closest log point to that line is found by project-and-clamp iteration (radial + axial
+   // clamp), and the radial distance to the axis gives the penetration.
+   //   penetrationDepth = radial_dist - pillar_radius (< 0 -> penetrating)
    //   contactNormal points radially outward from the pillar axis toward the log (world frame)
-   // cylinderContactSkin wrapper (see ModelParameters::cylinderContactSkin): detect with the inflated cylinder
-   // (radius + m, half-length + m); containment mode (arch/tunnel scenarios) is left unchanged.
+   // cylinderContactSkin (ModelParameters::cylinderContactSkin): detect with the inflated cylinder
+   // (radius + m, half-length + m); containment mode (arch/tunnel) is not inflated.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Cylinder& cyl,
@@ -753,37 +699,32 @@ public:
       {
          const real_t maxOverlap = real_t(1.0); // same envelope-safety scale as the pillar overload
 
-         // Axial gate: uses the isotropic circumscribing-sphere bound (not the log's exact extent)
-         // -- a conservative over-approximation (interactionRadius >= half-length always), cheap and
-         // never a false negative, matching the level of precision this gate has always used.
+         // Axial gate with the circumscribing-sphere bound (interactionRadius >= half-length): conservative,
+         // never a false negative.
          const auto&   axis  = cb.getAxis();
          const real_t  effR  = ac.getInteractionRadius(idx1);
          const real_t  axialC = containment_detail::axialCoord(c, cylCenter, axis);
          if (axialC + effR < cb.getAxialMin() || axialC - effR > cb.getAxialMax()) return false;
 
-         // Radial pre-gate: mirrors the axial gate above -- needed because multiple tubes can share
-         // the same axial span. Without this, a body merely within that SHARED span, but nowhere
-         // near THIS tube's own axis, still gets a huge, spurious overlap computed against it (see
-         // the Box overload's own comment, job 4141165 postmortem, for the concrete evidence).
+         // Radial pre-gate: several tubes can share the same axial span; skip tubes whose axis is out of
+         // reach (see the Box overload).
          {
             const mesa_pd::Vec3 relCenter  = c - cylCenter;
             const real_t        distCenter = (relCenter - (relCenter * axis) * axis).length();
             if (distCenter - effR > cb.getRadius()) return false;
          }
 
-         // A solid cylinder's farthest point from any line is always on one of its two end-cap rims
-         // (squared radial distance is a convex quadratic in the axial rim parameter, so its max over
-         // the finite length is always at an endpoint) -- search each rim's own farthest point (with
-         // the half-clip, if any) and keep whichever rim reaches farther.
+         // A solid cylinder's farthest point from a line lies on one of its two end-cap rims (squared radial
+         // distance is convex in the axial parameter): search each rim's farthest point (with the half-clip,
+         // if any) and keep the farther one.
          const mesa_pd::Vec3 logAxis = R * mesa_pd::Vec3(real_t(0), real_t(0), real_t(1));
          mesa_pd::Vec3 uB, vB;
          closed_form_contacts::detail::perpendicularBasis(logAxis, uB, vB);
 
          real_t        farthestRadialSq = real_t(-1);
          mesa_pd::Vec3 worstPoint;
-         // The "runner-up" here is simply the OTHER rim, if it also breaches independently -- see
-         // hasSecondaryContact()'s own comment (Box overload above) for why this matters: a log lying
-         // across the tube such that both end caps poke past the radius at once.
+         // Runner-up = the other rim, if it also breaches (a log lying across the tube with both end caps
+         // out); see hasSecondaryContact().
          real_t        secondRadialSq = real_t(-1);
          mesa_pd::Vec3 secondPoint;
          for (const real_t sgn : { real_t(-1), real_t(1) })
@@ -808,8 +749,7 @@ public:
          real_t overlap = farthestRadial - cb.getRadius();
          if (overlap <= real_t(0)) return false; // safely inside
 
-         // SAFETY: same envelope clamp as the pillar-exterior overloads (see that overload's own
-         // comment, job 4140767 postmortem).
+         // SAFETY: envelope clamp, as in the pillar-exterior overloads.
          const bool envelopClamped = overlap > maxOverlap;
          if (envelopClamped)
          {
@@ -837,9 +777,7 @@ public:
          getContactNormal()    = -outHat; // points inward, toward the axis
          getContactPoint()     = worstPoint;
 
-         // Secondary contact: the other rim, if it also genuinely breaches on its own (not merely
-         // "the other candidate" -- an ordinary single-rim contact must not spuriously report a
-         // second one). See hasSecondaryContact()'s own comment.
+         // Secondary contact: the other rim, only if it breaches on its own (see hasSecondaryContact()).
          if (secondRadialSq > cb.getRadius() * cb.getRadius())
          {
             real_t secondOverlap = std::sqrt(secondRadialSq) - cb.getRadius();
@@ -861,11 +799,11 @@ public:
          return true;
       }
 
-      // [Claude, 2026-10-01] refineCylinderContacts: the solid pillar is represented locally by a finite cylinder of the
-      // pillar radius, centred on the projection of the rod centre onto the pillar axis and long enough that its end
-      // faces never matter, and resolved by the validated refined cylinder-cylinder detection. The legacy path below
-      // (3 alternating projections onto the axis line) missed 115 of about 1150 contacts and underestimated depths by
-      // up to 0.1 against the independent reference (thesis Section 5.2, scripts/contact-validation/obstacle_reference.py).
+      // refineCylinderContacts: the solid pillar is represented locally by a finite cylinder of the pillar radius,
+      // centred on the projection of the rod centre onto the pillar axis and long enough that its end faces never
+      // matter, and resolved by the refined cylinder-cylinder detection. The default path below (3 alternating
+      // projections onto the axis line) misses some contacts and underestimates depths against the independent
+      // reference (thesis Section 5.2, scripts/contact-validation/obstacle_reference.py).
       if (refineCylinderContacts)
       {
          const mesa_pd::Vec3 ap      = cb.getAxis().getNormalizedIfNotZero();
@@ -919,10 +857,8 @@ public:
       real_t penetrationDepth = dist - cb.getRadius();
       if (penetrationDepth < getContactThreshold())
       {
-         // Same envelop safety clamp as Box×CylindricalBoundary: a log enveloping the thin pillar
-         // yields a near-radius overlap + degenerate normal → unbounded spring force → fluid NaN.
-         // 1.5 -> 1.0 -- see the Box×CylindricalBoundary overload's own comment (job 4140767
-         // postmortem) for the rationale, including why 0.3 turned out too aggressive.
+         // Envelope safety clamp as in Box x CylindricalBoundary: a log enveloping the thin pillar yields a
+         // near-radius overlap + degenerate normal -> unbounded spring force -> fluid NaN.
          const real_t maxOverlap = real_t(1.0);
          bool envelopClamped = false;
          if (penetrationDepth < -maxOverlap)
@@ -962,30 +898,18 @@ public:
       return operator()(idx2, idx1, cyl, cb, ac);
    }
 
-   // [Claude, 2026-09-26] Capsule (pill-shaped rod) vs CylindricalBoundary (solid pillar) -- mirrors
-   // the Cylinder x CylindricalBoundary overload above for the SAME reason: the generic
-   // GeneralContactDetection::operator()(CylindricalBoundary, GEO2_T) fallback this pair would
-   // otherwise use (src/mesa_pd/collision_detection/GeneralContactDetection.h) implements
-   // CONTAINMENT semantics UNCONDITIONALLY (collision when the OTHER body's FARTHEST point from the
-   // axis EXCEEDS the boundary's radius) -- exactly backwards from what a solid pillar needs
-   // (collision when the body's CLOSEST point gets nearer than the radius). It does not consult
-   // CylindricalBoundary::isContainment() at all. Found via ANTIDUNES_CapsuleShape's
-   // testCapsuleCylindricalBoundaryContact (penetrationDepth came out as 1.8, not the expected 0.2 --
-   // traced directly to that file's `if (dist > radius*radius)` check) BEFORE the job that would
-   // have used it (4267741) ever ran -- caught by the test, not by a corrupted cluster result.
+   // Capsule (pill-shaped rod) vs CylindricalBoundary (solid pillar). Needed because the generic
+   // GeneralContactDetection::operator()(CylindricalBoundary, GEO2_T) fallback always uses CONTAINMENT
+   // semantics (collision when the body's FARTHEST point from the axis exceeds the radius) and ignores
+   // CylindricalBoundary::isContainment(); a solid pillar needs collision when the CLOSEST point gets nearer
+   // than the radius (checked by testCapsuleCylindricalBoundaryContact). Containment mode is left to the
+   // generic path, which implements it correctly.
    //
-   // Only handles the non-containment ("solid pillar") case this showcase actually uses; containment
-   // mode (arch/tunnel scenarios) is left to the generic path, which already implements that
-   // semantics correctly.
-   //
-   // Closed-form, NOT iterative like the Cylinder overload: a capsule's closest SURFACE point to any
-   // line is exactly its CORE SEGMENT's closest point, moved `radius` toward that line -- no radial
-   // clamp is needed at all (unlike a cylinder's flat cap + curved side, which need a joint
-   // radial-and-axial clamp iterated to convergence), only a 1-D axial clamp of the segment's own
-   // parameter to [-coreHalfLength,+coreHalfLength]. Derived directly from the two-lines
-   // closest-point normal equations (line 1 = the capsule's own body-z axis; line 2 = the pillar's
-   // infinite axis) then clamped -- exact by convexity (squared distance is a convex quadratic in
-   // the single free axial parameter), so a single evaluation suffices; no iteration to converge.
+   // Closed form, not iterative: a capsule's closest surface point to a line is its core segment's closest
+   // point moved `radius` toward the line, so only a 1-D clamp of the axial parameter to
+   // [-coreHalfLength, +coreHalfLength] is needed. From the two-lines closest-point normal equations (capsule
+   // body-z axis vs. infinite pillar axis), then clamped; exact because the squared distance is a convex
+   // quadratic in that parameter.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Capsule& capsule,
@@ -1014,8 +938,7 @@ public:
 
       // Closed-form closest point of the (infinite) body-z axis to the pillar axis line: from
       // d/dz|P|^2=0 and d/dt|P|^2=0 for P=(0,0,z)-a0-t*d, eliminating t gives
-      // z*(1-d_z^2) = a0_z - (a0.d)*d_z. Falls back to z=0 if the two axes are (near-)parallel
-      // (denom ~ 0, a genuinely degenerate configuration with no unique closest point anyway).
+      // z*(1-d_z^2) = a0_z - (a0.d)*d_z. Falls back to z=0 for (near-)parallel axes (no unique closest point).
       const real_t denom  = real_t(1) - d[2] * d[2];
       const real_t zStar  = (std::abs(denom) > real_t(1e-10)) ? (a0[2] - (a0 * d) * d[2]) / denom : real_t(0);
       const real_t zClamp = std::clamp(zStar, -a, a);
@@ -1023,14 +946,14 @@ public:
       const mesa_pd::Vec3 segPt(real_t(0), real_t(0), zClamp);
       const mesa_pd::Vec3 vec    = segPt - a0;
       const mesa_pd::Vec3 radial = vec - (vec * d) * d;
-      const real_t        dist   = radial.length(); // core-segment-to-axis distance; subtract rCap below for the surface
+      // core-segment-to-axis distance; subtract rCap below for the surface
+      const real_t        dist   = radial.length();
 
       real_t penetrationDepth = (dist - rCap) - cb.getRadius();
       if (penetrationDepth < getContactThreshold())
       {
-         // Same envelope safety clamp as the Cylinder overload (job 4140767 postmortem): a capsule
-         // deeply enveloping the pillar yields a near-radius overlap + degenerate normal, which would
-         // otherwise blow up into an unbounded spring force.
+         // Envelope safety clamp as in the Cylinder overload: a capsule enveloping the pillar yields a
+         // near-radius overlap + degenerate normal -> unbounded spring force.
          const real_t maxOverlap = real_t(1.0);
          bool envelopClamped = false;
          if (penetrationDepth < -maxOverlap)
@@ -1070,27 +993,21 @@ public:
       return operator()(idx2, idx1, capsule, cb, ac);
    }
 
-   // Box vs Box / Cylinder vs Cylinder — OPTIONAL closed-form alternative (PaperAnalyticalContacts.h)
-   // to the two operator() overloads these pairs would otherwise inherit unchanged from
-   // GeneralContactDetection (GJK/EPA). Gated at runtime by useAnalyticalContactDetection so both
-   // paths stay reachable from the same binary; default false reproduces the exact pre-existing
-   // GJK/EPA-only behaviour. See ModelParameters.useAnalyticalContactDetection (SimulationParams.h)
-   // for the .prm switch and PaperAnalyticalContactTest.cpp for the 33-case cross-check both branches
-   // below are validated against.
+   // Box vs Box / Cylinder vs Cylinder: optional closed-form alternative (ClosedFormContacts*.h) to the
+   // GJK/EPA overloads inherited from GeneralContactDetection, switched at runtime by
+   // useAnalyticalContactDetection (ModelParameters, SimulationParams.h; default false = GJK/EPA only).
+   // Cross-checked against GJK/EPA in PaperAnalyticalContactTest.cpp.
    //
-   // Box×Box: boxBoxSAT is the fully-verified branch (no known discrepancy vs. GJK/EPA across the
-   // test suite) — trusted directly, no fallback gate.
+   // Box x Box: boxBoxSAT has no known discrepancy vs. GJK/EPA across the test suite, so no fallback gate.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Box& bx1,
                    const mesa_pd::data::Box& bx2,
                    Accessor& ac)
    {
-      // boxContactSkin (see ModelParameters): both boxes are replaced by inflated boxes (each
-      // half-extent + m) and resolved by the unchanged dispatch below (SAT, sphero, or GJK/EPA
-      // fallback, whichever this call would otherwise have taken) -- mirrors cylinderContactSkin's
-      // own Cylinder x Cylinder wrapper. The skin is cleared during the recursive call so the
-      // inflation is applied exactly once.
+      // boxContactSkin (see ModelParameters): both boxes are replaced by inflated boxes (each half-extent + m)
+      // and resolved by the dispatch below; the skin is cleared during the recursive call so the inflation is
+      // applied exactly once (as for cylinderContactSkin in Cylinder x Cylinder).
       if (boxContactSkin > real_t(0))
       {
          const real_t m = boxContactSkin;
@@ -1109,18 +1026,10 @@ public:
          return GeneralContactDetection::operator()(idx1, idx2, bx1, bx2, ac);
       }
 
-      // [Claude, 2026-10-29] useSpheroBoxContact/useSpheroBoxAnalytical (spherosimplex box contact,
-      // GJK/EPA-with-margin and Eberly closed-form variants) removed entirely -- unused by any
-      // thesis-cited result; archived at archive/unused_contact_methods/ (see ARCHIVE_README.md).
-
-      // useTightLayer1 (this session): cheap single-candidate-axis pre-filter ahead of the full
-      // 15-axis boxBoxSAT test below -- see ModelParameters.useTightLayer1's own doc comment and
-      // closed_form_contacts::detail::boxesDefinitelySeparatedAlongCenterLine's comment for the full
-      // derivation (one legitimate separating axis -- the line between the two centres -- tested
-      // instead of all 15, so it can reject but never positively confirm contact). Unlike Cylinder x
-      // Cylinder's equivalent gate above, boxBoxSAT itself is already cheap and exact (no GJK/EPA
-      // fallback needed for boxes at all), so this saves the cost of a full SAT call, not a GJK/EPA
-      // one -- a smaller win than the cylinder case, but still a real one for obviously-separated pairs.
+      // useTightLayer1: cheap pre-filter ahead of the full 15-axis boxBoxSAT test that tests one legitimate
+      // separating axis (the line between the centres), so it can reject but never confirm contact (see
+      // closed_form_contacts::detail::boxesDefinitelySeparatedAlongCenterLine). Saves a SAT call for
+      // obviously separated pairs (a smaller win than the Cylinder x Cylinder gate below, which saves GJK/EPA).
       if (useTightLayer1 &&
           closed_form_contacts::detail::boxesDefinitelySeparatedAlongCenterLine(
              ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(), bx1.getEdgeLength() * real_t(0.5),
@@ -1149,37 +1058,27 @@ public:
       return true;
    }
 
-   // Cylinder×Cylinder: cylinderCylinderContact's rim-vs-face/band branches (face-edge,
-   // special-contact, band-edge) can report the wrong OVERLAP MAGNITUDE for some oblique tilts (the
-   // true closest feature sits on a curved band neither Kodam et al. nor Guo et al.'s corrections
-   // search) — cylinderCylinderResultIsUncertain flags exactly those cases (plus any near-miss the
-   // analytical dispatch found no contact for at all) and this falls back to GJK/EPA for them, so the
-   // reported contact is never trusted blind.
+   // Cylinder x Cylinder: cylinderCylinderContact's rim-vs-face/band branches (face-edge, special-contact,
+   // band-edge) can report the wrong overlap magnitude for some oblique tilts (the true closest feature lies on
+   // a curved band neither Kodam et al. nor Guo et al.'s corrections search). cylinderCylinderResultIsUncertain
+   // flags those cases (plus near-misses the closed forms found no contact for) and they fall back to GJK/EPA.
    template< typename Accessor >
    bool operator()(const size_t idx1, const size_t idx2,
                    const mesa_pd::data::Cylinder& cyl1,
                    const mesa_pd::data::Cylinder& cyl2,
                    Accessor& ac)
    {
-      // Canonicalize by uid BEFORE calling cylinderCylinderContact, exactly like
-      // GeneralContactDetection's own generic operator() does for its GJK/EPA path (see that
-      // class's "ensure collision order idx2 has to be larger than idx1" comment). Needed because
-      // cylinderCylinderContact's face-edge/special-contact/band-edge branch is NOT symmetric under
-      // swapping its two arguments (rimVsFaceOrBand(ci,cj) is tried and preferred over
-      // rimVsFaceOrBand(cj,ci) -- see that function's own comment) -- so which physical cylinder
-      // ends up as ci vs cj must not depend on this rank's local particle-storage index order
-      // (idx1/idx2), or two ranks holding the same physical pair via different local indices can
-      // independently compute two different-but-each-individually-valid "band-edge" contacts. Both
-      // ranks already see identical synced positions/orientations for both particles (syncCall()
-      // runs every DEM sub-cycle right before contact detection) -- the missing piece was making
-      // both ranks agree on which particle is 1st vs 2nd, which this uid comparison does without
-      // any communication, since uid is a global identifier both ranks already have.
+      // Canonicalise by uid before cylinderCylinderContact, as GeneralContactDetection does for GJK/EPA:
+      // the rim-vs-face/band branch is not symmetric in its arguments (rimVsFaceOrBand(ci,cj) is preferred
+      // over rimVsFaceOrBand(cj,ci)), so the argument order must not depend on the rank-local storage index,
+      // or two ranks holding the same pair could compute two different valid contacts. uid is global, and
+      // positions/orientations are already synced before contact detection.
       if (ac.getUid(idx2) < ac.getUid(idx1))
          return operator()(idx2, idx1, cyl2, cyl1, ac);
 
       // cylinderContactSkin (see ModelParameters): both rods are replaced by inflated cylinders (radius + m,
-      // half-length + m) and resolved by the unchanged dispatch below (closed forms and GJK/EPA fallback). The skin is
-      // cleared during the recursive call so that the inflation is applied exactly once.
+      // half-length + m) and resolved by the dispatch below; the skin is cleared during the recursive call so
+      // the inflation is applied exactly once.
       if (cylinderContactSkin > real_t(0))
       {
          const real_t m = cylinderContactSkin;
@@ -1191,32 +1090,15 @@ public:
          return hit;
       }
 
-      // Cheap raw-center-distance reject, BEFORE either the closed-form solver or the GJK/EPA
-      // fallback runs: mirrors the same bound mesa_pd's own detectSphereSphereCollision gets for
-      // free from its formula (|pos1-pos2| < r1+r2) -- but Cylinder-Cylinder has no such built-in
-      // immunity, since its geometry (closed-form band-band-skewed included) has no equivalent
-      // early bound. Found via floater-history CSV analysis of a real ContactHistoryNotification
-      // crash (dense 100-log pile, job 4103899): a periodic-boundary ghost copy handed one rank a
-      // WRONG (non-minimum-image) position for one cylinder; band-band-skewed still returned
-      // contact=true/a plausible-looking overlap for a pair whose true center separation (~34 LU)
-      // was nearly 3x the two cylinders' combined max possible reach (~12.7 LU, circumR+circumR) --
-      // a false positive regardless of which periodic image was used. getInteractionRadius() is
-      // already the per-particle circumscribing-sphere radius (SetupStages.h: circumR =
-      // sqrt(radius^2 + halfLength^2)), stored at floater creation -- no new state needed, and this
-      // scales correctly even for mixed-size cylinders in the same scenario. Guarded on > 0: an
-      // unset/zero interaction radius (real production floaters always have a positive one, set at
-      // creation in SetupStages.h; only a caller that never populated it -- e.g. a unit test building
-      // particles directly via ParticleStorage -- would have zero here) means this bound can't be
-      // trusted, so skip the cheap reject and fall through to the real solver instead of silently
-      // rejecting every pair.
-      //
-      // useTightLayer1 (this session): replaces the sphere-sum bound above with
-      // closed_form_contacts::detail::closestDistanceSqBetweenSegments -- each cylinder's own axis
-      // SEGMENT (not a worst-case circumscribing sphere) vs. the sum of their radii. Same
-      // conservativeness guarantee (see that function's own comment), just orientation-aware instead
-      // of orientation-blind, so it resolves far more genuinely-separated pairs at this cheap stage,
-      // BEFORE they'd otherwise reach the (now more expensive to enter at all) analytical dispatch
-      // below. CylinderState built here (moved up from below) so both branches can use it.
+      // Cheap reject before the closed forms or GJK/EPA run. Cylinder-Cylinder has no built-in early bound like
+      // detectSphereSphereCollision's |pos1-pos2| < r1+r2, and a bad (e.g. non-minimum-image ghost) position
+      // could otherwise yield a false-positive contact for a pair far beyond its combined reach.
+      // useTightLayer1=false: circumscribing-sphere bound, getInteractionRadius() = sqrt(radius^2 + halfLength^2)
+      // (set at floater creation in SetupStages.h); skipped if the interaction radius is unset (0, e.g. unit
+      // tests building particles directly), so pairs are not rejected wholesale.
+      // useTightLayer1=true: closed_form_contacts::detail::closestDistanceSqBetweenSegments of the two axis
+      // segments vs. the sum of radii; equally conservative but orientation-aware, so it rejects far more
+      // separated pairs.
       const closed_form_contacts::CylinderState ci{ ac.getPosition(idx1), ac.getRotation(idx1).getMatrix(),
                                                  cyl1.getRadius(), cyl1.getHeight() };
       const closed_form_contacts::CylinderState cj{ ac.getPosition(idx2), ac.getRotation(idx2).getMatrix(),
@@ -1247,24 +1129,13 @@ public:
 
       auto result = closed_form_contacts::cylinderCylinderContact(ci, cj);
 
-      // Capsule-bound safety net: a cylinder is a subset of the capsule of the same radius around its
-      // axis SEGMENT, so two cylinders can only touch if their axis segments are within R_i + R_j of
-      // each other. Any analytic "contact" violating this is a false positive of the closed-form
-      // dispatch (e.g. the near-parallel band-band-skewed one fixed in PaperAnalyticalContacts.h, see
-      // CylinderNearParallelSkewedTest.cpp) and must never reach the contact solver -- in particular not
-      // in usePureAnalyticalCylinder mode, which trusts the dispatch without any GJK/EPA cross-check.
-      // Cheap (one segment-segment distance) and it can never reject a real contact (tiny relative slack
-      // for round-off only).
-      // [Claude, 2026-11-08] per author (thesis session, provably redundant when useTightLayer1=true):
-      // skipped in that case. With useTightLayer1=true the pre-filter above (l. ~1320-1331) already
-      // rejects on dist(axis segments) > R_i + R_j using the SAME CylinderState, so by the time this
-      // point is reached every pair already satisfies dist <= R_i + R_j, which trivially also satisfies
-      // this check's (R_i + R_j)*(1+1e-9) bound -- this second evaluation cannot change the outcome and
-      // only re-does the same O(1) distance computation. Still needed, and still run, when
-      // useTightLayer1=false (the pre-filter then uses the looser, orientation-blind circumscribing-
-      // sphere bound, l. ~1333-1338, under which the two bounds genuinely differ); this is also the
-      // configuration under which this safety net historically caught the near-parallel band-band-skewed
-      // bug referenced above.
+      // Capsule-bound safety net: a cylinder lies inside the capsule of the same radius around its axis segment,
+      // so two cylinders can only touch if their axis segments are within R_i + R_j. An analytic "contact"
+      // violating this is a closed-form false positive (cf. CylinderNearParallelSkewedTest.cpp) and must not
+      // reach the solver, in particular not with usePureAnalyticalCylinder (no GJK/EPA cross-check). Cheap, and
+      // never rejects a real contact (tiny relative slack for round-off only).
+      // Skipped when useTightLayer1=true: the pre-filter above already rejected dist(axis segments) > R_i + R_j
+      // with the same CylinderState, so this check could not change the outcome.
       if (result.contact && !useTightLayer1)
       {
          mesa_pd::Vec3 p0i, p1i, p0j, p1j;
@@ -1278,11 +1149,11 @@ public:
          }
       }
 
-      // [Claude, 2026-09-30] refineCylinderContacts (opt-in): the closed-form result is refined by minimising the
-      // projection overlap over directions (closed_form_contacts::refineCylinderContact) -- exact scenarios unchanged,
-      // inexact ones (edge-edge, band-edge, face-edge, special contact) get the minimising depth and normal, and
-      // "no scenario" pairs are decided by the same descent (separation proven if a negative overlap is found).
-      // No GJK/EPA call at all; GJK/EPA remains the verification reference in PaperAnalyticalContactTest.cpp.
+      // refineCylinderContacts (opt-in): the closed-form result is refined by minimising the projection overlap
+      // over directions (closed_form_contacts::refineCylinderContact). Exact scenarios are unchanged, inexact ones
+      // (edge-edge, band-edge, face-edge, special contact) get the minimising depth and normal, and "no scenario"
+      // pairs are decided by the same descent (separation proven if a negative overlap is found). No GJK/EPA call;
+      // GJK/EPA remains the verification reference in PaperAnalyticalContactTest.cpp.
       if (refineCylinderContacts)
       {
          static const bool shadowTiming = std::getenv("ANTIDUNES_REFINE_SHADOW_TIMING") != nullptr;
@@ -1315,8 +1186,8 @@ public:
          if (trace.path == closed_form_contacts::RefinePath::ContactDescended ||
              trace.path == closed_form_contacts::RefinePath::ContactDescendedSeparated)
          {
-            // [Claude, 2026-10-01] profiling dump (ANTIDUNES_REFINE_DUMP=<prefix>): the re-descended pairs, every 499th, at most 20000
-            // per rank, to <prefix>_rank<r>.csv, for offline analysis of the fast-path rejections
+            // Profiling dump (ANTIDUNES_REFINE_DUMP=<prefix>): every 499th re-descended pair, at most 20000 per
+            // rank, to <prefix>_rank<r>.csv, for offline analysis of the fast-path rejections.
             static const char*   dumpPrefix = std::getenv("ANTIDUNES_REFINE_DUMP");
             static std::ofstream dump;
             static uint_t        dumped = 0, seen = 0;
@@ -1362,19 +1233,12 @@ public:
 
       if (closed_form_contacts::cylinderCylinderResultIsUncertain(ci, cj, result))
       {
-         // Tier 1 (analytical found nothing at all) vs special-contact (analytical DID find a
-         // contact, but that ONE scenario is unconditionally distrusted) -- see
-         // cylinderCylinderResultIsUncertain's own comment in PaperAnalyticalContacts.h. NOTE: this
-         // used to also cover a broader magnitude-based "Tier 2" applied to every non-exempt scenario
-         // (face-edge/band-edge/edge-edge too) -- that was REMOVED (see PaperAnalyticalContacts.h's
-         // own history comment); what remains here is special-contact ONLY, renamed accordingly
-         // (was cylFallbackTier2/cylPureTier2Trusted) so the code's own names don't keep implying a
-         // broader check that no longer exists.
+         // Tier 1 (closed forms found no contact) vs special-contact (a contact was found, but that scenario is
+         // always distrusted); see cylinderCylinderResultIsUncertain in ClosedFormContactsCylinderCylinder.h.
          if (usePureAnalyticalCylinder)
          {
-            // "Pure Kodam+Guo" mode: no GJK/EPA safety net at all -- trust the closed-form dispatch's
-            // own answer even where cylinderCylinderResultIsUncertain() would normally trigger a
-            // fallback. See ModelParameters.usePureAnalyticalCylinder's own doc comment.
+            // "Pure Kodam+Guo" mode: no GJK/EPA safety net; trust the closed-form answer even where
+            // cylinderCylinderResultIsUncertain() flags it. See ModelParameters.usePureAnalyticalCylinder.
             if (!result.contact)
             {
                ++contactStats.cylPureTier1Rejected;
@@ -1421,11 +1285,9 @@ public:
 
       if (!result.contact)
       {
-         // Reached only when cylinderCylinderResultIsUncertain() returned false (NOT uncertain) for a
-         // dispatch-gap pair -- i.e. its centre-distance bound (which essentially never triggers this in
-         // production, since the Layer-1 reject above is tighter) proved the two cylinders cannot possibly be touching, so "no contact" is trusted
-         // directly, with NO GJK/EPA call at all. Counted separately from cylFallbackTier1 (which is
-         // the OTHER, uncertain outcome of the same dispatch-gap case) specifically to measure this.
+         // Dispatch-gap pair (no scenario) that cylinderCylinderResultIsUncertain() did NOT flag: its
+         // centre-distance bound proves the cylinders cannot touch (rare, since the Layer-1 reject above is
+         // tighter), so "no contact" is trusted without GJK/EPA. Counted separately from cylFallbackTier1.
          ++contactStats.cylTier1CheaplyProvedSeparated;
          return false;
       }
@@ -1441,12 +1303,9 @@ public:
       return true;
    }
 
-   // Diagnostic side-channel (local to this rank, not synced): remembers, per uid pair, which
-   // path (closed-form vs GJK/EPA fallback tier) most recently produced this Cylinder x Cylinder
-   // contact, so a later [ContactHistory DUPLICATE] warning (ContactHistoryNotification.h, fired
-   // from within the same reduction cycle right after this contact was computed) can report it
-   // via contactHistoryDuplicateDiagnosticHook. Not MPI-synced: each rank only ever needs its own
-   // local answer for the pairs it itself computed a contact for.
+   // Diagnostic side-channel (rank-local, not synced): per uid pair, the path (closed form vs. GJK/EPA fallback
+   // tier) that most recently produced the contact, so a later [ContactHistory DUPLICATE] warning
+   // (ContactHistoryNotification.h, same reduction cycle) can report it via contactHistoryDuplicateDiagnosticHook.
    void recordDetectionPath(walberla::id_t uidA, walberla::id_t uidB, std::string path)
    {
       const auto key = uidA < uidB ? std::make_pair(uidA, uidB) : std::make_pair(uidB, uidA);
@@ -1460,33 +1319,18 @@ public:
       return it == pairDetectionPath.end() ? nullptr : &it->second;
    }
 
-   // Rank-wide (unlike recordDetectionPath above, which is per-rank-local storage), always-on log
-   // of every Cylinder x Cylinder computation this rank performs: rank, both uids, which path/tier
-   // produced it, both cylinders' full pose, and the resulting contact geometry. Added specifically
-   // to investigate a ContactHistoryNotification crash (step 929 of the dense sedimentation
-   // showcase) that survived both the argument-order and frame-mismatch fixes already made to this
-   // file/PaperAnalyticalContacts.h -- the [ContactHistory DUPLICATE] diagnostic could only report
-   // "not tracked locally on this rank this cycle" for that crash, because neither of the two
-   // REDUCING ranks (the ones holding the real copy of each particle) had computed the contact
-   // themselves; some OTHER (ghost-owning) rank(s) did, and this file's existing diagnostic has no
-   // way to know what they computed. This log line lets a later `grep` for the crashing pair's uids
-   // across the WHOLE log (all ranks) find every rank that computed a contact for that pair, and
-   // directly compare what each one got -- the same physical pair should always produce the same
-   // scenario/point/overlap regardless of which rank asks, if this class of bug is really fixed.
+   // Log of every Cylinder x Cylinder computation on this rank: rank, both uids, path/tier, both poses and the
+   // resulting contact. Ghost-owning ranks may compute a pair's contact that the reducing ranks never see, so
+   // grepping a pair's uids across all ranks shows whether every rank got the same scenario/point/overlap.
    void logCylComputation(walberla::id_t uidA, walberla::id_t uidB, const std::string& path,
                            const closed_form_contacts::CylinderState& ci, const closed_form_contacts::CylinderState& cj,
                            const closed_form_contacts::ContactResult& result)
    {
       static uint_t logCount = uint_t(0);
-      if (logCount >= uint_t(20000)) return; // generous cap; this scenario is expected to crash in <1000 steps
+      if (logCount >= uint_t(20000)) return; // cap on log volume
       ++logCount;
-      // WALBERLA_LOG_WARNING, not _INFO: the first run of this diagnostic found that entries for the
-      // actual crashing pair were entirely missing from the log despite this running unconditionally
-      // for every Cylinder x Cylinder computation -- the existing [ContactHistory DUPLICATE] warning
-      // (which DOES reliably survive) already uses WARNING level, not INFO, and MPI_ABORT kills every
-      // rank near-simultaneously without flushing buffered stdio, so INFO-level output from the same
-      // reduction cycle as the crash is lost. WARNING to match the level that's already proven to
-      // survive.
+      // WARNING, not INFO: MPI_ABORT kills all ranks without flushing buffered stdio, and INFO output from the
+      // crashing reduction cycle was lost; WARNING output survives.
       WALBERLA_LOG_WARNING(
          "[CylComputation] rank=" << walberla::mpi::MPIManager::instance()->rank()
          << " uidA=" << uidA << " uidB=" << uidB << " path=[" << path << "]"
@@ -1496,11 +1340,9 @@ public:
          << " scenario=" << result.scenario);
    }
 
-   // Diagnostics: per-rank tallies of which PaperAnalyticalContacts.h scenario / GJK-EPA-fallback
-   // path fired, only incremented while useAnalyticalContactDetection is on. Fixed named counters
-   // (not a string-keyed map) specifically so ParticleKernels::logContactDetectionStatistics() can
-   // MPI-sum them across ranks with plain scalar allReduceInplace calls, the same pattern already
-   // used throughout SetupStages.h/DataInitialization.h — no variable-key gather needed.
+   // Diagnostics: per-rank tallies of which closed-form scenario / GJK/EPA fallback path fired, incremented only
+   // while useAnalyticalContactDetection is on. Fixed named counters (not a string-keyed map) so
+   // ParticleKernels::logContactDetectionStatistics() can MPI-sum them with scalar allReduceInplace calls.
    struct ContactDetectionStats
    {
       uint64_t boxBoxSAT           = 0;
@@ -1512,57 +1354,44 @@ public:
       uint64_t cylSpecialContact   = 0;
       uint64_t cylBandEdge         = 0;
       uint64_t cylEdgeEdge         = 0;
-      // Fired when cylinderCylinderResultIsUncertain() overruled the analytical result and this
-      // fell back to GJK/EPA instead. cylFallbackTier1: analytical found NO scenario at all.
-      // cylFallbackSpecialContact: analytical found a contact, but the "special-contact" scenario is
-      // unconditionally distrusted (was named cylFallbackTier2 -- renamed because a broader,
-      // magnitude-based Tier 2 covering EVERY non-exempt scenario used to exist here and was removed;
-      // see PaperAnalyticalContacts.h's own history comment on cylinderCylinderResultIsUncertain --
-      // what remains is special-contact only, so the name shouldn't keep implying a general tier).
+      // cylinderCylinderResultIsUncertain() overruled the closed form and GJK/EPA was used instead.
+      // cylFallbackTier1: closed forms found no scenario. cylFallbackSpecialContact: a contact was found, but
+      // the "special-contact" scenario is always distrusted.
       uint64_t cylFallbackTier1          = 0;
       uint64_t cylFallbackSpecialContact = 0;
-      // What GJK/EPA actually found for each of the two fallback paths above -- added to answer
-      // directly "are these Tier 1 fallbacks (analytical found no scenario at all) mostly genuine
-      // non-contacts, or is the analytical dispatch actually missing real contacts here": every Tier 1
-      // fallback that GJK/EPA also resolves to "no contact" is exactly the population Kodam's paper
-      // itself says a coarse/intermediate bounding check should be catching cheaply instead (see
-      // PaperAnalyticalContacts.h's own comment quoting Kodam et al. 2010 Section 4's conclusion) --
-      // this is NOT one of Kodam's own ten contact-detection equations, purely a diagnostic added here.
+      // What GJK/EPA found on each fallback path: Tier 1 fallbacks that GJK/EPA also resolves to "no contact"
+      // are the pairs a coarse bounding check should reject cheaply (cf. Kodam et al. 2010, Section 4). Purely a
+      // diagnostic, not part of Kodam's contact-detection equations.
       uint64_t cylFallbackTier1GjkFoundContact            = 0;
       uint64_t cylFallbackTier1GjkFoundNoContact           = 0;
       uint64_t cylFallbackSpecialContactGjkFoundContact   = 0;
       uint64_t cylFallbackSpecialContactGjkFoundNoContact = 0;
-      // Fired instead of the two counters above when usePureAnalyticalCylinder is true (no GJK/EPA
-      // fallback attempted at all) -- see that flag's own doc comment (SimulationParams.h).
+      // Used instead of the counters above when usePureAnalyticalCylinder is true (no GJK/EPA fallback).
       uint64_t cylPureTier1Rejected          = 0; // analytical found no contact; accepted as "no contact" as-is
       uint64_t cylPureSpecialContactTrusted  = 0; // special-contact flagged uncertain; trusted as-is anyway
-      // Dispatch-gap pairs (analytical found no scenario) where cylinderCylinderResultIsUncertain()
-      // was NOT triggered -- some bound proved the pair definitely separated, so "no contact" is
-      // trusted directly with NO GJK/EPA call. Mutually exclusive with cylFallbackTier1 (the other,
-      // uncertain outcome of the same dispatch-gap case).
+      // Dispatch-gap pairs (no scenario) NOT flagged uncertain: a bound proved them separated, so "no contact"
+      // is trusted without GJK/EPA. Mutually exclusive with cylFallbackTier1.
       uint64_t cylTier1CheaplyProvedSeparated = 0;
-      // Box x Box pairs the useTightLayer1 single-axis pre-filter proved definitely separated before
-      // boxBoxSAT ever ran -- see ModelParameters.useTightLayer1's own doc comment.
+      // Box x Box pairs the useTightLayer1 single-axis pre-filter proved separated before boxBoxSAT ran.
       uint64_t boxTightLayer1CheaplyProvedSeparated = 0;
-      // Cylinder x Cylinder analytic "contacts" rejected by the always-on capsule bound (axis segments
-      // farther apart than R_i + R_j) -- must stay 0 unless the closed-form dispatch produced a false
-      // positive; a nonzero value in the logs is a red flag worth investigating.
+      // Cylinder x Cylinder analytic "contacts" rejected by the capsule bound (axis segments farther apart than
+      // R_i + R_j). Must stay 0 unless the closed-form dispatch produced a false positive.
       uint64_t cylCapsuleRejected = 0;
-      // [Claude, 2026-09-30] refineCylinderContacts: pairs the support-function refinement reported as touching / as
-      // separated (no GJK/EPA call in either case, see closed_form_contacts::refineCylinderContact).
+      // refineCylinderContacts: pairs the support-function refinement reported as touching / as separated
+      // (no GJK/EPA call in either case, see closed_form_contacts::refineCylinderContact).
       uint64_t cylRefinedContact   = 0;
       uint64_t cylRefinedSeparated = 0;
-      // [Claude, 2026-10-01] profiling of refineCylinderContact: pairs and wall time per exit (closed_form_contacts::RefinePath),
-      // why the fast path rejected a closed-form contact (FastReject), how often the kink search / convex check ran, and
-      // the closed-form scenario of the contacts that had to be re-descended (index as in shadow mode, 0..7).
+      // Profiling of refineCylinderContact: pairs and wall time per exit (closed_form_contacts::RefinePath), why
+      // the fast path rejected a closed-form contact (FastReject), how often the kink search / convex check ran,
+      // and the closed-form scenario of the re-descended contacts (index as in shadow mode, 0..7).
       static constexpr int kRefinePaths = int(closed_form_contacts::RefinePath::Count);
       uint64_t cylRefinePath[kRefinePaths]        = {};
       double   cylRefinePathSeconds[kRefinePaths] = {};
       uint64_t cylRefineFastReject[int(closed_form_contacts::FastReject::Count)] = {};
       uint64_t cylRefineKinks = 0, cylRefineConvex = 0;
       uint64_t cylRefineDescendedScenario[8] = {};
-      // [Claude, 2026-10-01] shadow timing (ANTIDUNES_REFINE_SHADOW_TIMING set, refined mode only): on the same pairs, the
-      // time of the closed form and of the GJK/EPA fallback that the closed form with fallback would have called
+      // Shadow timing (ANTIDUNES_REFINE_SHADOW_TIMING set, refined mode only): on the same pairs, the time of
+      // the closed form and of the GJK/EPA fallback that the closed form with fallback would have called.
       uint64_t shadowFallbackCalls = 0;
       double   shadowClosedFormSeconds = 0, shadowFallbackSeconds = 0;
 
@@ -1581,13 +1410,18 @@ public:
    };
    ContactDetectionStats contactStats;
 
-   // ---- SHADOW MODE (ModelParameters.shadowAnalyticCylinderLog): closed-form result computed next to the GJK/EPA result that is actually used, never applied. Cumulative (NOT reset with contactStats).
+   // ---- SHADOW MODE (ModelParameters.shadowAnalyticCylinderLog): closed-form result computed next to the GJK/EPA
+   // result that is actually used, never applied. Cumulative (NOT reset with contactStats).
    struct ShadowScenarioStat
    {
-      uint64_t n = 0, wrong = 0, verifierFlagged = 0, normalFlipped = 0, normalOff = 0;   // wrong: |overlap - GJK overlap| > 5 % R (a closed-form contact where GJK sees none counts as wrong)
-      double   sumAbsErr = 0, maxUnder = 0, maxOver = 0;                                    // over/under = closed-form overlap minus GJK overlap (>0 over-estimate)
+      // wrong: |overlap - GJK overlap| > 5 % R (a closed-form contact where GJK sees none counts as wrong);
+      // over/under = closed-form overlap minus GJK overlap (> 0 over-estimate)
+      uint64_t n = 0, wrong = 0, verifierFlagged = 0, normalFlipped = 0, normalOff = 0;
+      double   sumAbsErr = 0, maxUnder = 0, maxOver = 0;
    };
-   static constexpr size_t kShadowScenarios = 9;   // face-face, band-band-parallel, face-band, band-band-skewed, face-edge, special-contact, band-edge, edge-edge, none (closed form found nothing)
+   // scenarios: face-face, band-band-parallel, face-band, band-band-skewed, face-edge, special-contact, band-edge,
+   // edge-edge, none (closed form found nothing)
+   static constexpr size_t kShadowScenarios = 9;
    struct ShadowStats
    {
       std::array< ShadowScenarioStat, kShadowScenarios > byScenario{};
@@ -1635,7 +1469,8 @@ public:
       return ub;
    }
 
-   //! Called right after the GJK/EPA result (the one actually used) is known; reads it from getPenetrationDepth()/getContactNormal() if gjkHit.
+   //! Called right after the GJK/EPA result (the one actually used) is known; reads it from
+   //! getPenetrationDepth()/getContactNormal() if gjkHit.
    template< typename Accessor >
    void shadowCompare(const size_t idx1, const size_t idx2, const closed_form_contacts::CylinderState& ci, const closed_form_contacts::CylinderState& cj, const bool gjkHit, Accessor& ac)
    {
@@ -1656,7 +1491,8 @@ public:
          flagged = (need - double(res.overlap) > tol) || (double(res.overlap) - ub > tol);
          if (gjkHit) { const double dot = double(res.normal * gjkN); flipped = dot < 0.0; normalOff = !flipped && dot < 0.94; }
       }
-      else err = -gjkOverlap;                                                       // closed form missed a contact GJK sees
+      // closed form missed a contact GJK sees
+      else err = -gjkOverlap;
       ++st.n; st.sumAbsErr += std::abs(err); st.maxUnder = std::max(st.maxUnder, -err); st.maxOver = std::max(st.maxOver, err);
       if (std::abs(err) > tol) ++st.wrong;
       if (flagged) ++st.verifierFlagged;
@@ -1680,62 +1516,49 @@ public:
       }
    }
 
-   // Runtime switch (default false = exact pre-existing GJK/EPA-only behaviour). Public so
-   // ComputeContacts can set it once at construction from ModelParameters.useAnalyticalContactDetection.
+   // Runtime switch (default false = GJK/EPA only). Public so ComputeContacts can set it at construction from
+   // ModelParameters.useAnalyticalContactDetection.
    bool useAnalyticalContactDetection = false;
 
-   // Runtime switch (default false), only meaningful while useAnalyticalContactDetection is also
-   // true. See ModelParameters.usePureAnalyticalCylinder's own doc comment (SimulationParams.h) for
-   // the full rationale -- removes the GJK/EPA safety net for Cylinder x Cylinder entirely, trusting
-   // the closed-form Kodam et al. (2010) + Guo et al. (2012) dispatch as-is ("pure Kodam+Guo").
+   // Runtime switch (default false), only meaningful with useAnalyticalContactDetection: removes the GJK/EPA
+   // safety net for Cylinder x Cylinder and trusts the closed-form Kodam et al. (2010) + Guo et al. (2012)
+   // dispatch as-is ("pure Kodam+Guo"). See ModelParameters.usePureAnalyticalCylinder (SimulationParams.h).
    bool usePureAnalyticalCylinder = false;
-   // [Claude, 2026-09-30] see ModelParameters.refineCylinderContacts
+   // See ModelParameters.refineCylinderContacts.
    bool refineCylinderContacts = false;
 
-   // Runtime switch (default TRUE since 2026-09-20). See ModelParameters.useTightLayer1's own doc comment
-   // (SimulationParams.h) -- swaps the cheap "definitely too far apart to touch" pre-filter that runs
-   // BEFORE any real contact detection (Cylinder x Cylinder's own reject, and, newly, a Box x Box one
-   // that didn't exist before this flag) from a circumscribing-sphere-sum bound to each shape's own
-   // tight, orientation-aware bound (capsule/segment-distance for cylinders, single-axis projection
-   // for boxes). Meaningful for Cylinder x Cylinder regardless of useAnalyticalContactDetection (that
-   // reject runs either way); only has an effect for Box x Box when useAnalyticalContactDetection is
-   // also true (boxBoxSAT, the only thing this pre-filter guards for boxes, is only reached then).
-   bool useTightLayer1 = true; // default ON since 2026-09-20 (user request)
+   // Runtime switch (default true), see ModelParameters.useTightLayer1 (SimulationParams.h): replaces the cheap
+   // "too far apart to touch" pre-filter (Cylinder x Cylinder reject, plus a Box x Box one) by a tight,
+   // orientation-aware bound (axis-segment distance for cylinders, single-axis projection for boxes) instead of
+   // the circumscribing-sphere sum. Acts on Cylinder x Cylinder regardless of useAnalyticalContactDetection; on
+   // Box x Box only when useAnalyticalContactDetection is true (boxBoxSAT is only reached then).
+   bool useTightLayer1 = true;
 
-   // See ModelParameters::useRotationalEffectiveMass's own doc comment (SimulationParams.h) for the full
-   // derivation. It changes the force law's OWN calibration -- read by ComputeContacts (not this class directly) at the
-   // point it calls collisionResponse_.setStiffnessAndDamping(...), since that is where the generalized
-   // effective mass actually needs to replace the plain translational one.
+   // See ModelParameters::useRotationalEffectiveMass (SimulationParams.h). Changes the force-law calibration, so
+   // it is read by ComputeContacts where it calls collisionResponse_.setStiffnessAndDamping(...), the point at
+   // which the generalized effective mass replaces the translational one.
    bool useRotationalEffectiveMass = false;
 
-   // [Claude, 2026-10-29] useSpheroBoxContact/spheroBoxRadius/useSpheroBoxAnalytical (spherosimplex box
-   // contact) removed entirely -- unused by any thesis-cited result; archived at
-   // archive/unused_contact_methods/.
-   // See ModelParameters::cylinderContactSkin's own doc comment (SimulationParams.h). 0 = off.
+   // See ModelParameters::cylinderContactSkin (SimulationParams.h). 0 = off.
    real_t cylinderContactSkin = real_t(0);
-   // See ModelParameters::boxContactSkin's own doc comment (SimulationParams.h). 0 = off. Box
-   // analog of cylinderContactSkin, mutable for the same reason (toggled off/back-on around the
-   // recursive inflated-shape call -- see the Box x Box/Box x HalfSpace/Box x CylindricalBoundary
-   // overloads above).
+   // See ModelParameters::boxContactSkin (SimulationParams.h). 0 = off. Box analogue of cylinderContactSkin;
+   // mutable for the same reason (toggled off and back on around the recursive inflated-shape call in the
+   // Box x Box / Box x HalfSpace / Box x CylindricalBoundary overloads above).
    real_t boxContactSkin = real_t(0);
 
    // Secondary contact point (arch/tunnel containment only, Box/Cylinder floaters): the containment
-   // branches' farthest-point search can find TWO independent points simultaneously poking past the
-   // tube radius at once -- e.g. an elongated floater wedged so both a leading and trailing corner
-   // (or, for a Cylinder, both end-cap rims) breach simultaneously. The base GeneralContactDetection
-   // interface only carries ONE contact point/normal/depth per call, so the worse of the two still
-   // drives the normal return-value path unchanged (full LinearSpringDashpot response, incl. friction
-   // and tangential-spring history, via ComputeContacts as before); the second one is exposed here so
-   // ComputeContacts can give it its own simplified one-sided response (see that call site's own
-   // comment for why it's simplified) instead of silently discarding it, as happened before this.
+   // farthest-point search can find two independent points poking past the tube radius at once (an elongated
+   // floater wedged with a leading and a trailing corner, or both end-cap rims, out). The base interface carries
+   // one contact per call, so the worse point takes the normal path (full LinearSpringDashpot response via
+   // ComputeContacts); the second is exposed here so ComputeContacts can give it a simplified one-sided
+   // response instead of discarding it.
    bool hasSecondaryContact() const { return hasSecondaryContact_; }
    const mesa_pd::Vec3& getSecondaryContactPoint() const { return secondaryContactPoint_; }
    const mesa_pd::Vec3& getSecondaryContactNormal() const { return secondaryContactNormal_; }
    real_t getSecondaryPenetrationDepth() const { return secondaryPenetrationDepth_; }
-   // Called once per pair by ComputeContacts before dispatching -- this object is reused across every
-   // pair visited in a sub-cycle (not reconstructed per-pair), so without an explicit reset a stale
-   // hasSecondaryContact_=true from a PREVIOUS pair could leak into a pair whose own branch (or a
-   // branch other than the two containment ones below) never touches these fields at all.
+   // Called once per pair by ComputeContacts before dispatching: this object is reused for every pair in a
+   // sub-cycle, so a stale hasSecondaryContact_ must not leak into a pair whose branch (anything other than the
+   // two containment branches above) never touches these fields.
    void resetSecondaryContact() { hasSecondaryContact_ = false; }
 
 private:
@@ -1750,18 +1573,15 @@ private:
 };
 
 
-// Per-rank CSV writer for ModelParameters.logFloaterHistory (see that flag's own doc comment in
-// SimulationParams.h for the full rationale). One instance is owned by ParticleKernels and shared
-// (by pointer) with ComputeContacts and ComputeLubrication, since both are the only two places a
-// contact/lubrication pair is actually computed and force-applied. Disabled (enabled_ == false) is
-// the zero-cost default: every call site below early-returns before touching the file.
+// Per-rank CSV writer for ModelParameters.logFloaterHistory (see SimulationParams.h). Owned by ParticleKernels
+// and shared by pointer with ComputeContacts and ComputeLubrication, the places where a contact/lubrication pair
+// is computed and its force applied. Disabled (enabled_ == false) is the zero-cost default: every call below
+// returns early before touching the file.
 class FloaterHistoryLogger {
 public:
-   // Called once, after ModelParameters is known, before the main timeloop starts. baseFolder must
-   // already exist (Antidunes.cpp creates it root-only, alongside vtk-out/eval/snapshots) -- every
-   // rank opens (and truncates) its OWN file here, so this must run after that directory exists on
-   // shared storage but does not itself need a barrier (setupBlockForest and friends, called between
-   // directory creation and this constructor, already involve collective MPI calls).
+   // Called once, after ModelParameters is known, before the main timeloop. baseFolder must already exist
+   // (Antidunes.cpp creates it on root); every rank opens (and truncates) its own file. No barrier needed:
+   // collective MPI calls (setupBlockForest etc.) already lie between directory creation and this call.
    void init(const std::string& baseFolder, bool enabled)
    {
       enabled_ = enabled;
@@ -1775,30 +1595,19 @@ public:
                "penetrationDepth,overlapMagnitude,forceOnA_x,forceOnA_y,forceOnA_z,forceOnB_x,forceOnB_y,forceOnB_z\n";
       file_.flush();
 
-      // Second file, same toggle: a per-floater WORLD-STATE snapshot (not per-contact) -- what THIS
-      // rank currently believes every floater's position/velocity/ownership is, for every particle it
-      // holds (local AND ghost copies), taken right after each sub-cycle's first sync (see
-      // doDEMSubCycles' logFloaterStates() call site). Answers "what does each process know about the
-      // floaters at time t": comparing one rank's row for a given uid against another rank's row for
-      // the SAME uid at the SAME (mainStep,subCycle) directly shows sync staleness/divergence (e.g. a
-      // ghost copy whose position lags the owner's real copy), independent of whether a contact was
-      // even computed that cycle.
+      // Second file, same toggle: a per-floater world-state snapshot (not per-contact) of every particle this
+      // rank holds (local and ghost copies), taken right after each sub-cycle's first sync (logFloaterStates()
+      // in doDEMSubCycles). Comparing two ranks' rows for the same uid at the same (mainStep,subCycle) shows
+      // sync staleness/divergence (e.g. a ghost copy lagging the owner), whether or not a contact was computed.
       stateFile_.open(baseFolder + "/rank_" + std::to_string(rank) + "_state.csv",
                        std::ios::out | std::ios::trunc);
       WALBERLA_CHECK(stateFile_.is_open(), "[FloaterHistoryLogger] failed to open state CSV for rank " << rank
          << " in \"" << baseFolder << "\" -- does the directory exist?");
-      // hydroForce/hydroTorque: the raw MEM (momentum-exchange method) hydrodynamic force/torque
-      // (ac.getHydrodynamicForce/Torque), computed once per main LBM step by
-      // reduceAndAvgHydroForces() BEFORE doDEMSubCycles' sub-cycle loop even starts, from the
-      // fluid-boundary-link PDFs around the particle's mapped cells (SimpleBB) -- this is exactly
-      // the same value AddExternalForces reads when it logs "[AddExternalForces] NaN/Inf
-      // hydrodynamic force". IMPORTANT: unlike position/velocity/rotation, this field is NOT part
-      // of ParticleGhostCopyNotification's packed field list (checked directly against
-      // mesa_pd/mpi/notifications/ParticleGhostCopyNotification.h) -- it is never synced to ghost
-      // copies at all. So it only ever holds a real, current value on the OWNING rank's row
-      // (isGhost=0/isLocal=1); every ghost-copy row (isGhost=1) will read whatever default/stale
-      // value that copy's struct happens to hold, not a live number -- do not compare hydroForce
-      // across ranks the way position/velocity are compared elsewhere in this class's own comment.
+      // hydroForce/hydroTorque: the raw MEM hydrodynamic force/torque (ac.getHydrodynamicForce/Torque),
+      // computed once per main LBM step by reduceAndAvgHydroForces() before the DEM sub-cycles, i.e. the value
+      // AddExternalForces checks for NaN/Inf. Unlike position/velocity/rotation it is not part of
+      // ParticleGhostCopyNotification, so it is only valid on the owning rank's row (isGhost=0); ghost rows hold
+      // stale/default values and must not be compared across ranks.
       stateFile_ << "mainStep,subCycle,observingRank,uid,ownerRank,isGhost,isLocal,shapeType,"
                     "posX,posY,posZ,velX,velY,velZ,angVelX,angVelY,angVelZ,forceX,forceY,forceZ,"
                     "torqueX,torqueY,torqueZ,hydroForceX,hydroForceY,hydroForceZ,"
@@ -1808,36 +1617,27 @@ public:
 
    bool enabled() const { return enabled_; }
 
-   // nullptr (default) -> every floater is logged, as before. Non-null -> log() and logState() below
-   // skip any row whose particle(s) aren't in this set (see ModelParams::logFloaterHistoryReleaseStepFilter
-   // for why: restricts the heavy per-subcycle world-state snapshot to one release batch instead of
-   // all 1000 floaters). Pointer, not owned -- caller (ParticleKernels) keeps the real set alive.
+   // nullptr (default) -> every floater is logged. Non-null -> log() and logState() skip rows whose particle(s)
+   // are not in this set (ModelParams::logFloaterHistoryReleaseStepFilter: restricts the heavy per-sub-cycle
+   // snapshot to one release batch). Not owned; the caller (ParticleKernels) keeps the set alive.
    void setUidFilter(const std::unordered_set< walberla::id_t >* uidFilter) { uidFilter_ = uidFilter; }
 
-   // 0 (default) -> log from step 0, as before. See ModelParams::logFloaterHistoryStartStep's own
-   // comment (SimulationParams.h) for why: a targeted rerun of an already-approximately-located crash
-   // doesn't need (and can't afford, size-wise) full-resolution logging for every step before the
-   // window that actually matters.
+   // 0 (default) -> log from step 0. Otherwise skip earlier steps (ModelParams::logFloaterHistoryStartStep), so a
+   // targeted rerun logs only the window of interest.
    void setMinStep(uint_t minStep) { minStep_ = minStep; }
 
-   // 0 (default, converted to the max uint_t sentinel) -> log through to the end of the run, as
-   // before. Nonzero -> the upper-bound counterpart to setMinStep above (see
-   // ModelParams::logFloaterHistoryEndStep's own comment in SimulationParams.h).
+   // 0 (default, converted to the max uint_t sentinel) -> log to the end of the run. Nonzero -> upper bound
+   // counterpart of setMinStep (ModelParams::logFloaterHistoryEndStep).
    void setMaxStep(uint_t maxStep)
    {
       maxStep_ = (maxStep == uint_t(0)) ? std::numeric_limits< uint_t >::max() : maxStep;
    }
 
-   // kind: "contact" (ComputeContacts) or "lubrication" (ComputeLubrication). detectionPath describes
-   // which algorithm actually produced this row: for Box-Box / Cylinder-Cylinder pairs (the only two
-   // gated by ModelParameters.useAnalyticalContactDetection) this is the string recorded by
-   // SolidCylinderContactDetection::recordDetectionPath -- "closed-form analytical (scenario=...)" or
-   // "GJK/EPA fallback (tier1/special-contact: ...)"; for every other shape pair (no analytical/GJK choice
-   // exists) or for lubrication rows, the caller passes a fixed descriptive label instead. forceOnA/
-   // forceOnB are the FORCE DELTA this specific pair contributed this sub-cycle (caller captures
-   // ac.getForceRef before/after applying the pair's force, since both LinearSpringDashpot and
-   // LubricationCorrectionKernel add atomically onto whatever earlier contacts already accumulated
-   // this sub-cycle -- reading the accumulated total here would conflate multiple contacts).
+   // kind: "contact" (ComputeContacts) or "lubrication" (ComputeLubrication). detectionPath names the algorithm
+   // that produced the row: for Box-Box / Cylinder-Cylinder (gated by useAnalyticalContactDetection) the string
+   // recorded by SolidCylinderContactDetection::recordDetectionPath; otherwise, and for lubrication rows, a fixed
+   // label from the caller. forceOnA/forceOnB are the force DELTA of this pair in this sub-cycle (the caller
+   // reads ac.getForceRef before/after, since the kernels add onto earlier contacts' accumulated force).
    template< typename ParticleAccessor_T >
    void log(uint_t mainStep, uint_t subCycle, const char* kind, const ParticleAccessor_T& ac,
             size_t idx1, size_t idx2, const mesa_pd::Vec3& contactPoint, const mesa_pd::Vec3& normal,
@@ -1859,23 +1659,17 @@ public:
             << (-penetrationDepth) << ','
             << forceOnA[0] << ',' << forceOnA[1] << ',' << forceOnA[2] << ','
             << forceOnB[0] << ',' << forceOnB[1] << ',' << forceOnB[2] << '\n';
-      // Flush every row, not just at shutdown: this run can WALBERLA_ABORT/MPI_ABORT at any point
-      // (e.g. ContactHistoryNotification's own WALBERLA_CHECK), and the whole point of this logger is
-      // to have the data available for exactly that crash -- an unflushed, lost final row would be
-      // the single most important one.
+      // Flush every row: the run can abort (WALBERLA_ABORT/MPI_ABORT) at any point, and the final rows before a
+      // crash are the most important ones.
       file_.flush();
    }
 
-   // One row per floater particle (sphere/box/cylinder -- type 1/3/4, see ParticleKernels' own "5
-   // types" comment) THIS rank currently holds, local or ghost. Called from doDEMSubCycles right
-   // after each sub-cycle's first sync, via a forEachParticle sweep (see logFloaterStates() there) --
-   // deliberately NOT restricted to SelectLocal(), since the whole point is to also capture ghost
-   // copies' state for the staleness/divergence comparison described above.
-   // fluidDensity: rho at this floater's current position, sampled from the PDF field by the caller
-   // (ParticleKernels::sampleFluidDensityAt) -- the same quantity ReconstructInterfaceCellABB.h's
-   // [LOW-RHO] guard checks before u/=rho. Only meaningful on the row where isLocal=1 (the position
-   // was sampled against THIS rank's own block); a ghost row's position may fall outside every block
-   // this rank owns, in which case the caller passes NaN (see sampleFluidDensityAt's own doc comment).
+   // One row per floater particle this rank holds, local or ghost. Called from doDEMSubCycles right after each
+   // sub-cycle's first sync (logFloaterStates()); deliberately not restricted to SelectLocal(), so ghost
+   // copies are captured for the staleness comparison described above.
+   // fluidDensity: rho at the floater position, sampled by the caller (ParticleKernels::sampleFluidDensityAt);
+   // the quantity the [LOW-RHO] guard in ReconstructInterfaceCellABB.h checks. Only meaningful for isLocal=1
+   // rows; for a position outside this rank's blocks the caller passes NaN.
    template< typename ParticleAccessor_T >
    void logState(uint_t mainStep, uint_t subCycle, const ParticleAccessor_T& ac, size_t idx, real_t fluidDensity)
    {
@@ -1889,10 +1683,8 @@ public:
       const auto& pos         = ac.getPosition(idx);
       const auto& hydroForce  = ac.getHydrodynamicForce(idx);
       const auto& hydroTorque = ac.getHydrodynamicTorque(idx);
-      // Quaternion (r,i,j,k), body->world -- added to let an independent, offline check reconstruct
-      // each floater's true oriented footprint (box corners / cylinder axis) at any logged instant,
-      // rather than assuming axis-aligned (wrong as soon as any contact has imparted torque -- see
-      // angVel above, which is often nonzero well before any "expected" collision).
+      // Quaternion (r,i,j,k), body->world: lets an offline check reconstruct each floater's oriented footprint
+      // (box corners / cylinder axis) at any logged instant.
       const auto& quat = ac.getRotation(idx).getQuaternion();
       stateFile_ << mainStep << ',' << subCycle << ',' << mpi::MPIManager::instance()->rank() << ','
                  << ac.getUid(idx) << ',' << ac.getOwner(idx) << ','
@@ -1910,15 +1702,10 @@ public:
       stateFile_.flush(); // same crash-survivability rationale as log() above
    }
 
-   // One-sided companion to log() above, for ComputeTunnelContacts (arch tunnels aren't real mesa_pd
-   // particles -- see that class's own comment). Reuses the exact same CSV columns as a real
-   // contact/lubrication pair (kind="tunnel") so no downstream parsing script needs a schema branch:
-   // uidB is a small sentinel (900000000 + tunnelIndex) that can never collide with a real 64-bit
-   // particle UID (this project's UIDs are always astronomically larger, e.g. ~1e17-1e18), ownerRankB
-   // is -1, shapeTypeB is 997 (never a valid mesa_pd::data::BaseShape::SHAPE_TYPE, which only spans
-   // 0-6) -- a "shapeTypeB==997" filter unambiguously selects tunnel-wall rows. forceOnB is the
-   // negation of forceOnA (the reaction the floater exerts on an infinite-mass wall, for readability --
-   // the wall itself never moves and has no accumulated force to diff before/after).
+   // One-sided companion to log() for ComputeTunnelContacts (arch tunnels are not mesa_pd particles). Same CSV
+   // columns (kind="tunnel"): uidB is the sentinel 900000000 + tunnelIndex (real UIDs are far larger), ownerRankB
+   // is -1, shapeTypeB is 997 (not a valid mesa_pd SHAPE_TYPE), so "shapeTypeB==997" selects tunnel-wall rows.
+   // forceOnB = -forceOnA (reaction on the infinite-mass wall, for readability).
    template< typename ParticleAccessor_T >
    void logTunnelContact(uint_t mainStep, uint_t subCycle, const ParticleAccessor_T& ac, size_t idx,
       size_t tunnelIndex, const mesa_pd::Vec3& contactPoint, const mesa_pd::Vec3& normal,
@@ -1939,7 +1726,7 @@ public:
             << (-penetrationDepth) << ','
             << forceOnFloater[0] << ',' << forceOnFloater[1] << ',' << forceOnFloater[2] << ','
             << -forceOnFloater[0] << ',' << -forceOnFloater[1] << ',' << -forceOnFloater[2] << '\n';
-      // Same crash-survivability rationale as log()/logState() above.
+      // Flush every row (crash survivability, see log()).
       file_.flush();
    }
 
@@ -1953,14 +1740,16 @@ private:
 };
 
 
-//! Diagnostic artificial caps for cylinder floaters (ModelParameters.rodCap*), per rank; see SimulationParams.h. All zero = off.
+//! Diagnostic artificial caps for cylinder floaters (ModelParameters.rodCap*), per rank; see SimulationParams.h.
+//! All zero = off.
 struct RodCaps { real_t hydroForce = real_t(0), hydroTorque = real_t(0), velocity = real_t(0), angularVelocity = real_t(0), overlap = real_t(0);
                  bool any() const { return hydroForce > real_t(0) || hydroTorque > real_t(0) || velocity > real_t(0) || angularVelocity > real_t(0) || overlap > real_t(0); } };
 struct RodCapStats { uint64_t hydroForce = 0, hydroTorque = 0, velocity = 0, angularVelocity = 0, overlap = 0, nonFinite = 0;
                      real_t maxHydroForce = real_t(0), maxHydroTorque = real_t(0), maxVelocity = real_t(0), maxAngularVelocity = real_t(0), maxOverlap = real_t(0); };
 inline RodCaps     g_rodCaps;
 inline RodCapStats g_rodCapStats;
-//! [Claude, 2026-09-21] ModelParameters.rodPrescribedVelocity (test option, default off): constant rigid velocity imposed on all rods after every sub-cycle's velocity update
+//! ModelParameters.rodPrescribedVelocity (test option, default off): constant rigid velocity imposed on all
+//! sphere/box/cylinder floaters after every sub-cycle's velocity update
 inline Vector3< real_t > g_rodPrescribedVelocity{ real_t(0) };
 inline bool              g_rodPrescribedVelocityOn = false;
 inline void logRodCapHit(const char* what, walberla::id_t uid, uint_t step, uint_t sub, real_t before, real_t cap)
@@ -2026,22 +1815,14 @@ private:
    uint_t subCycle_ = uint_t(0);
 };
 
-// See ModelParameters::useRotationalEffectiveMass's own doc comment (SimulationParams.h) for the full
-// derivation and literature reference. Computes the generalized (translational + rotational) effective
-// mass for a contact at `contactPoint` with unit normal `contactNormal` between bodies idx1/idx2:
+// Generalized (translational + rotational) effective mass for a contact at `contactPoint` with unit normal
+// `contactNormal` between bodies idx1/idx2 (see ModelParameters::useRotationalEffectiveMass, SimulationParams.h):
 //     1/meff = 1/mA + 1/mB + (rA x n)^T IA_world^-1 (rA x n) + (rB x n)^T IB_world^-1 (rB x n)
-// where rA/rB are the contact point's offset from each body's centre of mass. Each body's inverse
-// inertia tensor is stored in BODY frame (getInvInertiaBF) and must be rotated into world frame before
-// use here -- exactly the same math::transformMatrixRART(rotationMatrix, invInertiaBF) transform
-// mesa_pd::kernel::VelocityVerlet itself uses to turn torque into angular acceleration.
-//
-// For a FIXED/infinite-mass body (walls, pillars) both getInvMass and getInvInertiaBF are zero by
-// construction (see ComputeContacts' own comment on why meff = 1/(invMass_floater + 0) already holds for
-// the plain translational formula), so that body's rotational term is automatically zero here too.
-//
-// For sphere-sphere contact, rA and rB are always parallel to contactNormal (the line of centres), so
-// rA x n = rB x n = 0 identically and this reduces EXACTLY to the plain translational formula --
-// consistent with sphere-sphere floaters never showing the energy-injection defect this option targets.
+// with rA/rB the contact point's offset from each centre of mass. The inverse inertia is stored in the body frame
+// (getInvInertiaBF) and rotated to world with math::transformMatrixRART, as in mesa_pd::kernel::VelocityVerlet.
+// For a fixed/infinite-mass body (walls, pillars) getInvMass and getInvInertiaBF are zero, so its terms vanish.
+// For sphere-sphere contact rA and rB are parallel to the normal, so this reduces exactly to the translational
+// formula.
 template < typename Accessor >
 inline real_t computeRotationalEffectiveMass(Accessor& ac, size_t idx1, size_t idx2,
                                               const mesa_pd::Vec3& contactPoint,
@@ -2096,19 +1877,16 @@ public:
       acd_.useTightLayer1                = useTightLayer1;
       contact_filter_.useOwnerRankTiebreak = useContactFilterOwnerTiebreak;
 
-      // Wire the optional ContactHistoryNotification diagnostic hook (see that file's own comment)
-      // to acd_'s local per-pair detection-path record, so a [ContactHistory DUPLICATE] warning can
-      // report whether the colliding contact came from the closed-form analytical path or its
-      // GJK/EPA fallback. Captures `this` (not acd_ directly) since acd_ is a member and this
-      // ComputeContacts instance outlives the simulation.
+      // Wire the optional ContactHistoryNotification diagnostic hook to acd_'s per-pair detection-path record,
+      // so a [ContactHistory DUPLICATE] warning can report whether the contact came from the closed form or the
+      // GJK/EPA fallback. Captures `this`, which outlives the simulation.
       mesa_pd::contactHistoryDuplicateDiagnosticHook = [this](walberla::id_t a, walberla::id_t b) -> std::string {
          const std::string* path = acd_.lookupDetectionPath(a, b);
          std::string result = path ? *path
                                     : std::string("not tracked locally on this rank this cycle "
                                                    "(not a Cylinder x Cylinder pair, or computed on a different rank)");
-         // See pairContactInputState_'s own doc comment: this rank's full local view of both particles'
-         // pose/velocity at the moment it fed the ContactFilter decision, if this rank computed this
-         // pair's contact at all this cycle.
+         // This rank's local view of both particles at the ContactFilter decision, if it computed this pair's
+         // contact this cycle (see pairContactInputState_).
          if (const ContactInputState* state = lookupContactInputState(a, b))
             result += " || input state: " + state->format();
          return result;
@@ -2116,23 +1894,18 @@ public:
    }
 
    // Read-only access to acd_'s per-rank scenario/fallback tallies, for
-   // ParticleKernels::logContactDetectionStatistics() to MPI-sum and log at end-of-run.
+   // ParticleKernels::logContactDetectionStatistics() to MPI-sum and log.
    const SolidCylinderContactDetection::ContactDetectionStats& contactStats() const { return acd_.contactStats; }
 
-   // Zeroes acd_'s per-rank tallies in place, for ParticleKernels::resetContactDetectionStatistics()
-   // -- lets a periodic (not just end-of-run) log report PER-INTERVAL counts instead of a running
-   // cumulative total, e.g. to see whether a scenario's mix of cylinder-cylinder sub-cases shifts as
-   // a jam builds up over the run.
+   // Zeroes acd_'s per-rank tallies, for ParticleKernels::resetContactDetectionStatistics(), so a periodic log
+   // can report per-interval instead of cumulative counts.
    void resetContactStats() { acd_.contactStats = SolidCylinderContactDetection::ContactDetectionStats{}; }
 
-   // Wires ModelParameters.logFloaterHistory's CSV writer in (nullptr/disabled by default -- see
-   // FloaterHistoryLogger's own class comment). Both this and setStepInfo are called once per
-   // sub-cycle from doDEMSubCycles, mirroring the existing addExternalForces.setStepInfo/setSubCycle
-   // pattern already used there.
+   // Wires in ModelParameters.logFloaterHistory's CSV writer (nullptr/disabled by default, see
+   // FloaterHistoryLogger). Both this and setStepInfo are called once per sub-cycle from doDEMSubCycles.
    void setHistoryLogger(FloaterHistoryLogger* logger) { historyLogger_ = logger; }
    void setStepInfo(uint_t mainStep, uint_t subCycle) { mainStep_ = mainStep; subCycle_ = subCycle; acd_.shadowMainStep = mainStep; acd_.shadowSubCycle = subCycle; }
 
-   // Shadow mode (ModelParameters.shadowAnalyticCylinderLog): see SolidCylinderContactDetection::shadowCompare.
    // See ModelParameters::cylinderContactSkin (SimulationParams.h).
    void setCylinderContactSkin(real_t skin) { acd_.cylinderContactSkin = skin; }
    // See ModelParameters::boxContactSkin (SimulationParams.h).
@@ -2140,27 +1913,24 @@ public:
    void setRefineCylinderContacts(bool on) { acd_.refineCylinderContacts = on; }
    void setUsePureAnalyticalCylinder(bool on) { acd_.usePureAnalyticalCylinder = on; }
 
+   // Shadow mode (ModelParameters.shadowAnalyticCylinderLog): see SolidCylinderContactDetection::shadowCompare.
    void setShadowAnalytic(bool enabled, uint_t startStep, uint_t endStep)
    {
       acd_.shadowAnalyticLog = enabled; acd_.shadowStartStep = startStep; acd_.shadowEndStep = endStep;
    }
    const SolidCylinderContactDetection::ShadowStats& shadowStats() const { return acd_.shadowStats; }
 
-   // Debug/validation hook for the "flying floater" release-time-overlap bug (see
-   // SimulationObjects::freshlyActivatedFloaterUIDs' own doc comment) -- nullptr/disabled by
-   // default, same spirit as historyLogger_ above. When set, and a genuine contact resolved below
-   // involves a UID in this set, that's proof positive (not an approximation) that a floater was
-   // released while already overlapping an active neighbour, using the exact same detection this
-   // contact was already going through anyway.
+   // Debug hook for release-time overlaps (see SimulationObjects::freshlyActivatedFloaterUIDs); nullptr/disabled
+   // by default. A contact resolved below that involves a UID in this set proves a floater was released while
+   // already overlapping an active neighbour.
    void setFreshlyActivatedUIDs(std::shared_ptr< std::unordered_set< walberla::id_t > > uids)
    {
       freshlyActivatedUIDs_ = std::move(uids);
    }
 
-   // See ModelParams::logContactAnomalies' own doc comment in SimulationParams.h for what the three
-   // watchers this enables ([NORMAL-FLIP]/[PROLONGED-CONTACT]/[SIMULTANEOUS-CONTACTS]) do and why.
-   // endStep == 0 means unbounded (through end of run), same convention as FloaterHistoryLogger's own
-   // setMaxStep.
+   // See ModelParams::logContactAnomalies (SimulationParams.h) for the three watchers this enables
+   // ([NORMAL-FLIP]/[PROLONGED-CONTACT]/[SIMULTANEOUS-CONTACTS]). endStep == 0 means unbounded, as in
+   // FloaterHistoryLogger::setMaxStep.
    void setLogContactAnomalies(bool enabled, uint_t startStep, uint_t endStep)
    {
       logContactAnomalies_     = enabled;
@@ -2168,14 +1938,11 @@ public:
       contactAnomalyEndStep_   = (endStep == uint_t(0)) ? std::numeric_limits< uint_t >::max() : endStep;
    }
 
-   // Called once per sub-cycle by doDEMSubCycles, right after forEachParticlePairHalf(...,
-   // computeContacts, ...) finishes for that sub-cycle -- reports any floater that was resolved
-   // against kSimultaneousContactsThreshold or more OTHER bodies within this SAME sub-cycle
-   // ([SIMULTANEOUS-CONTACTS]: each contact's spring-dashpot force is computed independently and
-   // summed onto that body, so the effective combined stiffness may exceed what the explicit
-   // integrator's timestep was tuned to handle for a single dominant contact -- the "many floaters
-   // piled on top of each other" packing case), then clears the per-sub-cycle tally regardless of
-   // whether logging is even on (cheap; keeps the map from growing across sub-cycles it's disabled).
+   // Called once per sub-cycle by doDEMSubCycles after the contact sweep. [SIMULTANEOUS-CONTACTS] reports any
+   // floater resolved against kSimultaneousContactsThreshold (3) or more other bodies in the same sub-cycle:
+   // the independently computed spring-dashpot forces are summed, so the effective stiffness may exceed what the
+   // explicit integrator's timestep was tuned for (dense packing). The tally is cleared even when logging is
+   // off, so the map does not grow.
    void reportAndResetSimultaneousContacts()
    {
       if (logContactAnomalies_ && mainStep_ >= contactAnomalyStartStep_ && mainStep_ <= contactAnomalyEndStep_)
@@ -2201,19 +1968,14 @@ public:
 
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx1, const size_t idx2, ParticleAccessor_T& ac){
-      // Box-Box (and every other convex pair without an analytic overload) is handled by the
-      // GJK/EPA fallback in SolidCylinderContactDetection's GeneralContactDetection base, so
-      // floating boxes/cylinders collide with each other and with FixedBox pillars.
-      acd_.resetSecondaryContact(); // acd_ is reused across every pair -- see that method's own comment
+      // Pairs without an analytic overload (e.g. Box-Box) use the GJK/EPA path of the GeneralContactDetection
+      // base, so floating boxes/cylinders collide with each other and with fixed pillars.
+      acd_.resetSecondaryContact(); // acd_ is reused for every pair, see resetSecondaryContact()
       if (double_cast_(idx1, idx2, ac, acd_, ac))
       {
-         // Capture this rank's full local input state for the ContactFilter decision about to be made,
-         // keyed by uid pair -- see pairContactInputState_'s own doc comment for why. Only ever surfaced
-         // later if a [ContactHistory DUPLICATE] actually fires for this exact pair, via
-         // contactHistoryDuplicateDiagnosticHook below.
-         // [Claude, 2026-10-02] stores the raw values; the text is built only on lookup. Formatting it here,
-         // for every contact in every sub-cycle, took ~38 % of the busy ranks' time in the settled cuboid
-         // pile (eu-stack profile of the random_cuboids replay, step 70000 of 4284396).
+         // Capture this rank's local input state for the ContactFilter decision, keyed by uid pair (see
+         // pairContactInputState_); surfaced only if a [ContactHistory DUPLICATE] fires for this pair. Raw values
+         // are stored and formatted only on lookup, since formatting every contact was a large cost in dense piles.
          {
             const auto i1 = acd_.getIdx1();
             const auto i2 = acd_.getIdx2();
@@ -2246,13 +2008,9 @@ public:
                return; // skip this contact to avoid NaN propagation
             }
 
-            // Debug/validation hook for the "flying floater" release-time-overlap bug (see
-            // SimulationObjects::freshlyActivatedFloaterUIDs' own doc comment). uid1/uid2 only reach
-            // freshlyActivatedUIDs_ on the very first doDEMSubCycles() call after
-            // releaseSettledFloatingSpheres() unset FIXED -- so a genuine contact here, using the
-            // exact same GJK/EPA/analytical detection this pair was already going through, is direct
-            // proof (not an approximation) that the floater was released while already overlapping
-            // an active neighbour.
+            // Debug hook for release-time overlaps (see SimulationObjects::freshlyActivatedFloaterUIDs). UIDs are
+            // in freshlyActivatedUIDs_ only during the first doDEMSubCycles() call after
+            // releaseSettledFloatingSpheres() unset FIXED.
             if (freshlyActivatedUIDs_)
             {
                const walberla::id_t uid1 = ac.getUid(acd_.getIdx1());
@@ -2263,12 +2021,10 @@ public:
                                      ? ac.getBaseShape(acd_.getIdx1())->getShapeType() : uint_t(999);
                   const auto s2 = ac.getBaseShape(acd_.getIdx2())
                                      ? ac.getBaseShape(acd_.getIdx2())->getShapeType() : uint_t(999);
-                  // Only a contact at sub-cycle 0 can be an INSERTION overlap: the detection at the start of the
-                  // first sub-cycle runs on the positions/orientations the floaters had at the instant they were
-                  // released, before anything has moved. A contact at a LATER sub-cycle of that first step means the
-                  // floaters moved or rotated within it -- not an overlap at activation -- so the message below
-                  // ("insertion overlap ... increase the release stagger") would misdiagnose it. Log the full state
-                  // of both bodies instead (throttled) and continue; the contact is then handled like any other.
+                  // Only a contact at sub-cycle 0 can be an insertion overlap: that detection runs on the
+                  // positions the floaters had when released. A contact at a later sub-cycle of that step means
+                  // they moved or rotated within it, so log both bodies' full state (throttled) instead and
+                  // handle the contact like any other.
                   if (subCycle_ == uint_t(0))
                   {
                      WALBERLA_ABORT(
@@ -2313,16 +2069,10 @@ public:
                }
             }
 
-            // DIAGNOSTIC: flag an anomalously large (but finite, so the NaN guard above doesn't catch
-            // it) penetration depth from the GJK/EPA fallback (Box-Box, Cylinder-Cylinder, Cylinder-Box,
-            // ... -- any pair without an exact analytic overload). This mirrors a known, previously-hit
-            // failure mode in the Box-vs-CylindricalBoundary overload above ("a body large enough to
-            // ENVELOP... yields a near-radius penetration with a degenerate normal, which the spring-
-            // dashpot turns into a catastrophic force") -- but unlike that overload, this general path
-            // has no clamp, only this warning, since it's not yet confirmed whether clamping here is
-            // safe for every shape pair that can reach it. Threshold: overlapping by more than half the
-            // smaller body's interaction radius should never happen for two genuinely-separate convex
-            // bodies settling under gravity/contact damping.
+            // [LARGE-OVERLAP]: warns (no clamp) when a finite penetration exceeds half the smaller body's
+            // interaction radius, which should never happen for separate convex bodies settling under
+            // gravity/contact damping. Aimed at the GJK/EPA path (Box-Box, Cylinder-Cylinder, Cylinder-Box, ...),
+            // which unlike the pillar overloads has no envelope clamp; the check itself runs for every contact.
             const real_t overlapMag  = -acd_.getPenetrationDepth();
             const real_t smallerRad  = std::min(ac.getInteractionRadius(acd_.getIdx1()),
                                                  ac.getInteractionRadius(acd_.getIdx2()));
@@ -2345,18 +2095,11 @@ public:
                }
             }
 
-            // [DEM-WATCH]: flags a single contact whose overlap, relative to the smaller body's own
-            // size, is deep enough to be a plausible launch-strength hit -- not a fixed force number
-            // (the old trigger here), which conflated "large" across bodies of very different size/
-            // stiffness and, worse, was measured on ac.getForce(idx) *after* summing in whatever else
-            // already landed on the particle this sub-cycle, so it could never be tied back to one
-            // specific contact. Threshold picked from this scenario's own collision-cascade evidence
-            // (see the "Collision Cascade Traces" investigation): glancing/settling contacts sat at
-            // ~2-3% of the smaller interaction radius (penetration ~0.18-0.32 LU on a ~9.95 LU box),
-            // while every confirmed launch-causing hit sat at ~7-8% (penetration ~0.68-0.77 LU) --
-            // 0.06 (6%) sits in the gap between the two populations. Deliberately well below
-            // [LARGE-OVERLAP]'s 0.5 (that one flags near-degenerate GJK/EPA geometry that should never
-            // happen at all; this one flags an ordinary-but-strong contact worth a closer look).
+            // [DEM-WATCH]: a single contact whose overlap exceeds kDemWatchOverlapRatio (6 %) of the smaller
+            // interaction radius, i.e. a plausible launch-strength hit. Overlap-based rather than force-based, so
+            // it is comparable across body sizes and tied to one contact. Calibration: glancing/settling contacts
+            // sat at ~2-3 % (0.18-0.32 LU on a ~9.95 LU box), launch-causing hits at ~7-8 % (0.68-0.77 LU). Far
+            // below [LARGE-OVERLAP]'s 50 %, which flags near-degenerate geometry.
             if (overlapMag > kDemWatchOverlapRatio * smallerRad)
             {
                static uint_t demWatchLogCount = uint_t(0);
@@ -2378,28 +2121,20 @@ public:
                }
             }
 
-            // [NORMAL-FLIP] / [PROLONGED-CONTACT] / [SIMULTANEOUS-CONTACTS]: forensic instrumentation
-            // for the "logs/boxes silently build up 50%+ overlap over many sub-cycles, then explode
-            // once contact is finally resolved -- Sphere floaters in the identical jam never do this"
-            // investigation. All three are OFF by default (logContactAnomalies_) and, even when on,
-            // only active inside [contactAnomalyStartStep_, contactAnomalyEndStep_] -- see
-            // ModelParams::logContactAnomalies' own doc comment in SimulationParams.h.
+            // [NORMAL-FLIP] / [PROLONGED-CONTACT] / [SIMULTANEOUS-CONTACTS]: diagnostics for overlap building up
+            // over many sub-cycles before a contact explodes. Off by default (logContactAnomalies_) and only active
+            // in [contactAnomalyStartStep_, contactAnomalyEndStep_]; see ModelParams::logContactAnomalies.
             if (logContactAnomalies_ && mainStep_ >= contactAnomalyStartStep_ && mainStep_ <= contactAnomalyEndStep_)
             {
                const walberla::id_t uidA = ac.getUid(acd_.getIdx1());
                const walberla::id_t uidB = ac.getUid(acd_.getIdx2());
                const auto pairKey = uidA < uidB ? std::make_pair(uidA, uidB) : std::make_pair(uidB, uidA);
 
-               // [NORMAL-FLIP]: a large, sudden change in the reported contact normal for the SAME uid
-               // pair between the last sub-cycle they were seen in contact and this one -- the discrete
-               // mode-switch symptom of SAT (Box-Box) / the Kodam-scenario dispatch (Cylinder-Cylinder):
-               // a tiny positional change near a near-symmetric/degenerate configuration (two nearly-
-               // parallel logs, two nearly face-aligned boxes -- exactly what a tight jam produces) can
-               // flip which face/edge/rim is reported as the contact feature, snapping the normal to a
-               // very different direction. To the (continuous-normal-assuming) spring-dashpot integrator
-               // that looks like an impulsive kick, not a continuous restoring force. Sphere-sphere
-               // contact has exactly one possible feature (the center-to-center line) and can never do
-               // this -- a candidate explanation for why only Box/Cylinder floaters "explode" this way.
+               // [NORMAL-FLIP]: the contact normal of the same uid pair changed by more than ~45 deg (cos < 0.7)
+               // since the pair was last seen in contact. Symptom of the discrete feature switch of SAT (Box-Box)
+               // or the Kodam scenario dispatch (Cylinder-Cylinder) near symmetric/degenerate configurations
+               // (nearly parallel logs, nearly face-aligned boxes in a jam); the spring-dashpot sees an impulsive
+               // kick. Sphere-sphere contact has a single feature (line of centres) and cannot do this.
                {
                   const auto it = lastContactNormal_.find(pairKey);
                   if (it != lastContactNormal_.end())
@@ -2432,12 +2167,10 @@ public:
                   lastContactNormal_[pairKey] = n;
                }
 
-               // [PROLONGED-CONTACT]: tracks how many consecutive sub-cycles (allowing up to a 1-main-
-               // step gap, since a pair need not be re-detected on EVERY sub-cycle of the same step to
-               // still be the "same" ongoing contact) this exact pair has been resolved, plus the peak
-               // overlap seen during that stretch -- direct evidence for whether overlap crept up
-               // gradually over many steps (a slow build-up the contact force never fully arrested) or
-               // appeared suddenly within one step (more consistent with a detection/sync gap upstream).
+               // [PROLONGED-CONTACT]: number of sub-cycles this pair has been resolved in the current episode (an
+               // episode survives as long as the pair is seen again in the same or the next main step) and the peak
+               // overlap. Reported at 30 sub-cycles and then at every multiple of 50; shows whether overlap crept up
+               // gradually or appeared within one step (pointing to a detection/sync gap).
                {
                   auto& episode = contactEpisodes_[pairKey];
                   if (mainStep_ > episode.lastSeenMainStep + uint_t(1))
@@ -2473,17 +2206,14 @@ public:
                   }
                }
 
-               // [SIMULTANEOUS-CONTACTS]: per-sub-cycle active-contact count per body, reported (and
-               // reset) once the whole sub-cycle's pairwise sweep finishes by
-               // reportAndResetSimultaneousContacts() (called from doDEMSubCycles right after this
-               // sub-cycle's forEachParticlePairHalf(computeContacts, ...) sweep) -- see that method's
-               // own comment for why this specifically targets the "many floaters piled on top of each
-               // other" packing case.
+               // [SIMULTANEOUS-CONTACTS]: per-sub-cycle contact count per body, reported and reset by
+               // reportAndResetSimultaneousContacts() after the sweep.
                ++contactCountThisSubCycle_[uidA];
                ++contactCountThisSubCycle_[uidB];
             }
 
-            // DIAGNOSTIC artificial cap (ModelParameters.rodCapOverlap): limit the penetration depth fed into the force law for contacts involving a rod (type 4)
+            // DIAGNOSTIC artificial cap (ModelParameters.rodCapOverlap): limit the penetration depth fed into the force
+            // law for contacts involving a rod (type 4)
             if (g_rodCaps.overlap > real_t(0) && (ac.getType(acd_.getIdx1()) == uint_t(4) || ac.getType(acd_.getIdx2()) == uint_t(4)))
             {
                const real_t pen = -acd_.getPenetrationDepth();
@@ -2491,12 +2221,10 @@ public:
                if (pen > g_rodCaps.overlap) { logRodCapHit("overlap", ac.getUid(acd_.getIdx1()), mainStep_, subCycle_, pen, g_rodCaps.overlap); acd_.getPenetrationDepth() = -g_rodCaps.overlap; ++g_rodCapStats.overlap; }
             }
             auto meff = real_c(1) / (ac.getInvMass(idx1) + ac.getInvMass(idx2));
-            // useRotationalEffectiveMass (any shape pair, see ModelParameters' own doc comment in
-            // SimulationParams.h): replace the plain translational reduced mass with the generalized
-            // effective mass AT THE ACTUAL CONTACT POINT just reported by acd_ -- the single change
-            // needed to make LinearSpringDashpot's stiffness/damping calibration correct for contacts
-            // whose point is off the line of centres (identical to the plain formula for sphere-sphere,
-            // where it never is).
+            // useRotationalEffectiveMass (any shape pair, see ModelParameters, SimulationParams.h): use the
+            // generalized effective mass at the contact point reported by acd_, so LinearSpringDashpot's
+            // stiffness/damping calibration is correct for contacts off the line of centres (identical to the plain
+            // formula for sphere-sphere).
             if (acd_.useRotationalEffectiveMass)
             {
                meff = computeRotationalEffectiveMass(ac, idx1, idx2, acd_.getContactPoint(), acd_.getContactNormal());
@@ -2506,8 +2234,7 @@ public:
             const uint_t t2 = std::max(ac.getType(acd_.getIdx1()), ac.getType(acd_.getIdx2()));
             collisionResponse_.setStiffnessAndDamping(t1, t2, restitutionCoefficient_, collisionTime_, kappa_, meff);
 
-            // Captured unconditionally (not just when historyLogger_ is on) -- [STRONG-CONTACT-FORCE]
-            // below needs this delta too, and it's a cheap Vec3 copy either way.
+            // Captured unconditionally: [STRONG-CONTACT-FORCE] below needs the delta too (cheap Vec3 copies).
             const mesa_pd::Vec3 forceBeforeA  = ac.getForceRef(acd_.getIdx1());
             const mesa_pd::Vec3 forceBeforeB  = ac.getForceRef(acd_.getIdx2());
             const mesa_pd::Vec3 torqueBeforeA = ac.getTorqueRef(acd_.getIdx1());
@@ -2516,15 +2243,10 @@ public:
             collisionResponse_(acd_.getIdx1(), acd_.getIdx2(), ac, acd_.getContactPoint(), acd_.getContactNormal(),
                                acd_.getPenetrationDepth(), particleTimestepSize_);
 
-            // [STRONG-CONTACT-FORCE]: permanent safety-net diagnostic, independent of logFloaterHistory
-            // (which is normally off). Fires whenever a single contact's force delta exceeds
-            // STRONG_FORCE_THRESHOLD and dumps a full breakdown -- this contact's own force/torque,
-            // each particle's total accumulated force/torque so far this sub-cycle, and each particle's
-            // hydrodynamic force/torque -- so an abnormal contact force (e.g. the launched floaters once
-            // traced to a DEM contact-overlap event in the collapsed-plane scenarios) is visible
-            // directly instead of inferred after the fact. Threshold is a round number well above a
-            // typical gravity-scale weight, deliberately lenient so a real event isn't missed. Throttled
-            // per rank.
+            // [STRONG-CONTACT-FORCE]: always-on safety-net diagnostic, independent of logFloaterHistory. When a
+            // single contact's force delta exceeds STRONG_FORCE_THRESHOLD (0.1, well above a typical gravity-scale
+            // weight, deliberately lenient), dumps this contact's force/torque, each particle's accumulated
+            // force/torque this sub-cycle and its hydrodynamic force/torque. Throttled per rank (100 lines).
             {
                const mesa_pd::Vec3 forceDeltaA  = ac.getForceRef(acd_.getIdx1())  - forceBeforeA;
                const mesa_pd::Vec3 forceDeltaB  = ac.getForceRef(acd_.getIdx2())  - forceBeforeB;
@@ -2562,11 +2284,11 @@ public:
                }
             }
 
-            // [Claude, 2026-10-01] [LAUNCH-TRACE] (env ANTIDUNES_LAUNCH_TRACE_UID=<uid>, ANTIDUNES_LAUNCH_TRACE_FROM=<step>,
-            // ANTIDUNES_LAUNCH_TRACE_TO=<step>): every contact of one floater in a step window, with both bodies' full state
-            // (position, rotation matrix, linear and angular velocity, shape type), the contact geometry and this contact's
-            // force/torque, to locate the contact that injects energy in the randomised cuboid drop tests (floaters
-            // launched from the pile at ~0.3 LU/step). Unthrottled inside the window; inert unless the variable is set.
+            // [LAUNCH-TRACE] (env ANTIDUNES_LAUNCH_TRACE_UID=<uid>, ANTIDUNES_LAUNCH_TRACE_FROM=<step>,
+            // ANTIDUNES_LAUNCH_TRACE_TO=<step>): every contact of one floater in a step window, with both bodies' full
+            // state (position, rotation matrix, linear and angular velocity, shape type), the contact geometry and
+            // this contact's force/torque, to locate a contact that injects energy (e.g. floaters launched from a
+            // pile). Unthrottled inside the window; inert unless the variable is set.
             {
                static const uint64_t traceUid  = std::getenv("ANTIDUNES_LAUNCH_TRACE_UID")
                                                     ? std::strtoull(std::getenv("ANTIDUNES_LAUNCH_TRACE_UID"), nullptr, 10) : 0;
@@ -2574,8 +2296,8 @@ public:
                                                     ? std::strtoull(std::getenv("ANTIDUNES_LAUNCH_TRACE_FROM"), nullptr, 10) : 0;
                static const uint64_t traceTo   = std::getenv("ANTIDUNES_LAUNCH_TRACE_TO")
                                                     ? std::strtoull(std::getenv("ANTIDUNES_LAUNCH_TRACE_TO"), nullptr, 10) : 0;
-               // speed trigger (ANTIDUNES_LAUNCH_SPEED=<LU/step>): trace every contact of a floater faster than this, at
-               // most 4000 lines per rank -- for runs that do not reproduce a specific launch exactly
+               // Speed trigger (ANTIDUNES_LAUNCH_SPEED=<LU/step>): trace every contact of a floater faster than
+               // this, at most 4000 lines per rank, for runs that do not reproduce a specific launch exactly.
                static const double traceSpeed = std::getenv("ANTIDUNES_LAUNCH_SPEED")
                                                    ? std::strtod(std::getenv("ANTIDUNES_LAUNCH_SPEED"), nullptr) : 0.0;
                static uint_t       speedLines = 0;
@@ -2615,12 +2337,8 @@ public:
 
             if (doLog)
             {
-               // Populated for Box-Box/Cylinder-Cylinder only (the two pairs
-               // useAnalyticalContactDetection actually gates -- see those overloads' own
-               // recordDetectionPath calls above). Every other pair either has an exact analytic
-               // overload (sphere-sphere, sphere-box, sphere-halfspace, ...) with no GJK/EPA choice
-               // at all, or -- per this class's own header comment -- has no analytic overload and
-               // always falls through GeneralContactDetection to GJK/EPA regardless of the flag.
+               // Tracked for Box-Box/Cylinder-Cylinder only (the pairs useAnalyticalContactDetection gates). Every
+               // other pair either has an exact analytic overload or always uses GJK/EPA.
                const std::string* trackedPath = acd_.lookupDetectionPath(ac.getUid(acd_.getIdx1()), ac.getUid(acd_.getIdx2()));
                const std::string detectionPath = trackedPath ? *trackedPath
                   : std::string("not Box-Box/Cylinder-Cylinder -- exact analytic overload or "
@@ -2631,18 +2349,11 @@ public:
                   detectionPath);
             }
 
-            // Secondary contact (arch/tunnel containment only, Box/Cylinder floaters): a second point
-            // independently poking past the tube radius at the same time as the primary one -- see
-            // SolidCylinderContactDetection::hasSecondaryContact()'s own comment. Deliberately NOT
-            // routed back through collisionResponse_ (LinearSpringDashpot): its tangential-spring
-            // history is keyed only by (idx1,idx2) UID pair, not by "which of the two contact points",
-            // so a second call for the same pair this same sub-cycle would read/overwrite the SAME
-            // history entry as the primary call just above -- conflating two physically distinct
-            // contact points' sliding history into one. A plain velocity-based normal+tangential
-            // spring-dashpot (no persistent history, same formula ComputeTunnelContacts already uses
-            // one-sided for the whole tube) sidesteps that entirely, reusing the SAME stiffness/
-            // damping just set above for this exact type pair -- both points are the same materials,
-            // same contact, just two places at once.
+            // Secondary contact (arch/tunnel containment only, Box/Cylinder floaters; see
+            // SolidCylinderContactDetection::hasSecondaryContact()). Not routed through collisionResponse_:
+            // LinearSpringDashpot's tangential-spring history is keyed by the particle pair only, so a second call
+            // would overwrite the primary contact's history. Instead a history-free velocity-based normal+tangential
+            // spring-dashpot (as in ComputeTunnelContacts) with the stiffness/damping just set for this type pair.
             if (acd_.hasSecondaryContact())
             {
                const mesa_pd::Vec3& secNormal = acd_.getSecondaryContactNormal();
@@ -2687,29 +2398,22 @@ private:
    real_t collisionTime_;
    real_t particleTimestepSize_;
 
-   // See the [DEM-WATCH] block in operator() above for how this was picked.
+   // [DEM-WATCH] threshold, see operator().
    static constexpr real_t kDemWatchOverlapRatio = real_t(0.06);
 
    FloaterHistoryLogger* historyLogger_ = nullptr;
    uint_t mainStep_ = uint_t(0);
    uint_t subCycle_ = uint_t(0);
 
-   // See setFreshlyActivatedUIDs()'s own doc comment above.
+   // See setFreshlyActivatedUIDs().
    std::shared_ptr< std::unordered_set< walberla::id_t > > freshlyActivatedUIDs_;
 
-   // Diagnostic side-channel (local to this rank, not synced), mirroring SolidCylinderContactDetection's
-   // own pairDetectionPath/recordDetectionPath/lookupDetectionPath pattern: remembers, per uid pair, the
-   // FULL local input state (both particles' position/orientation/velocity, ghost-vs-real, owner rank)
-   // this rank fed into contact_filter_ this cycle. Added to answer a concrete question raised while
-   // investigating the mesa_pd::mpi::ContactFilter double-accept race (job 4166652, ContactHistoryNotification
-   // duplicate-insert crash on a Cylinder x Box pair straddling a rank boundary): the existing
-   // [ContactHistory DUPLICATE] diagnostic can show that two ranks disagreed, but not WHAT each rank's
-   // own local view of the two particles was at that moment -- i.e. whether the disagreement traces to
-   // genuinely different (ghost-stale) input positions, as the GJK/EPA-determinism argument predicts, or
-   // something else. Wired into contactHistoryDuplicateDiagnosticHook below (same call site as the
-   // existing detection-path lookup) so a future reproduction of this crash prints both ranks' full input
-   // state side by side.
-   // [Claude, 2026-10-02] raw values instead of a preformatted string (see the call site); format() gives the same text
+   // Diagnostic side-channel (rank-local, not synced), like SolidCylinderContactDetection::pairDetectionPath:
+   // per uid pair, the local input state (both particles' pose/velocity, ghost flag, owner rank) this rank fed
+   // into contact_filter_ this cycle. Printed by contactHistoryDuplicateDiagnosticHook, so when two ranks
+   // disagree about a contact ([ContactHistory DUPLICATE], e.g. a ContactFilter double-accept on a pair
+   // straddling a rank boundary) both ranks' views can be compared, e.g. to detect stale ghost positions.
+   // Raw values are stored; format() builds the text on lookup.
    struct ContactInputSide
    {
       walberla::id_t                uid;
@@ -2755,13 +2459,12 @@ private:
 
    std::map< std::pair< walberla::id_t, walberla::id_t >, ContactInputState > pairContactInputState_;
 
-   // See setLogContactAnomalies()'s own doc comment above for what these three gate/feed.
+   // See setLogContactAnomalies().
    bool   logContactAnomalies_     = false;
    uint_t contactAnomalyStartStep_ = uint_t(0);
    uint_t contactAnomalyEndStep_   = std::numeric_limits< uint_t >::max();
 
-   // [NORMAL-FLIP]'s per-pair "last seen contact normal" (local to this rank, not synced -- same
-   // spirit as pairContactInputState_ above).
+   // [NORMAL-FLIP]'s per-pair last contact normal (rank-local, not synced).
    std::map< std::pair< walberla::id_t, walberla::id_t >, mesa_pd::Vec3 > lastContactNormal_;
 
    // [PROLONGED-CONTACT]'s per-pair episode state.
@@ -2774,8 +2477,8 @@ private:
    };
    std::map< std::pair< walberla::id_t, walberla::id_t >, ContactEpisodeState > contactEpisodes_;
 
-   // [SIMULTANEOUS-CONTACTS]' per-sub-cycle tally -- populated in operator(), consumed and cleared by
-   // reportAndResetSimultaneousContacts() once per sub-cycle.
+   // [SIMULTANEOUS-CONTACTS]' per-sub-cycle tally: filled in operator(), consumed and cleared by
+   // reportAndResetSimultaneousContacts().
    std::unordered_map< walberla::id_t, uint_t > contactCountThisSubCycle_;
 };
 
@@ -2801,8 +2504,8 @@ public:
       submergedVolumes_ = sv;
    }
 
-   // Option A: per-sphere tapered phantom force F_pred_z to subtract from the vertical MEM force.
-   // Enabled only when usePhantomForceCorrection is true; the map pointer stays null otherwise.
+   // Option A: per-sphere tapered phantom force F_pred_z to subtract from the vertical MEM force. Set only when
+   // usePhantomForceCorrection is true; null otherwise.
    void setPhantomForceZ(const std::unordered_map< walberla::id_t, real_t >* pf) {
       phantomForceZ_ = pf;
    }
@@ -2815,26 +2518,22 @@ public:
       comOffsetZ_ = com;
    }
 
-   // Wire up the step counter + eval frequency so the per-box force breakdown can be logged once
-   // per eval step (the counter is owned by the enclosing ParticleKernels and advances once per step).
+   // Step counter (owned by ParticleKernels, advances once per step), for the once-per-eval-step force log.
    void setStepInfo(const uint_t* stepCounter) { stepCounter_ = stepCounter; }
 
-   // Set once per sub-cycle by doDEMSubCycles; true only on the first sub-cycle of an eval step, so
-   // every floater (any count) logs its force breakdown exactly once per eval step.
+   // Set once per sub-cycle by doDEMSubCycles; true only on the first sub-cycle of an eval step, so every
+   // floater logs its force breakdown once per eval step.
    void setLogForces(bool logForces) { logForces_ = logForces; }
 
-   // Sub-cycle index within the current LBM step (0..numSubCycles-1), for the DEM/MEM-WATCH logs
-   // below -- lets a blowup that GROWS across sub-cycles (implicating DEM contact resolution, since
-   // hydro_force is fixed for the whole outer step and only F_contact is recomputed each sub-cycle)
-   // be told apart from one that is ALREADY anomalous at sub-cycle 0 (implicating MEM, since that is
-   // the first sub-cycle to see this step's hydro_force at all).
+   // Sub-cycle index within the current LBM step (0..numSubCycles-1), for the [MEM-WATCH] log. hydro_force is
+   // fixed for the whole outer step, so a value already anomalous at sub-cycle 0 points at MEM, one that grows
+   // across sub-cycles at DEM contact resolution.
    void setSubCycle(uint_t subCycle) { subCycle_ = subCycle; }
 
    template< typename ParticleAccessor_T >
    void operator()(const size_t idx, ParticleAccessor_T& ac){
       // Buoyancy acts only in Z because the hydrostatic MEM contribution is only in Z.
-      // Type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder;
-      // derive density from invMass×volume.
+      // Type 1 = floating sphere, type 3 = floating box, type 4 = floating cylinder; density from invMass x volume.
       const uint_t ptype = ac.getType(idx);
       const bool isFloater = (ptype == uint_t(1) || ptype == uint_t(3) || ptype == uint_t(4));
       const real_t rho = isFloater
@@ -2842,8 +2541,8 @@ public:
          : particleDensityRatio_;
 
       const real_t vFull = ac.getVolume(idx);
-      // For floaters use the precomputed submerged volume so the gas-phase portion does not
-      // contribute a spurious upward buoyancy force.  Non-floaters are always fully submerged.
+      // For floaters use the precomputed submerged volume so the gas-phase portion does not contribute a
+      // spurious buoyancy force. Non-floaters are always fully submerged.
       real_t vSub = vFull;
       if (isFloater && submergedVolumes_) {
          auto it = submergedVolumes_->find(ac.getUid(idx));
@@ -2851,12 +2550,11 @@ public:
       }
 
       // X/Y: full-volume driving force (pressure-gradient body force acts on the whole particle).
-      // Z:   useMemOnlyBuoyancy_ → (DEFAULT) gravity only (rho * vFull); the MEM/hydrodynamic force
-      //      alone supplies buoyant support (Bogner & Rude 2013 -- no separate geometric channel).
-      //      otherwise → gravity minus the analytic buoyancy term (vSub × g, fluid density = 1),
-      //      Antidunes' extended split (opt-in, pre-existing pre-default-flip behaviour).
-      // driveFloatersByMass_ → floaters are pushed with their own mass in X/Y (rho * vFull = m_p;
-      //         slope reading of the body force) instead of the fluid-density full-volume term.
+      // Z:   useMemOnlyBuoyancy_ (default) -> gravity only (rho * vFull); the MEM force alone supplies buoyant
+      //      support (Bogner & Rude 2013, no separate geometric channel).
+      //      otherwise -> gravity minus the analytic buoyancy term (vSub x g, fluid density = 1).
+      // driveFloatersByMass_ -> floaters are driven with their own mass in X/Y (rho * vFull = m_p; slope
+      //      reading of the body force) instead of the fluid-density full-volume term.
       const real_t driveVol = (isFloater && driveFloatersByMass_) ? rho * vFull : vFull;
       Vector3< real_t > bodyForce(
          driveVol * (*acceleration_)[0],
@@ -2867,66 +2565,42 @@ public:
       auto hydro_torque = ac.getHydrodynamicTorque(idx);
       const Vector3< real_t > hydroForceRaw = hydro_force; // pre-scaling value, kept for the verification log
 
-      // Option A — cancel the analytic phantom force in the VERTICAL MEM component only. F_pred_z is the
-      // double-counted pile-up head (buoyancy the flat-reference subtraction failed to remove and the
-      // geometric channel already supplies), which the MEM leaks as a spurious UPWARD lift.
-      //
-      // ONE-SIDED CLAMP: the phantom is strictly an UPWARD artifact, so cancelling it may only REDUCE a
-      // positive (upward) MEM force toward zero — it must never turn it negative and manufacture a downward
-      // force that was not there. Subtracting F_pred unclamped over-corrected in the first end-to-end test
-      // (phantom.log): near 50% submersion F_pred marginally exceeded the raw MEM force, flipping it
-      // negative, which sank the floater past 50% into the submerged-regime down-residual (a trap the
-      // taper leaves uncorrected) and down to the bottom. Clamping to max(raw − F_pred, 0) removes the
-      // levitation while structurally preventing that sink. Horizontal drag + dynamic fluctuations intact;
-      // self-disables where there is no pile-up (F_pred → 0). Particle-side only → no PDF feedback.
+      // Option A: cancel the analytic phantom force in the vertical MEM component only. F_pred_z is the
+      // double-counted pile-up head (buoyancy the flat-reference subtraction failed to remove and the geometric
+      // channel already supplies), which the MEM leaks as a spurious upward lift.
+      // One-sided clamp: the phantom is an upward artefact, so the correction may only reduce a positive MEM
+      // force toward zero, never make it negative (near 50 % submersion F_pred can exceed the raw MEM force,
+      // which would sink the floater). Horizontal drag and fluctuations are untouched; F_pred -> 0 without
+      // pile-up. Particle-side only, no PDF feedback.
       real_t phantomZ  = real_t(0); // clamped value actually subtracted
-      real_t rawFPred  = real_t(0); // unclamped F_pred, for the log — reveals when the clamp saturates
+      real_t rawFPred  = real_t(0); // unclamped F_pred, for the log (shows when the clamp saturates)
       bool   fPredSeen = false;
-      // Disabled under useMemOnlyBuoyancy_ (the default): that mode's entire point is that buoyant
-      // support comes solely from the raw MEM/hydrodynamic force (Bogner & Rude 2013's original
-      // formulation, no separate geometric buoyancy channel). This phantom-lift cancellation is itself
-      // a submergence-depth-derived correction bolted on AFTER that formulation to fix a pile-up
-      // over-lift issue this project found in more complex (flowing/multi-floater/pillar) scenarios
-      // Bogner's original static hydrostatic test never encountered -- applying it here would silently
-      // reintroduce exactly the kind of extra correction useMemOnlyBuoyancy_ is meant to strip out.
-      // Independent of whatever usePhantomForceCorrection_ is set to in the .prm.
+      // Disabled under useMemOnlyBuoyancy_ (the default), whose point is that buoyant support comes solely from
+      // the raw MEM force (Bogner & Rude 2013); this submergence-derived correction would reintroduce an extra
+      // channel. Independent of usePhantomForceCorrection_.
       if (isFloater && phantomForceZ_ && !useMemOnlyBuoyancy_) {
          auto itp = phantomForceZ_->find(ac.getUid(idx));
          if (itp != phantomForceZ_->end()) {
             rawFPred  = itp->second;
             fPredSeen = true;
             if (hydro_force[2] > real_t(0)) {
-               // F_pred can be NEGATIVE when the floater sits in a local trough (localSurfaceZ < flat
-               // reference, e.g. downstream of a pillar or in an antidune trough) — deltaH<0 there. That
-               // regime is outside the model (derived for pile-up, deltaH>0) and must not be allowed to
-               // ADD to the upward MEM force via hydro_force[2] -= (negative). Clamp to [0, hydro_force[2]].
+               // F_pred can be negative in a local trough (localSurfaceZ below the flat reference, e.g. behind a
+               // pillar or in an antidune trough, deltaH < 0), outside the pile-up model; it must not add to the
+               // upward MEM force. Clamp to [0, hydro_force[2]].
                phantomZ = std::clamp(rawFPred, real_t(0), hydro_force[2]);
                hydro_force[2] -= phantomZ;
             }
          }
       }
 
-      // Submersion-scaled hydrodynamic force (generalises the old binary vSub==0 airborne guard).
-      // The MEM (SimpleBB) builds the force as if every near-boundary cell were full liquid (ρ≈1),
-      // but a partially-emerged floater only pushes on a real fluid column over its SUBMERGED part.
-      // The emerged part's "force" is a phantom: cells the floater just vacated are reconstructed/
-      // refilled to liquid density, and a locally raised/dammed surface (pillar hump, displaced
-      // water) is under-counted by the flat hydrostatic reference ρ_hyd(z)=1+3·a_z·(z−h_liquid).
-      // Both leak a spurious upward impulse that can exceed the floater's weight and launch it
-      // ballistically up into the gas (nine.log: airborne sphere F_hydro_z≈+0.021 vs weight 0.011).
-      // Scaling F_hydro and the torque by the geometric submerged fraction V_sub/V_full removes the
-      // leak smoothly: fully submerged → ×1 (unchanged), fully emerged → ×0 (the old guard), and
-      // partially emerged → proportional. V_sub itself is read off the LIVE local waterline
-      // (computeFloaterBuoyancy), so this is correct on raised/dammed/wake surfaces too.
+      // Submersion-scaled hydrodynamic force (V_sub/V_full). The MEM (SimpleBB) treats near-boundary cells as full
+      // liquid, so the emerged part of a floater can see a phantom upward force (refilled vacated cells, raised
+      // surface under-counted by the flat hydrostatic reference rho_hyd(z) = 1 + 3 a_z (z - h_liquid)).
       real_t submFrac = real_t(1);
       if (isFloater) {
          submFrac = (vFull > real_t(0)) ? std::clamp(vSub / vFull, real_t(0), real_t(1)) : real_t(0);
-         // Geometric submersion scaling DELIBERATELY OFF: the phantom MEM lift is now corrected at its
-         // source by the per-link fill-weighting φ(x_b) in SimpleBB (Bogner & Rüde 2013, Eq. 5.9), so
-         // this coarse global V_sub/V_full factor is no longer applied. φ-weighting is the physical fix;
-         // this scaling was a band-aid that masked the same leak with a single geometric factor and is
-         // intentionally retired. submFrac is still computed for the [FloaterForces] log below.
-         // (Two-scenario validation: changes.md "Phantom-force investigation".)
+         // Deliberately OFF: the phantom lift is corrected at its source by the per-link fill weighting phi(x_b)
+         // in SimpleBB (Bogner & Rude 2013, Eq. 5.9). submFrac is still computed for the [FloaterForces] log.
          // hydro_force  *= submFrac;
          // hydro_torque *= submFrac;
       }
@@ -2938,7 +2612,7 @@ public:
          WALBERLA_LOG_WARNING("[AddExternalForces] NaN/Inf hydrodynamic torque on uid=" << ac.getUid(idx)
             << " pos=" << ac.getPosition(idx));
 
-      // DIAGNOSTIC artificial caps (ModelParameters.rodCapHydroForce/Torque) -- rods (type 4) only
+      // DIAGNOSTIC artificial caps (ModelParameters.rodCapHydroForce/Torque), rods (type 4) only
       if ((g_rodCaps.hydroForce > real_t(0) || g_rodCaps.hydroTorque > real_t(0)) && ac.getType(idx) == uint_t(4))
       {
          const uint_t stepNow = stepCounter_ ? *stepCounter_ : uint_t(0);
@@ -2950,26 +2624,17 @@ public:
          if (g_rodCaps.hydroTorque > real_t(0) && tm > g_rodCaps.hydroTorque) { logRodCapHit("hydroTorque", ac.getUid(idx), stepNow, subCycle_, tm, g_rodCaps.hydroTorque); hydro_torque *= g_rodCaps.hydroTorque / tm; ++g_rodCapStats.hydroTorque; }
       }
 
-      // MEM-WATCH: hydro_force is the fluid->particle momentum-exchange force, computed ONCE per LBM
-      // step (reduceAndAvgHydroForces, called before doDEMSubCycles) and held fixed across all
-      // sub-cycles of this step -- so if it is ALREADY large at subCycle_==0, the fluid coupling fed
-      // in a bad value before any DEM contact this step could have caused it, pointing at MEM rather
-      // than DEM. Checked every sub-cycle (not just once per eval step) so the exact step is caught.
-      // DISABLED (kEnableMemDemWatch=false): in a dense many-floater pile (e.g. 100-sphere stillwater
-      // showcase), routine steady-state hydro forces sit at/above kMemWatchThreshold essentially every
-      // sub-cycle, so this fires continuously instead of only on genuine blowups -- one such run
-      // produced a 28.7GB log that was ~97-99% this warning (plus its old DEM-WATCH sibling, now moved
-      // to ComputeContacts). Flip kEnableMemDemWatch back to true to re-enable (threshold/logic untouched).
+      // [MEM-WATCH]: |hydro_force| > kMemWatchThreshold. hydro_force is computed once per LBM step
+      // (reduceAndAvgHydroForces, before doDEMSubCycles) and fixed across sub-cycles, so a large value at
+      // subCycle_==0 points at the fluid coupling rather than DEM. Checked every sub-cycle to catch the exact step.
+      // Gated by kEnableMemDemWatch.
       if (kEnableMemDemWatch)
       {
          const real_t hydroMag = hydro_force.length();
          if (hydroMag > kMemWatchThreshold)
          {
-            // Throttled (unlike the original unthrottled version -- see kEnableMemDemWatch's own
-            // comment for the 28.7GB flooding incident this caused in a dense-pile run). Capped to
-            // the first 100 hits per rank, same convention as [STRONG-CONTACT-FORCE] in
-            // ComputeContacts, so re-enabling this is now safe regardless of how "steady-state"
-            // noisy a given scenario turns out to be.
+            // Throttled to 100 hits per rank (as [STRONG-CONTACT-FORCE]): in dense piles steady-state hydro forces
+            // can exceed the threshold every sub-cycle.
             static uint_t memWatchLogCount = uint_t(0);
             if (memWatchLogCount < uint_t(100))
             {
@@ -2984,28 +2649,18 @@ public:
          }
       }
 
-      // [DEM-WATCH] used to live here too, keyed off ac.getForce(idx) (accumulated contact+lubrication
-      // force on this particle so far this sub-cycle) exceeding a flat force number. Moved to
-      // ComputeContacts (see its operator(), right after [LARGE-OVERLAP]) and re-keyed off penetration
-      // depth relative to body size instead: a fixed force threshold couldn't distinguish "big because
-      // stiff/large body" from "big because of a genuinely deep, launch-strength overlap," and summing
-      // ac.getForce(idx) across possibly-several contacts this sub-cycle meant a firing here could never
-      // be traced back to the one contact that actually mattered. The per-contact penetration ratio can.
+      // [DEM-WATCH] is in ComputeContacts::operator() (per-contact overlap ratio, traceable to one contact).
 
-      // Per-floater force breakdown, once per eval step (doDEMSubCycles sets logForces_ on sub-cycle 0,
-      // so every sphere AND the box log exactly once). ac.getForce(idx) here = contact + lubrication
-      // accumulated THIS sub-cycle (ComputeContacts runs before AddExternalForces); hydro_force and
-      // bodyForce are the MEM and buoyancy/gravity/driving parts about to be added. This shows why
-      // equal-density floaters end at different depths: compare F_buoy+grav (model), F_hydro (flow),
-      // and F_contact (sphere-sphere pile / pillar / wall) per floater.
+      // Per-floater force breakdown, once per eval step (doDEMSubCycles sets logForces_ on sub-cycle 0).
+      // ac.getForce(idx) = contact + lubrication accumulated this sub-cycle (ComputeContacts runs first);
+      // hydro_force and bodyForce are the MEM and buoyancy/gravity/driving parts about to be added. Compares
+      // F_buoy+grav (model), F_hydro (flow) and F_contact (pile / pillar / wall) per floater.
       if (logForces_ && isFloater)
       {
          const auto fContact = ac.getForce(idx);
-         // Y-tilt angle, same convention as [BoxRightingMoment]'s own tiltDeg (Bogner & Rüde 2013,
-         // Fig. 5.6 validation, further up this file): for a pure rotation about Y, R(0,2)=sinθ,
-         // R(0,0)=cosθ. Only meaningful for box/cylinder floaters (spheres are rotationally symmetric,
-         // so their own rotation state carries no physical tilt information) -- gated the same way
-         // [BoxTorque]/[CylTorque] below already gate their own box/cylinder-only output.
+         // Y-tilt angle, same convention as [BoxRightingMoment]'s tiltDeg below (Bogner & Rude 2013, Fig. 5.6
+         // validation): for a pure rotation about Y, R(0,2)=sin(theta), R(0,0)=cos(theta). Box/cylinder floaters
+         // only (spheres carry no physical tilt).
          std::string tiltStr;
          if (ptype == uint_t(3) || ptype == uint_t(4))
          {
@@ -3035,13 +2690,11 @@ public:
 
       mesa_pd::addForceAtomic(idx, ac, hydro_force + bodyForce);
 
-      // Buoyancy righting / capsizing moment (Bogner & Rüde 2013, Fig. 5.4): the buoyancy force
-      // (vertical, +vSub·g) acts at the centre of buoyancy B = centroid of the submerged volume,
-      // not at the centre of gravity G (the COM). When the box tilts, B shifts horizontally off G,
-      // so the vertical buoyancy produces a moment (B − G) × F_buoy. We apply that moment here as an
-      // explicit torque (the net force is unchanged, so the equilibrium depth is unaffected). The
-      // sign is physical — it self-rights when B's metacentre is above G and tips further when below,
-      // exactly as in the figure. Spheres store no offset (B is on the vertical through G → 0 torque).
+      // Buoyancy righting / capsizing moment (Bogner & Rude 2013, Fig. 5.4): the buoyancy force (vertical,
+      // +vSub g) acts at the centre of buoyancy B (centroid of the submerged volume), not at the COM G. When the
+      // body tilts, B shifts off G and the buoyancy produces the moment (B - G) x F_buoy, applied here as an
+      // explicit torque (net force unchanged). It self-rights when the metacentre is above G and tips further
+      // when below. Spheres store no offset (B on the vertical through G, zero torque).
       Vector3< real_t > totalTorque = hydro_torque;
       if (isFloater && buoyancyCenterOffset_)
       {
@@ -3056,30 +2709,28 @@ public:
          }
       }
 
-      // Lowered centre of mass (pendulum righting torque). Gravity acts at the true COM, which a
-      // comOffsetZ < 0 places BELOW the geometric centroid (= the box's rotation centre). When the
-      // box tilts, this offset swings out to the side, so the weight produces a restoring moment
-      // (COM − centroid) × F_grav that raises the metacentric height and keeps the box upright —
-      // the configurable fix for the GM<0 rolling of a uniform-density log/cube. comOffsetZ = 0
-      // reproduces the uniform box exactly (no torque).
+      // Lowered centre of mass (pendulum righting torque): comOffsetZ < 0 places the COM below the geometric
+      // centroid (the rotation centre); when the box tilts, the weight produces the restoring moment
+      // (COM - centroid) x F_grav, raising the metacentric height (counters GM < 0 rolling of a uniform log/cube).
+      // comOffsetZ = 0 reproduces the uniform box (no torque).
       if (isFloater && comOffsetZ_)
       {
          auto ito = comOffsetZ_->find(ac.getUid(idx)); // map holds only nonzero offsets (guarded at build)
          if (ito != comOffsetZ_->end())
          {
             const mesa_pd::Mat3& R = ac.getRotation(idx).getMatrix();                     // body → world
-            const Vector3< real_t > leverG = R * Vector3< real_t >(real_t(0), real_t(0), ito->second); // COM − centroid (world)
-            const Vector3< real_t > Fgrav(real_t(0), real_t(0), rho * vFull * (*acceleration_)[2]);     // weight (down: a_z<0)
+            // COM − centroid (world)
+            const Vector3< real_t > leverG = R * Vector3< real_t >(real_t(0), real_t(0), ito->second);
+            // weight (down: a_z<0)
+            const Vector3< real_t > Fgrav(real_t(0), real_t(0), rho * vFull * (*acceleration_)[2]);
             totalTorque += Vector3< real_t >(leverG[1] * Fgrav[2] - leverG[2] * Fgrav[1],
                                              leverG[2] * Fgrav[0] - leverG[0] * Fgrav[2],
                                              leverG[0] * Fgrav[1] - leverG[1] * Fgrav[0]);
          }
       }
-      // Torque breakdown, logged once per eval step: hydro_torque is the raw MEM/PDF momentum-exchange
-      // torque (from the real LBM lattice — independent of the buoyancy volume/centroid method, sampling
-      // or analytic) vs. the buoyancy-lever (self-righting) contribution added above from cbOff. Needed
-      // to tell apart a genuine hydrodynamic roll torque from the buoyancy-lever torque, since the latter
-      // is exact/self-righting for cylinders now (clipCylinderAnalytic) but the tiltY drift persisted.
+      // Torque breakdown, once per eval step: hydro_torque is the raw MEM momentum-exchange torque (independent
+      // of the buoyancy volume/centroid method) vs. the buoyancy-lever contribution added above from cbOff, to
+      // tell a hydrodynamic roll torque from the buoyancy-lever torque.
       if (logForces_ && isFloater && (ptype == uint_t(3) || ptype == uint_t(4)))
       {
          WALBERLA_LOG_INFO((ptype == uint_t(3) ? "[BoxTorque]" : "[CylTorque]")
@@ -3095,19 +2746,18 @@ private:
    std::shared_ptr< mesa_pd::domain::BlockForestDomain >   domain_;
    std::shared_ptr< Vector3< real_t > >                    acceleration_;
    real_t                                                   particleDensityRatio_;
-   // true  → (DEFAULT) vertical body force is gravity only (rho*vFull*a_z); buoyant support comes
-   //         solely from the MEM/hydrodynamic force, matching Bogner & Rude (2013)'s original
-   //         formulation (no separate geometric buoyancy channel). computeSubmergedVolumes()/
-   //         computeSubmergedVolumesBox() are skipped entirely in this mode (doDEMSubCycles) -- no
-   //         vSub, no righting torque, matching Bogner's Eq. 18 torque (raw MEM only, no analytic
-   //         buoyancy-lever addition).
-   // false → gravity minus the analytic vSub*g buoyancy term, plus the vSub-derived righting torque
-   //         (Antidunes' extended, non-thesis split; the pre-existing behaviour before the default flip).
+   // true  -> (default) vertical body force is gravity only (rho*vFull*a_z); buoyant support comes solely from
+   //         the MEM force, as in Bogner & Rude (2013). computeSubmergedVolumes()/computeSubmergedVolumesBox()
+   //         are skipped in this mode (doDEMSubCycles): no vSub and no righting torque, consistent with Bogner's
+   //         Eq. 18 torque (raw MEM only).
+   // false -> gravity minus the analytic vSub*g buoyancy term, plus the vSub-derived righting torque (Antidunes'
+   //         extended split, not used for the thesis).
    bool                                                     useMemOnlyBuoyancy_;
    // true → floater X/Y drive is m_p * a_xy instead of vFull * a_xy (see SimulationParams driveFloatersByMass).
    bool                                                     driveFloatersByMass_;
    const std::unordered_map< walberla::id_t, real_t >*     submergedVolumes_;
-   const std::unordered_map< walberla::id_t, real_t >*     phantomForceZ_ = nullptr; // Option A vertical MEM correction; null = disabled
+   // Option A vertical MEM correction; null = disabled
+   const std::unordered_map< walberla::id_t, real_t >*     phantomForceZ_ = nullptr;
    const std::unordered_map< walberla::id_t, Vector3< real_t > >* buoyancyCenterOffset_;
    const std::unordered_map< walberla::id_t, real_t >*     comOffsetZ_ = nullptr; // per-box COM offset below centroid
 
@@ -3116,36 +2766,26 @@ private:
    bool          logForces_   = false;   // set true by doDEMSubCycles on the first sub-cycle of an eval step
    uint_t        subCycle_    = uint_t(0); // current DEM sub-cycle index, for DEM/MEM-WATCH (see setSubCycle)
 
-   // MEM diagnostic threshold (see the [MEM-WATCH] log in operator() above; [DEM-WATCH]'s own
-   // threshold, kDemWatchOverlapRatio, now lives on ComputeContacts instead -- it's penetration-ratio-
-   // based, not a force number, so it doesn't belong alongside this one anymore).
-   // Typical per-floater force magnitudes observed in stable runs are ~1e-3 to ~1e-2 (see
-   // [FloaterForces] logs, e.g. F_buoy+grav_z~-0.003, F_hydro~0.002); 0.05 is roughly an order of
-   // magnitude above that, so it should stay silent in normal operation but fire early -- well before
-   // a value goes non-finite -- on the kind of blowup that produced avgParticleVelocity=inf in
-   // mix_sed_pil.log. Deliberately unconditional (every sub-cycle, every floater), unlike the
-   // once-per-eval-step [FloaterForces] log, so the exact triggering step/sub-cycle is captured.
+   // [MEM-WATCH] threshold. Typical per-floater forces in stable runs are ~1e-3 to ~1e-2 ([FloaterForces], e.g.
+   // F_buoy+grav_z ~ -0.003, F_hydro ~ 0.002); 0.05 is about an order of magnitude above, so it stays silent
+   // normally but fires well before a value goes non-finite. Checked every sub-cycle for every floater.
    static constexpr real_t kMemWatchThreshold = real_t(0.05);
-   // Re-enabled: [MEM-WATCH] is throttled (first 100 hits/rank -- see its own comment at the call
-   // site above) after the original unthrottled version produced a 28.7GB log in a dense-pile run.
-   // Safe to leave on now regardless of scenario noise. Also gates nothing in ComputeContacts anymore
-   // ([DEM-WATCH] there is unconditional, matching [LARGE-OVERLAP]/[STRONG-CONTACT-FORCE]).
+   // [MEM-WATCH] on/off (throttled, see the call site).
    static constexpr bool kEnableMemDemWatch = true;
 };
 
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// Analytical (exact) submerged volume + centre of buoyancy of an oriented box (OBB) clipped by the
-// fitted free-surface plane — the closed-form counterpart to the 12³ point-sampling clip. Mirrors the
-// Python proof of concept in `box_overlap_volume.py` (OBB ∩ half-space), but specialised to a box vs a
-// single plane so no convex-hull library is needed: we split the box into 6 tetrahedra (Kuhn
-// triangulation) and clip each tet against the half-space, summing volume and volume-weighted centroid.
+// Analytical (exact) submerged volume + centre of buoyancy of an oriented box (OBB) clipped by the fitted
+// free-surface plane, the closed-form counterpart to the 12³ point-sampling clip (prototype:
+// local_only/debug_and_exploratory_scripts/box_overlap_volume.py). The box is split into 6 tetrahedra (Kuhn
+// triangulation), each clipped against the half-space, summing volume and volume-weighted centroid.
 //
 //   h    : box half-extents (body frame)          nHat : fitted surface normal (world), LIQUID→GAS (up)
 //   R    : rotation body→world (orthonormal)       xBar : a point on the fitted plane (world)
 //   pos  : box centre (world)
 // Returns  vSub  = submerged volume, and  cbOff = world-frame offset of the centre of buoyancy from the
-// box centre (the lever arm B−G used for the righting torque) — same meaning/frame as the sampling clip.
+// box centre (the lever arm B−G used for the righting torque), same meaning/frame as the sampling clip.
 
 // Unsigned volume of a tetrahedron (a,b,c,e).
 inline real_t tetVolume(const Vector3< real_t >& a, const Vector3< real_t >& b,
@@ -3263,16 +2903,14 @@ inline void clipBoxAnalytic(const Vector3< real_t >& h, const mesa_pd::Mat3& R,
 // Returns vSub = submerged volume, and cbOff = world-frame offset of the centre of buoyancy from the
 // cylinder centre (same meaning/frame as clipBoxAnalytic / the sampling clip).
 //
-// Method: the circular cross-section is invariant under rotation about the body Z (axis) direction, so
-// azimuthally align the plane normal's horizontal component onto the body X axis first — in that frame
-// the plane is  rho*x + nz*z = d  (no y dependence), so the submerged column length at a given x is a
-// CLAMPED AFFINE function of x alone. Splitting the disk into the (at most) three regions where that
-// clamp is saturated-low / linear / saturated-high, each region's contribution to volume and the first
-// moments (∫x dV, ∫z dV; ∫y dV = 0 by the x-only dependence) is a closed-form combination of the
-// standard circular antiderivatives ∫w, ∫x·w, ∫x²·w with w(x) = 2·sqrt(r²−x²) — the same family used for
-// the circular-segment area. No numerical integration or point sampling is involved. This replaces the
-// 12³-point Cartesian sampling grid for cylinders, which is not azimuthally symmetric at finite
-// resolution and was the source of a spurious roll torque on axisymmetric cylinders (see changes.md).
+// Method: the circular cross-section is invariant under rotation about the body Z (axis), so the plane normal's
+// horizontal component is first aligned azimuthally onto body X. In that frame the plane is rho*x + nz*z = d
+// (no y dependence), so the submerged column length at a given x is a CLAMPED AFFINE function of x alone.
+// Splitting the disk into the (at most) three regions where that clamp is saturated-low / linear /
+// saturated-high, each region's contribution to volume and first moments (∫x dV, ∫z dV; ∫y dV = 0) is a
+// closed-form combination of the circular antiderivatives ∫w, ∫x·w, ∫x²·w with w(x) = 2·sqrt(r²−x²). No
+// numerical integration or sampling; unlike the 12³-point Cartesian sampling grid (not azimuthally symmetric at
+// finite resolution), it produces no spurious roll torque on axisymmetric cylinders.
 inline void clipCylinderAnalytic(real_t r, real_t halfLen, const mesa_pd::Mat3& R,
                                  const Vector3< real_t >& nHat, const Vector3< real_t >& xBar,
                                  const Vector3< real_t >& pos, real_t& vSub, Vector3< real_t >& cbOff)
@@ -3402,9 +3040,8 @@ public:
       , normalFieldID_(simObjs->normalFieldID)
       , pdfFieldID_(simObjs->pdfFieldID)
       , particleFieldID_(simObjs->particleFieldID)
-      // [Claude, 2026-10-01] guarded: the fluid-free DropTest never creates a boundary handling (DropTest.cpp), and this
-      // unconditional dereference made every DropTest run segfault in this constructor since 67d5961d; the ID is only
-      // used by the fluid-coupling functions, which DropTest never calls
+      // Guarded: the fluid-free DropTest (DropTest.cpp) creates no boundary handling; the ID is only used by the
+      // fluid-coupling functions, which DropTest never calls.
       , boundaryHandlingID_(simObjs->antidunesBoundaryHandling ? simObjs->antidunesBoundaryHandling->getHandlingID()
                                                                : BlockDataID())
       , hasFluid_(simObjs->antidunesBoundaryHandling != nullptr)
@@ -3421,7 +3058,8 @@ public:
          simParams->computed.particleCollisionTime,
          simParams->computed.particleTimestepSize,
          simParams->particle.frictionCoefficient,
-         uint_t(6), // 6 types: 0=bed/wall, 1=sphere floater, 2=pillar, 3=box floater, 4=cylinder floater, 5=capsule floater
+         // 6 types: 0=bed/wall, 1=sphere floater, 2=pillar, 3=box floater, 4=cylinder floater, 5=capsule floater
+         uint_t(6),
          simParams->model.useAnalyticalContactDetection,
          simParams->model.usePureAnalyticalCylinder,
          simParams->model.useContactFilterOwnerTiebreak,
@@ -3437,7 +3075,7 @@ public:
          simParams->model.driveFloatersByMass)
       , useLubricationCorrection(simParams->particle.useLubricationCorrection)
       , evalFrequency_(simParams->evaluation.evaluationFrequency)
-      , stepCounter_(simObjs->beginTimeStep) // absolute (resume-safe): a checkpoint resume must NOT restart the step numbering at 0 -- logs/floater-history steps must match the original run's ([STALE-PARTICLE-IDX] etc.)
+      , stepCounter_(simObjs->beginTimeStep) // absolute (resume-safe): step numbers in logs match the original run
       , ringBand_(simParams->particle.floaterRingBand)
       , planeFitRadiusFactor_(simParams->model.floaterPlaneFitRadiusFactor)
       , boxPlaneFitBandFactor_(simParams->model.boxPlaneFitBandFactor)
@@ -3447,18 +3085,17 @@ public:
       , useDynamicReferenceHeight_(simParams->model.useDynamicReferenceHeight)
       , useHydrodynamicForceTimeAveraging_(simParams->model.useHydrodynamicForceTimeAveraging)
    {
-      // ModelParameters.logFloaterHistory (see its own doc comment in SimulationParams.h): opens this
-      // rank's own CSV (a no-op when disabled) and wires it into both places a contact/lubrication
-      // pair is actually computed. Directory itself is created root-only, once, in Antidunes.cpp,
-      // before this constructor runs.
+      // ModelParameters.logFloaterHistory (SimulationParams.h): opens this rank's CSV (no-op when disabled) and
+      // wires it into both places a contact/lubrication pair is computed. The directory is created on root in
+      // Antidunes.cpp before this constructor runs.
       floaterHistoryLogger_.init(simParams->model.floaterHistoryBaseFolder, simParams->model.logFloaterHistory);
       floaterHistoryLogger_.setMinStep(simParams->model.logFloaterHistoryStartStep);
       floaterHistoryLogger_.setMaxStep(simParams->model.logFloaterHistoryEndStep);
       computeContacts.setHistoryLogger(&floaterHistoryLogger_);
       computeContacts.setCylinderContactSkin(simParams->model.cylinderContactSkin);
       computeContacts.setRefineCylinderContacts(simParams->model.refineCylinderContacts);
-      // [Claude, 2026-10-10] ModelParameters.kodamBandEdgeAxialCheck: a switch of the closed form itself (free functions in
-      // PaperAnalyticalContacts.h), hence a namespace-level flag like kodamCapSelectionByAxisDistance
+      // ModelParameters.kodamBandEdgeAxialCheck: a switch of the closed form itself (free functions in
+      // ClosedFormContacts*.h), hence a namespace-level flag like kodamCapSelectionByAxisDistance.
       closed_form_contacts::kodamBandEdgeAxialCheck = simParams->model.kodamBandEdgeAxialCheck;
       WALBERLA_LOG_INFO_ON_ROOT("kodamBandEdgeAxialCheck = " << (simParams->model.kodamBandEdgeAxialCheck ? "true" : "false"));
       if (simParams->model.cylinderContactSkin > real_t(0))
@@ -3503,9 +3140,8 @@ public:
                    ? (" to step " + std::to_string(simParams->model.contactAnomalyEndStep))
                    : std::string()));
 
-      // ModelParams::logFloaterHistoryReleaseStepFilter (0 = disabled = log everyone, unchanged):
-      // build the UID allowlist from whichever FloatingSphere/Box/Cylinder entries have a matching
-      // settlingSteps, then wire it into the logger so BOTH log() and logState() skip everyone else.
+      // ModelParams::logFloaterHistoryReleaseStepFilter (0 = disabled = log all): build the UID allowlist from the
+      // FloatingSphere/Box/Cylinder entries with matching settlingSteps; log() and logState() skip everyone else.
       if (simParams->model.logFloaterHistory && simParams->model.logFloaterHistoryReleaseStepFilter != uint_t(0))
       {
          const uint_t targetStep = simParams->model.logFloaterHistoryReleaseStepFilter;
@@ -3523,10 +3159,9 @@ public:
             << " floater(s) with settlingSteps==" << targetStep);
       }
 
-      // UIDs are resolved by setupParticles via an indexed creation loop + allReduce(SUM),
-      // so every rank already has the correct UID for every floater in simObjs->floaterUIDs /
-      // floaterBoxUIDs.  Copying avoids the earlier bug where a per-rank assignIdx caused
-      // UID collisions at index 0 after allReduce(SUM).
+      // UIDs are resolved by setupParticles via an indexed creation loop + allReduce(SUM), so every rank already
+      // has the correct UID for every floater in simObjs->floaterUIDs / floaterBoxUIDs; copy them (a per-rank
+      // assignIdx would collide after allReduce(SUM)).
       const size_t nF = simParams->floatingSpheres.size();
       floaterUIDs_ = simObjs->floaterUIDs;
       floaterRadii_.resize(nF);
@@ -3599,7 +3234,7 @@ public:
          << "SAMPLING (12³ points)"
          << "  pinned-position floaters: " << pinnedBoxPositions_.size());
 
-      // Self-identify the buoyancy sampling mode in the log (answers "did this run use the ring?").
+      // Report the sphere buoyancy sampling mode (full-box plane fit vs. contact ring).
       WALBERLA_LOG_INFO_ON_ROOT("[FloaterBuoyancy] sphere V_sub sampling: floaterRingBand=" << ringBand_
          << (ringBand_ > real_t(1e5) ? "  (OLD full-box plane-fit)" : "  (contact-ring restriction)"));
 
@@ -3608,14 +3243,11 @@ public:
                                         : "STATIC (flat H=" + std::to_string(surfaceHeight_) + ")"));
    }
 
-   // MPI-sums computeContacts' per-rank PaperAnalyticalContacts.h scenario / GJK-EPA-fallback
-   // tallies (all zero unless ModelParameters.useAnalyticalContactDetection is on) and logs one line
-   // on root. Called once after the main timeloop finishes (stepLabel="") -- see Antidunes.cpp -- or,
-   // when EvaluationParameters.logContactDetectionStatsPeriodically is set, also periodically at
-   // performanceLogFrequency (stepLabel=the current step number) paired with
-   // resetContactDetectionStatistics() so each printed line reports PER-INTERVAL counts instead of a
-   // cumulative running total -- lets the sub-case mix be tracked as a jam develops over a run,
-   // instead of only seeing one aggregate total at the end.
+   // MPI-sums computeContacts' per-rank closed-form scenario / GJK/EPA fallback tallies (all zero unless
+   // ModelParameters.useAnalyticalContactDetection is on) and logs one line on root. Called once after the main
+   // timeloop (stepLabel="", see Antidunes.cpp) and, with EvaluationParameters.logContactDetectionStatsPeriodically,
+   // also every performanceLogFrequency steps (stepLabel = step) followed by resetContactDetectionStatistics(), so
+   // each line reports per-interval counts and the sub-case mix can be followed as a jam develops.
    void logContactDetectionStatistics(const std::string& stepLabel = "") const
    {
       const auto& s = computeContacts.contactStats();
@@ -3675,11 +3307,9 @@ public:
       mpi::allReduceInplace(rk, mpi::SUM);
       mpi::allReduceInplace(rc, mpi::SUM);
 
-      // cylPureSpecialContactTrusted is a SUB-metric of cylAnalyticalTrusted below (that path also
-      // calls bumpCylScenario, so it's already folded into face-face/band-band-skewed/etc.) --
-      // reported separately, not added again, to avoid double-counting. cylPureTier1Rejected is NOT
-      // folded into anything else (a pure-mode-rejected pair isn't a "trusted" scenario), so it's
-      // added to the grand total the same way a fallback attempt would be.
+      // cylPureSpecialContactTrusted is a sub-metric of cylAnalyticalTrusted (that path also calls bumpCylScenario),
+      // so it is reported separately, not added again. cylPureTier1Rejected is not folded into any scenario, so it
+      // is added to the grand total like a fallback attempt.
       const uint64_t cylAnalyticalTrusted = cylFaceFace + cylBandBandParallel + cylFaceBand +
          cylBandBandSkewed + cylFaceEdge + cylSpecialContact + cylBandEdge + cylEdgeEdge;
       const uint64_t cylFallbackTotal = cylFallbackTier1 + cylFallbackSpecialContact;
@@ -3773,10 +3403,9 @@ public:
       }
    }
 
-   // Zeroes computeContacts' per-rank ContactDetectionStats tallies in place -- call right after
-   // logContactDetectionStatistics() in a periodic (not end-of-run) reporting loop so the NEXT
-   // printed line reports only what happened since this reset, not a cumulative running total. A
-   // no-op with respect to physics/contact resolution itself -- purely a diagnostic counter reset.
+   // Zeroes computeContacts' per-rank ContactDetectionStats tallies; call right after
+   // logContactDetectionStatistics() in periodic reporting so the next line covers only the new interval.
+   // Diagnostic counters only, no effect on the physics.
    void resetContactDetectionStatistics() { computeContacts.resetContactStats(); }
 
    template< typename TP >
@@ -3790,17 +3419,11 @@ public:
 
    template< typename TP >
    void reduceAndAvgHydroForces(timing::TimingPool<TP> & tp, bool initializeOldValues){
-      // [PRE-REDUCE] -- logs THIS rank's own local accumulator for a floater, on BOTH local and ghost
-      // copies, BEFORE any cross-rank combination happens at all. [NAN-LINK] (SimpleBB.h) only proves
-      // that wherever an add actually occurs, the added value is finite -- it says nothing about
-      // whether every term that ends up in the MPI-reduced sum corresponds to a real, observed add.
-      // This checks the other half: is every rank's own pre-reduce total for this uid already clean
-      // going INTO ReduceProperty? Runs on ALL floaters this rank knows about (local + ghost, not just
-      // SelectLocal) since a ghost copy's stale/uninitialized accumulator is exactly the suspected
-      // mechanism. Once per main step (no sub-cycle here at all).
-      //
-      // [Claude, 2026-09-27] Converted to push into diagnosticEvents_ (gated by diagnosticSweepEnabled_)
-      // instead of an unconditional direct WALBERLA_LOG_WARNING, same rationale as VELOCITY-JUMP.
+      // [PRE-REDUCE]: this rank's local hydrodynamic accumulator for each floater (local and ghost copies) before
+      // any cross-rank reduction. [NAN-LINK] (SimpleBB.h) shows each individual add is finite; this checks that
+      // every rank's pre-reduce total entering ReduceProperty is finite too. All floaters this rank knows (a stale
+      // ghost accumulator is a suspected mechanism). Once per main step; pushed into diagnosticEvents_ (gated by
+      // diagnosticSweepEnabled_).
       {
          particleStorage->forEachParticle(useOpenMP,
             [](size_t idx, auto& ac) {
@@ -3830,15 +3453,10 @@ public:
       mesa_pd::mpi::ReduceProperty{}.operator()< mesa_pd::HydrodynamicForceTorqueNotification >(*particleStorage);
       tp["MESAPD: ReduceProperty(HydrodynamicForceTorqueNotification)"].end();
 
-      // [RAW-HYDRO] -- [NAN-LINK] in SimpleBB.h proved every individual per-link contribution to a
-      // particle's force is finite -- so if AddExternalForces later sees a NaN/Inf hydrodynamic force,
-      // it must be entering at THIS stage: the MPI-summed "raw" force right after ReduceProperty, or
-      // in AverageHydrodynamicForceTorqueKernel's blend with a stale "old" value from a previous step.
-      // Logs BOTH the raw just-reduced value and the current "old" value so the two failure modes are
-      // distinguishable. SelectLocal only. Once per main step (no sub-cycle here at all).
-      //
-      // [Claude, 2026-09-27] Converted to push into diagnosticEvents_ (gated by diagnosticSweepEnabled_),
-      // same rationale as PRE-REDUCE/VELOCITY-JUMP above.
+      // [RAW-HYDRO]: with every per-link contribution finite ([NAN-LINK], SimpleBB.h), a non-finite force seen by
+      // AddExternalForces must enter here: the MPI-summed raw force after ReduceProperty, or the blend with a stale
+      // "old" value in AverageHydrodynamicForceTorqueKernel. Logs both raw and old values to tell them apart.
+      // SelectLocal only, once per main step; pushed into diagnosticEvents_ (gated by diagnosticSweepEnabled_).
       {
          particleStorage->forEachParticle(useOpenMP,
             [](size_t idx, auto& ac) {
@@ -3877,13 +3495,11 @@ public:
             lbm_mesapd_coupling::InitializeHydrodynamicForceTorqueForAveragingKernel{}, *particleAccessor);
       }
 
-      // ModelParameters.useHydrodynamicForceTimeAveraging (see its own doc comment, SimulationParams.h):
-      // AverageHydrodynamicForceTorqueKernel blends this step's freshly-reduced force/torque with the
-      // PREVIOUS step's (F = 0.5*(F(t)+F(t-Δt)), rolling average, Ladd 1994) -- the same mechanism
-      // Watanabe et al. 2023 (Eq. 48-49, citing Aidun et al. 1998) use "to improve the stability of the
-      // fluid-solid coupling with floating objects". DEFAULT true keeps this codebase's pre-existing
-      // always-on behaviour; set false to feed DEM the raw just-reduced force undamped (still swaps
-      // old<-new below regardless, so old values stay valid if this is flipped back on mid-investigation).
+      // ModelParameters.useHydrodynamicForceTimeAveraging (SimulationParams.h): AverageHydrodynamicForceTorqueKernel
+      // blends this step's reduced force/torque with the previous step's (F = 0.5*(F(t)+F(t-Δt)), Ladd 1994), as
+      // Watanabe et al. 2023 (Eq. 48-49, citing Aidun et al. 1998) do "to improve the stability of the fluid-solid
+      // coupling with floating objects". Default true; false feeds DEM the raw reduced force (old<-new is still
+      // swapped, so the old values stay valid).
       if (useHydrodynamicForceTimeAveraging_)
       {
          tp["MESAPD: AverageHydrodynamicForceTorqueKernel"].start();
@@ -3906,19 +3522,13 @@ public:
 
    template< typename TP >
    void doDEMSubCycles(timing::TimingPool<TP> & tp, uint_t numSubCycles = uint_t(1)){
-      // One increment per LBM step, independent of whether spheres/boxes are present. The per-shape
-      // submerged-volume functions early-return when their list is empty, so the counter must not be
-      // gated on them (otherwise a box-only run never advances and every eval log fires each step).
+      // One increment per LBM step, independent of whether spheres/boxes are present (the submerged-volume
+      // functions return early for empty lists; gating the counter on them would stall it).
       ++stepCounter_;
-      // Submerged volumes computed once per LBM step (fill field is constant during DEM sub-cycles).
-      // Both functions write into the same submergedVolumes_ map (keyed by UID).
-      // Skipped entirely under useMemOnlyBuoyancy_ (the default): that mode's force term is already
-      // vSub-independent (AddExternalForces, useMemOnlyBuoyancy_ ? rho*vFull : ...), and its righting
-      // torque should be the raw MEM torque alone (Bogner & Rude 2013 Eq. 18), not the analytic
-      // buoyancy-lever addition these functions also populate via buoyancyCenterOffset_. Running them
-      // anyway would cost time for maps AddExternalForces then ignores for the force but NOT for the
-      // torque -- i.e. it would silently keep the non-thesis righting-lever torque active even in
-      // "MEM-only" mode, which is exactly what this flag is meant to remove.
+      // Submerged volumes, once per LBM step (the fill field is constant during the DEM sub-cycles); both
+      // functions write into submergedVolumes_ (keyed by UID). Skipped under useMemOnlyBuoyancy_ (default): its
+      // force term does not depend on vSub and its righting torque is the raw MEM torque alone (Bogner & Rude
+      // 2013, Eq. 18); running them would add the analytic buoyancy-lever torque via buoyancyCenterOffset_.
       if (!useMemOnlyBuoyancy_)
       {
          computeSubmergedVolumes();
@@ -3927,21 +3537,18 @@ public:
       addExternalForces.setSubmergedVolumes(&submergedVolumes_);
       addExternalForces.setBuoyancyCenterOffset(&buoyancyCenterOffset_);
       addExternalForces.setComOffsetZ(&boxComOffsetZ_);
-      // Option A: hand the phantom-force map to the force kernel only when the correction is enabled;
-      // otherwise leave the pointer null so the subtraction is skipped entirely (pre-fix behaviour).
+      // Option A: pass the phantom-force map only when the correction is enabled; null skips the subtraction.
       addExternalForces.setPhantomForceZ(usePhantomForceCorrection_ ? &phantomForceZ_ : nullptr);
       addExternalForces.setStepInfo(&stepCounter_);
 
       const bool logForcesThisStep = (stepCounter_ % evalFrequency_ == uint_t(0));
       for (auto subCycle = uint_t(0); subCycle < numSubCycles; ++subCycle)
       {
-         // [GHOST-VANISHED] snapshot: captures, once per main step (subCycle==0, before this step's
-         // own DEM subcycles/syncCalls touch anything), every floater UID this rank can currently see
-         // at all (local or ghost) -- the population the fluid-obstacle map (particleField_) assumed
-         // when it was last refreshed (once per MAIN timestep, after all subcycles). If a ghost held at
-         // refresh time is dropped by a later syncCall() before the next refresh, particleField_ is
-         // left holding a UID this rank can no longer resolve -- the STALE-PARTICLE-IDX precondition,
-         // and one the LOCAL-only [SUBCYCLE-LEFT-RANK] check below cannot see on its own.
+         // [GHOST-VANISHED] snapshot, once per main step (subCycle==0, before this step's sub-cycles/syncs):
+         // every floater UID this rank can see (local or ghost), i.e. the population the fluid-obstacle map
+         // (particleField_, refreshed once per main step) assumed. A ghost dropped by a later syncCall() before
+         // the next refresh leaves particleField_ with an unresolvable UID (the STALE-PARTICLE-IDX precondition),
+         // which the local-only [SUBCYCLE-LEFT-RANK] check below cannot see.
          if (subCycle == uint_t(0))
          {
             ghostMappingSnapshot_.clear();
@@ -3955,26 +3562,13 @@ public:
                *particleAccessor);
          }
 
-         // [VELOCITY-JUMP] -- catches the ONSET of a runaway, not just its aftermath. Every routine
-         // per-floater log (BoxForces/BoxTorque) only fires once per evalFrequency_ (1000 steps), so a
-         // corruption that starts and escalates WITHIN that window is invisible until the next
-         // 1000-step snapshot already shows it fully blown up (exactly what happened investigating
-         // job 4179027: normal at step 59000, ~100x torque jump at step 60000, no visibility into
-         // which step in between it actually started or how fast it grew). Runs once per MAIN step
-         // (subCycle==0, using each floater's velocity as left by the END of the PREVIOUS main step),
-         // comparing against lastVelocityForJumpCheck_ and flagging if the per-MAIN-STEP change
-         // exceeds a threshold far above ordinary floater dynamics (observed normal steps: |v| changes
-         // by <<0.001 LU/step per 1000-step window in this scenario) but far below an already-runaway
-         // value (observed post-corruption: tens to hundreds of LU/step) -- 0.05 LU/step/mainstep gives
-         // ~2 orders of magnitude of margin on both sides.
-         //
-         // [Claude, 2026-09-27] Converted, per explicit request, from an unconditional direct
-         // WALBERLA_LOG_WARNING to pushing into the shared diagnosticEvents_ buffer -- now gated
-         // behind diagnosticSweepEnabled_ (off by default) instead of always running, and its output
-         // is drained/logged once per step by BuildTimeloop.h's addAfterTimeStepDiagnosticSweep
-         // instead of being formatted here inline. The velocity-tracking itself (lastVelocityForJumpCheck_
-         // bookkeeping) still runs unconditionally -- it's just a map update, negligible cost -- so
-         // turning the sweep on mid-run still has a valid "previous step" baseline to compare against.
+         // [VELOCITY-JUMP]: catches the onset of a runaway between the once-per-evalFrequency_ floater logs. Once
+         // per main step (subCycle==0, velocity as left by the previous main step), compares against
+         // lastVelocityForJumpCheck_ and flags a change above 0.05 LU/step per main step: about two orders of
+         // magnitude above ordinary floater dynamics (<<0.001) and below runaway values (tens to hundreds).
+         // Events go into diagnosticEvents_ (gated by diagnosticSweepEnabled_, off by default), drained once per
+         // step by BuildTimeloop.h's addAfterTimeStepDiagnosticSweep. The velocity bookkeeping always runs (cheap),
+         // so enabling the sweep mid-run has a valid baseline.
          if (subCycle == uint_t(0))
          {
             constexpr real_t velocityJumpThreshold = real_t(0.05);
@@ -4011,8 +3605,7 @@ public:
 
          // Log the per-floater force breakdown once per eval step (only on the first sub-cycle).
          addExternalForces.setLogForces(logForcesThisStep && subCycle == uint_t(0));
-         // DEM/MEM-WATCH sub-cycle index (see AddExternalForces::setSubCycle) -- unconditional, every
-         // sub-cycle, unlike the eval-step-gated log above.
+         // [MEM-WATCH] sub-cycle index (see AddExternalForces::setSubCycle), every sub-cycle.
          addExternalForces.setSubCycle(subCycle);
          // FloaterHistoryLogger's (mainStep, subCycle) tag for this sub-cycle -- no-op when disabled.
          computeContacts.setStepInfo(stepCounter_, subCycle);
@@ -4025,14 +3618,10 @@ public:
             vvIntegratorPreForce, *particleAccessor);
          tp["MESAPD: VelocityVerletPreForceUpdate"].end();
 
-         // [SUBCYCLE-LEFT-RANK]: permanent, low-volume safety check (throttled to 50 hits per rank per
-         // run) for whether pure DEM-subcycle physics has already moved a LOCAL floater outside every
-         // block this rank owns, before this subcycle's own syncCall() has a chance to hand ownership
-         // off. The fluid-side obstacle mapping / ghost-sync architecture assumes a particle can't move
-         // far enough in one subcycle to leave its owning rank's territory before the next sync catches
-         // up; this fires the instant that assumption breaks, so a run's log can be checked for whether
-         // it precedes a STALE-PARTICLE-IDX abort. Local blocks only, so this is an exact check, not a
-         // heuristic.
+         // [SUBCYCLE-LEFT-RANK]: low-volume safety check (50 hits per rank) whether DEM sub-cycle motion has moved
+         // a LOCAL floater outside every block this rank owns before this sub-cycle's syncCall() hands off
+         // ownership. The obstacle mapping / ghost sync assume this cannot happen within one sub-cycle; a hit
+         // preceding a STALE-PARTICLE-IDX abort shows the assumption broke. Exact (local blocks only).
          {
             static uint_t leftRankLogCount = uint_t(0);
             particleStorage->forEachParticle(useOpenMP,
@@ -4072,20 +3661,12 @@ public:
          syncCall();
          tp["MESAPD: syncCall 1"].end();
 
-         // [GHOST-VANISHED] check -- see ghostMappingSnapshot_'s own capture-site comment above. After
-         // this sub-cycle's syncCall(), any UID from the start-of-step snapshot that uidToIdx() now
-         // reports invalid means this rank just lost its only visibility (ghost or local) into a
-         // particle that particleField_ may still cite as a cell's obstacle owner. Most hits are benign
-         // ghost churn; the value is cross-referencing uid/step/subCycle against an eventual
-         // STALE-PARTICLE-IDX abort. Erased from the snapshot once seen, so each UID is only ever
-         // checked once per main step.
-         //
-         // A guard that tried clearing a vanished particle's orphaned obstacle cells here (to pre-empt
-         // the STALE-PARTICLE-IDX abort) was tried and removed: on two crashed jobs, clearing did
-         // eliminate that specific abort, but both runs crashed again shortly after via a worse,
-         // harder-to-trace failure (an abrupt fill-level discontinuity destabilising the free-surface
-         // reconstruction) -- see THESIS_PLAN.md for the full investigation. The original SimpleBB.h
-         // abort remains the correct, intentional behaviour until a real fix is found.
+         // [GHOST-VANISHED] check (see the snapshot above): after this sub-cycle's syncCall(), a snapshot UID that
+         // uidToIdx() reports invalid means this rank lost its only visibility (ghost or local) of a particle that
+         // particleField_ may still cite as a cell's obstacle owner. Most hits are benign ghost churn; useful for
+         // cross-referencing against a STALE-PARTICLE-IDX abort. Erased once seen (checked once per main step).
+         // Clearing the vanished particle's orphaned obstacle cells here is deliberately not done: the abrupt
+         // fill-level discontinuity destabilises the free-surface reconstruction; the SimpleBB.h abort stays.
          for (auto it = ghostMappingSnapshot_.begin(); it != ghostMappingSnapshot_.end(); )
          {
             if (particleAccessor->uidToIdx(*it) == particleAccessor->getInvalidIdx())
@@ -4094,17 +3675,10 @@ public:
                ++it;
          }
 
-         // [MIGRATION-NAN] -- see lastKnownOwner_'s own doc comment. Fires the first time a LOCAL
-         // floater's hydrodynamicForce/oldHydrodynamicForce is non-finite right after this
-         // sub-cycle's syncCall(), reporting whether its owner rank just changed since the last time
-         // this rank observed it (a fresh migration landing here vs. an already-owned particle whose
-         // force went bad by some other means).
-         //
-         // [Claude, 2026-09-27] Converted, per explicit request, to push into diagnosticEvents_
-         // (gated by diagnosticSweepEnabled_) instead of an unconditional direct WALBERLA_LOG_WARNING
-         // -- see the VELOCITY-JUMP comment above for the same rationale. lastKnownOwner_ bookkeeping
-         // still runs unconditionally (cheap map update) so the ownership-migration comparison stays
-         // valid even if the sweep is toggled on mid-run.
+         // [MIGRATION-NAN] (see lastKnownOwner_): a LOCAL floater's hydrodynamicForce/oldHydrodynamicForce is
+         // non-finite right after this sub-cycle's syncCall(); reports whether its owner rank changed since this
+         // rank last saw it (fresh migration vs. a force gone bad otherwise). Pushed into diagnosticEvents_ (gated
+         // by diagnosticSweepEnabled_); the lastKnownOwner_ bookkeeping always runs (cheap).
          {
             particleStorage->forEachParticle(useOpenMP,
                [](size_t idx, auto& ac) {
@@ -4143,13 +3717,10 @@ public:
                *particleAccessor);
          }
 
-         // ModelParameters.logFloaterHistory's world-state snapshot (no-op when disabled): what THIS
-         // rank believes every floater's state is, right after the sync that ComputeLubrication/
-         // ComputeContacts below are about to use -- see FloaterHistoryLogger::logState's own comment.
-         // Dormant (startInactive, not yet released) floaters are skipped here too, same reasoning as
-         // pairSelector below: a still-dormant floater sits motionless at its spawn position, so
-         // logging it every subcycle is pure disk cost for zero information -- data starts the
-         // instant releaseSettledFloatingSpheres clears its dormant-UID entry, not before.
+         // ModelParameters.logFloaterHistory world-state snapshot (no-op when disabled): this rank's view of every
+         // floater right after the sync used by ComputeLubrication/ComputeContacts (see
+         // FloaterHistoryLogger::logState). Dormant (startInactive, not yet released) floaters are skipped, as in
+         // pairSelector below: they sit motionless at their spawn position.
          if (floaterHistoryLogger_.enabled())
             particleStorage->forEachParticle(useOpenMP,
                [dormant = dormantFloaterUIDs_](size_t idx, auto& ac) {
@@ -4191,8 +3762,7 @@ public:
          particleStorage->forEachParticlePairHalf(useOpenMP,
             pairSelector, *particleAccessor,
             computeContacts, *particleAccessor);
-         // [SIMULTANEOUS-CONTACTS]: report+reset this sub-cycle's per-body active-contact tally, now
-         // that the whole pairwise sweep above has finished -- see that method's own comment.
+         // [SIMULTANEOUS-CONTACTS]: report and reset the per-body contact tally after the full sweep.
          computeContacts.reportAndResetSimultaneousContacts();
          tp["MESAPD: ComputeContacts"].end();
 
@@ -4213,15 +3783,11 @@ public:
          mesa_pd::mpi::ReduceProperty{}.operator()< mesa_pd::ForceTorqueNotification >(*particleStorage);
          tp["MESAPD: ReduceProperty(ForceTorque)"].end();
 
-         // [TOTAL-FORCE-THRESHOLD]: permanent companion to [STRONG-CONTACT-FORCE]. That check only
-         // looks at one contact's own force delta; several simultaneous contacts on a squeezed floater
-         // can each stay under that per-contact threshold while summing to something well above
-         // baseline. This checks the fully-accumulated per-subcycle force (every contact + lubrication
-         // + tunnel contact + external force, already cross-rank reduced) once per subcycle, right
-         // before VelocityVerletPostForceUpdate consumes and resets it. Threshold (0.03) sits above
-         // ordinary baseline (O(1e-4..1e-3) for gravity+buoyancy+hydro) but below
-         // STRONG_FORCE_THRESHOLD's 0.1, covering the gap between "ordinary" and "a single contact
-         // already flagged it". Throttled per rank.
+         // [TOTAL-FORCE-THRESHOLD]: companion to [STRONG-CONTACT-FORCE] (per-contact only). Several contacts on a
+         // squeezed floater can each stay below that threshold but sum to a large force, so this checks the fully
+         // accumulated, cross-rank reduced force (contacts + lubrication + tunnel + external) once per sub-cycle,
+         // before VelocityVerletPostForceUpdate consumes and resets it. Threshold 0.03: above the ordinary baseline
+         // (O(1e-4..1e-3) for gravity+buoyancy+hydro), below STRONG_FORCE_THRESHOLD (0.1). 100 lines per rank.
          {
             static uint_t totalForceLogCount = uint_t(0);
             particleStorage->forEachParticle(useOpenMP,
@@ -4259,7 +3825,8 @@ public:
             vvIntegratorPostForce, *particleAccessor);
          tp["MESAPD: VelocityVerletPostForceUpdate"].end();
 
-         // DIAGNOSTIC artificial velocity caps (ModelParameters.rodCapVelocity/AngularVelocity) -- rods (type 4), local only
+         // DIAGNOSTIC artificial velocity caps (ModelParameters.rodCapVelocity/AngularVelocity), rods (type 4),
+         // local only
          if (g_rodCaps.velocity > real_t(0) || g_rodCaps.angularVelocity > real_t(0))
          {
             particleStorage->forEachParticle(useOpenMP,
@@ -4282,12 +3849,9 @@ public:
                *particleAccessor);
          }
 
-         // TEST OPTION (ModelParameters.rodPrescribedVelocity): rigid prescribed motion of all rods,
-         // applied after the velocity update and before the sync so ghosts see it. [Claude, 2026-09-23]
-         // Extended from cylinder-only (type 4) to also cover sphere (1) and box (3) floaters, for a
-         // same-setup shape comparison (does the wall-pinch sealed-cell instability reproduce with
-         // spheres/boxes the same way it does with rods?) -- capsule (5) deliberately excluded, unrelated
-         // to this comparison.
+         // TEST OPTION (ModelParameters.rodPrescribedVelocity): rigid prescribed motion of all sphere (1), box (3)
+         // and cylinder (4) floaters (capsules excluded), applied after the velocity update and before the sync so
+         // ghosts see it.
          if (g_rodPrescribedVelocityOn)
          {
             particleStorage->forEachParticle(useOpenMP,
@@ -4302,7 +3866,7 @@ public:
                *particleAccessor);
          }
 
-         // pin translation of pinPosition boxes (rotation left free), before the sync so ghosts see it -
+         // hold the pinned translational/rotational DOFs, before the sync so ghosts see it
          pinBoxTranslations();
 
          // synchronize -----------------------------------------------------------------
@@ -4311,32 +3875,22 @@ public:
          tp["MESAPD: syncCall 2"].end();
       }
 
-      // Debug/validation hook (see SimulationObjects::freshlyActivatedFloaterUIDs' own doc comment):
-      // only ever meant to cover the ONE main step immediately following a release, so whether or
-      // not ComputeContacts found (and aborted on) a real contact this step, nothing released in a
-      // PRIOR step should still be flagged going forward -- unconditional clear, every step.
+      // Debug hook (see SimulationObjects::freshlyActivatedFloaterUIDs): covers only the one main step right
+      // after a release, so the set is cleared unconditionally every step.
       if (freshlyActivatedFloaterUIDs_ && !freshlyActivatedFloaterUIDs_->empty())
          freshlyActivatedFloaterUIDs_->clear();
    }
 
-   // Holds selected TRANSLATIONAL DOFs of every pinPosition floater (sphere, box, or cylinder) while
-   // leaving rotation free: for each world axis whose pin-mask component is nonzero, resets that
-   // position component to the pinned value and zeroes that velocity component after each sub-cycle
-   // integration; axes with a zero mask evolve normally. The floater still accumulates hydrodynamic +
-   // buoyancy torque, so a box/cylinder still rotates to its equilibrium tilt in place (a sphere's own
-   // rotation has no visible effect). Mask <1,1,1> = rigid hold; <1,1,0> pins x,y and lets z float
-   // (finds its own buoyant depth without lateral drift).
+   // Holds selected TRANSLATIONAL DOFs of every pinPosition floater (sphere, box or cylinder), rotation free: for
+   // each world axis with a nonzero pin mask, the position component is reset to the pinned value and the
+   // velocity component zeroed after each sub-cycle; masked-out axes evolve normally. The floater still rotates
+   // to its equilibrium tilt in place. Mask <1,1,1> = rigid hold; <1,1,0> pins x,y and lets z find its buoyant
+   // depth.
    //
-   // Independently, every pinRotation floater has selected ROTATIONAL DOFs held too: for each world
-   // axis whose pinRotationAxes component is nonzero, that axis's ANGULAR velocity is zeroed every
-   // sub-cycle (never the rotation/orientation itself). Since VelocityVerletPreForceUpdate always
-   // integrates rotation from the angular velocity left over from the END of the previous sub-cycle,
-   // and that velocity is masked here BEFORE the next PreForceUpdate ever consumes it, a pinned axis's
-   // angular velocity is always exactly zero at the moment it would be used — so rotation about that
-   // axis never accumulates ANY component, even a tiny drifting one (this is exact, not an
-   // approximation). A free axis (zero mask) integrates normally. Mask <1,1,1> = no rotation at all
-   // (equivalent to the old capture-and-freeze behaviour); <1,0,1> allows rotation about Y only (roll,
-   // within the world XZ plane) while suppressing pitch (X) and yaw (Z).
+   // Independently, for pinRotation floaters the ANGULAR velocity about each world axis with a nonzero
+   // pinRotationAxes component is zeroed every sub-cycle (orientation itself untouched). It is masked before the
+   // next VelocityVerletPreForceUpdate integrates rotation from it, so rotation about a pinned axis is exactly
+   // zero. Mask <1,1,1> = no rotation; <1,0,1> allows rotation about Y only (roll in the XZ plane).
    void pinBoxTranslations()
    {
       if (pinnedBoxPositions_.empty() && pinnedRotationAxes_.empty()) return;
@@ -4356,7 +3910,8 @@ public:
             Vector3< real_t > pos = particleAccessor->getPosition(idx);
             Vector3< real_t > vel = particleAccessor->getLinearVelocity(idx);
             for (uint_t d = 0; d < uint_t(3); ++d)
-               if (std::abs(mask[d]) > real_t(0.5)) { pos[d] = target[d]; vel[d] = real_t(0); } // pin this axis; free axes untouched
+               // pin this axis; free axes untouched
+               if (std::abs(mask[d]) > real_t(0.5)) { pos[d] = target[d]; vel[d] = real_t(0); }
             particleAccessor->setPosition(idx, pos);
             particleAccessor->setLinearVelocity(idx, vel);
          }
@@ -4373,27 +3928,14 @@ public:
       }
    }
 
-   // Estimates the submerged volume of every floating sphere (type 1) once per LBM step.
-   // For each Z-slice dz through the sphere, 4 cells just outside the sphere in XY are sampled
-   // from the fill field. Their average fill level phi(dz) ≈ 1 below the free surface and ≈ 0
-   // above it, so sum_dz phi(dz) approximates h (submersion depth). V_sub is then the spherical
-   // cap formula pi*h^2*(3r-h)/3, clamped to [0, V_sphere].
-   // Computes the submerged volume of every floating sphere (type 1) once per LBM step.
+   // Computes the submerged volume of every floating sphere (type 1) once per LBM step, by plane fitting with the
+   // NormalSweep normal field (unit free-surface normal n̂ at every interface cell, pointing FROM LIQUID TO GAS,
+   // i.e. upward for a flat surface).
    //
-   // Strategy: plane-fitting using the NormalSweep normal field.
-   //
-   // NormalSweep (run every LBM step) already stores the unit free-surface normal n̂
-   // at every interface cell.  Convention: n̂ points FROM LIQUID TO GAS (i.e. upward
-   // for a flat horizontal surface).
-   //
-   // For each sphere we sample INTERFACE cells in a (r+2)-radius box but keep only those
-   // within `ringBand` of the sphere SURFACE (|dist−r| < ringBand) — the waterline contact
-   // ring ON the sphere, excluding the surrounding far-field free surface, whose height under
-   // waves is at a different phase and would bias the fitted plane. Restricting to the ring also
-   // makes x̄ ≈ the circle centre = the perpendicular foot of C on the plane, so (x̄−C) is
-   // nearly parallel to the true normal and the fit becomes robust to noise in n̂.
-   // We weight by φ(1−φ) which peaks at the transition (φ≈0.5) and vanishes in bulk
-   // liquid/gas, and accumulate:
+   // For each sphere, interface cells within a lateral disk of radius planeFitRadiusFactor_ * r around the sphere
+   // axis are sampled (reaching past any crater/gas moat the sphere digs), keeping only upward normals (n_z > 0)
+   // and dropping cells nearer another floater's surface. Weights φ(1−φ) peak at the transition (φ≈0.5) and
+   // vanish in bulk liquid/gas:
    //
    //   wSum  = Σ wᵢ
    //   nSum  = Σ wᵢ nᵢ          (weighted-average normal direction)
@@ -4407,17 +3949,14 @@ public:
    //   h_cap  = clamp(r + h_signed, 0, 2r)
    //   V_sub  = π · h_cap² · (3r − h_cap) / 3   (spherical-cap formula, exact for any plane)
    //
-   // This is geometrically exact for any free-surface orientation — works correctly
-   // even when waves make the local surface non-horizontal.  Uses only pre-existing
-   // waLBerla fields (fillFieldID_, flagFieldID_, normalFieldID_); no eigensolver needed.
+   // Exact for any free-surface orientation (waves). Uses only existing waLBerla fields (fillFieldID_,
+   // flagFieldID_, normalFieldID_); no eigensolver.
    //
-   // Fallback: if wSum ≈ 0 (no interface cells near the sphere) the sphere is either
-   // fully in gas or fully in liquid.  The average fill φ̄ of the non-obstacle
-   // cells in the sampling box distinguishes the two cases:
-   //   φ̄ ≈ 0 (gas)   → h_cap = 0
-   //   φ̄ ≈ 1 (liquid) → h_cap = 2r
-   // This prevents the wrong "assume fully submerged" that launched a sphere starting
-   // entirely in the gas phase upward with a huge erroneous buoyancy force.
+   // Fallback: if wSum ≈ 0 (no interface cells near the sphere) the sphere is fully in gas or fully in liquid;
+   // the average fill φ̄ of the non-obstacle cells in the upper half of the sampling box decides:
+   //   φ̄ ≤ 0.5 (gas)    → h_cap = 0
+   //   φ̄ > 0.5 (liquid) → h_cap = 2r
+   // (assuming "fully submerged" would launch a sphere starting in the gas phase).
    void computeSubmergedVolumes()
    {
       const size_t nF = floaterUIDs_.size();
@@ -4468,24 +4007,20 @@ public:
       //   [4-6] xSum      — Σ wᵢ xᵢ   (weighted centroid)
       //   [7]   fillSum   — Σ φ of non-obstacle cells above sphere equator (fallback)
       //   [8]   fillCount — number of such cells (fallback)
-      // Fallback: when no interface cells exist (wSum≈0), the sphere is entirely in
-      // gas or liquid.  In that case ALL valid (gas/liquid) neighbours have the same
-      // fill (≈0 or ≈1), so averaging any of them gives the correct answer even when
-      // multiple ranks contribute.  Pillars, NoSlip walls, and other obstacles are
-      // excluded by the fluidMask check — we keep looking past them automatically.
       //   [9]   aboveSum  — Σ φ of non-obstacle cells in the slab just ABOVE the sphere top (cavity probe)
       //   [10]  aboveCount— number of such cells (cavity probe)
-      // Cavity probe: liquid sitting on top of the sphere means the gas around its surface is an
-      // enclosed cavity, not the real free surface → it is submerged. This is the reference-free
-      // replacement for the old fixed absoluteLiquidHeight bound.
+      // Fallback: without interface cells (wSum≈0) all valid (gas/liquid) neighbours have the same fill (≈0 or
+      // ≈1), so the average is correct even with several contributing ranks; obstacles (pillars, NoSlip walls)
+      // are excluded by the fluidMask check.
+      // Cavity probe: liquid on top of the sphere means the gas around its surface is an enclosed cavity, not the
+      // real free surface, so the sphere is submerged (reference-free, no fixed liquid height).
       constexpr size_t stride = 11;
       std::vector< real_t > accum(nF * stride, real_t(0));
 
-      // De-contamination of touching/clustered floaters: a sampled cell belongs to the floater whose
-      // SURFACE it is nearest. nearerOtherFloater(p, fi, myDistErr) returns true if some OTHER floater's
-      // surface is closer to p than fi's is (by myDistErr = |dist_to_fi_surface|), so the cell is the
-      // neighbour's — skip it for fi. Without this, a neighbour's waterline pollutes fi's plane-fit (the
-      // ten-sphere "localSurfaceZ scattered 26..80" symptom). X is the only periodic axis (min-image in X).
+      // De-contamination of touching/clustered floaters: a sampled cell belongs to the floater whose SURFACE is
+      // nearest. nearerOtherFloater(p, fi, myDistErr) is true if another floater's surface is closer to p than
+      // myDistErr = |distance to fi's surface|, so a neighbour's waterline does not pollute fi's plane fit.
+      // X is the only periodic axis (minimum image in X).
       const real_t domainXSize = blockForest_->getDomain().xSize();
       auto nearerOtherFloater = [&](const Vector3< real_t >& p, size_t fi, real_t myDistErr) -> bool {
          for (size_t fj = 0; fj < nF; ++fj)
@@ -4518,10 +4053,9 @@ public:
          for (size_t fi = 0; fi < nF; ++fi)
          {
             const real_t r         = floaterRadii_[fi];
-            const real_t planeLatR = planeFitRadiusFactor_ * r; // lateral reach of the surface plane-fit: sample
-                                                                // the surrounding surface OUT TO planeFitRadiusFactor_*r
-                                                                // (prm: floaterPlaneFitRadiusFactor, default 1.8) so
-                                                                // it reaches past any crater/gas-moat the sphere digs.
+            // lateral reach of the surface plane fit (prm floaterPlaneFitRadiusFactor, default 1.8), so it
+            // reaches past any crater/gas moat the sphere digs
+            const real_t planeLatR = planeFitRadiusFactor_ * r;
             const int    pad       = static_cast< int >(std::ceil(planeLatR)) + 2;
 
             Vector3< real_t > c(cenX[fi], cenY[fi], cenZ[fi]);
@@ -4563,11 +4097,9 @@ public:
                      accum[fi * stride + 7] += fillField->get(localCell[0], localCell[1], localCell[2]);
                      accum[fi * stride + 8] += real_t(1);
                   }
-                  // Cavity probe: average fill in the slab JUST ABOVE the sphere top (offZ in (r, r+4],
-                  // within the top disk). Liquid here = water sits on top of the sphere = the gas around
-                  // its surface is an enclosed (numerical) cavity, not the real free surface → submerged.
-                  // A normally floating sphere has its top in the atmosphere, so this stays gas → no false
-                  // trigger. Reference-free replacement for the old fixed absoluteLiquidHeight bound.
+                  // Cavity probe: average fill in the slab just above the sphere top (offZ in (r, r+4], within
+                  // the top disk). Liquid here means the gas around the sphere is an enclosed (numerical) cavity,
+                  // so it is submerged; a normally floating sphere has its top in gas, so no false trigger.
                   const real_t lateral = std::sqrt(offX * offX + offY * offY);
                   if (offZ > r && offZ <= r + real_t(4) && lateral < r
                       && !nearerOtherFloater(samplePos, fi, offZ - r))
@@ -4577,12 +4109,10 @@ public:
                   }
                }
 
-               // Plane-fitting channel: fit the free surface over a WIDE lateral disk (radius planeLatR)
-               // around the sphere axis — reaching PAST any crater/gas-moat the sphere digs — so the fitted
-               // waterline tracks the undisturbed surrounding level instead of the depressed moat. Keep only
-               // interface cells with an UPWARD normal (n_z>0): crater/cavity walls point sideways/down and
-               // would drag the plane into the moat. (Wider than the old contact ring → can bias under
-               // strong waves, but correct for a calm floating body.)
+               // Plane-fitting channel: fit the free surface over a wide lateral disk (radius planeLatR) around
+               // the sphere axis, past any crater/gas moat, so the fitted waterline tracks the surrounding level.
+               // Only interface cells with an upward normal (n_z > 0): crater/cavity walls point sideways or down.
+               // (Can bias under strong waves, but correct for a calm floating body.)
                if (!isFlagSet(cellFlag, interfaceFlag)) continue;
                const real_t lateralP = std::sqrt(offX * offX + offY * offY);
                if (lateralP > planeLatR) continue;
@@ -4628,19 +4158,16 @@ public:
          real_t h_cap;
          real_t localSurfaceZ = C[2]; // reported below; refined to the fitted waterline when one exists
          Vector3< real_t > fittedNormal(real_t(0)); // free-surface normal used for the plane-fit (0 = none)
-         real_t normalCoherence = real_t(0);        // |Σw n̂|/Σw ∈ [0,1]; low ⇒ normals cancel (cavity / neighbour contamination)
+         // |Σw n̂|/Σw ∈ [0,1]; low ⇒ normals cancel (cavity / neighbour contamination)
+         real_t normalCoherence = real_t(0);
 
-         // --- REFERENCE-FREE submerged depth: read the waterline locally, no absoluteLiquidHeight ---
-         // The free surface is wherever the fill field transitions, sampled around THIS sphere:
-         //   • contact ring present (wTot>0): the surface crosses the sphere -> plane-fit the local
-         //     waterline from the ring interface cells. h_signed = n̂·(x̄−C) is the signed distance of
-         //     the centre below that plane; the clamp covers the just-submerged / just-emerged ends too.
-         //   • no ring: the sphere is fully in one phase -> the average fill φ̄ of the surrounding
-         //     non-obstacle cells decides (φ̄>0.5 liquid -> submerged 2r, else gas -> emerged 0).
-         // No flat global surface is assumed, so this holds in deformed/chaotic surfaces (piles,
-         // pillars, wakes) where a fixed reference is simply wrong. TRADE-OFF vs the old code: the
-         // fixed-surface "cavity-proof" override is gone — a gas pocket hugging a deeply-submerged
-         // sphere can again under-report V_sub (we revisit that locally if it shows up).
+         // --- Reference-free submerged depth: the waterline is read locally around THIS sphere ---
+         //   • plane fit available (wTot>0): h_signed = n̂·(x̄−C) is the signed depth of the centre below the
+         //     fitted plane; the clamp covers the just-submerged / just-emerged ends.
+         //   • otherwise the sphere is fully in one phase: the average fill φ̄ of the surrounding non-obstacle
+         //     cells decides (φ̄>0.5 liquid -> 2r, else gas -> 0).
+         // No flat global surface is assumed, so this holds on deformed surfaces (piles, pillars, wakes).
+         // Limitation: a gas pocket hugging a deeply submerged sphere can under-report V_sub.
          if (wTot > real_t(1e-6))
          {
             const Vector3< real_t > nSum(accum[fi*stride+1], accum[fi*stride+2], accum[fi*stride+3]);
@@ -4650,8 +4177,8 @@ public:
             localSurfaceZ   = xBar[2];
             normalCoherence = nSum.length() / wTot; // 1 ⇒ all ring normals aligned; →0 ⇒ they cancel
 
-            // Feed this floater's clean fitted waterline into the dynamic-H average (ambient surface,
-            // not this floater's own crater — the ring reaches out to 1.8r, past any dug-in moat).
+            // Feed the fitted waterline into the dynamic-H average (ambient surface: the fit reaches out to
+            // planeFitRadiusFactor_ * r, past the floater's own crater).
             dynHWeightedSum += wTot * localSurfaceZ;
             dynHWeightSum   += wTot;
 
@@ -4676,12 +4203,11 @@ public:
             h_cap = (avgFill > real_t(0.5)) ? real_t(2) * r : real_t(0);
          }
 
-         // CAVITY BLEND (reference-free, SMOOTH): blend the plane-fit h_cap toward fully-submerged (2r)
-         // as the slab just ABOVE the sphere top fills with liquid. avgFillAbove is the mean fill of
-         // those "ceiling" cells (gas→0, liquid→1, interface→partial; obstacle cells excluded). Water
-         // overhead ⇒ the gas around the sphere is an enclosed cavity ⇒ submerged. A smoothstep over
-         // [0.3, 0.7] keeps the buoyancy force CONTINUOUS — the old hard >0.5 snap kicked the heave into
-         // a growing oscillation that broke the free-surface solver.
+         // CAVITY BLEND (reference-free, smooth): blend h_cap toward fully submerged (2r) as the slab just above
+         // the sphere top fills with liquid. avgFillAbove is the mean fill of those "ceiling" cells (gas→0,
+         // liquid→1, interface→partial; obstacles excluded); water overhead ⇒ enclosed cavity ⇒ submerged. A
+         // smoothstep over [0.3, 0.7] keeps the buoyancy force continuous (a hard switch excites a growing heave
+         // oscillation that breaks the free-surface solver).
          const real_t aboveCnt     = accum[fi * stride + 10];           // # ceiling cells checked
          const real_t avgFillAbove = (aboveCnt > real_t(0)) ? (accum[fi * stride + 9] / aboveCnt) : real_t(0);
          const real_t tCav = std::clamp((avgFillAbove - real_t(0.3)) / real_t(0.4), real_t(0), real_t(1));
@@ -4692,13 +4218,9 @@ public:
 
          submergedVolumes_[floaterUIDs_[fi]] = vSub;
 
-         // --- PHANTOM FORCE (Option A) — DISABLED. This whole function is now skipped entirely under
-         // useMemOnlyBuoyancy_ (the default; see doDEMSubCycles), so this block only still matters for
-         // the opt-in useMemOnlyBuoyancy_=false path -- and even there it stays commented out, since
-         // this prediction/correction was a submergence-depth-derived fix bolted on for a pile-up
-         // over-lift issue found in more complex (flowing/multi-floater/pillar) scenarios Bogner's
-         // original static hydrostatic test never encountered.
-         // Left in place (not deleted) in case useMemOnlyBuoyancy_=false ever needs Option A revived.
+         // --- PHANTOM FORCE (Option A), disabled. This function is skipped under useMemOnlyBuoyancy_ (the
+         // default), and even with useMemOnlyBuoyancy_=false this pile-up over-lift correction stays commented out.
+         // Kept for a possible revival of Option A.
          /*
          const real_t submFrac  = std::clamp(vSub / vFull, real_t(0), real_t(1));
          constexpr real_t kneeSub = real_t(0.5);  // taper begins once the body is more than half submerged
@@ -4743,9 +4265,8 @@ public:
                << "  (oldFixedRef=" << surfaceHeight_ << ", now unused for force)"
                << "  (expect submersion ~densityRatio×100% and centreDepth~0 at equilibrium)");
 
-            // --- PHANTOM DECOMPOSITION log — disabled along with the Option A computation above (the
-            // variables it printed, deltaH/deltaP/rContact/aProj/openSurf/submFrac/taper/fPredRaw/fPredZ,
-            // no longer exist). See the comment on the commented-out block above for the rationale.
+            // --- PHANTOM DECOMPOSITION log, disabled with the Option A computation above (its variables no longer
+            // exist).
             /*
             WALBERLA_LOG_INFO_ON_ROOT("[PhantomDecomp] uid=" << floaterUIDs_[fi]
                << "  deltaH=" << deltaH << " LU (localSurfaceZ=" << localSurfaceZ << " − flatRef=" << surfaceHeight_ << ")"
@@ -4760,12 +4281,11 @@ public:
          }
       }
 
-      // Dynamic MEM reference height: EMA-blend the (wTot-weighted) ambient waterline average into
-      // memReferenceHeight_. Force-side only (SimpleBB's rhoHydStat feeds only forceMEM, never the fluid —
-      // see AntidunesBoundaryHandling / SimpleBB.h), so this has no PDF/reconstruction feedback loop. Held
-      // (not snapped) when no floater has a clean ring this step. See changes.md (2026-07 dynamic-H
-      // history) for why this is a STATIC/offset correction only — it cancels the uncancelled pile-up head
-      // exactly, but cannot remove a genuinely velocity-dependent (dynamic suction) residual.
+      // Dynamic MEM reference height: EMA-blend the wTot-weighted ambient waterline average into
+      // memReferenceHeight_. Force-side only (SimpleBB's rhoHydStat feeds only forceMEM, never the fluid; see
+      // AntidunesBoundaryHandling / SimpleBB.h), so no PDF/reconstruction feedback. Held (not snapped) when no
+      // floater has a plane fit this step. A static/offset correction only: it cancels the uncancelled pile-up
+      // head but cannot remove a velocity-dependent (dynamic suction) residual.
       if (useDynamicReferenceHeight_ && memReferenceHeight_ && dynHWeightSum > real_t(1e-6))
       {
          constexpr real_t alpha = real_t(0.2);
@@ -4781,31 +4301,19 @@ public:
       }
    }
 
-   // Computes the submerged volume of every floating box (type 3) once per LBM step.
-   //
-   // Strategy: integrate the fill field φ over all LBM cells whose centres lie inside
-   // the (possibly rotated) box.  Each such cell contributes φ × 1 LU³ to V_sub:
-   //   - φ ≈ 1  (liquid cell, below free surface) → full contribution
-   //   - φ ≈ 0  (gas cell, above free surface)    → no contribution
-   //   - φ ∈ (0,1) (interface cell)               → proportional contribution
-   //
-   // Cells inside the box are MovingObstacle cells; their fill values are maintained by
-   // ObstacleFillLevelSweep (propagated inward from neighbouring fluid cells each step)
-   // and by the fill-field state from when the cell was last fluid.  Boundary-layer cells
-   // are updated every step; deeper interior cells change slowly and remain bounded [0,1].
-   //
-   // Rotation is handled exactly: cell centres are transformed to the box body frame
-   // before the containment test, so the method is valid for any tilt angle.  No rate-
-   // limiting is needed because V_sub ∈ [0, V_full] by construction (φ ∈ [0,1]).
+   // Computes the submerged volume and centre-of-buoyancy offset of every floating box (type 3) and cylinder
+   // (type 4) once per LBM step: the local free surface is plane-fitted from interface cells in a shell around
+   // each body (as for the spheres), then the rotated body is clipped against that plane (12³-point sampling,
+   // used for the force; the analytic clip is computed as a cross-check). Without interface cells nearby, the
+   // average shell fill decides fully submerged vs. fully emerged. Followed by the cavity blend.
    void computeSubmergedVolumesBox()
    {
       buoyancyCenterOffset_.clear(); // box/cylinder-only; recomputed every step
       const size_t nB = clipFloaters_.size(); // boxes (type 3) + cylinders (type 4)
       if (nB == 0) return;
 
-      // useFullVolumeAnalyticBuoyancy_: skip the plane-fit/surface-sampling entirely -- vSub=vFull,
-      // no righting lever, for every floater unconditionally (see SimulationParams.h's own doc
-      // comment on this flag).
+      // useFullVolumeAnalyticBuoyancy_: skip the plane fit/sampling; vSub=vFull, no righting lever, for every
+      // floater (see SimulationParams.h).
       if (useFullVolumeAnalyticBuoyancy_)
       {
          for (size_t bi = 0; bi < nB; ++bi)
@@ -4864,26 +4372,13 @@ public:
       std::vector< real_t > acc(nB * stride, real_t(0));
       std::vector< real_t > fluidCnt(nB, real_t(0)); // # non-obstacle shell cells (fallback denominator)
 
-      // De-contamination of touching/nearby box/cylinder floaters — mirrors nearerOtherFloater() in
-      // computeSubmergedVolumes() (spheres), which was added for exactly this reason ("a neighbour's
-      // waterline pollutes fi's plane-fit"). No equivalent existed here: with boxPlaneFitBandFactor
-      // widened (to fix the single-box under-reach bias), a box's shell can reach 30+ LU past its own
-      // surface — easily overlapping a neighbour's shell in a multi-floater scene and dragging every
-      // fitted planeOrigin toward the group's shared centroid (confirmed: box_density_showcase_gas.prm's
-      // 3 boxes at x=32/64/96 all fitted planeOrigin_x within ~15-25 LU of the *group* centre, x≈64,
-      // instead of near their own pinned x).
-      //
-      // floaterSurfaceDistance(p, idx) computes the TRUE distance from world point p to floater idx's
-      // own ORIENTED surface (world->body via Rᵀ, then clamp to the shape's actual extent — per-axis for
-      // a box, radial+axial for a cylinder — exactly the same clamp used elsewhere in this file for
-      // cylinder contact detection). An earlier version of this guard approximated "own distance" with
-      // each floater's circumscribed BOUNDING SPHERE radius instead — much simpler, but a poor
-      // approximation for an elongated shape: a radius-8/half-length-12 cylinder's true lateral
-      // (radial) reach is only 8 LU, versus its bounding-sphere radius of ~14.4 LU. Confirmed with real
-      // data (cylinder_density_showcase_gas.prm, three cylinders lined up perpendicular to their own
-      // axis — exactly the direction the spherical approximation is worst): the bounding-sphere version
-      // cut contamination from ~15-26 LU down to ~4-11 LU, better but not eliminated. The exact clamp
-      // below removes the remaining approximation error entirely.
+      // De-contamination of touching/nearby box/cylinder floaters, as nearerOtherFloater() for spheres: with a
+      // wide boxPlaneFitBandFactor a shell can reach far past the body and overlap a neighbour's, dragging every
+      // fitted plane toward the group's shared centroid.
+      // floaterSurfaceDistance(p, idx) is the true distance from world point p to floater idx's ORIENTED surface
+      // (world->body via Rᵀ, then clamp to the shape's extent: per axis for a box, radial+axial for a cylinder).
+      // A bounding-sphere approximation would be poor for elongated shapes (a radius-8/half-length-12 cylinder
+      // reaches 8 LU laterally but has a bounding radius of ~14.4 LU).
       const real_t domainXSize = blockForest_->getDomain().xSize();
       const real_t domainYSize = blockForest_->getDomain().ySize();
       const bool   xPeriodic   = blockForest_->isXPeriodic();
@@ -4917,7 +4412,8 @@ public:
             clamped = mesa_pd::Vec3(std::clamp(local[0], -h[0], h[0]), std::clamp(local[1], -h[1], h[1]),
                                     std::clamp(local[2], -h[2], h[2]));
          }
-         return (local - clamped).length(); // 0 if p projects inside the shape; else true distance to nearest surface point
+         // 0 if p projects inside the shape, else the distance to the nearest surface point
+         return (local - clamped).length();
       };
       auto nearerOtherBoxFloater = [&](const Vector3< real_t >& p, size_t bi, real_t myDistErr) -> bool {
          for (size_t bj = 0; bj < nB; ++bj)
@@ -4944,11 +4440,9 @@ public:
             const real_t hx = clipFloaters_[bi].halfExtents[0];
             const real_t hy = clipFloaters_[bi].halfExtents[1];
             const real_t hz = clipFloaters_[bi].halfExtents[2];
-            // Wide lateral reach so the surface plane-fit samples PAST any crater/gas-moat the box digs,
-            // anchoring the fitted waterline to the undisturbed surrounding surface (mirrors the sphere).
-            // Configurable via prm ModelParameters.boxPlaneFitBandFactor (default 0.8, matching the old
-            // hardcoded value) — raise it if the fit still looks contaminated by the box's own local
-            // disturbance once the body has stopped moving.
+            // Wide lateral reach so the plane fit samples past any crater/gas moat the box digs, anchoring the
+            // fitted waterline to the surrounding surface (as for the sphere). prm
+            // ModelParameters.boxPlaneFitBandFactor (default 0.8).
             const real_t band = boxPlaneFitBandFactor_ * std::max({hx, hy, hz}) + real_t(2);
 
             mesa_pd::Mat3 R;
@@ -4967,12 +4461,10 @@ public:
             const real_t AABB_hy = std::abs(axx[1]) + std::abs(ayy[1]) + std::abs(azz[1]) + band;
             const real_t AABB_hz = std::abs(axx[2]) + std::abs(ayy[2]) + std::abs(azz[2]) + band;
 
-            // Ceiling/cavity probe setup (ported from the floating-sphere method, ParticleKernels.h
-            // ~1520-1531): world-space top of the shape's TRUE (unpadded, no `band`) extent, and an
-            // isotropic lateral cutoff for "directly above" -- mirrors the sphere's `lateral < r`. Liquid
-            // found here means the local gas pocket the shape sits in is an enclosed cavity fed by real
-            // liquid overhead, not the true free surface -- the box/cylinder analogue of the sphere's
-            // cavity blend (see the vSub correction right before it is stored, below).
+            // Ceiling/cavity probe setup (as in computeSubmergedVolumes()): world-space top of the shape's true
+            // (unpadded) extent and an isotropic lateral cutoff for "directly above" (the sphere's `lateral < r`).
+            // Liquid there means the gas pocket around the shape is an enclosed cavity under real liquid; used by
+            // the cavity blend below.
             const real_t trueTopZ     = pos[2] + std::abs(axx[2]) + std::abs(ayy[2]) + std::abs(azz[2]);
             const real_t ceilingReach = std::max({ hx, hy, hz });
 
@@ -5006,12 +4498,9 @@ public:
                   acc[bi * stride + 7] += fillField->get(localCell[0], localCell[1], localCell[2]);
                   fluidCnt[bi]         += real_t(1);
 
-                  // Ceiling/cavity probe (mirrors the floating-sphere method, ParticleKernels.h
-                  // ~1520-1531): average fill of non-obstacle cells in the slab just ABOVE the shape's
-                  // own (true) top surface, within its own lateral footprint. Liquid here means the gas
-                  // pocket the shape sits in is fed by real liquid overhead -- an enclosed cavity, not
-                  // the true free surface -- so the shape is genuinely submerged regardless of what the
-                  // (possibly small-local-void-contaminated) plane-fit alone found.
+                  // Ceiling/cavity probe (as in computeSubmergedVolumes()): average fill of non-obstacle cells in
+                  // the slab just above the shape's true top, within its lateral footprint. Liquid here means the
+                  // shape is submerged regardless of what the (possibly void-contaminated) plane fit found.
                   const real_t worldOffZ = samplePos[2] - trueTopZ;
                   const real_t lateralXY = std::sqrt((samplePos[0] - pos[0]) * (samplePos[0] - pos[0]) +
                                                       (samplePos[1] - pos[1]) * (samplePos[1] - pos[1]));
@@ -5105,9 +4594,8 @@ public:
                                          acc[bi*stride+5] / wTot,
                                          acc[bi*stride+6] / wTot);
 
-            // ---- Analytical clip (exact OBB∩plane for boxes, exact disk∩plane for cylinders; cheap) —
-            //      logged as the cross-check against the sampling estimate (useAnalyticBoxBuoyancy, which
-            //      used it for the force, was archived on 2026-11-20). ----
+            // ---- Analytical clip (exact OBB∩plane for boxes, exact disk∩plane for cylinders; cheap), logged as a
+            //      cross-check of the sampling estimate. ----
             Vector3< real_t > cbAnalytic(real_t(0));
             if (isCyl) clipCylinderAnalytic(hx, hz, R, nHat, xBar, pos, vSubAnalytic, cbAnalytic);
             else       clipBoxAnalytic(Vector3< real_t >(hx, hy, hz), R, nHat, xBar, pos, vSubAnalytic, cbAnalytic);
@@ -5150,25 +4638,18 @@ public:
             cbOff = Vector3< real_t >(real_t(0)); // symmetric → no righting lever
          }
 
-         // CAVITY BLEND (ported from the floating-sphere method, ParticleKernels.h ~1633-1643): blend
-         // vSub toward fully-submerged (vFull) as the slab just above the shape's own top fills with
-         // liquid. Without this, a box/cylinder buried in a densely packed pile keeps whatever vSub the
-         // local plane-fit found -- and deep in a pile that plane-fit can lock onto a small local void
-         // between neighbouring particles instead of the true (much higher) free surface, even when the
-         // shape sits under genuinely bulk liquid. The sphere path has carried this correction since
-         // f6db0727 ("cavity-proof buoyancy"); it was never ported to the box/cylinder path, which is why
-         // packed cylinders/boxes can end up with submersion oscillating well below 100% (and a
-         // buoyancy force cancelling the MEM hydro force) even tens of LU under the real surface.
+         // CAVITY BLEND (as in computeSubmergedVolumes()): blend vSub toward vFull as the slab just above the
+         // shape's top fills with liquid. Deep in a packed pile the plane fit can lock onto a small local void
+         // between particles instead of the real (much higher) free surface, under-reporting vSub even for a
+         // shape under bulk liquid.
          const real_t aboveCnt     = acc[bi * stride + 9];
          const real_t avgFillAbove = (aboveCnt > real_t(0)) ? (acc[bi * stride + 8] / aboveCnt) : real_t(0);
          const real_t tCav = std::clamp((avgFillAbove - real_t(0.3)) / real_t(0.4), real_t(0), real_t(1));
          const real_t wCav = tCav * tCav * (real_t(3) - real_t(2) * tCav); // smoothstep weight ∈ [0,1]
          vSub = (real_t(1) - wCav) * vSub + wCav * vFull;
-         // A fully-submerged centrally-symmetric shape (box or cylinder) has its submerged centroid at
-         // its own geometric centre, i.e. cbOff -> 0. Blend the (possibly unreliable, computed against
-         // the same contaminated plane-fit) lever arm toward that limit with the same weight, so the
-         // righting torque doesn't keep using a partial-submersion lever once vSub itself has been
-         // corrected toward "essentially fully submerged".
+         // A fully submerged centrally symmetric shape has its submerged centroid at its centre (cbOff -> 0):
+         // blend the lever arm toward that limit with the same weight, so the righting torque does not keep a
+         // partial-submersion lever once vSub is corrected toward full submersion.
          cbOff = (real_t(1) - wCav) * cbOff;
 
          vSub = std::clamp(vSub, real_t(0), vFull);
@@ -5210,10 +4691,9 @@ public:
             // F_buoy = +V_sub·|g| acts at the centre of buoyancy B = centroid of the submerged volume; the
             // horizontal offset of B from the centre of gravity G (= box centre) gives the restoring moment
             //   M = (B − G) × F_buoy,   heeled about y ⇒ M_y = −(B−G)_x · V_sub·|g|  (>0 restoring here).
-            // For a FIXED box held at heel α this is one point on the stability curve M(α); sweep α ∈ [0,30°]
-            // at 3 resolutions and compare to the ideal analytic curve (this uses the analytic clip's exact
-            // submerged centroid, so at high resolution it converges to the ideal). We log |M| and M_y, the
-            // heel angle, the righting arm GZ = |M|/(V_sub·|g|), and V_sub, one line per eval step.
+            // For a box held at heel α this is one point of the stability curve M(α), for comparison with the
+            // ideal analytic curve. B − G is cbOff (from the sampling clip, after the cavity blend). Logs |M|, M_y,
+            // the heel angle, the righting arm GZ = |M|/(V_sub·|g|) and V_sub, once per eval step.
             const real_t gMag     = std::abs((*acceleration_)[2]);
             const real_t fBuoyZ   = vSub * gMag;                              // upward buoyant force
             const Vector3< real_t > Mvec(cbOff[1] * fBuoyZ,                   // (B−G) × (0,0,F_buoy)
@@ -5230,12 +4710,10 @@ public:
       }
    }
 
-   // Looks up the fluid density (rho, same quantity ReconstructInterfaceCellABB.h's [LOW-RHO] guard
-   // checks before u/=rho) at the LBM cell containing the given global position, by scanning this
-   // rank's own blocks (one block per process here, so this is O(1) in practice) -- same
-   // globalCell/blockBB/transformGlobalToBlockLocalCell pattern used above for fillField sampling.
-   // Returns a NaN sentinel if pos does not fall inside any block this rank owns (e.g. a ghost
-   // floater whose owning rank is elsewhere) -- callers must not mistake that for an actual reading.
+   // Fluid density rho (the quantity the [LOW-RHO] guard in ReconstructInterfaceCellABB.h checks before u/=rho)
+   // at the LBM cell containing the global position, by scanning this rank's blocks (one block per process here,
+   // so O(1) in practice). Returns NaN if pos lies in no block of this rank (e.g. a ghost floater owned
+   // elsewhere); callers must not treat that as a reading.
    real_t sampleFluidDensityAt(Vector3< real_t > pos) const
    {
       blockForest_->mapToPeriodicDomain(pos);
@@ -5269,17 +4747,18 @@ private:
    BlockDataID                                        pdfFieldID_;
    BlockDataID                                        particleFieldID_;
    BlockDataID                                        boundaryHandlingID_;
-   // [Claude, 2026-10-01] false in the fluid-free DropTest (no boundary handling, no particle field): the fluid-side
-   // diagnostic sweeps in doDEMSubCycles are skipped then (their block-data lookups abort on the invalid IDs)
+   // false in the fluid-free DropTest (no boundary handling, no particle field): the fluid-side diagnostic sweeps
+   // in doDEMSubCycles are skipped (their block-data lookups would abort on the invalid IDs)
    bool                                               hasFluid_;
-   // See SimulationObjects::DiagnosticEvent's own doc comment -- shared buffer that per-sub-cycle
-   // checks below push a lightweight record into (when diagnosticSweepEnabled_) instead of logging
-   // directly; drained once per main step by BuildTimeloop.h's addAfterTimeStepDiagnosticSweep.
+   // Shared buffer (see SimulationObjects::DiagnosticEvent) that per-sub-cycle checks push records into (when
+   // diagnosticSweepEnabled_) instead of logging directly; drained once per main step by BuildTimeloop.h's
+   // addAfterTimeStepDiagnosticSweep.
    bool                                                diagnosticSweepEnabled_;
    std::shared_ptr< std::vector< SimulationObjects::DiagnosticEvent > > diagnosticEvents_;
    std::vector< walberla::id_t >                      floaterUIDs_;         // sphere floaters, same size on all ranks
    std::vector< real_t >                              floaterRadii_;        // indexed by floaterUIDs_
-   std::vector< real_t >                              floaterDensities_;    // density ratio per sphere floater (indexed by floaterUIDs_)
+   // density ratio per sphere floater (indexed by floaterUIDs_)
+   std::vector< real_t >                              floaterDensities_;
    // Box (type 3) + cylinder (type 4) floaters share the plane-fit + clip V_sub pipeline.
    // A cylinder is stored as halfExtents = (r, r, L/2) with its axis on the body z-axis.
    struct ClipFloater {
@@ -5288,40 +4767,42 @@ private:
       Vector3< real_t > halfExtents; // box: half-extents; cylinder: (r, r, halfLength)
    };
    std::vector< ClipFloater >                         clipFloaters_;          // same order/size on all ranks
-   std::unordered_map< walberla::id_t, real_t >       submergedVolumes_;    // keyed by UID; populated by both compute* methods
-   std::unordered_map< walberla::id_t, real_t >       phantomForceZ_;       // keyed by UID; tapered F_pred_z per sphere (Option A vertical MEM correction)
-   std::unordered_map< walberla::id_t, Vector3< real_t > > buoyancyCenterOffset_; // box C_b − C_com (world frame); box-only, for righting torque
-   std::unordered_map< walberla::id_t, real_t >       boxComOffsetZ_;       // per-box COM offset below centroid (body z, const); for the pendulum righting torque
-   bool                                               usePhantomForceCorrection_{ false }; // Option A: subtract F_pred_z from vertical MEM force
-   // (DEFAULT) true → skip computeSubmergedVolumes()/computeSubmergedVolumesBox() entirely in
-   // doDEMSubCycles: no vSub, no righting torque, matching Bogner & Rude (2013) exactly (buoyant
-   // support and righting moment both come solely from the raw MEM force/torque). false → run them as
-   // before (Antidunes' extended, opt-in split; the pre-existing behaviour before the default flip).
+   // keyed by UID; populated by both compute* methods
+   std::unordered_map< walberla::id_t, real_t >       submergedVolumes_;
+   // keyed by UID; tapered F_pred_z per sphere (Option A vertical MEM correction)
+   std::unordered_map< walberla::id_t, real_t >       phantomForceZ_;
+   // box/cylinder C_b − C_com (world frame), for the righting torque
+   std::unordered_map< walberla::id_t, Vector3< real_t > > buoyancyCenterOffset_;
+   // per-floater COM offset below the centroid (body z, const), for the pendulum righting torque
+   std::unordered_map< walberla::id_t, real_t >       boxComOffsetZ_;
+   // Option A: subtract F_pred_z from the vertical MEM force
+   bool                                               usePhantomForceCorrection_{ false };
+   // (default) true → skip computeSubmergedVolumes()/computeSubmergedVolumesBox() in doDEMSubCycles: no vSub, no
+   // righting torque, as in Bogner & Rude (2013) (buoyant support and righting moment come solely from the raw
+   // MEM force/torque). false → run them (Antidunes' extended split).
    bool                                               useMemOnlyBuoyancy_{ true };
    // Only consulted when useMemOnlyBuoyancy_==false. true -> computeSubmergedVolumes()/
-   // computeSubmergedVolumesBox() force vSub=vFull (buoyancyCenterOffset_=0) for every floater
-   // unconditionally, skipping the plane-fit/clip/sampling machinery entirely -- see
-   // SimulationParams.h::ModelParams::useFullVolumeAnalyticBuoyancy's own doc comment.
+   // computeSubmergedVolumesBox() set vSub=vFull (buoyancyCenterOffset_=0) for every floater, skipping the
+   // plane-fit/clip machinery (see ModelParams::useFullVolumeAnalyticBuoyancy, SimulationParams.h).
    bool                                               useFullVolumeAnalyticBuoyancy_{ false };
-   std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxPositions_;  // boxes whose TRANSLATION is held (rotation free); UID → pinned world position
-   std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxAxes_;       // UID → per-axis pin mask (nonzero = pin that axis, 0 = free)
-   std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedRotationAxes_; // UID → per-axis rotation pin mask (nonzero = zero that axis's angular velocity every sub-cycle, 0 = free)
+   // floaters whose TRANSLATION is held (rotation free): UID → pinned world position
+   std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxPositions_;
+   // UID → per-axis pin mask (nonzero = pin that axis, 0 = free)
+   std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedBoxAxes_;
+   // UID → per-axis rotation pin mask (nonzero = zero that axis's angular velocity every sub-cycle, 0 = free)
+   std::unordered_map< walberla::id_t, Vector3< real_t > > pinnedRotationAxes_;
 
    // [MIGRATION-NAN] support: hydrodynamicForce/oldHydrodynamicForce are not part of
-   // ParticleGhostCopyNotification's packed field list (see FloaterHistoryLogger's own doc comment),
-   // so a particle whose ownership transfers to this rank mid-main-step arrives with whatever
-   // default/uninitialized value this rank's ParticleStorage slot holds for those fields, not the
-   // value the old owner computed at the top of the step. UID -> last-observed owner rank, used to
-   // tell a fresh migration from an already-owned particle whose force went bad some other way.
+   // ParticleGhostCopyNotification, so a particle whose ownership moves to this rank mid-step arrives with this
+   // rank's default/uninitialized slot values, not the old owner's. UID -> last observed owner rank, to tell a
+   // fresh migration from an already-owned particle whose force went bad otherwise.
    std::unordered_map< walberla::id_t, int > lastKnownOwner_;
 
-   // [GHOST-VANISHED] support -- see doDEMSubCycles' own capture-site comment. Snapshot (rebuilt fresh
-   // each main step, at subCycle==0) of every floater UID this rank can see at all (local or ghost),
-   // i.e. exactly the population the last fluid-obstacle mapping sweep iterated.
+   // [GHOST-VANISHED] support (see doDEMSubCycles): snapshot, rebuilt each main step at subCycle==0, of every
+   // floater UID this rank can see (local or ghost), i.e. the population the last fluid-obstacle mapping used.
    std::unordered_set< walberla::id_t > ghostMappingSnapshot_;
 
-   // [VELOCITY-JUMP] support -- see doDEMSubCycles' own capture-site comment. UID -> velocity as
-   // observed at the start of the previous main step.
+   // [VELOCITY-JUMP] support (see doDEMSubCycles): UID -> velocity at the start of the previous main step.
    std::unordered_map< walberla::id_t, Vector3< real_t > > lastVelocityForJumpCheck_;
 
    // kernels — declaration order must match initializer-list order to avoid -Wreorder
@@ -5329,37 +4810,37 @@ private:
    mesa_pd::kernel::VelocityVerletPostForceUpdate vvIntegratorPostForce;
    ComputeLubrication computeLubrication;
    ComputeContacts computeContacts;
-   // ModelParameters.logFloaterHistory's per-rank CSV writer (disabled/no-op unless the prm sets it) --
-   // owned here since ParticleKernels outlives both computeContacts/computeLubrication, which hold a
-   // raw (non-owning) pointer to it via setHistoryLogger.
+   // ModelParameters.logFloaterHistory's per-rank CSV writer (no-op unless enabled). Owned here because
+   // ParticleKernels outlives computeContacts/computeLubrication, which hold a non-owning pointer.
    FloaterHistoryLogger floaterHistoryLogger_;
-   // Shared with SetupStages.h/BuildTimeloop.h (see SimulationObjects::dormantFloaterUIDs) — used to
-   // exclude dormant (startInactive, not yet at settlingSteps) floaters from DEM contact pairs here,
-   // same as they're already excluded from fluid mapping.
+   // Shared with SetupStages.h/BuildTimeloop.h (SimulationObjects::dormantFloaterUIDs): excludes dormant
+   // (startInactive, not yet at settlingSteps) floaters from DEM contact pairs, as from fluid mapping.
    std::shared_ptr< std::unordered_set< walberla::id_t > > dormantFloaterUIDs_;
-   // Shared with SetupStages.h (see SimulationObjects::freshlyActivatedFloaterUIDs' own doc
-   // comment) -- wired into computeContacts (setFreshlyActivatedUIDs, constructor below) and
-   // cleared unconditionally at the end of every doDEMSubCycles() call.
+   // Shared with SetupStages.h (SimulationObjects::freshlyActivatedFloaterUIDs): wired into computeContacts
+   // (setFreshlyActivatedUIDs) and cleared at the end of every doDEMSubCycles() call.
    std::shared_ptr< std::unordered_set< walberla::id_t > > freshlyActivatedFloaterUIDs_;
-   // Built once in the constructor from ModelParams::logFloaterHistoryReleaseStepFilter (empty/unused
-   // when that filter is 0); FloaterHistoryLogger keeps a raw pointer to this, so it must outlive it
-   // (both are members of this same ParticleKernels instance, so that's automatic).
+   // Built in the constructor from ModelParams::logFloaterHistoryReleaseStepFilter (empty when 0);
+   // FloaterHistoryLogger keeps a raw pointer to it (same owner, so lifetimes match).
    std::unordered_set< walberla::id_t > loggedFloaterUIDs_;
    AddExternalForces addExternalForces;
    bool useLubricationCorrection;
    uint_t                                             evalFrequency_;
    uint_t                                             stepCounter_;
    bool                                               simParams_shadowEnabled_ = false;
-   real_t                                             ringBand_; // sphere V_sub contact-ring half-width (prm: floaterRingBand)
-   real_t                                             planeFitRadiusFactor_; // sphere surface plane-fit lateral reach, in units of r (prm: floaterPlaneFitRadiusFactor)
-   real_t                                             boxPlaneFitBandFactor_; // box/cylinder plane-fit shell reach, in units of max(halfExtents) (prm: boxPlaneFitBandFactor)
-   real_t                                             surfaceHeight_; // mean free-surface height (absoluteLiquidHeight); global V_sub bound
-   std::shared_ptr< Vector3< real_t > >               acceleration_;  // body acceleration incl. gravity; for net-force logging
+   // sphere V_sub contact-ring half-width (prm floaterRingBand); currently only reported in the constructor log
+   real_t                                             ringBand_;
+   // sphere surface plane-fit lateral reach, in units of r (prm floaterPlaneFitRadiusFactor)
+   real_t                                             planeFitRadiusFactor_;
+   // box/cylinder plane-fit shell reach, in units of max(halfExtents) (prm boxPlaneFitBandFactor)
+   real_t                                             boxPlaneFitBandFactor_;
+   // static free-surface reference height (absoluteLiquidHeight); used in logs and the disabled Option A block
+   real_t                                             surfaceHeight_;
+   // body acceleration incl. gravity; for net-force logging
+   std::shared_ptr< Vector3< real_t > >               acceleration_;
 
-   // Live MEM hydrostatic reference height (ModelParameters.useDynamicReferenceHeight). Shared with
-   // HydrostaticDensityFtor via SimulationObjects; EMA-updated here from the floaters' fitted local
-   // waterlines each step. Force-side only (SimpleBB.h rhoHydStat never touches the fluid), so updating
-   // it has no PDF/reconstruction feedback — see the [DynamicH] log / changes.md for the 2026-07 history.
+   // Live MEM hydrostatic reference height (ModelParameters.useDynamicReferenceHeight), shared with
+   // HydrostaticDensityFtor via SimulationObjects and EMA-updated here from the floaters' fitted waterlines.
+   // Force-side only (SimpleBB.h rhoHydStat never touches the fluid), so no PDF/reconstruction feedback.
    std::shared_ptr< real_t >                          memReferenceHeight_;
    bool                                                useDynamicReferenceHeight_ = false;
 

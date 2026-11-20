@@ -13,8 +13,10 @@
 //  You should have received a copy of the GNU General Public License along
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
-//! \file DragForceSphere.cpp
+//! \file IbbEquivalenceDragTest.cpp
 //! \ingroup lbm_mesapd_coupling
+//! Adapted from tests/lbm_mesapd_coupling/momentum_exchange_method/DragForceSphereMEM.cpp: adds --MEMVariant IBB
+//! (SimpleBB with useInterpolatedBounceBack) to compare its drag with --MEMVariant CLI (CurvedLinear).
 //! \author Christoph Rettinger <christoph.rettinger@fau.de>
 //
 //======================================================================================================================
@@ -116,7 +118,8 @@ struct Setup{
    real_t analyticalDrag;
 };
 
-enum MEMVariant { BB, CLI, IBB }; // IBB = SimpleBB with useInterpolatedBounceBack = true ([Claude, 2026-09-21] equivalence test against lbm_mesapd_coupling::CurvedLinear)
+// IBB = SimpleBB with useInterpolatedBounceBack = true (equivalence test against CurvedLinear)
+enum MEMVariant { BB, CLI, IBB };
 
 MEMVariant to_MEMVariant( const std::string& s )
 {
@@ -566,7 +569,7 @@ int main( int argc, char **argv )
 
    timeloopTiming.logResultOnRoot();
 
-   // [Claude, 2026-09-21] equivalence check output: final drag force with full precision, compared between --MEMVariant CLI (lbm_mesapd_coupling::CurvedLinear) and --MEMVariant IBB (SimpleBB, useInterpolatedBounceBack)
+   // equivalence check output: final drag force at full precision, to compare --MEMVariant CLI and --MEMVariant IBB
    WALBERLA_ROOT_SECTION()
    {
       std::cout << std::setprecision(17) << "IBB-EQUIV-DRAG " << MEMVariant_to_string(method) << " steps=" << timeloop.getCurrentTimeStep() << " drag=" << forceEval->getDragForce() << std::endl;

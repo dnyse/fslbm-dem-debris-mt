@@ -22,8 +22,7 @@
 //======================================================================================================================
 
 // Forcing.h is not self-contained: it relies on the include order of Antidunes.cpp (free-surface,
-// timeloop and boundary-handling headers arrive via BuildTimeloop.h first). Mirror that order here
-// (test-side only, no production file touched) instead of depending on an include-order accident.
+// timeloop and boundary-handling headers arrive via BuildTimeloop.h first), mirrored here.
 #include "core/Environment.h"
 #include "core/debug/TestSubsystem.h"
 #include "core/mpi/MPIManager.h"
@@ -32,12 +31,9 @@
 #include "timeloop/all.h"
 
 #include "BuildTimeloop.h"
-// [Claude, 2026-11-06] added: BuildTimeloop.h only forward-declares trackWatchCells, checkPdfNaN,
-// logFluidBoxHistory, logDensityColumn and logWaterHeights; their definitions live in SetupStages.h, which
-// Antidunes.cpp includes separately right after BuildTimeloop.h (see its own include block) but this test never
-// did. Without it, every addSweep*/addAfterTimeStepDiagnosticSweep lambda this test pulls in from
-// BuildTimeloop.h left those five symbols unresolved at link time (confirmed pre-existing on the unmodified
-// debris-clogging branch too, unrelated to any other change in this commit).
+// BuildTimeloop.h only forward-declares trackWatchCells, checkPdfNaN, logFluidBoxHistory, logDensityColumn and
+// logWaterHeights; their definitions are in SetupStages.h, which Antidunes.cpp includes right after it. Without it
+// the addSweep*/addAfterTimeStepDiagnosticSweep lambdas from BuildTimeloop.h leave them unresolved at link time.
 #include "SetupStages.h"
 
 #include <cmath>

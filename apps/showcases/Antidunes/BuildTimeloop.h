@@ -71,40 +71,30 @@ namespace walberla
 namespace antidunes
 {
 
-// [Claude, 2026-09-24] Forward declaration: defined in SetupStages.h, which this project's own
-// Antidunes.cpp includes AFTER BuildTimeloop.h -- needed here for the sweep-by-sweep NaN-tracing
-// probes added to addSweepSurfaceDynamics (THESIS_PLAN.md, step-444 crash investigation).
+// Forward declarations of diagnostics defined in SetupStages.h, which Antidunes.cpp includes after this file.
+// trackWatchCells: logs the state of a fixed list of watch cells.
 void trackWatchCells(const std::shared_ptr< SimulationObjects >& simObjs, const char* const label, const uint_t t,
                      const std::vector< Vector3< real_t > >& watchCoords);
 
-// [Claude, 2026-09-27] Same reason as trackWatchCells above: needed for addAfterTimeStepDiagnosticSweep
-// below, defined in SetupStages.h.
 void logFluidBoxHistory(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
                         const std::string& baseFolder,
                         const Vector3< real_t >& boxMin, const Vector3< real_t >& boxMax);
 
-// [Claude, 2026-09-28] Same reason as trackWatchCells above: needed for addAfterTimeStepDiagnosticSweep
-// below, defined in SetupStages.h.
 void logDensityColumn(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
                       const std::string& baseFolder, const real_t columnX, const real_t columnY);
 
-// [Claude, 2026-09-28] fill-integrated water height on a grid of columns, defined in SetupStages.h.
+// Fill-integrated water height on a grid of columns (ModelParameters.logWaterHeight).
 void logWaterHeights(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t, const std::string& baseFolder,
                      const uint_t gridX, const uint_t gridY);
 
-// [Claude, 2026-09-24] Same reason as trackWatchCells above: needed for the generic (domain-wide,
-// not-a-fixed-cell) intra-timestep NaN scan added to addSweepSurfaceGeometry/Dynamics below. Unlike
-// trackWatchCells' fixed watch-cell list, this scans EVERY liquid/interface cell at each sweep stage
-// and only logs (with its own 3x3x3 neighbourhood dump, see SetupStages.h) if one is actually
-// non-finite -- built for crashes where the culprit cell isn't already known in advance (e.g. the
-// hopper clogging scenario's own NaN, THESIS_PLAN.md 2026-09-24).
+// Scans every liquid/interface cell, logs non-finite ones with a 3x3x3 neighbourhood dump, and issues the precursor
+// warnings configured in PhysicsParameters.
 bool checkPdfNaN(const std::shared_ptr< SimulationObjects >& simObjs, const char* const location, const uint_t t,
                  real_t lowRhoPrecursorThreshold, real_t highVelocityPrecursorThreshold,
                  real_t populationPrecursorThreshold, real_t densityPrecursorLow,
                  real_t densityPrecursorHigh, bool densityPrecursorLiquidOnly);
 
-// Forward declaration (defined in SetupStages.h, included after this file) -- narrow, reactive repair
-// for obstacle-flagged cells whose PDFs have gone non-finite/non-positive (THESIS_PLAN.md, 2026-09-25).
+// Resets obstacle cells with non-finite or non-positive PDF sums (ModelParameters.repairDegenerateObstaclePdfs).
 uint_t repairDegenerateObstacleCells(const std::shared_ptr< SimulationObjects >& simObjs, const char* const location, const uint_t t);
 
 using StateSweep = walberla::free_surface::BlockStateDetectorSweep< FlagField_T >;
@@ -121,14 +111,8 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
 {
    WALBERLA_LOG_INFO_ON_ROOT("addBeforeTimeStepVTKOutput");
 
-   // [Claude, 2026-10-01] Lets the particle/floater/pillar point-data VTK writers below ALSO follow
-   // VTKParams::snapshotSteps (the same discrete step list fluid_field_snapshots already uses, see
-   // its own doc comment in SimulationParams.h), instead of inventing a second mechanism. Each
-   // writer still obeys its own writeFrequency as before; this only ADDS a forced write on every
-   // listed step via VTKOutput::forceWriteNextStep() (see vtk/VTKOutput.cpp: writeFrequency_==0
-   // disables the periodic cadence entirely but forceWriteNextStep() still fires -- the same "0 +
-   // explicit steps" pattern fluid_field_snapshots already relies on). A no-op, byte-for-byte the
-   // same as plain vtk::writeFiles(output), whenever snapshotsEnabled is false (every existing prm).
+   // The particle/floater point-data writers below also force a write at every step of VTKParams::snapshotSteps
+   // (VTKOutput::forceWriteNextStep), in addition to their own writeFrequency. No-op if snapshotsEnabled is false.
    auto addSnapshotAwareVTKWrite = [simObjs, enabled = simParams->vtk.snapshotsEnabled,
                                      steps = simParams->vtk.snapshotSteps](const std::shared_ptr< vtk::VTKOutput >& output) {
       return [output, simObjs, enabled, steps]() {
@@ -213,9 +197,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       floaterPointData->addOutput< mesa_pd::data::SelectParticleInteractionRadius >("radius");
       floaterPointData->addOutput< mesa_pd::data::SelectParticleLinearVelocity >("velocity");
       floaterPointData->addOutput< SelectFloaterDensityRatio >("densityRatio");
-      // uid: lets a specific floater spotted in ParaView (e.g. "Select Points On" + Spreadsheet View)
-      // be cross-referenced directly against WALBERLA_LOG_WARNING/CSV output keyed by the same uid,
-      // instead of guessing via nearest-position matching across snapshots (unreliable in a dense jam).
+      // uid: lets a floater picked in ParaView be matched against log/CSV output keyed by uid.
       floaterPointData->addOutput< mesa_pd::data::SelectParticleUid >("uid");
       floaterPointData->setParticleSelector([](const mesa_pd::data::ParticleStorage::iterator& pIt) {
          using namespace walberla::mesa_pd::data::particle_flags;
@@ -228,27 +210,13 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
    }
 
    // floating boxes (type 3) ---------------------------------------------
-   // One point per floating box, carrying edgeLength, full orientation, velocity, and a combined
-   // "sizeOrientation" tensor, so the actual ORIENTED, correctly-SIZED solid can be rendered in
-   // ParaView (a freely-rotating box needs its rotation, unlike a sphere) even when different boxes
-   // in the same scenario have different edgeLength (mixed-size scenarios).
-   //
-   // [Claude, 2026-09-14]: the recipe below (Tensor Glyph fed "rotation" alone) was found NOT to work
-   // as documented -- verified directly with a local pvpython test (vtkTensorGlyph, ExtractEigenvalues
-   // OFF, fed a pure rotation matrix): every box renders at the SAME default unit size regardless of
-   // its actual edgeLength. Root cause: unlike the plain "Glyph" filter (which has its own separate
-   // per-point "Scale Array" input), ParaView's "Tensor Glyph" filter derives BOTH orientation AND
-   // size from the one tensor it's fed -- a pure rotation matrix's columns are all unit length, so no
-   // size information survives. Fixed by adding "sizeOrientation" below: the same rotation matrix with
-   // each column pre-scaled by that axis's own edge length, so a single Tensor Glyph call recovers
-   // both pieces at once. Confirmed exact (bounding box of the glyph matches the true edgeLength to
-   // the last digit, for two differently-sized boxes in the same output) via the same pvpython test.
-   //
-   // Recipe in ParaView: Filters > Tensor Glyph, Glyph Type = Box (unit cube, edge length 1),
-   // Extract Eigenvalues = OFF, Tensors = "sizeOrientation", Scale Factor = 1. Color by "velocity" or
-   // "densityRatio". ("edgeLength" and "rotation" are kept as separate fields too, in case a plain
-   // Glyph + Scale-by-Components workflow -- correct for size, but orientation-vector-only, no roll --
-   // is ever preferred instead; they are not needed for the Tensor Glyph recipe above.)
+   // One point per floating box with edgeLength, rotation, a combined "sizeOrientation" tensor, velocity, densityRatio
+   // and uid, so oriented boxes of different sizes can be rendered in ParaView. Tensor Glyph takes both size and
+   // orientation from one tensor (a pure rotation gives unit-size glyphs), hence "sizeOrientation": the rotation with
+   // each column scaled by that axis's edge length.
+   // Recipe: Filters > Tensor Glyph, Glyph Type = Box, Extract Eigenvalues = OFF, Tensors = "sizeOrientation",
+   // Scale Factor = 1; colour by "velocity" or "densityRatio". "edgeLength" and "rotation" serve a plain Glyph +
+   // Scale-by-Components workflow (orientation vector only, no roll).
    if (!simParams->floatingBoxes.empty())
    {
       WALBERLA_LOG_INFO_ON_ROOT("AddOutputFloatingBoxes")
@@ -264,12 +232,9 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
             return static_cast< const mesa_pd::data::Box* >(shape.get())->getEdgeLength();
          }
       };
-      // Full 3x3 orientation for a ParaView Tensor Glyph. getMatrix() is body→world
-      // (Support.h: world = getMatrix()*body), but ParaView's Tensor Glyph applies the 9-tuple with
-      // the opposite (column-major) ordering, which would render the INVERSE rotation — the box glyph
-      // tilts the wrong way and mismatches the mapped obstacle hole. So we emit the TRANSPOSE here
-      // (Rᵀ, i.e. column-major of R) so the glyph orientation matches the actual obstacle. This is a
-      // visualization-only ordering; the buoyancy/torque math uses getMatrix() directly and is unaffected.
+      // Full 3x3 orientation for a ParaView Tensor Glyph. getMatrix() is body->world, but Tensor Glyph reads the
+      // 9-tuple column-major, so the transpose R^T is emitted to get the rotation (not its inverse). Visualisation
+      // only.
       struct SelectParticleRotationMatrix
       {
          using return_type = std::array< real_t, 9 >;
@@ -281,12 +246,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
                      R(0, 2), R(1, 2), R(2, 2) };
          }
       };
-      // Combined size+orientation tensor for the Tensor Glyph recipe (see this block's own header
-      // comment for why a plain rotation matrix isn't enough): same Rᵀ convention as
-      // SelectParticleRotationMatrix above, but each of R's three columns (the box's own local X/Y/Z
-      // axis directions in world space) is additionally scaled by that axis's own edge length, so a
-      // SINGLE Tensor Glyph (ExtractEigenvalues OFF, unit cube source) reproduces the box's exact
-      // size AND orientation together.
+      // Same R^T convention, each column (the box's local axis in world space) scaled by that axis's edge length.
       struct SelectBoxSizeOrientationTensor
       {
          using return_type = std::array< real_t, 9 >;
@@ -322,36 +282,11 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
    }
 
    // floating cylinders / logs (type 4) -----------------------------------
-   // One point per floating cylinder with glyphScale = (2r, L, 2r), the body→world rotation
-   // tensor, a combined "sizeOrientation" tensor, and velocity.
-   //
-   // [Claude, 2026-09-14]: same fix as the box block above -- Tensor Glyph fed "rotation" alone
-   // renders every cylinder at the SAME default unit size regardless of its actual radius/length
-   // (verified with the same local pvpython test used for the box case; Tensor Glyph has no separate
-   // per-point Scale Array the way the plain Glyph filter does). Use "sizeOrientation" instead:
-   // ParaView recipe: Filters > Tensor Glyph, Glyph Type = Cylinder (unit cylinder, radius 0.5,
-   // height 1), Extract Eigenvalues = OFF, Tensors = "sizeOrientation", Scale Factor = 1 — NO manual
-   // Transform/Rotate-X-90 step needed, unlike an earlier version of this export. ("glyphScale" and
-   // "rotation" are kept as separate fields too, for a plain Glyph + Scale-by-Components workflow if
-   // ever preferred -- a cylinder's own rotational symmetry about its axis means that workflow's
-   // orientation-vector-only limitation doesn't lose any real information for a plain cylinder,
-   // unlike for a box.)
-   //
-   // Axis-convention fix: ParaView's built-in Cylinder glyph source has its OWN long axis along
-   // its local Y, but mesa_pd's Cylinder shape defines its axis along its own local Z. Exporting
-   // the plain body→world rotation R (transposed for ParaView's column-major Tensor Glyph, as the
-   // box does) applies R as if the glyph's long axis were already Z, so the glyph's Y-axis (a
-   // RADIAL direction of the real cylinder, not its axis) gets mapped to wherever the real axis
-   // points — the glyph renders standing on the wrong axis (e.g. a horizontal log rendering as a
-   // short vertical post). Confirmed visually: a manual ParaView Transform (Rotate X=90, plus a
-   // compensating Translate since Transform rotates about the world origin, not the glyph's own
-   // centre) was needed to fix a single frame — not viable across an animation where the glyph
-   // moves every step. Fixed here instead by pre-composing R with Rx(+90°) (the fixed rotation
-   // that maps "glyph-local Y is the axis" onto "body-local Z is the axis") BEFORE transposing:
-   // exported = (R · Rx(+90°))ᵀ = Rx(-90°) · Rᵀ. Tensor Glyph applies this to the glyph's OWN
-   // local geometry before translating to the point position, so — unlike the manual ParaView
-   // Transform — this rotates correctly about the glyph's own centre at every timestep, no
-   // per-frame compensation needed.
+   // One point per floating cylinder with glyphScale = (2r, L, 2r), rotation, "sizeOrientation", velocity,
+   // densityRatio and uid. Recipe: Filters > Tensor Glyph, Glyph Type = Cylinder (radius 0.5, height 1), Extract
+   // Eigenvalues = OFF, Tensors = "sizeOrientation", Scale Factor = 1 (see the box block for why a pure rotation is
+   // not enough). ParaView's cylinder glyph has its axis along local Y, mesa_pd's Cylinder along local Z, so R is
+   // pre-composed with Rx(+90) before transposing: exported = (R Rx(+90))^T = Rx(-90) R^T.
    if (!simParams->floatingCylinders.empty())
    {
       WALBERLA_LOG_INFO_ON_ROOT("AddOutputFloatingCylinders")
@@ -379,11 +314,7 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
                     -R(0, 1), -R(1, 1), -R(2, 1) };
          }
       };
-      // Combined size+orientation tensor -- same (R*Rx(+90))^T convention as
-      // SelectParticleRotationMatrix above, but each of the three emitted groups (glyph-local X, Y,
-      // Z respectively after the Rx90 axis-convention fix) is additionally scaled by the matching
-      // glyphScale component (2r, L, 2r), so a SINGLE Tensor Glyph (ExtractEigenvalues OFF, unit
-      // cylinder source) reproduces the cylinder's exact size AND orientation together.
+      // Same (R Rx(+90))^T convention, each emitted group scaled by the matching glyphScale component (2r, L, 2r).
       struct SelectCylinderSizeOrientationTensor
       {
          using return_type = std::array< real_t, 9 >;
@@ -419,27 +350,16 @@ void addBeforeTimeStepVTKOutput(const std::shared_ptr< const SimulationParams >&
       timeloop->addFuncBeforeTimeStep(addSnapshotAwareVTKWrite(cylinderFloaterVTKOutput), "VTK: floating cylinder data");
    }
 
-   // Dedicated box/cylinder pillar glyph VTK outputs (one point per pillar + a shape-scale attribute,
-   // rendered in ParaView via Filters > Glyph) were removed: pillar geometry is already visible via
-   // the fluid field's own "mapped_flag" writer (FlagFieldMapping, VtkWriter.h), which classifies
-   // every NoSlip-flagged cell -- confirmed still live and registered. The glyph-based version is
-   // recoverable from git history if a dedicated pillar-shape visualization is ever needed again.
+   // Pillars get no glyph output: their cells are visible through the fluid field's "mapped_flag" writer
+   // (FlagFieldMapping, VtkWriter.h).
 }
 
-// [Claude, 2026-10-02] prm ModelParameters.diagnoseNaNNormals: after the normal sweep (and its ghost-layer exchange), scans
-// inner cells + first ghost layer for non-finite values in the interface normal field, the smoothed fill level, and the
-// obstacle normal field, and logs [NAN-NORMAL] / [NAN-SMOOTHFILL] / [NAN-OBSTACLENORMAL] with the inputs of the normal
-// computation (own flags, fill, smoothed fill; per obstacle neighbour its smoothed fill and obstacle normal; neighbours
-// with non-finite smoothed fill; counts of liquid/interface/gas neighbours). Throttled per kind and rank (first 30, then
-// every 20000th); a global count per kind is logged every 1000 steps. Motivation: run 4284594 (curvature guard on)
-// skipped ~995000 NaN neighbour normals, all in the cell layer next to the side wall (y = 0), z ~ 22-30.
-// [Claude, 2026-10-03] Check of the OUTER ghost layer (layer 2) beyond non-periodic domain borders. A Border wall with
-// walldistance -1 occupies only ghost layer 1 in the wall-normal direction; layer 2 behind it is set to the domain flag
-// (liquid | interface) by fillWithDomain(nrOfGhostLayers) in mapParticlesOntoCells, is not reset by
-// initFlagsFromFillLevels (interior only), and is never communicated at a non-periodic border. ObstacleFillLevelSweep
-// (includes ghost layer 1) then treats these cells as fluid neighbours of the wall cells. Logs [GHOST2-FLUID label]:
-// global number of layer-2 border cells carrying liquid/interface/gas flags, of those with a non-finite fill, and the
-// fill range of the flagged ones.
+// Called by diagnoseNaNNormals every 1000 steps: counts the cells of the outer ghost layer (layer 2) beyond
+// non-periodic domain borders that carry liquid/interface/gas flags. A Border wall with walldistance -1 occupies only
+// ghost layer 1; layer 2 behind it gets the domain flag from fillWithDomain(nrOfGhostLayers) in mapParticlesOntoCells,
+// is not reset by initFlagsFromFillLevels (interior only) and is never communicated, so ObstacleFillLevelSweep (which
+// includes ghost layer 1) treats it as fluid next to the wall. Logs [GHOST2-FLUID label]: number of such cells, of
+// those with non-finite fill, and their fill range.
 inline void checkOuterGhostLayerFlags(const std::shared_ptr< SimulationObjects >& simObjs, const std::string& label)
 {
    uint_t nCells = 0, nFluid = 0, nNonFinite = 0;
@@ -491,7 +411,7 @@ inline void checkOuterGhostLayerFlags(const std::shared_ptr< SimulationObjects >
                              << (c[1] > c[2] ? fMin : real_t(0)) << ", " << (c[1] > c[2] ? fMax : real_t(0)) << "]");
 }
 
-// [Claude, 2026-10-03] ModelParameters.wallOuterGhostLayer (see SimulationParams.h): makes the outer ghost layer beyond
+// ModelParameters.wallOuterGhostLayer (see SimulationParams.h): makes the outer ghost layer beyond
 // every non-periodic domain border a wall, copying the NoSlip/FreeSlip flag of the layer-1 cell between it and the
 // domain, with fill 1 as initFillLevelsInBoundaries sets for walls. Other boundary types in layer 1 (inflow, pressure,
 // outlet) are left alone. Must run after initFlagsFromFillLevel. Returns the number of cells changed on this rank.
@@ -541,6 +461,11 @@ inline uint_t wallOuterGhostLayer(const std::shared_ptr< SimulationObjects >& si
    return changed;
 }
 
+// ModelParameters.diagnoseNaNNormals: after the normal sweep and its communication, scans inner cells and the first
+// ghost layer for non-finite interface normals, smoothed fill levels and obstacle normals and logs [NAN-NORMAL] /
+// [NAN-SMOOTHFILL] / [NAN-OBSTACLENORMAL] with the inputs of the normal computation (flags, fill, smoothed fill,
+// obstacle neighbours' smoothed fill and normal, neighbours with non-finite smoothed fill, L/I/G neighbour counts).
+// Throttled per kind and rank (first 30, then every 20000th); a global count per kind every 1000 steps.
 inline void diagnoseNaNNormals(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t)
 {
    static uint_t logged[3]  = { 0, 0, 0 };
@@ -619,13 +544,13 @@ inline void diagnoseNaNNormals(const std::shared_ptr< SimulationObjects >& simOb
       WALBERLA_LOG_INFO_ON_ROOT("[NAN-NORMAL-SUMMARY t=" << t << "] inner cells with non-finite normal / smoothFill / "
                                 "obstacleNormal since the last summary: " << c[0] << " / " << c[1] << " / " << c[2]);
       counted[0] = counted[1] = counted[2] = uint_t(0);
-      checkOuterGhostLayerFlags(simObjs, "t=" + std::to_string(t)); // [Claude, 2026-10-03]
+      checkOuterGhostLayerFlags(simObjs, "t=" + std::to_string(t));
    }
 }
 
-// [Claude, 2026-10-09] momentum budget diagnostics (ModelParameters.logMomentumBudget).
-// Rank-local {fluid Px, Py, Pz, fluid mass, bodies Px, Pz}: liquid + fill-weighted interface inner cells, and m*v of the
-// local non-ghost bodies.
+// Momentum budget diagnostics (ModelParameters.logMomentumBudget).
+// Rank-local {fluid Px, Py, Pz, fluid mass, bodies Px, Pz}: liquid + fill-weighted interface inner cells, and m*v of
+// the local non-ghost bodies.
 inline std::array< real_t, 6 > localFluidBodyMomentum(const std::shared_ptr< SimulationObjects >& simObjs)
 {
    real_t px = 0, py = 0, pz = 0, mass = 0;
@@ -663,9 +588,9 @@ inline std::array< real_t, 6 > localFluidBodyMomentum(const std::shared_ptr< Sim
    return { px, py, pz, mass, bx, bz };
 }
 
-// Change of {fluid Px, fluid Pz, bodies Px, bodies Pz} attributed to the timeloop stage that ends at each probe, summed since
-// the last report (rank-local). A probe charges everything since the previous probe to its own stage; the stage list is the
-// order in which the probes run within one time step.
+// Change of {fluid Px, fluid Pz, bodies Px, bodies Pz} attributed to the timeloop stage that ends at each probe, summed
+// since the last report (rank-local). A probe charges everything since the previous probe to its own stage; the stage
+// list is the order in which the probes run within one time step.
 struct MomentumStageBudget
 {
    static constexpr const char* names[] = { "boundary(gas blocks)", "forceWeighting", "streamReconstructAdvect", "collide",
@@ -692,10 +617,11 @@ inline void momentumStageProbe(const std::shared_ptr< SimulationObjects >& simOb
    b.init = true;
 }
 
-// [MOMENTUM-BUDGET] line: momentum the freed cells carried into the fluid and the covered cells took out of it since the last
-// report (each {Px, Py, Pz, L_y about the body centre, mass, cells}, rank-local, see PdfReconstructionManager::takeFreedMomentum),
-// the total fluid momentum now and the bodies' momentum m*v. [MOMENTUM-STAGES] line: the stage budget above and the MEM link sums
-// of SimpleBB.h (MemLinkMomentumBudget). Resets `covered`, the stage budget and the link sums.
+// [MOMENTUM-BUDGET] line: momentum the freed cells carried into the fluid and the covered cells took out of it since
+// the last report (each {Px, Py, Pz, L_y about the body centre, mass, cells}, rank-local, see
+// PdfReconstructionManager::takeFreedMomentum), the total fluid momentum now and the bodies' momentum m*v.
+// [MOMENTUM-STAGES] line: the stage budget above and the MEM link sums of SimpleBB.h (MemLinkMomentumBudget).
+// Resets `covered`, the stage budget and the link sums.
 inline void logMomentumBudget(const std::shared_ptr< SimulationObjects >& simObjs, const uint_t t,
                               const std::array< real_t, 6 >& freed, std::array< real_t, 6 >& covered)
 {
@@ -737,9 +663,8 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
 {
    WALBERLA_LOG_INFO_ON_ROOT("addSweepSurfaceGeometry");
 
-   // [Claude, 2026-09-24] Baseline probe: state of the step-444 crash cell BEFORE any sweep in this
-   // timestep's timeloopFSLBM chain runs at all (see the matching probe/lambda in
-   // addSweepSurfaceDynamics for the full rationale).
+   // Debug probe: fixed watch cells (trackWatchCells) at the start of the FSLBM chain during steps 425-444, and the
+   // dense NaN scan (PhysicsParameters.denseNanScan*).
    timeloop->add() << Sweep(EmptySweep(), "Empty sweep: probe anchor (surface geometry start)")
                    << AfterFunction(
                          [simObjs]() {
@@ -821,7 +746,7 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
                    << Sweep(EmptySweep(), "Empty sweep: normal")
                    << AfterFunction(Communication_T(simObjs->blockForest, simObjs->normalFieldID),
                                     "Communication: after normal sweep")
-                   // [Claude, 2026-10-02] prm ModelParameters.diagnoseNaNNormals (see diagnoseNaNNormals)
+                   // ModelParameters.diagnoseNaNNormals
                    << AfterFunction(
                          [simObjs, on = simParams->model.diagnoseNaNNormals]() {
                             if (on) diagnoseNaNNormals(simObjs, *simObjs->currentMainStep);
@@ -839,7 +764,7 @@ void addSweepSurfaceGeometry(const std::shared_ptr< const SimulationParams >& si
                    simObjs->flagFieldID, walberla::free_surface::flagIDs::interfaceFlagID,
                    walberla::free_surface::flagIDs::liquidInterfaceGasFlagIDs, simObjs->flagInfo.getObstacleIDSet(),
                    false, real_c(0));
-      // [Claude, 2026-10-02] prm ModelParameters.guardCurvatureInputs (default false = unchanged upstream behaviour)
+      // ModelParameters.guardCurvatureInputs (default false = upstream behaviour)
       curvSweep.setGuardInvalidNeighbours(simParams->model.guardCurvatureInputs);
       WALBERLA_LOG_INFO_ON_ROOT("Curvature input guard (guardCurvatureInputs): "
                                 << (simParams->model.guardCurvatureInputs ? "on" : "off"));
@@ -858,11 +783,7 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
 {
    WALBERLA_LOG_INFO_ON_ROOT("addSweepSurfaceDynamics");
 
-   // [Claude, 2026-09-24] Sweep-by-sweep NaN-tracing probe for the step-444 crash cell (world
-   // (20.5,8.5,25.5), THESIS_PLAN.md): self-gated to a tight step window so it doesn't flood the log
-   // for the rest of a run. Wired in via AfterFunction after every PDF-touching sweep below to find
-   // EXACTLY which operation first turns this cell's clean rho=1.0 (confirmed at t=442 post-AfterDEM,
-   // right after its OBST->INTF conversion) into the NaN seen by t=443 post-FSLBM.
+   // Debug probe: logs fixed watch cells (trackWatchCells) after every PDF-touching sweep below, during steps 425-444.
    auto probeCrashCell = [simObjs](const char* label) {
       const uint_t t = *simObjs->currentMainStep;
       if (t < uint_t(425) || t > uint_t(444)) return;
@@ -873,14 +794,9 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                                             Vector3< real_t >(real_t(18.5), real_t(34.5), real_t(26.5)) });
    };
 
-   // [Claude, 2026-09-24] Generic (not a fixed-cell) sweep-by-sweep NaN scan, for crashes where the
-   // culprit cell isn't already known in advance (unlike probeCrashCell above). Scans EVERY liquid/
-   // interface cell in the domain at each PDF-touching sweep stage this timestep and only logs (via
-   // checkPdfNaN's own 3x3x3 neighbourhood dump) when one is actually non-finite -- so a run stays
-   // silent here unless something is genuinely wrong. Reuses PhysicsParameters.denseNanScanEnabled/
-   // From/ToStep (the same window already used by Antidunes.cpp's own two end-of-phase checkPdfNaN
-   // calls) so no new prm key is needed; does NOT abort on finding one (unlike those two calls) so the
-   // full stage-by-stage progression for this timestep can still be observed.
+   // Domain-wide NaN scan after every PDF-touching sweep below (checkPdfNaN with its 3x3x3 neighbourhood dump), in the
+   // PhysicsParameters.denseNanScan* window. Silent unless a cell is non-finite; the result is ignored (no abort), so
+   // the stage-by-stage progression within the step stays visible.
    auto scanIntraStepNaN = [simParams, simObjs](const char* label) {
       if (!simParams->physics.denseNanScanEnabled) return;
       const uint_t t = *simObjs->currentMainStep;
@@ -972,18 +888,8 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
       typename LatticeModel_T::Sweep sweep_;
    };
 
-   // [Claude, 2026-09-27] Per explicit request ("rerun and print those values out and how they
-   // came to be"): empirically checks whether the plain generated collision kernel (used for
-   // fullFreeSurface blocks -- see comment above) actually runs on OBSTACLE-flagged cells too, or
-   // skips them. MovingParticleMapping.h (checked directly) never touches a cell's own PDF storage
-   // after it becomes obstacle -- it only extracts momentum ONCE at the moment of covering and
-   // leaves the array frozen from then on. If collide() is unconditional (no per-cell flag check),
-   // an obstacle cell's own stored PDFs would still get iterated by the SAME nonlinear collision
-   // formula every step using whatever (frozen/self-referential) data is already there -- a
-   // plausible source of the growing oscillation traced at (608.5,18.5,30.5)/(609.5,18.5,30.5)
-   // while both were still OBST-flagged. This logs their density immediately BEFORE and AFTER this
-   // exact collide() call, every step, to settle it directly instead of inferring from the
-   // generated-kernel source.
+   // Debug probe: density of two fixed watch cells immediately before and after the generated collision, every step
+   // (shows whether collide() also iterates obstacle cells, whose PDFs MovingParticleMapping leaves untouched).
    static const std::vector< Vector3< real_t > > collideProbeCells = {
       Vector3< real_t >(real_t(608.5), real_t(18.5), real_t(30.5)),
       Vector3< real_t >(real_t(609.5), real_t(18.5), real_t(30.5))
@@ -1006,7 +912,7 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
                    << AfterFunction([scanIntraStepNaN]() { scanIntraStepNaN("INTRA-after-collide"); },
                                     "Intra-step NaN scan: after collide")
                    << AfterFunction([simObjs, simParams]() {
-                         if (!simParams->model.repairDegenerateObstaclePdfs) return; // Option B: prm-controlled, default off
+                         if (!simParams->model.repairDegenerateObstaclePdfs) return; // default off
                          const uint_t t = *simObjs->currentMainStep;
                          repairDegenerateObstacleCells(simObjs, "after-collide", t);
                       }, "Repair: degenerate obstacle-cell PDFs after collide")
@@ -1175,39 +1081,22 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
       return dormantUIDs->count(ac.getUid(particleIdx)) == 0;
    };
 
-   // [Claude, 2026-09-27] Per explicit request ("add the instrumentation to find out why"): traces
-   // the SAME two watch cells (608.5,18.5,30.5)/(609.5,18.5,30.5) around MovingParticleMapping and
-   // PdfReconstructionManager -- the ONLY two mechanisms in this whole timeloopAfterDEM phase that
-   // can touch a cell's PDFs, and neither is covered by the obstacle-PDF freeze (that only brackets
-   // the EARLIER timeloopFSLBM phase's stream+collide sweeps). This is where the residual monotonic
-   // drift found with the freeze active (job 4271276/4271299) most likely originates.
+   // Debug probe: the same two watch cells around MovingParticleMapping and PdfReconstructionManager, the only
+   // operations of timeloopAfterDEM that touch PDFs.
    static const std::vector< Vector3< real_t > > couplingProbeCells = {
       Vector3< real_t >(real_t(608.5), real_t(18.5), real_t(30.5)),
       Vector3< real_t >(real_t(609.5), real_t(18.5), real_t(30.5))
    };
 
-   // [Claude, 2026-09-27] Per THESIS_PLAN.md's "ownership handoff" origin finding + fix: fired by
-   // MovingParticleMapping (see its own doc comment) exactly once, right before a GENUINE cross-
-   // particle obstacle-ownership handoff is committed -- resets the handed-off cell's PDF to rest
-   // equilibrium (rho=1, u=0), breaking the silent-inheritance-of-stale-history chain the origin
-   // finding traced (a growing checkerboard oscillation began in the exact same step as an
-   // ownership handoff between two recurring rods, jobs 4271684/4271714). Manual D3Q27 weight
-   // assignment (NOT the generic lbm::Equilibrium<>::set()/PdfField::setToEquilibrium() API,
-   // matching this codebase's own established convention -- SetupStages.h's
-   // repairDegenerateObstacleCells): that generic API reads a static LatticeModel_T::w[] weight
-   // table whose specialization is apparently not safe to call from the generic
-   // MovingParticleMapping.h file for this generated Cumulant model in the real multi-file
-   // production link -- confirmed by direct bisection (jobs 4271763/4271773 segfaulted with it;
-   // job 4271777, identical otherwise, got the ordinary STALE-PARTICLE-IDX abort instead).
+   // ModelParameters.useOwnershipHandoffPdfReset: called by MovingParticleMapping once, right before a cell's obstacle
+   // ownership passes from one particle to another; resets the cell's PDFs to rest equilibrium (rho 1, u 0) so it does
+   // not inherit the previous owner's stale history. The D3Q27 weights are assigned by hand, as in SetupStages.h's
+   // repairDegenerateObstacleCells.
    auto onOwnershipHandoff = [simParams, simObjs](IBlock& block, cell_idx_t x, cell_idx_t y, cell_idx_t z,
                                         walberla::id_t formerUid, walberla::id_t newUid) {
-      if (!simParams->model.useOwnershipHandoffPdfReset) return; // prm toggle off: original pre-fix behaviour (silent inheritance)
-      // [Claude, 2026-09-27] Real root cause of three segfaulted cluster attempts (jobs 4271763/
-      // 4271773/4271821), found via bracketing logs (job 4271830): MovingParticleMapping.h now
-      // guards the call site itself with pdfField->isInInnerPart() before ever invoking this
-      // callback (flagField and pdfField have different ghost-layer counts in the real Antidunes
-      // setup -- see that file's own comment) -- so by the time we get here, (x,y,z) is always safe
-      // to write.
+      if (!simParams->model.useOwnershipHandoffPdfReset) return; // off: the cell keeps its PDFs
+      // MovingParticleMapping.h calls this only for cells in pdfField's inner part (flag and PDF fields have different
+      // ghost-layer counts), so (x, y, z) is always safe to write.
       auto* pdfField = block.getData< PdfField_T >(simObjs->pdfFieldID);
       pdfField->get(x, y, z, uint_t(0)) = real_t(8.0 / 27.0);
       for (uint_t q = uint_t(1); q <= uint_t(6); ++q) pdfField->get(x, y, z, q) = real_t(2.0 / 27.0);
@@ -1225,9 +1114,9 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
       }
    };
 
-   // [Claude, 2026-10-09] momentum budget diagnostic (ModelParameters.logMomentumBudget): fluid momentum lost to cells the
-   // bodies cover, weighted like fluid mass (liquid 1, interface its fill, gas 0) -- {Px, Py, Pz, L_y about the covering
-   // particle's centre, mass, cells}, rank-local, reported and reset with the conversion counts below
+   // ModelParameters.logMomentumBudget: fluid momentum lost to cells the bodies cover, weighted like fluid mass (liquid
+   // 1, interface its fill, gas 0) -- {Px, Py, Pz, L_y about the covering particle's centre, mass, cells}, rank-local,
+   // reported and reset with the conversion counts below.
    auto coveredMomentum = std::make_shared< std::array< real_t, 6 > >();
    coveredMomentum->fill(real_t(0));
    std::function< void(IBlock&, cell_idx_t, cell_idx_t, cell_idx_t, size_t) > onNewlyCovered; // see MovingParticleMapping.h
@@ -1274,42 +1163,16 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
    << AfterFunction([simObjs, simParams]() { if (simParams->model.logMomentumBudget) momentumStageProbe(simObjs, 8); },
                     "Momentum budget probe: after MovingParticleMapping");
 
-   // sweep for restoring PDFs in cells previously occupied by particles
-   //
-   // FIX: switch from GradsMomentApproximationReconstructor to EquilibriumReconstructor.
-   //
-   // GradsMomentApproximation constructs f_i = f_i^eq(ρ_avg, u_particle) + Pneq_correction.
-   // The Pneq term involves velocity gradients computed from neighboring FLUID cells.
-   // At the contact circle (z ≈ absoluteLiquidHeight, just inside the sphere surface), the
-   // neighbors include:
-   //   - interface cells with fill-drift-corrupted PDFs (contact-line mass imbalance)
-   //   - gas cells (fill=0, PDF=0 — above the free surface)
-   //   - obstacle cells (still inside the sphere)
-   // The Pneq correction applied on top of an already-low average density (only ~⅔ of the
-   // D3Q27 stencil has valid fluid neighbours) pushes individual f_i negative.  After one
-   // FSLBM streaming step those negative values propagate into adjacent liquid cells and the
-   // Cumulant collision (τ ≈ 0.501) diverges → NaN.
-   //
-   // EquilibriumReconstructor sets ALL 27 PDFs to f_i^eq(ρ_avg, u_particle) ≥ 0.
-   // Streaming from gas neighbours (PDF=0) then reduces ρ, but keeps every f_i ≥ 0, so the
-   // collision cannot produce NaN from a negative-density state.
-   //
-   // Bogner & Rüde (2013) state-selection + EquilibriumReconstructor.
-   //
+   // Restore PDFs in cells previously occupied by particles: Bogner & Rude (2013) state selection with the
+   // EquilibriumReconstructor, which sets all 27 PDFs to f_i^eq(rho_avg, u_particle) >= 0. (Grad's moment
+   // approximation adds a non-equilibrium term from neighbouring fluid velocities; near the contact line, with gas and
+   // obstacle neighbours, that term can make f_i negative and the collision diverge.)
    // Each FormerMO cell is classified by its D3Q27 non-obstacle neighbourhood B(x):
-   //   no liquid            →  GAS        (φ = 0)
-   //   no gas, no unknown   →  LIQUID     (φ = 1, clearly submerged)
-   //   everything else      →  INTERFACE  (φ = mean fill of interface cells in B(x))
-   // The φ seeding (§5.2) is done in the manager's pass 2 via the fill field.
-   //
-   // Held as a named shared_ptr so the AfterFunction below can flush its per-branch FormerMO→state
-   // conversion counters (see logAndResetConversionCounts / contact_ring_crash_analysis.md §5.3).
-   // useBognerReconstruction (prm: ModelParameters.useBognerReconstruction):
-   //   true  → per-cell gas/liquid/interface state selection (+ φ seeding) as above.
-   //   false → every FormerMO cell is reconstructed uniformly as INTERFACE (target = fluid below),
-   //           with no φ seeding — the legacy all-interface path. The manager type is unchanged
-   //           (the toggle is a runtime flag), so the conversion-count AfterFunction still compiles;
-   //           with Bogner off the counters simply stay zero.
+   //   no liquid            ->  GAS        (fill 0)
+   //   no gas, no unknown   ->  LIQUID     (fill 1)
+   //   everything else      ->  INTERFACE  (fill = mean fill of the interface cells in B(x), seeded in pass 2)
+   // useBognerReconstruction=false reconstructs every FormerMO cell as interface without fill seeding; the conversion
+   // counters then stay zero. Held as a shared_ptr so the AfterFunction below can log and reset those counters.
    auto bognerReconstructionManager =
       lbm_mesapd_coupling::makePdfReconstructionManagerBogner< PdfField_T,
                                                                AntidunesBoundaryHandling_T::BoundaryHandling_T,
@@ -1329,20 +1192,20 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
          (*simObjs->acceleration)[2],                    // a_z (= -gravity), same value HydrostaticDensityFtor uses
          simParams->staticReferenceHeight(),             // flat static reference H (same as SimpleBB)
          simParams->model.usePass3Reresolution);
-   // [Claude, 2026-10-01] prm ModelParameters.seedFillFromAllNeighbours (default false = legacy seeding)
+   // ModelParameters.seedFillFromAllNeighbours (default false)
    bognerReconstructionManager->setSeedFillFromAllNeighbours(simParams->model.seedFillFromAllNeighbours);
-   // [Claude, 2026-10-08] prm ModelParameters.seedSkipObstacleNeighbours (default true = behaviour since 2026-10-01)
+   // ModelParameters.seedSkipObstacleNeighbours (default true)
    bognerReconstructionManager->setSeedSkipObstacleNeighbours(simParams->model.seedSkipObstacleNeighbours);
    WALBERLA_LOG_INFO_ON_ROOT("FormerMO interface fill seeding: "
                              << (simParams->model.seedFillFromAllNeighbours ? "all resolved neighbours" : "interface neighbours (legacy)")
                              << ", obstacle-flagged neighbours " << (simParams->model.seedSkipObstacleNeighbours ? "skipped" : "counted if interface (pre-2026-10-01)"));
-   // [Claude, 2026-10-08] prm ModelParameters.strictBognerClassification (default false = same-step interface fallback)
+   // ModelParameters.strictBognerClassification (default false = same-step interface fallback)
    bognerReconstructionManager->setStrictBognerClassification(simParams->model.strictBognerClassification);
-   // [Claude, 2026-10-10] prm ModelParameters.strictBognerNoLiquidAtGas (default false)
+   // ModelParameters.strictBognerNoLiquidAtGas (default false)
    bognerReconstructionManager->setStrictBognerNoLiquidAtGas(simParams->model.strictBognerNoLiquidAtGas);
    WALBERLA_LOG_INFO_ON_ROOT("strictBognerNoLiquidAtGas = " << (simParams->model.strictBognerNoLiquidAtGas ? "true" : "false"));
-   // [Claude, 2026-11-12] prm ModelParameters.strictBognerRelaxInterface (default false); no-op unless
-   // strictBognerClassification and strictBognerNoLiquidAtGas are also on.
+   // ModelParameters.strictBognerRelaxInterface (default false); no-op unless strictBognerClassification and
+   // strictBognerNoLiquidAtGas are also on.
    bognerReconstructionManager->setStrictBognerRelaxInterface(simParams->model.strictBognerRelaxInterface);
    WALBERLA_LOG_INFO_ON_ROOT("strictBognerRelaxInterface = " << (simParams->model.strictBognerRelaxInterface ? "true" : "false"));
    WALBERLA_LOG_INFO_ON_ROOT("FormerMO classification: "
@@ -1383,13 +1246,6 @@ void addSweepFluidParticleCoupling(const std::shared_ptr< const SimulationParams
       << AfterFunction(
             [simObjs]() { trackWatchCells(simObjs, "AFTER-RECONSTRUCTION-COMM", *simObjs->currentMainStep, couplingProbeCells); },
             "Probe: after PdfReconstructionManager's own communication");
-
-   // [Claude, 2026-10-29] SealedCellGuard.h (ModelParameters.closeSealedCellsMinNeighbours) removed
-   // entirely -- superseded by cylinderContactSkin/boxContactSkin (THESIS_PLAN.md 2026-09-25/09-30:
-   // the guard "delays but does NOT eliminate the sealed-cell mechanism" and "checks the wrong
-   // signature"; contact skin, implemented next, prevents the sealing from occurring at all rather
-   // than detecting and closing it afterward, and is the approach used in every thesis-cited run
-   // since). Archived at archive/sealed_cell_guard/.
 }
 
 void addAfterTimeStepPerformanceLogger(const std::shared_ptr< const SimulationParams >& simParams,
@@ -1450,14 +1306,11 @@ void addAfterTimeStepDataEvaluators(const std::shared_ptr< const SimulationParam
       simObjs->particleAccessor, simObjs->dataCols, simParams->evaluation.evaluationFrequency);
    timeloop->addFuncAfterTimeStep(totalHydrodynamicForceEvaluator, "Evaluator: TotalHydrodynamicForce");
 
-   // clog measurement evaluator (THESIS_PLAN.md item 3) --------------------------------------------------------
-   // only wired up when the optional "ClogMeasurement" prm block is present -- absent block means every
-   // existing prm's timeloop is completely unaffected.
+   // clog measurement evaluator (optional "ClogMeasurement" prm block) -----------------------------------------
    if (simParams->evaluation.clogMeasurementEnabled)
    {
-      // Blockage-ratio inputs (review.md item 4): pillar geometry, read once here rather than inside
-      // the evaluator itself, so ClogMeasurementEvaluator stays decoupled from SimulationParams.h's
-      // CylinderPillarParams type.
+      // Blockage-ratio inputs: the pillar geometry is passed in here so that ClogMeasurementEvaluator stays
+      // independent of CylinderPillarParams.
       std::vector< Vector3< real_t > > pillarCenters;
       std::vector< real_t >            pillarRadii;
       for (const auto& pillar : simParams->cylinderPillars)
@@ -1478,9 +1331,8 @@ void addAfterTimeStepDataEvaluators(const std::shared_ptr< const SimulationParam
       timeloop->addFuncAfterTimeStep(clogMeasurementEvaluator, "Evaluator: ClogMeasurement");
    }
 
-   // Second, optional probe pair at the pillar's own Y (see EvaluationParams::clogPillarMeasurementEnabled's
-   // own doc comment, SimulationParams.h, for the Schalko/Follett/Nepf 2023 motivation) -- writes to
-   // distinct "clogPillar*" dataCols columns via the same evaluator class, just a different columnPrefix.
+   // Optional second probe pair at the pillar's y (see EvaluationParams, SimulationParams.h): same evaluator class,
+   // writing "clogPillar*" columns.
    if (simParams->evaluation.clogPillarMeasurementEnabled)
    {
       ClogMeasurementEvaluator< AntidunesBoundaryHandling_T, PdfField_T, FlagField_T, ScalarField_T >
@@ -1519,36 +1371,14 @@ void addAfterTimeStepForcingAdjuster(const std::shared_ptr< const SimulationPara
    timeloop->addFuncAfterTimeStep(forcingAdjuster, "Evaluator: ForcingAdjuster");
 }
 
-// [Claude, 2026-09-27] Per explicit request ("introduce a toggleable sweep after every lbm timestep
-// that does some diagnostics when activated... check for other diagnostic we could move to this
-// additional sweep"): a single, off-by-default sweep (ModelParameters::diagnosticSweepEnabled) that
-// runs once per MAIN step, on timeloopEval so every LBM/DEM/force computation for that step has
-// already settled. When enabled it does three things:
-//   1. Drains and logs SimulationObjects::diagnosticEvents -- the shared buffer that several
-//      per-sub-cycle checks in ParticleKernels.h (VELOCITY-JUMP, MIGRATION-NAN so far) push a
-//      lightweight record into INSTEAD of calling WALBERLA_LOG_WARNING directly at the point of
-//      detection (per the refined request: "collect the data... then log them in this extra sweep"
-//      rather than have each check independently re-scan/format/print). This is the central,
-//      single place their output actually gets formatted and printed.
-//   2. Runs the existing checkPdfNaN (SetupStages.h) once, domain-wide, over every liquid/interface
-//      cell, flagging any cell whose density falls outside [densityPrecursorLow, densityPrecursorHigh]
-//      -- reuses that function and its existing PhysicsParameters thresholds entirely rather than
-//      duplicating a second density scan; the diagnosticSweep* window is independent of
-//      denseNanScanEnabled's own window, so this can run even when that separate, older toggle is off.
-//   3. Logs every LOCAL floater's position, quaternion, and force/torque (both raw contact and
-//      hydrodynamic) in one line each -- the same fields FloaterHistoryLogger::logState already
-//      writes to CSV, but here as a lightweight, always-current WALBERLA_LOG_INFO snapshot without
-//      needing logFloaterHistory's own per-sub-cycle file-writing machinery turned on.
-//
-// NOT moved here (reviewed, left alone deliberately): GHOST-VANISHED and the guard's own clear
-// logic (ParticleKernels.h) -- these need genuine SUB-CYCLE resolution (the whole point is catching
-// a mid-step ghost drop before the next once-per-step mapping refresh) and are mid-investigation
-// right now (job 4270904's hang); SUBCYCLE-LEFT-RANK, PRE-REDUCE, NAN-LINK, STRONG-CONTACT-FORCE,
-// TOTAL-FORCE-THRESHOLD -- also genuinely sub-cycle-timed detectors (each compares state across, or
-// within, individual DEM sub-cycles), so collapsing them to a once-per-step sweep would lose exactly
-// the timing resolution they exist for. RAW-HYDRO (checked once per main step already, right after
-// reduceAndAvgHydroForces) is the best remaining candidate to convert next if this pattern proves
-// useful -- not done yet, left as pure review per the request.
+// Optional sweep (ModelParameters.diagnosticSweepEnabled), once per main step on timeloopEval, i.e. after all LBM/DEM
+// and force computations of the step, within [diagnosticSweepFromStep, diagnosticSweepToStep):
+//   1. drains and logs SimulationObjects::diagnosticEvents, filled by checks in ParticleKernels.h (PRE-REDUCE,
+//      RAW-HYDRO, VELOCITY-JUMP, MIGRATION-NAN) instead of logging at the point of detection;
+//   2. runs checkPdfNaN (SetupStages.h) once over all liquid/interface cells with the density window
+//      [densityPrecursorLow, densityPrecursorHigh], independent of the denseNanScan window;
+//   3. logs every local floater's position, quaternion and contact/hydrodynamic force and torque;
+//   4. writes the logFluidBoxHistory CSV, if enabled.
 void addAfterTimeStepDiagnosticSweep(const std::shared_ptr< const SimulationParams >& simParams,
                                      const std::shared_ptr< SimulationObjects >& simObjs,
                                      const std::unique_ptr< SweepTimeloop >& timeloop)
@@ -1597,10 +1427,7 @@ void addAfterTimeStepDiagnosticSweep(const std::shared_ptr< const SimulationPara
          },
          *simObjs->particleAccessor);
 
-      // [Claude, 2026-09-27] Per explicit request ("create a box around all the cylinders in the
-      // crash area, log out their values and see the crash evolution"): the FULL spatial+temporal
-      // evolution of every OBSTACLE/INTERFACE cell in a fixed box, once per main step, within its own
-      // independent step window -- see logFluidBoxHistory's own doc comment (SimulationParams.h).
+      // ModelParameters.logFluidBoxHistory: obstacle/interface cells of a fixed box, in its own step window.
       if (simParams->model.logFluidBoxHistory &&
           t >= simParams->model.logFluidBoxHistoryStartStep &&
           (simParams->model.logFluidBoxHistoryEndStep == uint_t(0) || t <= simParams->model.logFluidBoxHistoryEndStep))
@@ -1613,11 +1440,7 @@ void addAfterTimeStepDiagnosticSweep(const std::shared_ptr< const SimulationPara
    timeloop->addFuncAfterTimeStep(diagnosticSweep, "Diagnostic: toggleable density+floater sweep");
 }
 
-// [Claude, 2026-09-28] Deliberately INDEPENDENT of addAfterTimeStepDiagnosticSweep/
-// diagnosticSweepEnabled above (which gates unrelated crash-investigation diagnostics -- draining
-// diagnosticEvents, the domain-wide NaN scan, per-floater force/torque snapshots -- all noise for a
-// clean still-water buoyancy validation run) so logDensityColumn can be used on its own, e.g. to
-// investigate the sphere/cylinder/cuboid equilibrium position bias, without pulling in any of that.
+// ModelParameters.logDensityColumn, independent of the diagnostic sweep above.
 void addDensityColumnLoggingSweep(const std::shared_ptr< const SimulationParams >& simParams,
                                   const std::shared_ptr< SimulationObjects >& simObjs,
                                   const std::unique_ptr< SweepTimeloop >& timeloop)
@@ -1636,7 +1459,7 @@ void addDensityColumnLoggingSweep(const std::shared_ptr< const SimulationParams 
    timeloop->addFuncAfterTimeStep(densityColumnSweep, "Diagnostic: far-field density column log");
 }
 
-// [Claude, 2026-09-28] logWaterHeight: independent of every other diagnostic switch, over the whole run.
+// ModelParameters.logWaterHeight, independent of every other diagnostic switch, over the whole run.
 void addWaterHeightLoggingSweep(const std::shared_ptr< const SimulationParams >& simParams,
                                 const std::shared_ptr< SimulationObjects >& simObjs,
                                 const std::unique_ptr< SweepTimeloop >& timeloop)

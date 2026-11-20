@@ -14,25 +14,16 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file BognerStateClassificationTest.cpp
-//! Unit tests for classifyFormerObstacleNeighbourhood()/isPass3Candidate() (PdfReconstructionManager.h),
-//! the pure decision logic behind the Bogner & Rüde state-selection reconstruction's bognerTargetFlag
-//! and its optional Pass-3 local re-resolution sweep (ModelParameters.usePass3Reresolution).
+//! Unit tests for the pure decision logic in PdfReconstructionManager.h behind the Bogner & Rüde state-selection
+//! reconstruction: classifyFormerObstacleNeighbourhood()/classifyFormerObstacleCell() (state of a cell freshly
+//! uncovered by a moving particle), isPass3Candidate() (optional Pass-3 re-resolution,
+//! ModelParameters.usePass3Reresolution), seedInterfaceFillFromNeighbourhood() (initial fill of such a cell) and the
+//! strict Bogner rule (classifyFormerObstacleCellStrict()).
 //!
-//! Background: this function decides what state (gas/liquid/interface) a cell freshly uncovered
-//! by a moving mesa_pd particle should get, from three booleans describing its D3Q27 neighbourhood:
-//! hasGas/hasLiquid (REAL gas/liquid flags only -- an interface neighbour must count toward
-//! NEITHER) and hasUnknown (an adjacent cell freed in the same reconstruction pass, not yet
-//! classified). An earlier version of this code counted interface neighbours as evidence of both
-//! gas and liquid, which caused a self-propagating misclassification in densely packed, actively
-//! jittering particle beds: floating cylinders in cylinder_sedimentation_showcase_gas.prm ended up
-//! surrounded by persistent "interface" cells 30+ LU below the true free surface, with oscillating
-//! (17-86%) submersion instead of the ~100% a fully submerged particle should read. These tests
-//! cover the full truth table of the three input booleans so a future change to this function
-//! cannot silently reintroduce that bug or a similar misclassification.
-//!
-//! The two-round (Pass 2 then Pass 3) tests further down exercise isPass3Candidate() and the same
-//! classifier re-run against a mutated neighbourhood, simulating what PdfReconstructionManager's
-//! Pass-3 decide sub-loop sees once every same-pass FormerMO cell in the block has a final state.
+//! The classifier takes three booleans from the D3Q27 neighbourhood: hasGas/hasLiquid (real gas/liquid flags only; an
+//! interface neighbour counts toward neither) and hasUnknown (a neighbour freed in the same pass, not yet classified).
+//! Counting interface neighbours as both gas and liquid evidence makes interface cells propagate through densely
+//! packed particle beds far below the free surface; the tests cover the full truth table to guard against that.
 //======================================================================================================================
 
 #include "lbm_mesapd_coupling/momentum_exchange_method/reconstruction/PdfReconstructionManager.h"
@@ -44,50 +35,42 @@ namespace walberla {
 namespace lbm_mesapd_coupling {
 
 // ---------------------------------------------------------------------------------------------
-// Ground truth: the documented decision table in classifyFormerObstacleNeighbourhood's own
-// docstring (PdfReconstructionManager.h). Every one of the 8 combinations of
-// (hasGas, hasLiquid, hasUnknown) is exercised explicitly, so a future edit cannot silently change
-// a branch's outcome (or reintroduce interface-counts-as-gas/liquid) without a test failing.
+// Decision table of classifyFormerObstacleNeighbourhood (see its docstring): all 8 combinations of
+// (hasGas, hasLiquid, hasUnknown).
 // ---------------------------------------------------------------------------------------------
 
 void testGasOnlyFullyResolved()
 {
-   // hasGas && !hasLiquid && !hasUnknown -> Gas: provably bulk gas, no unresolved neighbour could
-   // still turn out to be liquid.
+   // hasGas && !hasLiquid && !hasUnknown -> Gas: no unresolved neighbour can still turn out liquid.
    WALBERLA_CHECK(classifyFormerObstacleNeighbourhood(/*hasGas*/ true, /*hasLiquid*/ false, /*hasUnknown*/ false)
                   == BognerNeighbourhoodState::Gas);
 }
 
 void testGasOnlyWithUnresolvedNeighbour()
 {
-   // hasGas && !hasLiquid && hasUnknown -> Interface: symmetric to the liquid-side case below. An
-   // adjacent cell freed in the same pass hasn't been classified yet and could still become liquid,
-   // so committing to gas now would risk the liquid-never-touches-gas invariant retroactively, just
-   // discovered from the gas side instead of the liquid side.
+   // hasGas && !hasLiquid && hasUnknown -> Interface (branch A'): the unresolved neighbour could still become
+   // liquid, so committing to gas could break the liquid-never-touches-gas invariant.
    WALBERLA_CHECK(classifyFormerObstacleNeighbourhood(/*hasGas*/ true, /*hasLiquid*/ false, /*hasUnknown*/ true)
                   == BognerNeighbourhoodState::Interface);
 }
 
 void testLiquidOnlyFullyResolved()
 {
-   // hasLiquid && !hasGas && !hasUnknown -> Liquid: provably bulk liquid, no unresolved neighbour
-   // could still turn out to be gas. This is the case that used to be forced to Interface.
+   // hasLiquid && !hasGas && !hasUnknown -> Liquid: no unresolved neighbour can still turn out gas.
    WALBERLA_CHECK(classifyFormerObstacleNeighbourhood(/*hasGas*/ false, /*hasLiquid*/ true, /*hasUnknown*/ false)
                   == BognerNeighbourhoodState::Liquid);
 }
 
 void testLiquidOnlyWithUnresolvedNeighbour()
 {
-   // hasLiquid && !hasGas && hasUnknown -> Interface: an adjacent cell freed in the same pass
-   // hasn't been classified yet and could still become gas, so committing to liquid now would
-   // risk the liquid-never-touches-gas invariant retroactively.
+   // hasLiquid && !hasGas && hasUnknown -> Interface (branch C): the unresolved neighbour could still become gas.
    WALBERLA_CHECK(classifyFormerObstacleNeighbourhood(/*hasGas*/ false, /*hasLiquid*/ true, /*hasUnknown*/ true)
                   == BognerNeighbourhoodState::Interface);
 }
 
 void testMixedNeighbourhood()
 {
-   // hasGas && hasLiquid -> Interface: a genuine free-surface cell, independent of hasUnknown.
+   // hasGas && hasLiquid -> Interface (branch D): a genuine free-surface cell, independent of hasUnknown.
    WALBERLA_CHECK(classifyFormerObstacleNeighbourhood(/*hasGas*/ true, /*hasLiquid*/ true, /*hasUnknown*/ false)
                   == BognerNeighbourhoodState::Interface);
    WALBERLA_CHECK(classifyFormerObstacleNeighbourhood(/*hasGas*/ true, /*hasLiquid*/ true, /*hasUnknown*/ true)
@@ -96,11 +79,8 @@ void testMixedNeighbourhood()
 
 void testNeitherPhaseReachable()
 {
-   // !hasGas && !hasLiquid -> Interface (safe fallback): only interface and/or still-unresolved
-   // FormerMO neighbours nearby -- neither promotion is provably safe. This is exactly the
-   // situation inside a densely packed, actively-jittering particle bed once a few cells nearby
-   // have already been (mis)classified interface; the fallback must stay interface here rather
-   // than silently defaulting to gas or liquid.
+   // !hasGas && !hasLiquid -> Interface (branch E, safe fallback): only interface and/or unresolved FormerMO
+   // neighbours, so neither promotion is provably safe.
    WALBERLA_CHECK(classifyFormerObstacleNeighbourhood(/*hasGas*/ false, /*hasLiquid*/ false, /*hasUnknown*/ false)
                   == BognerNeighbourhoodState::Interface);
    WALBERLA_CHECK(classifyFormerObstacleNeighbourhood(/*hasGas*/ false, /*hasLiquid*/ false, /*hasUnknown*/ true)
@@ -108,14 +88,10 @@ void testNeitherPhaseReachable()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Cube-based tests: drive classifyFormerObstacleCell() -- the SAME function bognerTargetFlag
-// calls in production -- with a literal 3x3x3 neighbourhood of flags, exactly as a real FlagField
-// scan would see it, instead of pre-computed hasGas/hasLiquid/hasUnknown booleans. This exercises
-// the neighbour-scanning loop itself, not just the downstream decision table.
-//
-// A tiny local flag type stands in for the real (BoundaryHandling_T-dependent) flag_t; the only
-// requirement on Flag_T is that field::isFlagSet(value, testFlag) works, which holds for any
-// unsigned integer used as a bitmask -- exactly how the real flag_t behaves.
+// Cube-based tests: drive classifyFormerObstacleCell() (the function bognerTargetFlag calls) with a literal 3x3x3
+// flag neighbourhood, so the neighbour-scanning loop is exercised as well as the decision table.
+// MockFlag stands in for the real flag_t; Flag_T only needs field::isFlagSet(value, testFlag), which any unsigned
+// bitmask satisfies.
 // ---------------------------------------------------------------------------------------------
 
 using MockFlag = uint8_t;
@@ -125,8 +101,7 @@ constexpr MockFlag INTERFACE       = MockFlag(1) << 2;
 constexpr MockFlag FORMER_OBSTACLE = MockFlag(1) << 3;
 constexpr MockFlag OBSTACLE        = MockFlag(1) << 4; // currently-covered flag, excluded from all evidence
 
-// [dz+1][dy+1][dx+1]; index [1][1][1] (the centre) is never read by classifyFormerObstacleCell,
-// so it's left at whatever the cube was filled with.
+// [dz+1][dy+1][dx+1]; the centre [1][1][1] is never read by classifyFormerObstacleCell.
 using Cube = std::array< std::array< std::array< MockFlag, 3 >, 3 >, 3 >;
 
 Cube uniformCube(MockFlag fill)
@@ -144,8 +119,7 @@ BognerNeighbourhoodState classifyCube(const Cube& cube)
    uint_t unknownNbr;
    return classifyFormerObstacleCell(
       [&](int dx, int dy, int dz) {
-         // dx,dy,dz in {-1,0,1}; casting first (per clang-tidy's own preferred form) then adding 1
-         // relies on well-defined unsigned wraparound for -1 -> SIZE_MAX -> (+1, mod 2^64) -> 0.
+         // dx,dy,dz in {-1,0,1}; casting first, then adding 1, uses well-defined unsigned wraparound (-1 -> 0).
          const size_t ix = static_cast< size_t >(dx) + size_t(1);
          const size_t iy = static_cast< size_t >(dy) + size_t(1);
          const size_t iz = static_cast< size_t >(dz) + size_t(1);
@@ -154,9 +128,7 @@ BognerNeighbourhoodState classifyCube(const Cube& cube)
       LIQUID, GAS, FORMER_OBSTACLE, OBSTACLE, hasGas, hasLiquid, hasUnknown, unknownNbr);
 }
 
-// Same as classifyCube(), but also hands back hasGas/hasLiquid/hasUnknown -- needed by the
-// two-round (Pass 2 then Pass 3) tests below, which must feed isPass3Candidate() the same booleans
-// production code computes at classification time.
+// Same as classifyCube(), but also returns hasGas/hasLiquid/hasUnknown for isPass3Candidate().
 BognerNeighbourhoodState classifyCubeFull(const Cube& cube, bool& hasGas, bool& hasLiquid, bool& hasUnknown)
 {
    uint_t unknownNbr;
@@ -172,13 +144,8 @@ BognerNeighbourhoodState classifyCubeFull(const Cube& cube, bool& hasGas, bool& 
 
 void testCubeTopLeftInterfaceRestLiquid()
 {
-   // The user's own example: one corner of the surrounding cube -- (dx,dy,dz) = (-1,-1,-1), "top
-   // left" of the neighbourhood -- is interface, the other 25 cells are real liquid, no real gas
-   // anywhere. This is the DIRECT regression test for the fix: under the old code (interface
-   // counted as both gas- and liquid-equivalent), that one interface neighbour alone would have
-   // set hasGas=true, making the whole cell "mixed" -> Interface. Under the fixed code, an
-   // interface neighbour counts toward neither, so hasGas stays false and this is unambiguously
-   // bulk liquid.
+   // One corner neighbour (-1,-1,-1) is interface, the other 25 are liquid. An interface neighbour counts toward
+   // neither phase, so hasGas stays false and the cell is bulk liquid (not "mixed" -> Interface).
    Cube cube = uniformCube(LIQUID);
    cube[0][0][0] = INTERFACE; // (dx,dy,dz) = (-1,-1,-1)
    WALBERLA_CHECK(classifyCube(cube) == BognerNeighbourhoodState::Liquid);
@@ -205,19 +172,13 @@ void testCubeOneGasRestLiquid()
 
 void testCubeAllInterfaceNoRealPhase()
 {
-   // The entire neighbourhood is interface -- no real gas or liquid reachable within one cell at
-   // all. This is exactly the state a cell deep inside a densely packed, actively-jittering
-   // particle bed can be in once its immediate surroundings have themselves already been
-   // classified interface: neither promotion is provably safe, so the fallback must stay
-   // Interface rather than silently defaulting to Gas or Liquid.
+   // All-interface neighbourhood, no real phase within one cell: the fallback must stay Interface.
    WALBERLA_CHECK(classifyCube(uniformCube(INTERFACE)) == BognerNeighbourhoodState::Interface);
 }
 
 void testCubeFormerObstacleNeighbourBlocksLiquidPromotion()
 {
-   // All-liquid except one still-unresolved FormerMO neighbour, no real gas anywhere -> Interface
-   // (branch C): that neighbour could still turn out to be gas later in the same reconstruction
-   // pass, so promoting this cell to liquid now would risk the invariant retroactively.
+   // All-liquid except one unresolved FormerMO neighbour -> Interface (branch C).
    Cube cube = uniformCube(LIQUID);
    cube[1][0][2] = FORMER_OBSTACLE; // (dx,dy,dz) = (+1,-1,0), an arbitrary non-centre cell
    WALBERLA_CHECK(classifyCube(cube) == BognerNeighbourhoodState::Interface);
@@ -225,33 +186,22 @@ void testCubeFormerObstacleNeighbourBlocksLiquidPromotion()
 
 void testCubeFormerObstacleNeighbourBlocksGasPromotion()
 {
-   // Symmetric to the test above: all-gas except one still-unresolved FormerMO neighbour, no real
-   // liquid anywhere -> Interface (branch A'): that neighbour could still turn out to be liquid
-   // later in the same reconstruction pass, so promoting this cell to gas now would risk the
-   // invariant retroactively, same as the liquid-side case, just from the other direction.
+   // All-gas except one unresolved FormerMO neighbour -> Interface (branch A').
    Cube cube = uniformCube(GAS);
    cube[1][0][2] = FORMER_OBSTACLE; // (dx,dy,dz) = (+1,-1,0), same arbitrary non-centre cell
    WALBERLA_CHECK(classifyCube(cube) == BognerNeighbourhoodState::Interface);
 }
 
 // ---------------------------------------------------------------------------------------------
-// Stale-flag regression tests: a real cluster run (81-sphere drop, sphere_only_81floaters_*) showed
-// via direct VTK inspection that MovingParticleMapping.h can leave a cell simultaneously flagged
-// OBSTACLE (currently covered by a particle) and a stale real GAS or LIQUID bit from before it was
-// covered (root cause: the mapping only clears/sets flags for cells that were `isDomain()` --
-// liquid|interface -- when swept over; a cell that was gas at that moment matches no branch and is
-// silently skipped, keeping its old gas bit indefinitely). Without an explicit exclusion, that stale
-// bit would be read as genuine phase evidence by any FormerMO neighbour scanning it. These tests
-// model that exact corrupted cell directly and confirm the obstacle check in
-// classifyFormerObstacleCell neutralises it completely, regardless of what real-phase bit it also
-// carries.
+// Stale-flag tests: MovingParticleMapping.h can leave a cell flagged OBSTACLE together with a stale GAS or LIQUID
+// bit from before it was covered (the mapping only rewrites flags of cells that were isDomain(), i.e.
+// liquid|interface, so a gas cell keeps its gas bit). The obstacle check in classifyFormerObstacleCell must ignore
+// such a neighbour whatever phase bit it carries.
 // ---------------------------------------------------------------------------------------------
 
 void testObstacleExcludesStaleGasEvidence()
 {
-   // All-liquid except one neighbour that is BOTH stale-GAS and currently-OBSTACLE. If the obstacle
-   // exclusion works, that neighbour contributes no evidence at all -- hasGas must stay false, and
-   // the cell must classify as unambiguous bulk Liquid, not Interface.
+   // All-liquid except one GAS|OBSTACLE neighbour: no gas evidence, so Liquid rather than Interface.
    Cube cube = uniformCube(LIQUID);
    cube[1][0][2] = GAS | OBSTACLE; // (dx,dy,dz) = (+1,-1,0)
    WALBERLA_CHECK(classifyCube(cube) == BognerNeighbourhoodState::Liquid);
@@ -259,20 +209,16 @@ void testObstacleExcludesStaleGasEvidence()
 
 void testObstacleExcludesStaleLiquidEvidence()
 {
-   // Symmetric case: all-gas except one neighbour that is BOTH stale-LIQUID and currently-OBSTACLE.
-   // hasLiquid must stay false -- confirms the exclusion isn't accidentally gas-only.
+   // All-gas except one LIQUID|OBSTACLE neighbour: hasLiquid stays false, so Gas.
    Cube cube = uniformCube(GAS);
    cube[1][0][2] = LIQUID | OBSTACLE;
    WALBERLA_CHECK(classifyCube(cube) == BognerNeighbourhoodState::Gas);
 }
 
 // ---------------------------------------------------------------------------------------------
-// isPass3Candidate() truth table: should a cell that fell back to Interface in Pass 2 be
-// re-examined by Pass 3 once every same-pass FormerMO cell in the block has a final state? True
-// only for branches A'/C (blocked purely by an unresolved same-pass neighbour) and branch E when it
-// ALSO had an unresolved neighbour -- never for branch D (a genuine, already-correct surface), and
-// never for a branch-E cell with zero unresolved neighbours (nothing in its neighbourhood can
-// change by Pass-3 time, so it is structurally unrescuable).
+// isPass3Candidate() truth table: is a cell that fell back to Interface in Pass 2 re-examined in Pass 3, once all
+// same-pass FormerMO cells have a final state? True for branches A'/C and for branch E with an unresolved neighbour;
+// false for branch D (a genuine surface) and for branch E without unresolved neighbours (nothing can change).
 // ---------------------------------------------------------------------------------------------
 
 void testPass3CandidateTruthTable()
@@ -296,16 +242,13 @@ void testPass3CandidateTruthTable()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Two-round (Pass 2 then Pass 3) tests: call classifyCube[Full]() twice on the same cube, mutating
-// the one FormerMO neighbour between rounds to simulate it being resolved elsewhere in the same
-// Pass-2 sweep -- exactly what Pass 3 sees when it re-examines a queued candidate against the
-// now-fully-known neighbourhood (PdfReconstructionManager.h's decide sub-loop).
+// Two-round (Pass 2, then Pass 3) tests: classify the same cube twice, resolving the FormerMO neighbour in between,
+// as Pass 3 sees a queued candidate in PdfReconstructionManager.h's decide sub-loop.
 // ---------------------------------------------------------------------------------------------
 
 void testCubeTwoRoundLiquidPromotion()
 {
-   // Round 1 (Pass 2): all-liquid except one still-unresolved FormerMO neighbour -> Interface
-   // (branch C), correctly identified as a Pass-3 candidate.
+   // Pass 2: all-liquid except one unresolved FormerMO neighbour -> Interface (branch C), a Pass-3 candidate.
    Cube cube = uniformCube(LIQUID);
    cube[1][0][2] = FORMER_OBSTACLE; // (dx,dy,dz) = (+1,-1,0)
    bool hasGas, hasLiquid, hasUnknown;
@@ -313,9 +256,7 @@ void testCubeTwoRoundLiquidPromotion()
    WALBERLA_CHECK(round1 == BognerNeighbourhoodState::Interface);
    WALBERLA_CHECK(isPass3Candidate(round1, hasGas, hasLiquid, hasUnknown));
 
-   // Round 2 (Pass 3): that neighbour has since resolved to real LIQUID elsewhere in the same
-   // Pass-2 sweep -> re-classifying against the now-fully-known neighbourhood correctly promotes to
-   // Liquid.
+   // Pass 3: the neighbour resolved to LIQUID -> Liquid.
    cube[1][0][2] = LIQUID;
    WALBERLA_CHECK(classifyCube(cube) == BognerNeighbourhoodState::Liquid);
 }
@@ -336,9 +277,8 @@ void testCubeTwoRoundGasPromotion()
 
 void testCubeTwoRoundUnresolvedIsland()
 {
-   // Round 1 (Pass 2): the entire neighbourhood is interface except one still-unresolved FormerMO
-   // cell -- no real gas or liquid anywhere -> Interface (branch E), and (since hasUnknown is true)
-   // correctly identified as a Pass-3 candidate.
+   // Pass 2: all-interface except one unresolved FormerMO neighbour -> Interface (branch E); a Pass-3 candidate
+   // because hasUnknown is true.
    Cube cube = uniformCube(INTERFACE);
    cube[1][0][2] = FORMER_OBSTACLE;
    bool hasGas, hasLiquid, hasUnknown;
@@ -346,14 +286,9 @@ void testCubeTwoRoundUnresolvedIsland()
    WALBERLA_CHECK(round1 == BognerNeighbourhoodState::Interface);
    WALBERLA_CHECK(isPass3Candidate(round1, hasGas, hasLiquid, hasUnknown));
 
-   // Round 2 (Pass 3): that neighbour has since resolved to a genuine, boring INTERFACE cell
-   // elsewhere in the same Pass-2 sweep (not a real phase -- e.g. it turned out to have real gas
-   // AND real liquid in its own neighbourhood, branch D). Two things must both hold: (1) the
-   // candidate must NOT incorrectly cascade to liquid or gas -- an interface neighbour is still not
-   // evidence of either, so it correctly stays Interface; (2) hasGas/hasLiquid must both still be
-   // false, which is exactly the [PASS3-UNRESOLVED-ISLAND] trigger condition in production
-   // (PdfReconstructionManager.h) -- this cell is genuinely isolated from both real phases even
-   // after full same-pass resolution, not simply still-pending.
+   // Pass 3: the neighbour resolved to INTERFACE. The cell must stay Interface (an interface neighbour is no phase
+   // evidence), and hasGas/hasLiquid must both be false: the [PASS3-UNRESOLVED-ISLAND] condition in
+   // PdfReconstructionManager.h.
    cube[1][0][2] = INTERFACE;
    const auto round2 = classifyCubeFull(cube, hasGas, hasLiquid, hasUnknown);
    WALBERLA_CHECK(round2 == BognerNeighbourhoodState::Interface);
@@ -363,10 +298,10 @@ void testCubeTwoRoundUnresolvedIsland()
 }
 
 // ---------------------------------------------------------------------------------------------
-// [Claude, 2026-10-01] seedInterfaceFillFromNeighbourhood (PdfReconstructionManager.h): fill level seeded into a freshly
-// uncovered cell that became INTERFACE. Legacy rule: mean fill of the interface neighbours, 0.5 if none. New rule
-// (prm seedFillFromAllNeighbours): mean volume fraction of all resolved neighbours (gas 0, liquid 1, interface fill),
-// excluding obstacle and still-unclassified (formerObstacle) cells.
+// seedInterfaceFillFromNeighbourhood (PdfReconstructionManager.h): fill level seeded into a freshly uncovered cell
+// that became INTERFACE. Legacy rule: mean fill of the interface neighbours, 0.5 if none. All-neighbour rule (prm
+// seedFillFromAllNeighbours): mean volume fraction of all resolved neighbours (gas 0, liquid 1, interface fill),
+// excluding obstacle and still-unclassified (formerObstacle) cells; 0.5 if none.
 // ---------------------------------------------------------------------------------------------
 using FillCube = std::array< std::array< std::array< real_t, 3 >, 3 >, 3 >;
 
@@ -404,7 +339,7 @@ void checkSeed(const char* name, const Cube& flags, const FillCube& fills, real_
 
 void testSeedBulkLiquidWithUnknownNeighbour()
 {
-   // branch C: liquid all around, one still-unclassified neighbour -> interface; legacy seeds a half-empty cell
+   // branch C: liquid all around, one unclassified neighbour; legacy falls back to 0.5, all-neighbour gives 1
    Cube c = uniformCube(LIQUID);
    c[1][1][2] = FORMER_OBSTACLE;
    checkSeed("bulk liquid + unknown (C)", c, uniformFill(real_t(1)), real_t(0.5), true, real_t(1), false);
@@ -412,7 +347,7 @@ void testSeedBulkLiquidWithUnknownNeighbour()
 
 void testSeedAirWithUnknownNeighbour()
 {
-   // branch A': gas all around, one unclassified neighbour -> interface; legacy seeds half a cell of water in the air
+   // branch A': gas all around, one unclassified neighbour; legacy falls back to 0.5, all-neighbour gives 0
    Cube c = uniformCube(GAS);
    c[1][1][0] = FORMER_OBSTACLE;
    checkSeed("air + unknown (A')", c, uniformFill(real_t(0)), real_t(0.5), true, real_t(0), false);
@@ -420,7 +355,8 @@ void testSeedAirWithUnknownNeighbour()
 
 void testSeedSurfaceLiquidBelowGasAbove()
 {
-   // branch D without interface neighbours: lower plane liquid, upper plane gas, middle plane obstacle (a floater edge)
+   // branch D without interface neighbours: lower plane liquid, upper plane gas, middle plane obstacle;
+   // all-neighbour: 9 liquid / 18 resolved = 0.5
    Cube c = uniformCube(OBSTACLE);
    for (auto& row : c[0]) row.fill(LIQUID);
    for (auto& row : c[2]) row.fill(GAS);
@@ -460,8 +396,8 @@ void testSeedIgnoresStaleFillOfExcludedCells()
 
 void testSeedSkipObstacleNeighboursToggle()
 {
-   // [Claude, 2026-10-08] an interface neighbour that still carries the formerObstacle flag: skipped by default (since
-   // 2026-10-01) -> no evidence, 0.5 fallback; counted with skipObstacle = false (legacy rule before 2026-10-01) -> its fill.
+   // An interface neighbour that still carries the formerObstacle flag: skipped by default (prm
+   // seedSkipObstacleNeighbours = true) -> no evidence, 0.5 fallback; counted with skipObstacle = false -> its fill.
    // The all-neighbour rule always skips it.
    Cube     c = uniformCube(OBSTACLE);
    FillCube f = uniformFill(real_t(0.3));
@@ -479,8 +415,8 @@ void testSeedSkipObstacleNeighboursToggle()
    WALBERLA_LOG_INFO_ON_ROOT("[seed] skipObstacleNeighbours toggle: ok");
 }
 
-// [Claude, 2026-10-08] strict Bogner rule (classifyStrictBognerNeighbourhood / classifyFormerObstacleCellStrict): Bogner's
-// three cases in his order, and cells freed in the same step (formerObstacle) are not in B(x).
+// Strict Bogner rule (classifyStrictBognerNeighbourhood / classifyFormerObstacleCellStrict): Bogner's three cases in
+// his order; cells freed in the same step (formerObstacle) are not in B(x).
 BognerNeighbourhoodState classifyCubeStrict(const Cube& cube, bool& hasGas, bool& hasLiquid)
 {
    return classifyFormerObstacleCellStrict(
@@ -503,7 +439,7 @@ void testStrictBognerTruthTable()
 void testStrictBognerSameStepNeighbours()
 {
    bool g, l;
-   // dry upper face: gas above, the rest of the freed sheet beside it, body below -> gas (the fallback rule gives interface)
+   // dry upper face: gas above, the rest of the freed sheet beside it, body below -> gas (fallback rule: interface)
    Cube c = uniformCube(OBSTACLE);
    for (auto& row : c[2]) row.fill(GAS);
    for (auto& row : c[1]) row.fill(FORMER_OBSTACLE);

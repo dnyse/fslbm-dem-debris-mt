@@ -14,36 +14,33 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file AnalyticalSolutions.h
-//! \brief Closed-form rigid-body-impact reference solutions for DEMValidation.h.
+//! \brief Closed-form rigid-body-impact reference solutions for the DEMValidation scenarios (DEMValidationScenarios.h).
 //!
-//! ONE general solver (rigidBodyImpact, below) is applied to every shape rather than writing three
-//! shape-specific formulas. This is the same standard single-point impulsive-contact-with-Coulomb-
-//! friction method that the shape-specific literature results below each independently specialize:
+//! ONE general solver (rigidBodyImpact, below) is applied to every shape: the standard single-point
+//! impulsive-contact-with-Coulomb-friction method, of which each literature result below is a special case:
 //!
 //!  - Kodam, M., Bharadwaj, R., Curtis, J., Hancock, B., & Wassgren, C. (2010). "Cylindrical object
 //!    contact detection for use in discrete element method simulations. Part II - Experimental
 //!    validation." Chemical Engineering Science, 65(22), 5863-5871. Their Test 1 (single cylinder
 //!    dropped onto a flat wall at a prescribed tilt angle, compared to a closed-form analytical
-//!    rebound) is exactly rigidBodyImpact() evaluated at the rim contact point their own Part I paper
-//!    derives (reused here directly via closed_form_contacts::rimPointTowardPlane,
-//!    ClosedFormContactsCylinderPlaneGeometry.h).
+//!    rebound) is rigidBodyImpact() evaluated at the rim contact point derived in Part I
+//!    (closed_form_contacts::detail::rimPointTowardPlane, ClosedFormContactsCylinderPlaneGeometry.h).
 //!  - Housner, G.W. (1963). "The behavior of inverted pendulum structures during earthquakes." Bulletin
 //!    of the Seismological Society of America, 53(2), 403-417. The rocking-block restitution
 //!    r = (omega_after/omega_before)^2 = (1 - 1.5*sin^2(alpha))^2 is the special case of rigidBodyImpact()
 //!    with zero normal restitution (Housner's block does not bounce -- the impulsive event is the pivot
 //!    transferring from one base corner to the other) and full-stick friction (no final slip at the new
-//!    pivot corner), evaluated by conservation of angular momentum about that corner. selfCheckHousner()
-//!    below asserts the general solver reproduces this closed form exactly, as a standing regression
-//!    check on the general solver rather than a separate user-facing experiment.
+//!    pivot corner), evaluated by conservation of angular momentum about that corner.
+//!    selfCheckHousnerRelativeError() below checks that the general solver reproduces this closed form exactly
+//!    (a regression check on the solver, not a separate experiment).
 //!  - The classic oblique sphere-wall impact (e.g. Walton, O.R. & Braun, R.L. (1986), or as used in
 //!    Kruggel-Emden, H. et al. (2011), "Benchmark tests for verifying discrete element modelling codes
 //!    at particle impact level," Granular Matter 13, 235-244) is rigidBodyImpact() with the trivial
 //!    contact point r_c = -R*n (always directly below the sphere's centre along the wall normal).
 //!
-//! Restricted to PLANAR impacts (velocity, spin axis, and contact point all in one plane) throughout --
-//! matching Kodam Part II's own cylinder test setup and Housner's rocking-block assumptions. Fully
-//! general 3D oblique impacts are a harder, separately-studied problem (see e.g. Stronge, W.J. (2000),
-//! "Impact Mechanics," Cambridge University Press) and out of scope here.
+//! Restricted to PLANAR impacts (velocity, spin axis and contact point in one plane), matching Kodam Part II's
+//! cylinder test setup and Housner's rocking-block assumptions. General 3D oblique impacts are a harder problem
+//! (see e.g. Stronge, W.J. (2000), "Impact Mechanics," Cambridge University Press) and out of scope here.
 //======================================================================================================================
 
 #pragma once
@@ -109,19 +106,16 @@ struct ImpactResult
 //! collision response with friction; or Stronge (2000), ch. 6). `normal` points from B toward A (the
 //! direction A is pushed to separate).
 //!
-//! CALIBRATION NOTE (found empirically running DEMValidationScenarios.h's wall-impact tests): this
-//! model assumes kinetic friction saturates at mu*Jn for the ENTIRE duration sliding persists (the
-//! textbook rigid-body-impact assumption). mesa_pd's actual contact law (LinearSpringDashpot) instead
-//! uses a Cundall & Strack (1979)-style TANGENTIAL SPRING clamped by the Coulomb limit
-//! (tangentialSpringDisplacement / fTLS in LinearSpringDashpot.h) -- over a short, finite, soft contact
-//! duration that spring does not necessarily have time to ramp up to the full Coulomb-limited force for
-//! the whole contact, so the simulated tangential impulse transferred (and hence induced spin) comes in
-//! systematically BELOW this idealized-instantaneous-impulse prediction for fast oblique impacts --
-//! observed ~15-25% low on angular velocity at tangential/normal speed ratios of 0.25-1.5, growing
-//! roughly monotonically with the ratio, while the PURE NORMAL case (ratio=0, no friction involved)
-//! matches to <1%. This is an expected, physically-understood difference between two different valid
-//! tangential contact models, not a bug in either -- the wall-impact experiments' pass tolerance is set
-//! accordingly (looser than the friction-free energy-conservation checks).
+//! CALIBRATION NOTE (DEMValidationWallImpact.h's wall-impact tests): this model assumes kinetic friction saturates
+//! at mu*Jn for the ENTIRE duration sliding persists (the textbook rigid-body-impact assumption). mesa_pd's contact
+//! law (LinearSpringDashpot) instead uses a Cundall & Strack (1979)-style TANGENTIAL SPRING clamped by the Coulomb
+//! limit (tangentialSpringDisplacement / fTLS in LinearSpringDashpot.h); over a short, finite, soft contact the
+//! spring need not ramp up to the full Coulomb-limited force for the whole contact, so the simulated tangential
+//! impulse (and induced spin) is systematically BELOW this instantaneous-impulse prediction for fast oblique
+//! impacts: ~15-25% low on angular velocity at tangential/normal speed ratios of 0.25-1.5, growing roughly
+//! monotonically with the ratio, while the PURE NORMAL case (ratio 0, no friction) matches to <1%. This is an
+//! expected difference between two valid tangential contact models, not a bug in either; the wall-impact pass
+//! tolerance is set accordingly (looser than the friction-free energy-conservation checks).
 inline ImpactResult rigidBodyImpact(const BodyState& A, const BodyState& B, const Vec3& normal,
                                      real_t restitution, real_t friction)
 {
@@ -149,7 +143,8 @@ inline ImpactResult rigidBodyImpact(const BodyState& A, const BodyState& B, cons
       // No tangential slip (or frictionless): pure normal impulse.
       // nKn = 1/m + r^2*cos^2(alpha+theta)/Iyy  (Kodam et al. 2010 Eq. 3 denominator, cylinder-wall case)
       const real_t nKn = n * (K * n);
-      // Jn = -(1+e)*vn / nKn  =>  omega_y^+ = m*Vz,CM^-*(1+e)*r*cos(alpha+theta) / (Iyy + m*r^2*cos^2(alpha+theta))  (Eq. 3)
+      // Jn = -(1+e)*vn / nKn  =>
+      // omega_y^+ = m*Vz,CM^-*(1+e)*r*cos(alpha+theta) / (Iyy + m*r^2*cos^2(alpha+theta))  (Eq. 3)
       const real_t Jn  = -(real_t(1) + restitution) * vn / nKn;
       J                = Jn * n;
    }
@@ -161,17 +156,14 @@ inline ImpactResult rigidBodyImpact(const BodyState& A, const BodyState& B, cons
       const Vec3   dirSliding = n - friction * t;
       const real_t nKdir      = n * (K * dirSliding);
 
-      // n*K*dirSliding <= 0 means the sliding-impulse direction has non-positive effective stiffness
-      // along the normal -- the classic Coulomb-friction-impact indeterminacy/inconsistency for strong
-      // rotational coupling + high friction (Painleve's paradox family; see Stronge (2000) ch. 6, or
-      // Wang, Y. & Mason, M.T. (1992), ASME J. Applied Mechanics 59, on how planar frictional impact can
-      // become ill-posed for some inertia/geometry/friction combinations -- large-lever-arm anisotropic
-      // bodies like a box corner strike are exactly where this shows up; the sphere and cylinder tests
-      // never hit it, r x n stays modest there). A naive sliding-branch solve would then produce a
-      // negative or huge Jn (observed empirically: an UNPHYSICAL negative post-impact normal velocity,
-      // i.e. penetrating further rather than separating). Skip straight to the sticking branch instead,
-      // which stays well-posed as long as its own Knn (n*K*n, unconditionally positive for any real body)
-      // is used as the leading coefficient.
+      // n*K*dirSliding <= 0 means the sliding-impulse direction has non-positive effective stiffness along the
+      // normal -- the classic Coulomb-friction-impact inconsistency for strong rotational coupling + high friction
+      // (Painleve's paradox family; see Stronge (2000) ch. 6, or Wang, Y. & Mason, M.T. (1992), ASME J. Applied
+      // Mechanics 59, on planar frictional impact becoming ill-posed for some inertia/geometry/friction
+      // combinations). Large-lever-arm anisotropic bodies such as a box corner strike show it; the sphere and
+      // cylinder tests do not (r x n stays modest). A naive sliding-branch solve would then give a negative or huge
+      // Jn (an UNPHYSICAL negative post-impact normal velocity, i.e. further penetration), so the sticking branch is
+      // used instead, which stays well-posed with its Knn (n*K*n, positive for any real body) as leading coefficient.
       const bool slidingIllPosed = nKdir <= real_t(1e-10);
 
       Vec3   Jsliding(real_t(0));
@@ -219,10 +211,9 @@ inline ImpactResult rigidBodyImpact(const BodyState& A, const BodyState& B, cons
          }
          else
          {
-            // Both branches degenerate (Painleve-paradox-adjacent geometry/friction combination): fall
-            // back to a pure normal impulse (Knn = n*K*n is unconditionally positive for any physically
-            // valid K, so this is always well-posed). Loses the frictional torque this step, but stays
-            // physically sane (no spurious penetration) rather than propagating a nonsensical impulse.
+            // Both branches degenerate (Painleve-paradox-adjacent geometry/friction combination): pure normal
+            // impulse (Knn = n*K*n is positive for any physically valid K, so always well-posed). Loses the
+            // frictional torque of this impact but avoids a nonsensical impulse (no spurious penetration).
             const real_t JnSafe = -(real_t(1) + restitution) * vn / Knn;
             J                   = JnSafe * n;
          }
@@ -275,20 +266,15 @@ inline ImpactResult sphereWallImpact(real_t radius, real_t mass, const Vec3& vel
 
 //! Cylinder-wall impact, replicating Kodam et al. (2010) Part II Test 1: the contact point is the
 //! point on the cylinder's rim closest to the wall plane, from closed_form_contacts::rimPointTowardPlane
-//! (ClosedFormContactsCylinderPlaneGeometry.h) -- reusing the Kodam/Guo closed forms directly as the
-//! reference geometry, exactly as that file's own header comment anticipates ("so a dedicated test
-//! can compare these closed forms ... for identical geometry").
+//! (ClosedFormContactsCylinderPlaneGeometry.h), i.e. the Kodam/Guo closed forms as reference geometry.
 //!
-//! FACE-PLANE / BAND-PLANE SPECIAL CASE: near axis-parallel (face-on) or axis-perpendicular (band-on)
-//! orientations, the true contact is a whole flat face or the full band LENGTH touching the wall
-//! simultaneously, not a single point -- rimPointTowardPlane still returns *a* correct-height point on
-//! the rim, but an essentially ARBITRARY one off to one side, which would inject a spurious lever arm
-//! (and hence spurious predicted spin) that the true symmetric, evenly-distributed contact does not
-//! produce (confirmed empirically: DEMValidationScenarios.h's simulated angular velocity at tilt=0/90
-//! is consistent with zero, matching the physically-expected symmetric case, not the nonzero value the
-//! naive rim-point lever arm would predict). Mirrors closed_form_contacts::cylinderPlaneContact's own
-//! face-plane/band-plane branch split, using the same axisDotN thresholds -- but here to pick the
-//! physically-correct ON-AXIS effective contact point (zero net lever arm) instead.
+//! FACE-PLANE / BAND-PLANE SPECIAL CASE: near axis-parallel (face-on) or axis-perpendicular (band-on) orientations
+//! the true contact is a whole flat face or the full band LENGTH, not a single point; rimPointTowardPlane still
+//! returns a correct-height rim point, but an essentially ARBITRARY one off to one side, whose lever arm would
+//! predict spurious spin that the symmetric, evenly distributed contact does not produce (the simulated angular
+//! velocity at tilt=0/90 in DEMValidationWallImpact.h is consistent with zero). Mirrors
+//! closed_form_contacts::cylinderPlaneContact's face-plane/band-plane branch split, here to pick the ON-AXIS
+//! effective contact point (zero net lever arm).
 inline ImpactResult cylinderWallImpact(const closed_form_contacts::CylinderState& cyl, real_t mass,
                                         const Mat3& invInertiaWorld, const Vec3& velocity,
                                         const Vec3& angularVelocity, const Vec3& wallPos,
@@ -322,9 +308,8 @@ inline ImpactResult cylinderWallImpact(const closed_form_contacts::CylinderState
 
 //! Box-corner-first wall impact. `support` is the box's own support() function (its exact deepest-point
 //! geometry, mesa_pd::data::Box::support) evaluated at the body-frame direction opposite the wall
-//! normal -- reusing the identical corner-selection logic SolidCylinderContactDetection's Box x
-//! HalfSpace overload already uses in production (ParticleKernels.h), so the analytical reference
-//! targets the exact same contact point the DEM code under test will find.
+//! normal -- the corner-selection logic of SolidCylinderContactDetection's Box x HalfSpace overload
+//! (ParticleKernels.h), so the analytical reference targets the contact point the DEM code under test finds.
 inline ImpactResult boxCornerWallImpact(const Vec3& supportPointBodyFrame, const Mat3& R, real_t mass,
                                          const Mat3& invInertiaBF, const Vec3& velocity,
                                          const Vec3& angularVelocity, const Vec3& wallNormal,
@@ -348,11 +333,10 @@ inline real_t housnerRockingRestitution(real_t slendernessAngleRad)
 //! the special case of rigidBodyWallImpact with zero normal restitution (the block does not bounce --
 //! the impulsive event is the pivot transferring from one base corner to the other) and full-stick
 //! friction (mu large enough to force the sticking branch, so the new pivot corner's final velocity is
-//! exactly zero), evaluated by angular-momentum conservation about the new pivot corner. Using
-//! Housner's own reduced 2D parametrization directly (half-diagonal b, slenderness alpha, planar
-//! rotation about Y) avoids needing a full 3D box just to exercise this identity. Returns the relative
-//! error between the general solver's (omega_after/omega_before)^2 and housnerRockingRestitution(alpha);
-//! should be ~0 (machine precision) if rigidBodyImpact() is implemented correctly.
+//! exactly zero), evaluated by angular-momentum conservation about the new pivot corner. Uses Housner's reduced
+//! 2D parametrisation (half-diagonal b, slenderness alpha, planar rotation about Y) instead of a full 3D box.
+//! Returns the relative error between the general solver's (omega_after/omega_before)^2 and
+//! housnerRockingRestitution(alpha); ~0 (machine precision) if rigidBodyImpact() is correct.
 inline real_t selfCheckHousnerRelativeError(real_t slendernessAngleRad)
 {
    const real_t m = real_t(1), b = real_t(1);

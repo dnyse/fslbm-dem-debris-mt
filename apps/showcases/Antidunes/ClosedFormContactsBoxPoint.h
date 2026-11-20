@@ -16,8 +16,7 @@
 //! \file ClosedFormContactsBoxPoint.h
 //! \brief Box x Box closed-form contact: Gottschalk, Lin & Manocha (1996) SAT (boxBoxSAT) plus this
 //! codebase's own contact-point construction (box_contact_point, pullIntoBoxIntersection,
-//! placeOnNormalLine, boxBoxContactPoint). Split out of PaperAnalyticalContacts.h (namespace paper_analytical)
-//! 2026-10-29; see ClosedFormContactsInfra.h for the shared ContactResult type.
+//! placeOnNormalLine, boxBoxContactPoint); shared ContactResult type in ClosedFormContactsInfra.h.
 
 #pragma once
 
@@ -34,8 +33,9 @@ namespace detail
 {
 //! Closest points between two finite line segments P1->Q1 and P2->Q2 -- the standard closed-form
 //! algorithm (Ericson, "Real-Time Collision Detection" 2004, Section 5.1.9, ClosestPtSegmentSegment),
-//! no iteration. Used by boxBoxContactPoint below and by the cylinder-cylinder code; the squared-distance-only wrapper
-//! closestDistanceSqBetweenSegments (the cylinder-cylinder capsule bound) lives in ClosedFormContactsCylinderPlaneGeometry.h.
+//! no iteration. Used by boxBoxContactPoint below and by the cylinder-cylinder code; the squared-distance-only
+//! wrapper closestDistanceSqBetweenSegments (the cylinder-cylinder capsule bound) lives in
+//! ClosedFormContactsCylinderPlaneGeometry.h.
 inline void closestPointsBetweenSegments(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec3& q2,
                                           Vec3& outC1, Vec3& outC2)
 {
@@ -86,29 +86,26 @@ inline void closestPointsBetweenSegments(const Vec3& p1, const Vec3& q1, const V
    outC2 = p2 + d2 * t;
 }
 
-// Contact point of two overlapping boxes for a given contact normal and penetration depth.
-// boxBoxSAT used to place the point on the line between the centres ("midpoint between the extreme points along the
-// winning axis"), which for elongated, rotated boxes can lie several units from the actual contact and outside both
-// bodies; the force then acts with a wrong lever arm, the contact does net work, and elastic collisions gained up to
-// 98x their kinetic energy (DEMValidation cuboidPairEnergyFuzz; launched cuboids in the randomised drop tests,
-// THESIS_PLAN.md 2026-10-01). The point is now taken from the touching features:
+// Contact point of two overlapping boxes for a given contact normal and penetration depth, taken from the touching
+// features. A point on the line between the centres can, for elongated rotated boxes, lie several units from the actual
+// contact and outside both bodies; the force then acts with a wrong lever arm and the contact does net work
+// (energy gain in elastic collisions, DEMValidation cuboidPairEnergyFuzz).
 //  1. Contact patch of each box towards the other along the normal: the body-frame bounding box of the part of the box
 //     within `depth` of its deepest point (see supportFeature) -- a vertex for a just-touching corner, growing
 //     continuously into an edge strip or a whole face.
 //  2. The two features are projected onto the plane perpendicular to the normal and intersected (point, segment, or
-//     convex polygon); the contact point is the centroid of the intersection, placed at mid-depth between the two
-//     features along the normal. Edge-edge -> crossing point; face-face -> centre of the common area; vertex-face ->
-//     the vertex. If the projections do not intersect (round-off at a feature boundary), the closest pair of points of
-//     the two features is used instead. The patches are bounding boxes and slightly larger than the penetrating parts,
-//     so the point is finally pulled into the intersection by alternating projection (pullIntoBoxIntersection).
-// Step 3 is now closed form (placeOnNormalLine): the line through the in-plane point along the
-//     normal is clipped against the slabs of both boxes (clipLineToBox) and the point is the midpoint of the common
-//     interval; this moves the point only along the normal, the force's line of action, so the torque is unchanged.
-//     Where the line misses the intersection (wedge-shaped overlaps), the point is first moved in-plane to the nearest
-//     point of the intersection's projection (boxIntersectionVertices: edges of each box clipped by the other). The
-//     alternating projection converges only linearly; in the thin wedges of a settled pile (overlaps ~1e-5) it needed up
-//     to its 2000-iteration cap, and in a 16-rank replay of the random_cuboids drop-test pile (4284396, step 70000) it
-//     took 70-77 % of the busy ranks' time. It remains only as a last resort against round-off.
+//     convex polygon); the in-plane point is the centroid of the intersection, at mid-depth between the two features
+//     along the normal. Edge-edge -> crossing point; face-face -> centre of the common area; vertex-face -> the vertex.
+//     If the projections do not intersect (round-off at a feature boundary), the closest pair of points of the two
+//     features is used instead.
+//  3. The patches are bounding boxes, slightly larger than the penetrating parts, so the point is placed on the body
+//     overlap in closed form (placeOnNormalLine): the line through the point along the normal is clipped against the
+//     slabs of both boxes (clipLineToBox) and the point is the midpoint of the common interval. This moves the point
+//     only along the normal, the force's line of action, so the torque is unchanged. Where the line misses the
+//     intersection (wedge-shaped overlaps), the point is first moved in-plane to the nearest point of the
+//     intersection's projection (boxIntersectionVertices: edges of each box clipped by the other). Alternating
+//     projection (pullIntoBoxIntersection) converges only linearly -- up to its 2000-iteration cap in the thin wedges
+//     of a settled pile (overlaps ~1e-5) -- and remains only as a last resort against round-off.
 namespace box_contact_point
 {
 struct P2
@@ -190,16 +187,16 @@ inline P2 centroid(const std::vector< P2 >& poly, real_t eps)
    return P2{ real_t(0.5) * (lo.x + hi.x), real_t(0.5) * (lo.y + hi.y) };
 }
 
-// contact patch of a box in direction d (unit): the bounding box (in the body frame) of the
-// part of the box that lies within `depth` of its deepest point along d -- along axis i it reaches from the deepest end
-// over L_i = min(2 h_i, f depth / |d.a_i|), f = kPatchDepthFraction. Grows continuously from a vertex (depth -> 0) via an edge strip to a whole
-// face; the earlier yes/no classification (axis free if 2 h_i |d.a_i| <= depth) made the point jump by up to half an
-// edge where the classification switched (testBoxBoxContactPointContinuity). Returns the 8 corners of the patch.
-// Patch depth fraction: the patch is the part within kPatchDepthFraction * depth of the deepest point. A single-point
-// force k * depth conserves energy only if it acts where the depth is measured (the deepest point, as for GJK/EPA); a
-// patch over the full depth moved the point by up to depth / (2 |d.a_i|) along nearly parallel features and lost up to
-// 3 % in single elastic collisions (cuboidPairEnergyFuzz, 200 collisions). A small fraction keeps the point at the
-// deepest feature unless the features are parallel to within ~ this fraction of the depth, and still varies continuously.
+// contact patch of a box in direction d (unit): the body-frame bounding box of the part of the box within f * depth of
+// its deepest point along d, f = kPatchDepthFraction; along axis i it reaches from the deepest end over
+// L_i = min(2 h_i, f depth / |d.a_i|). Grows continuously from a vertex (depth -> 0) via an edge strip to a whole face,
+// so the point does not jump by up to half an edge as with a yes/no classification of free axes
+// (testBoxBoxContactPointContinuity). Returns the 8 corners of the patch.
+// kPatchDepthFraction: a single-point force k * depth conserves energy only if it acts where the depth is measured
+// (the deepest point, as for GJK/EPA); a patch over the full depth moves the point by up to depth / (2 |d.a_i|) along
+// nearly parallel features and loses energy in elastic collisions (cuboidPairEnergyFuzz). A small fraction keeps the
+// point at the deepest feature unless the features are parallel to within ~ this fraction of the depth, and still
+// varies continuously.
 constexpr real_t kPatchDepthFraction = real_t(0.1);
 inline std::vector< Vec3 > supportFeature(const Vec3& pos, const Vec3 axes[3], const Vec3& half, const Vec3& d, real_t depth)
 {
@@ -387,7 +384,7 @@ inline Vec3 placeOnNormalLine(const Vec3& x0, const Vec3& normal, const Vec3& po
 }
 
 //! normal points from B towards A (boxBoxSAT convention); overlap > 0
-//! legacyProjection: the 2026-10-01 point (alternating projection only), kept for the comparison in
+//! legacyProjection: place the point by alternating projection only, for the comparison in
 //! PaperAnalyticalContactTest.cpp; boxBoxSAT never sets it
 inline Vec3 boxBoxContactPoint(const Vec3& posA, const Vec3 axesA[3], const Vec3& halfA, const Vec3& posB,
                                const Vec3 axesB[3], const Vec3& halfB, const Vec3& normal, real_t overlap,
@@ -445,7 +442,6 @@ inline Vec3 boxBoxContactPoint(const Vec3& posA, const Vec3 axesA[3], const Vec3
          }
       }
    }
-   // mid-depth level along the normal between the two features
    // mid-depth between the deepest points of the two boxes along the normal (continuous in the configuration)
    real_t levelA = std::numeric_limits< real_t >::max(), levelB = -std::numeric_limits< real_t >::max();
    for (const auto& p : fA) levelA = std::min(levelA, p * normal);
@@ -483,9 +479,6 @@ inline Vec3 boxBoxContactPoint(const Vec3& posA, const Vec3 axesA[3], const Vec3
 //! Normal convention matches SolidCylinderContactDetection's pairwise overloads: points from B
 //! (2nd argument) toward A (1st argument), e.g. testSphereSphereContact's contactNormal = -dir
 //! where the 2nd sphere sits along +dir from the 1st.
-//!
-//! The rounded-corner, overlap-cap and axis-hysteresis variants of this function (useRoundedBoxCorners,
-//! useBoxOverlapCap, useAxisHysteresis) were archived on 2026-11-20, see archive/ARCHIVE_README.md.
 inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& halfA, const Vec3& posB,
                                 const Mat3& RB, const Vec3& halfB)
 {
@@ -554,12 +547,9 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
    result.contact  = true;
    result.overlap  = best.gap;
    result.scenario = "SAT";
-   // Supplementary contact point (NOT from the paper, see class-level comment): midpoint between
-   // the two boxes' extreme points along the winning axis. Only the component along `bestAxis` is
-   // geometrically well-defined for a flush face-face/edge-edge configuration.
-   // point from the touching features (detail::boxBoxContactPoint), no longer on the line between
-   // the centres (former: 0.5 (posA + posB) + 0.5 sign (ra - rb) axis); see that function's comment.
-   // ANTIDUNES_SAT_FORMER_POINT (env, any value): the former point, for before/after comparisons in the validation runs only
+   // Supplementary contact point (NOT from the paper, see ClosedFormContacts.h), from the touching features
+   // (detail::boxBoxContactPoint). ANTIDUNES_SAT_FORMER_POINT (env, any value) selects the centre-line point
+   // 0.5 (posA + posB) + 0.5 sign (ra - rb) axis instead, for comparisons in the validation runs only.
    static const bool formerPoint = std::getenv("ANTIDUNES_SAT_FORMER_POINT") != nullptr;
    result.point = formerPoint ? Vec3(real_t(0.5) * (posA + posB) + real_t(0.5) * sign * (bestRa - bestRb) * bestAxis)
                               : detail::boxBoxContactPoint(posA, axesA, halfA, posB, axesB, halfB, normal, best.gap);
@@ -567,13 +557,6 @@ inline ContactResult boxBoxSAT(const Vec3& posA, const Mat3& RA, const Vec3& hal
    result.normal = normal;
    return result;
 }
-
-// eberly_box_distance (Eberly's closed-form box-box distance, ported for
-// useSpheroBoxAnalytical) and boxBoxSpheroAnalytical removed entirely -- unused by any thesis-cited
-// result. Archived at archive/unused_contact_methods/spherosimplex_box_contact.h (see ARCHIVE_README.md).
-
-// BoxVertexContact and boxBoxMultiPointContacts (useMultiPointBoxContact) were archived on 2026-11-20, see
-// archive/unused_contact_methods/multipoint_box_contact.h.
 
 } // namespace closed_form_contacts
 } // namespace antidunes

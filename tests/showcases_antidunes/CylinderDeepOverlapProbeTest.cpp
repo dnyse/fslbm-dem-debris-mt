@@ -1,7 +1,8 @@
 //======================================================================================================================
 //! \file CylinderDeepOverlapProbeTest.cpp
-//! Diagnostic: rod pairs (r=3, L=18) taken from the floater-history of the cylinder-hopper resume run (job 4250907, steps 5650/5850) that are
-//! interpenetrated by 30-90 % of their volume (Monte-Carlo volume check in the plan) -- what do the analytic hybrid dispatch and plain GJK/EPA report?
+//! Diagnostic: rod pairs (r=3, L=18) taken from a recorded cylinder-hopper floater history (steps 5650/5850) that
+//! interpenetrate by 30-90 % of their volume (Monte-Carlo volume estimate). Prints what the analytic hybrid dispatch
+//! and plain GJK/EPA report for each pair; no pass criterion.
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 

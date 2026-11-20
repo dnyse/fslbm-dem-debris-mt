@@ -14,30 +14,20 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file ClipAnalyticGeometryTest.cpp
-//! Unit tests for the analytic box/cylinder submerged-volume clip used by the Antidunes
-//! ParticleKernels (clipBoxAnalytic, clipCylinderAnalytic), plus a sanity check of the documented
-//! spherical-cap formula used inline in ParticleKernels::computeSubmergedVolumes(). See
-//! /home/dhuber/.claude/plans/shiny-toasting-wind.md for the ground-truth derivation of every
-//! expected value used below -- most rest on general geometric identities (central symmetry,
-//! volume conservation, textbook centroid formulas) independent of this implementation.
+//! Unit tests for the analytic box/cylinder submerged-volume clip of ParticleKernels (clipBoxAnalytic,
+//! clipCylinderAnalytic), plus a check of the spherical-cap formula used in computeSubmergedVolumes(). Most expected
+//! values rest on geometric identities independent of the implementation (central symmetry, volume conservation,
+//! textbook centroid formulas).
 //!
-//! The non-trivial cylinder cases (general tilt, and all the position-varying/partial-submersion
-//! cases) were additionally cross-checked against TWO independent methods, neither of which calls
-//! clipCylinderAnalytic or re-derives its closed-form antiderivatives: (1) a 60M-sample Monte
-//! Carlo integration (numpy, scratchpad script) sampling random points and classifying them
-//! directly against the plane equation, and (2) trimesh (an established, separately-developed
-//! mesh-processing library) actually slicing a 720-facet polygon mesh with the same plane and
-//! integrating the resulting solid's volume/centroid directly. All three sources (this code, the
-//! Monte Carlo integration, and trimesh's exact mesh-slicing) agree to ~1e-4, the expected
-//! precision limit from trimesh's polygon approximation of the true circular cross-section -- the
-//! box cases matched trimesh's exact (non-approximated) polygon-slicing to machine precision.
+//! The non-trivial cylinder cases (general tilt, position-varying and partial submersion) were cross-checked against
+//! two methods that do not use clipCylinderAnalytic: a 60M-sample Monte Carlo integration classifying random points
+//! against the plane, and trimesh slicing a 720-facet polygon mesh with the same plane. All three agree to ~1e-4,
+//! the limit set by the polygon approximation of the circle; the box cases match trimesh to machine precision.
 //======================================================================================================================
 
 // SimulationObjects.h (pulled in transitively by ParticleKernels.h) uses blockforest::SimpleCommunication
-// without including its definition itself -- it only compiles in the real Antidunes.cpp because
-// BuildTimeloop.h happens to pull it in first via the free-surface dynamics headers. Include it
-// explicitly here too (test-side only, no production file touched) so this translation unit doesn't
-// depend on that same include-order accident.
+// without including its definition; Antidunes.cpp gets it earlier via BuildTimeloop.h (free-surface dynamics
+// headers). Included explicitly here.
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
 #include "ParticleKernels.h" // pulls in mesa_pd::Mat3, Vector3<real_t>, math::pi, and the clip*Analytic() functions
@@ -55,15 +45,12 @@ namespace antidunes {
 
 using Vec3 = Vector3< real_t >;
 
-// Note: WALBERLA_CHECK_FLOAT_EQUAL(/_EPSILON) has a Vector3<real_t> specialization
-// (core/math/Vector3.h) that compares component-wise, so it can be used directly on Vec3 values
-// below -- same convention as tests/mesa_pd/collision_detection/AnalyticContactDetection.cpp.
+// WALBERLA_CHECK_FLOAT_EQUAL(/_EPSILON) has a component-wise Vector3<real_t> specialization (core/math/Vector3.h),
+// used directly on Vec3 values as in tests/mesa_pd/collision_detection/AnalyticContactDetection.cpp.
 
 // ---------------------------------------------------------------------------------------------
-// clipBoxAnalytic -- ground truth: central-symmetry theorem (through-centre -> exact half) and
-// the volume-conservation identity (flipping the plane normal gives the exact complement). Both
-// are geometric facts true for ANY correct clip implementation, independent of clipBoxAnalytic's
-// own internals.
+// clipBoxAnalytic -- ground truth: central symmetry (through-centre plane -> exact half) and volume conservation
+// (flipping the plane normal gives the exact complement), true for any correct clip.
 // ---------------------------------------------------------------------------------------------
 
 void testBoxThroughCenterAxisAligned()
@@ -84,10 +71,8 @@ void testBoxThroughCenterAxisAligned()
 
 void testBoxThroughCenterArbitraryRotation()
 {
-   // Same box, arbitrary rotation R, with nHat = R * e_z (the cut stays "axis-aligned" in the
-   // box's OWN body frame) -- exercises that R is correctly applied both to the input (via R^T
-   // acting on nHat internally) and to the output centroid offset, while still resting on the
-   // same central-symmetry identity (through-centre -> exact half, for ANY orientation).
+   // Same box, arbitrary rotation R, nHat = R * e_z (cut axis-aligned in the body frame): checks that R is applied to
+   // the input (R^T nHat) and to the output centroid offset; through-centre -> exact half for any orientation.
    const Vec3 h(real_t(0.5), real_t(1.0), real_t(2.0));
    const real_t vFull = real_t(8) * h[0] * h[1] * h[2];
    const mesa_pd::Rot3 rot(Vec3(real_t(1), real_t(1), real_t(1)).getNormalized(), real_t(0.9));
@@ -129,9 +114,7 @@ void testBoxFullyAboveAndFullyBelow()
 
 void testBoxConservationIdentity()
 {
-   // vSub(plane) + vSub(flipped normal, same point) == vFull for an off-centre, tilted plane:
-   // the two clips are, by construction, exact geometric complements of the same solid, for ANY
-   // plane -- an algebraic identity, not something specific to this implementation.
+   // vSub(plane) + vSub(flipped normal, same point) == vFull for an off-centre, tilted plane (exact complements).
    const Vec3 h(real_t(0.7), real_t(0.9), real_t(1.3));
    const real_t vFull = real_t(8) * h[0] * h[1] * h[2];
    const mesa_pd::Rot3 rot(Vec3(real_t(1), real_t(2), real_t(-1)).getNormalized(), real_t(0.9));
@@ -151,11 +134,8 @@ void testBoxConservationIdentity()
 
 void testBoxPartialSubmersion()
 {
-   // The floater at different depths relative to the water, not just through-centre/fully-wet/
-   // fully-dry. For an axis-aligned box cut by a horizontal plane, the cross-section area is
-   // constant with height, so the submerged volume is an EXACT linear function of the plane
-   // offset -- a closed form independent of clipBoxAnalytic's own internals, not just another
-   // self-consistency check.
+   // Partial submersion at several depths. For an axis-aligned box cut by a horizontal plane the cross-section is
+   // constant with height, so the submerged volume is exactly linear in the plane offset.
    const Vec3 h(real_t(0.5), real_t(1.0), real_t(2.0)); // box spans z in [-2,2]
    const real_t vFull = real_t(8) * h[0] * h[1] * h[2];
    const mesa_pd::Mat3 R = mesa_pd::Mat3::makeIdentityMatrix();
@@ -181,13 +161,10 @@ void testBoxPartialSubmersion()
 }
 
 // ---------------------------------------------------------------------------------------------
-// clipCylinderAnalytic -- one case per internal branch. Ground truth: same central-symmetry /
-// conservation identities as the box for the through-centre and flat-cap/vertical-cut cases, PLUS
-// the textbook half-disk centroid 4r/(3*pi) for the vertical-cut case (an external reference, not
-// derived from this code). The general-tilt case was additionally cross-checked against an
-// independent 60M-sample Monte Carlo integration (see the plan file) -- that MC run first
-// reproduced the flat-cap and vertical-cut cases to ~1e-4 (validating the method itself), then
-// gave cbOff=(0,-0.14443,-0.45829) for the general-tilt case, matching what's asserted here.
+// clipCylinderAnalytic -- one case per internal branch. Ground truth: the same symmetry/conservation identities as
+// for the box, plus the textbook half-disk centroid 4r/(3*pi) for the vertical cut. The general-tilt case was
+// cross-checked by the 60M-sample Monte Carlo integration (which reproduces the flat-cap and vertical-cut cases to
+// ~1e-4): cbOff = (0,-0.14443,-0.45829), as asserted here.
 // ---------------------------------------------------------------------------------------------
 
 void testCylinderFlatCapBranch()
@@ -241,9 +218,7 @@ void testCylinderVerticalCutBranch()
 void testCylinderGeneralTiltBranch()
 {
    // Both rho and nz non-negligible: nHat tilted 30 deg from the axis, plane through centre.
-   // Independently verified via Monte Carlo (see file header + plan) -- epsilon set an order of
-   // magnitude looser than the MC statistical uncertainty (~1e-4), so this only fails on a real
-   // implementation change, not MC noise.
+   // Monte Carlo reference (file header); epsilon an order of magnitude above the MC uncertainty (~1e-4).
    const real_t r = real_t(1), halfLen = real_t(1);
    const real_t vFull = math::pi * r * r * real_t(2) * halfLen;
    const mesa_pd::Mat3 R = mesa_pd::Mat3::makeIdentityMatrix();
@@ -260,10 +235,8 @@ void testCylinderGeneralTiltBranch()
 
 void testCylinderPartialSubmersion()
 {
-   // The floater at different depths relative to the water, not just through-centre. Unlike the
-   // box, a cylinder's cross-section curves, so these offsets are NOT a linear function of depth
-   // -- independently verified via the same 60M-sample Monte Carlo integration as the general-tilt
-   // case (see the plan file), not re-derived from clipCylinderAnalytic's own formulas.
+   // Partial submersion at several depths. The cylinder's cross-section curves, so the volume is not linear in
+   // depth; expected values from the same Monte Carlo integration as the general-tilt case.
    const real_t r = real_t(1), halfLen = real_t(1);
    const real_t vFull = math::pi * r * r * real_t(2) * halfLen;
    const mesa_pd::Mat3 R = mesa_pd::Mat3::makeIdentityMatrix();
@@ -277,8 +250,7 @@ void testCylinderPartialSubmersion()
       WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(vSub / vFull, real_t(0.74773), real_t(1e-3));
       WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(cbOff, Vec3(real_t(-0.2185), real_t(0), real_t(0)), real_t(1e-3));
    }
-   // Same branch, offset -0.4 along nHat -> MC: 25.23% submerged (the geometric complement of the
-   // above, roughly -- confirms the offset direction/sign convention, not just the magnitude).
+   // Same branch, offset -0.4 along nHat -> MC: 25.23% submerged (complement of the above; checks the sign convention).
    {
       const Vec3 nHat(real_t(1), real_t(0), real_t(0));
       real_t vSub; Vec3 cbOff;
@@ -314,11 +286,9 @@ void testCylinderConservationIdentity()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sphere submerged-cap formula -- calls the actual production function sphereCapVolume()
-// (ParticleKernels.h, used by computeSubmergedVolumes()), not a re-derivation of it, and checks
-// it against INDEPENDENTLY known volumes (hemisphere, full sphere, empty). The clamp of hSigned
-// to a valid hCap in [0,2r] mirrors what computeSubmergedVolumes() itself does before calling
-// sphereCapVolume() -- it's the caller's responsibility, not part of the formula under test.
+// Sphere submerged-cap formula: calls sphereCapVolume() (ParticleKernels.h, used by computeSubmergedVolumes())
+// and checks it against known volumes (empty, hemisphere, full sphere). The clamp of hSigned to hCap in [0,2r]
+// mirrors computeSubmergedVolumes(); it is the caller's job, not part of the formula under test.
 // ---------------------------------------------------------------------------------------------
 
 void testSphereCapFormula()

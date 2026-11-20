@@ -246,24 +246,21 @@ class BedloadTransportEvaluator
 };
 
 
-// Measures a developing clog's backwater effect directly: tracks local water elevation and pressure
-// at two explicit probe points (e.g. upstream/downstream of a pier; placement is entirely prm-driven,
-// so this also works for a no-clog open-channel reference run).
+// Measures the backwater effect of a clog: local water elevation and pressure at two probe points
+// (e.g. upstream/downstream of a pier; placement comes from the prm file, so it also works for a reference
+// run without obstruction). Optionally also the flow rate and the blockage ratio at the probes' x positions.
 //
-// `columnPrefix` lets two instances coexist (e.g. "clog" at the gap centerline, "clogPillar" at the
-// pillar's own Y) without column collisions -- per Schalko, Follett \& Nepf (2023, Water Resources
-// Research), a partial-width obstruction's blocked-flow region and the open gap beside it have real
-// lateral variation in water depth, so a single centerline profile is not representative of the
-// pillar-face region where backwater pile-up is strongest; see BuildTimeloop.h for the wiring.
+// `columnPrefix` lets two instances coexist without column collisions (e.g. "clog" at the gap centreline,
+// "clogPillar" at the pillar's y). The water depth varies laterally between the blocked region and the open
+// gap beside a partial-width obstruction (Schalko, Follett & Nepf 2023, Water Resources Research), so a single
+// centreline profile does not represent the pillar face; see BuildTimeloop.h for the wiring.
 //
-// Elevation: fill level summed over Z (skipping solid/moving-obstacle cells), averaged over a small
-// XY window -- same technique as AverageDataSliceEvaluator above, giving the local liquid depth
-// directly (interface cells contribute their fractional fill, no reconstruction needed).
+// Elevation: fill level summed over z (skipping solid/moving-obstacle cells), averaged over a small xy window,
+// as in AverageDataSliceEvaluator; interface cells contribute their fractional fill.
 //
-// Pressure: lattice pressure p=(rho-1)/3 at the probe's exact cell, reported both raw and as "excess"
-// over the hydrostatic reference rho_hyd(z)=1+3*a_z*(z-H) (same formula as DataInitialization.h's
-// HydrostaticDensityFtor, inlined to avoid depending on that header) -- the excess isolates the
-// obstruction/backwater-driven component from the local water depth.
+// Pressure: lattice pressure p = (rho-1)/3 at the probe cell, reported raw and as excess over the hydrostatic
+// reference rho_hyd(z) = 1 + 3*a_z*(z-H) (same formula as HydrostaticDensityFtor in DataInitialization.h,
+// inlined to avoid the dependency). The excess isolates the obstruction-driven part from the local depth.
 template< typename AntidunesBoundaryHandling_T, typename PdfField_T, typename FlagField_T, typename ScalarField_T >
 class ClogMeasurementEvaluator
 {
@@ -305,9 +302,8 @@ class ClogMeasurementEvaluator
       return (*acceleration_)[2] * (pos[2] - absoluteLiquidHeight_);
    }
 
-   // Sum of the fill level over Z (skipping solid/moving-obstacle cells) for every (x,y) column whose
-   // center falls within probeHalfWidthXY_ of probePos, averaged over the number of such columns --
-   // gives the local liquid depth at the probe, per the class-level comment above.
+   // Local liquid depth at the probe: fill level summed over z (skipping solid/moving-obstacle cells) for every
+   // (x,y) column whose centre lies within probeHalfWidthXY_ of probePos, averaged over the number of columns.
    real_t elevationAt(const Vector3< real_t >& probePos) const
    {
       real_t sum = real_t(0);
@@ -334,8 +330,8 @@ class ClogMeasurementEvaluator
          }
       }
 
-      // number of (x,y) columns in the probe window -- computed analytically (not counted during the
-      // scan above) so it is independent of block decomposition/rank ownership.
+      // number of (x,y) columns in the probe window, computed analytically so that it does not depend on the
+      // block decomposition
       const int halfW          = int_c(std::floor(probeHalfWidthXY_));
       const uint_t columnCount = uint_c((2 * halfW + 1) * (2 * halfW + 1));
 
@@ -343,17 +339,12 @@ class ClogMeasurementEvaluator
       return columnCount > 0 ? sum / real_c(columnCount) : real_t(0);
    }
 
-   // Volumetric flow rate Q = sum over the full y-z cross-section at global cell column x = floor(planeX) of
-   // (fill level * u_x), and the wet cross-section area A = sum of the fill level, both over the FLUID cells
-   // of that plane only, averaged over the (2*floor(probeHalfWidthXY_)+1) neighbouring y-z planes
-   // x-halfW..x+halfW (a single 1-cell plane can fall exactly into the 1-LU slit between two rows of bodies and
-   // then says nothing about the flow; Q is conserved from plane to plane in steady flow, so the average is
-   // the same quantity with less sampling noise). The cell selection is (fill > 0, not a moving-obstacle cell, not a no-slip cell) -- the same cell selection
-   // AverageDataSliceEvaluator uses for its slice velocity. Cells covered by floaters, pillars or walls are
-   // excluded, so a body standing in the plane reduces A (its cross-section) and adds nothing to Q; the flux
-   // through the plane is therefore the fluid flux, independent of what shape the body has, and Q/A is the mean
-   // velocity of the water actually crossing the plane. Interface cells count with their fill level as weight,
-   // gas cells (fill 0) not at all. Velocity is pdfField->getVelocity, as in MeanVelocityComputer.
+   // Volumetric flow rate Q = sum of (fill level * u_x) and wet cross-section area A = sum of fill level over the
+   // fluid cells (fill > 0, neither moving-obstacle nor no-slip, as in AverageDataSliceEvaluator) of the y-z
+   // plane at x = floor(planeX), averaged over the 2*floor(probeHalfWidthXY_)+1 planes around it. A single plane
+   // can fall into a 1-cell slit between bodies; Q is conserved between planes in steady flow, so averaging only
+   // reduces sampling noise. Bodies in the plane reduce A and add nothing to Q, so Q/A is the mean velocity of
+   // the water crossing the plane. Velocity from pdfField->getVelocity, as in MeanVelocityComputer.
    // Lattice units: Q in cells^3 per time step, A in cells^2. Signed: back-flow reduces Q.
    void flowRateAt(real_t planeX, real_t& flowRate, real_t& wetArea) const
    {
@@ -403,22 +394,16 @@ class ClogMeasurementEvaluator
       mpi::reduceInplace(wetArea, mpi::SUM);
    }
 
-   // Fraction of the REFERENCE (undisturbed) wetted cross-section occupied by the pillar(s) and the
-   // jam of floaters, at the y-z plane through a probe's x (averaged over the same 2w+1 planes as
-   // flowRateAt, for the same reason: a single plane can fall into a gap between floaters and read as
-   // unblocked). Per Panici \& de Almeida (2018), afflux relates to blockage ratio measured against the
-   // UNDISTURBED (reference) flow area, not the locally backed-up one -- hence the fixed denominator
-   // `channelWidthY_ * absoluteLiquidHeight_` rather than a per-step remeasured wetted area, making
-   // this a scenario-describing number comparable across runs rather than a probe-placement-sensitive
-   // local reading.
+   // Fraction of the reference (undisturbed) wetted cross-section occupied by the pillar(s) and the floater
+   // jam at the y-z plane through planeX. Afflux relates to the blockage ratio against the undisturbed flow
+   // area (Panici & de Almeida 2018), hence the fixed denominator channelWidthY_ * absoluteLiquidHeight_
+   // rather than the local wetted area; this makes the ratio comparable across runs.
    //
-   // Pillar contribution is obtained analytically from the fixed pillar geometry (a vertical prism of
-   // circular footprint spanning the full domain height, see SetupStages.h's `createCylinder`): at a
-   // given x its intersection with the channel is the circle's y-chord, clipped to [0, channelWidthY_],
-   // times the reference depth. Jam contribution counts moving-obstacle (floater) cells at or below
-   // that depth, excluding cells geometrically inside a pillar's own footprint (pillars are themselves
-   // fixed mesa_pd bodies and may also carry the moving-obstacle flag; this avoids double-counting a
-   // floater resting against a pillar). Units: cells^2 for the areas, dimensionless for the ratio.
+   // Pillar area is analytic from the fixed geometry (vertical circular prism over the full height, see
+   // createCylinder in SetupStages.h): the circle's y-chord at planeX, clipped to [0, channelWidthY_], times the
+   // reference depth. Jam area counts moving-obstacle cells at or below the reference depth, averaged over the
+   // same 2w+1 planes as flowRateAt, and excludes cells inside a pillar footprint (pillars are mesa_pd bodies
+   // and may carry the moving-obstacle flag themselves). Units: cells^2 for the areas, ratio dimensionless.
    void blockageAt(real_t planeX, real_t& blockageRatio, real_t& pillarArea, real_t& jamArea) const
    {
       const cell_idx_t planeCell  = cell_idx_c(std::floor(planeX));
@@ -635,12 +620,10 @@ class TotalHydrodynamicForceEvaluator
          if (!isSet(ac_->getFlags(i), mesa_pd::data::particle_flags::GHOST) &&
             !isSet(ac_->getFlags(i), mesa_pd::data::particle_flags::GLOBAL))
          {
-            // NOT getHydrodynamicForce(i): this evaluator runs in timeloopEval, AFTER
-            // ParticleKernels::resetHydroForces() has already zeroed it for the step (per-timestep
-            // order in Antidunes.cpp: reduceAndAvgHydroForces -> doDEMSubCycles -> resetHydroForces ->
-            // timeloopAfterDEM -> timeloopEval). OldHydrodynamicForce holds this step's real
-            // (optionally time-averaged) value set inside reduceAndAvgHydroForces() and is never
-            // touched by the reset kernel.
+            // Not getHydrodynamicForce(i): this evaluator runs in timeloopEval, after resetHydroForces() has
+            // zeroed it (order in Antidunes.cpp: reduceAndAvgHydroForces -> doDEMSubCycles -> resetHydroForces
+            // -> timeloopAfterDEM -> timeloopEval). OldHydrodynamicForce holds this step's (optionally
+            // time-averaged) value from reduceAndAvgHydroForces() and is not touched by the reset.
             totalHydrodynamicForce_ += ac_->getOldHydrodynamicForce(i);
             maxParticlePosZ_ = std::max(ac_->getPosition(i)[2], maxParticlePosZ_);
          }

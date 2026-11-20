@@ -15,10 +15,8 @@
 //
 //! \file DEMValidationInfra.h
 //! \brief Shared infrastructure for the DEM validation experiments (DEMEngine, PassFailAccumulator,
-//! wall-impact loop, energy/conservation logging helpers) -- split out of DEMValidationScenarios.h
-//! 2026-10-29 so each scenario family lives in its own file. See that split's sibling files
-//! (DEMValidationWallImpact.h, DEMValidationPairEnergy.h, DEMValidationPackingAndDrum.h), all of which include
-//! this one.
+//! wall-impact loop, energy/conservation logging helpers), included by DEMValidationWallImpact.h,
+//! DEMValidationPairEnergy.h and DEMValidationPackingAndDrum.h.
 
 #pragma once
 
@@ -28,10 +26,9 @@
 #include "Utility.h"
 
 #include "blockforest/Initialization.h"
-// ParticleKernels.h -> SimulationObjects.h uses blockforest::SimpleCommunication<> but relies on the
-// caller having already included its defining header (normally pulled in transitively via
-// BuildTimeloop.h's chain of lbm/free_surface headers in the full Antidunes.cpp build, which this
-// fluid-free app does not include) -- include it explicitly here instead.
+// ParticleKernels.h -> SimulationObjects.h uses blockforest::SimpleCommunication<> but relies on the caller
+// including its defining header (in Antidunes.cpp via BuildTimeloop.h's lbm/free_surface chain, which this
+// fluid-free app does not include) -- included explicitly here.
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
 #include "ParticleKernels.h"
@@ -80,18 +77,15 @@ using namespace mesa_pd;
 namespace detail
 {
 //! Minimal fluid-free DEM engine: owns storage/domain/contact-response/integrators and runs one
-//! sub-cycle at a time. Always uses LinkedCells + forEachParticlePairHalf (BedGeneration.cpp's own
-//! pattern) regardless of particle count, so the same code path serves a 2-body wall-impact test and
-//! the hundreds-of-particles packing test alike.
+//! sub-cycle at a time. Always uses LinkedCells + forEachParticlePairHalf (as BedGeneration.cpp) regardless of
+//! particle count, so one code path serves the 2-body wall-impact tests and the packing tests alike.
 class DEMEngine
 {
 public:
-   // useAnalyticalContactDetection: false (DEFAULT, unchanged for every existing scenario below) routes
-   // Box x Box / Cylinder x Cylinder through the generic GJK/EPA fallback, same as before. true routes
-   // them through the ACTUAL production analytical dispatch (boxBoxSAT / Kodam+Guo) -- needed by any
-   // scenario that specifically investigates a defect in that path (e.g. runCornerNormalDiscontinuity),
-   // since GJK/EPA and the closed-form analytical dispatch are different code with different failure
-   // modes and a bug specific to one is not reproduced by running the other.
+   // useAnalyticalContactDetection: false (default) routes Box x Box / Cylinder x Cylinder through the generic
+   // GJK/EPA fallback; true routes them through the production analytical dispatch (boxBoxSAT / Kodam+Guo).
+   // GJK/EPA and the closed forms are different code with different failure modes, so a defect specific to one
+   // is only reproduced by running that one.
    DEMEngine(real_t dt, real_t restitutionCoefficient, real_t frictionCoefficient, real_t poissonsRatio,
              real_t collisionTime, real_t gravityMagnitude, real_t domainHalfExtent = real_t(500),
              bool useAnalyticalContactDetection = false, bool useRotationalEffectiveMass = false)
@@ -99,10 +93,8 @@ public:
       , gravityZ_(-gravityMagnitude)
       , restitutionCoefficient_(restitutionCoefficient)
       , collisionTime_(collisionTime)
-      // kappa = kT/kN = 2(1-nu)/(2-nu), Mindlin (1949)/Thornton's no-slip single-contact stiffness
-      // ratio -- exact primary Thornton paper/year not locally verified (no copy in cld_kbase/, no
-      // single matching reference found by web search as of 2026-10-29); treat the attribution as
-      // "Thornton-type no-slip model" rather than a pinned citation until checked against a source.
+      // kappa = kT/kN = 2(1-nu)/(2-nu), Mindlin (1949)/Thornton's no-slip single-contact stiffness ratio. The
+      // primary Thornton reference is not verified against a source; read it as "Thornton-type no-slip model".
       , kappa_(real_t(2) * (real_t(1) - poissonsRatio) / (real_t(2) - poissonsRatio))
       , preVV_(dt)
       , postVV_(dt)
@@ -171,11 +163,10 @@ public:
 
    size_t addWall(const Vec3& pos, const Vec3& normal) { return createPlane(*ps_, pos, normal).getIdx(); }
 
-   //! Re-poses an existing wall (from addWall) in place -- HalfSpace's normal is immutable after
-   //! construction (mesa_pd/data/shape/HalfSpace.h has no setter), so "rotating" a wall means replacing
-   //! its baseShape with a freshly-built HalfSpace(newNormal) alongside setPosition. Used to animate a
-   //! polygon-of-planes drum wall (see detail::addDrumWalls/updateDrumWalls below) -- cheap enough to do
-   //! every step for the handful of GLOBAL, non-communicating wall particles involved.
+   //! Re-poses an existing wall (from addWall) in place. HalfSpace's normal is immutable (no setter in
+   //! mesa_pd/data/shape/HalfSpace.h), so its baseShape is replaced by a new HalfSpace(newNormal) alongside
+   //! setPosition. Animates the polygon-of-planes drum wall (detail::addDrumWalls/updateDrumWalls); cheap enough
+   //! every step for the handful of GLOBAL, non-communicating wall particles.
    void setWallPose(size_t idx, const Vec3& pos, const Vec3& normal)
    {
       ps_->setPosition(idx, pos);
@@ -183,11 +174,10 @@ public:
    }
 
    //! Must be called once after all particles are created and before the first step(). `knownMaxDiameter`,
-   //! when nonzero, overrides the scan-existing-particles sizing below -- required for scenarios (e.g.
-   //! runPackingSingleShape) that call finalizeSetup() before any DYNAMIC particles exist yet (only
-   //! GLOBAL walls), where the scan would otherwise size the linked-cell grid at ~0 and every particle
-   //! created afterwards trips InsertParticleIntoLinkedCells' "interaction radius too large for this cell
-   //! size" assertion the first time step() runs.
+   //! when nonzero, overrides the scan of existing particles below -- required for scenarios (e.g.
+   //! runPackingSingleShape) that call finalizeSetup() before any DYNAMIC particles exist (only GLOBAL walls),
+   //! where the scan would size the linked-cell grid at ~0 and every later particle would trip
+   //! InsertParticleIntoLinkedCells' "interaction radius too large for this cell size" assertion.
    void finalizeSetup(real_t knownMaxDiameter = real_t(0))
    {
       // Skip walls (GLOBAL, infinite interaction radius per Utility.h::createPlane) -- including them
@@ -204,9 +194,8 @@ public:
       syncNN_(*ps_, forest_, domain_);
    }
 
-   //! One DEM sub-cycle: pre-force integration, contact resolution (production ComputeContacts, the
-   //! SAME class doDEMSubCycles uses), gravity, post-force integration. No lubrication, no
-   //! hydrodynamic/buoyancy force -- this is the fluid-free "dry run" by construction.
+   //! One DEM sub-cycle: pre-force integration, contact resolution (production ComputeContacts, as in
+   //! doDEMSubCycles), gravity, post-force integration. No lubrication, hydrodynamic or buoyancy force.
    void step()
    {
       ps_->forEachParticle(false, kernel::SelectLocal(), *ac_, preVV_, *ac_);
@@ -214,14 +203,11 @@ public:
 
       data::LinkedCells linkedCells(domain_->getUnionOfLocalAABBs().getExtended(linkedCellWidth_),
                                      linkedCellWidth_);
-      // LinkedCells's constructor leaves infiniteParticles_ at its default-member-initializer value (0,
-      // via std::atomic<int>'s C++20 value-init) instead of the -1 sentinel its own traversal logic
-      // expects -- only clear() sets it correctly. BedGeneration.cpp calls clear() for the same reason
-      // (there because it reuses one long-lived LinkedCells object; here because even a freshly
-      // constructed one needs it). Without this, the first inserted INFINITE particle's next-pointer
-      // wrongly chains to particle index 0, so any pair traversal that reaches the end of the infinite-
-      // particle list also revisits index 0 -- a real self-pairing crash when index 0 is itself the sole
-      // finite body (exactly the wall-impact scenarios below).
+      // LinkedCells's constructor leaves infiniteParticles_ at its default-member-initializer value (0, via
+      // std::atomic<int>'s C++20 value-init) instead of the -1 sentinel its traversal expects; only clear() sets
+      // it (BedGeneration.cpp calls clear() too). Without it, the first inserted INFINITE particle's next-pointer
+      // chains to particle index 0, so a pair traversal reaching the end of the infinite-particle list also
+      // revisits index 0 -- a self-pairing crash when index 0 is the sole finite body (the wall-impact scenarios).
       linkedCells.clear();
       kernel::InsertParticleIntoLinkedCells ipilc;
       ps_->forEachParticle(false, kernel::SelectAll(), *ac_, ipilc, *ac_, linkedCells);
@@ -248,9 +234,9 @@ public:
       t_ += dt_;
    }
 
-   //! Query-only contact check (no force applied): reuses the exact production contact-detection
-   //! functor (SolidCylinderContactDetection via DoubleCast) as the state-machine trigger for
-   //! "has this pair started/stopped touching" in the wall-impact / pair-restitution scenarios below.
+   //! Query-only contact check (no force applied) with the production contact-detection functor
+   //! (SolidCylinderContactDetection via DoubleCast): the "has this pair started/stopped touching" trigger of the
+   //! wall-impact / pair-restitution scenarios.
    bool queryContact(size_t idx1, size_t idx2, real_t& penetrationOut)
    {
       SolidCylinderContactDetection acd;
@@ -303,14 +289,11 @@ public:
       csv_ << "\n";
    }
 
-   // edgeLength/rotation: the SAME two fields, in the SAME convention, as BuildTimeloop.h's own
-   // production box floater VTK output (its own "AddOutputFloatingBoxes" section) -- so a box in this
-   // DEMValidation harness renders as its actual ORIENTED solid in ParaView (Filters > Glyph, Glyph
-   // Type = Box, Scale Array = edgeLength, Scale Mode = Scale by Components; then Filters > Tensor
-   // Glyph using "rotation", Extract Eigenvalues OFF) instead of a generic sphere-by-radius, exactly
-   // matching the recipe already documented there. Zero (Vec3(0)) for any non-box shape, so this is
-   // safe to add unconditionally for every DEMValidation scenario (sphere/cylinder VTK is unaffected --
-   // a zero-size box glyph simply doesn't render, "radius"-based glyphing still works for those).
+   // edgeLength/rotation: the same two fields, in the same convention, as BuildTimeloop.h's box floater VTK output
+   // ("AddOutputFloatingBoxes"), so a box renders as its ORIENTED solid in ParaView (Filters > Glyph, Glyph Type =
+   // Box, Scale Array = edgeLength, Scale Mode = Scale by Components; then Filters > Tensor Glyph using
+   // "rotation", Extract Eigenvalues OFF). Vec3(0) for non-box shapes (a zero-size box glyph does not render;
+   // "radius"-based glyphing still works for those).
    struct SelectBoxEdgeLength
    {
       using return_type = Vec3;
@@ -321,10 +304,9 @@ public:
          return static_cast< const data::Box* >(shape.get())->getEdgeLength();
       }
    };
-   // Transposed body->world rotation matrix -- see BuildTimeloop.h's own comment on why the transpose
-   // is required for ParaView's column-major Tensor Glyph to match the actual orientation (not its
-   // inverse). Visualization-only ordering; production's own buoyancy/torque math (and this file's own
-   // kineticEnergy()) uses getRotation().getMatrix() directly, untransposed, unaffected by this.
+   // Transposed body->world rotation matrix: ParaView's column-major Tensor Glyph needs the transpose to show the
+   // orientation, not its inverse (see BuildTimeloop.h). Visualisation only; kineticEnergy() and the production
+   // buoyancy/torque math use getRotation().getMatrix() untransposed.
    struct SelectParticleRotationMatrix
    {
       using return_type = std::array< real_t, 9 >;
@@ -398,8 +380,8 @@ struct YRotation
 
 inline real_t degToRad(real_t deg) { return deg * math::pi / real_t(180); }
 
-//! KE of a rigid body given explicit state -- used to compute the ANALYTICAL model's own predicted
-//! post-impact energy (as opposed to DEMEngine::kineticEnergy, which reads a live simulated particle).
+//! KE of a rigid body given explicit state, for the ANALYTICAL model's predicted post-impact energy
+//! (DEMEngine::kineticEnergy reads a live simulated particle instead).
 inline real_t kineticEnergyOf(real_t mass, const Vec3& velocity, const Vec3& angularVelocity,
                                const Mat3& inertiaWorld)
 {
@@ -444,16 +426,13 @@ inline uint_t runWallImpactLoop(DEMEngine& engine, size_t bodyIdx, size_t wallId
    return s;
 }
 
-// velocityScale/angularVelocityScale (both default 0, reproducing the previous pure-relative-error
-// behaviour via the pre-existing 1e-8 floor): optional mixed absolute+relative tolerance, following
-// the standard combined-tolerance form (atol + rtol*|b|), rewritten as an equivalent
-// floored-denominator relative error, relErr = resid / (scale + |analytic|). Needed because the pure
-// relative form is unusable where the analytical reference crosses zero: a tilt where the true
-// rebound speed is ~0.01 of the impact speed turns an ordinary small absolute residual into a
-// 10-200x relative error, failing a check that isn't actually detecting a worse result there (see
-// the thesis's wall-impact section and DEM_VALIDATION_MATH_REFERENCE.md). `scale` should be a fixed
-// physical reference for the quantity (e.g. the impact speed), not the per-tilt analytic value
-// itself, or the fix would be circular.
+// velocityScale/angularVelocityScale (default 0: pure relative error with the 1e-8 floor): optional mixed
+// absolute+relative tolerance, the standard combined form (atol + rtol*|b|) rewritten as a floored-denominator
+// relative error, relErr = resid / (scale + |analytic|). The pure relative form is unusable where the analytical
+// reference crosses zero: at a tilt where the true rebound speed is ~0.01 of the impact speed, an ordinary small
+// absolute residual becomes a 10-200x relative error (see the thesis's wall-impact section). `scale` must be a
+// fixed physical reference for the quantity (e.g. the impact speed), not the per-tilt analytic value, or the
+// tolerance would be circular.
 inline void logCaseResult(const std::string& tag, const Vec3& simVel, const Vec3& analyticVel,
                            const Vec3& simAngVel, const Vec3& analyticAngVel, real_t tolerance,
                            PassFailAccumulator& acc, real_t velocityScale = real_t(0),
@@ -475,11 +454,10 @@ inline void logCaseResult(const std::string& tag, const Vec3& simVel, const Vec3
 
 //! Hard physical bound independent of any friction-model calibration: a passive contact (no motors, no
 //! energy source) can only ever dissipate kinetic energy, never create it, regardless of the restitution
-//! or friction coefficients used. Checked in EVERY collision scenario (wall-impact and pairwise alike) as
-//! a model-agnostic sanity bound alongside each test's own quantitative comparison -- a violation here
-//! would mean the contact law itself is unstable/energy-injecting, a much more basic problem than a
-//! friction-model calibration mismatch. tolerance guards only against integration noise (sub-cycled
-//! spring-dashpot contacts are not exactly energy-monotonic step-to-step even when correct).
+//! or friction coefficients. Checked in EVERY collision scenario (wall-impact and pairwise) as a model-agnostic
+//! sanity bound alongside each test's quantitative comparison; a violation would mean the contact law itself
+//! injects energy, a more basic problem than a friction-model calibration mismatch. tolerance guards only against
+//! integration noise (sub-cycled spring-dashpot contacts are not exactly energy-monotonic step-to-step).
 inline void logConservation(const std::string& tag, real_t keBefore, real_t keAfter, PassFailAccumulator& acc,
                              real_t tolerance = real_t(1e-3))
 {
@@ -490,12 +468,10 @@ inline void logConservation(const std::string& tag, real_t keBefore, real_t keAf
                               << "  " << (pass ? "PASS" : "FAIL (energy created -- contact law is unstable)"));
 }
 
-//! STRONGER companion to logConservation: for scenarios where a specific post-impact energy is
-//! computable (either the e=1 elastic case, where it must equal keBefore exactly, or wherever an
-//! analytical model already predicts the exact post-state), checking only "did not increase" is a weak,
-//! one-sided bound -- it would pass even if the simulation dissipated far more or far less energy than a
-//! correctly-calibrated restitution/friction model implies. This checks the ACTUAL dissipated amount
-//! against the THEORETICALLY EXPECTED amount, not just its sign.
+//! STRONGER companion to logConservation, for scenarios with a computable post-impact energy (the e=1 elastic
+//! case, where it must equal keBefore, or wherever an analytical model predicts the post-state): "did not
+//! increase" is one-sided and would pass for far too much or too little dissipation, so this checks the ACTUAL
+//! dissipated amount against the EXPECTED one.
 inline void logEnergyBudget(const std::string& tag, real_t keAfterSim, real_t keAfterExpected,
                              PassFailAccumulator& acc, real_t tolerance)
 {
@@ -509,10 +485,8 @@ inline void logEnergyBudget(const std::string& tag, real_t keAfterSim, real_t ke
 
 //! Exact for any isolated N-body system with only internal (pairwise, Newton's-third-law) contact forces
 //! and no external force (no gravity, no walls) -- total linear momentum must be conserved to numerical
-//! precision regardless of the collision's restitution/friction outcome. A stronger, more model-agnostic
-//! check than energy or velocity comparisons: it holds even for a WRONG friction/restitution calibration,
-//! so a violation specifically implicates the contact force's Newton's-third-law symmetry (equal and
-//! opposite forces on the two bodies), not a parameter-tuning issue.
+//! precision regardless of restitution/friction. It holds even for a WRONG friction/restitution calibration, so a
+//! violation implicates the contact force's Newton's-third-law symmetry, not parameter tuning.
 inline void logMomentumConservation(const std::string& tag, const Vec3& pBefore, const Vec3& pAfter,
                                      PassFailAccumulator& acc, real_t tolerance = real_t(1e-6))
 {
@@ -526,11 +500,9 @@ inline void logMomentumConservation(const std::string& tag, const Vec3& pBefore,
 
 //! Total mechanical energy (kinetic + gravitational potential, PE = m*g*z relative to the floor at
 //! z=0) summed over every non-fixed, non-global dynamic particle. For a multi-body gravity-settling
-//! system with only dissipative internal forces (inelastic/frictional contacts, no motors or other
-//! energy source), this must be MONOTONICALLY NON-INCREASING over time -- a violation (checked between
-//! successive sampling checkpoints, not step-to-step, since a single sub-cycle is not exactly
-//! energy-monotonic even when correct) is a much more basic red flag than any shape- or friction-specific
-//! discrepancy: it means the contact/integration scheme is injecting energy somewhere.
+//! system with only dissipative internal forces (inelastic/frictional contacts, no energy source), this must be
+//! MONOTONICALLY NON-INCREASING; a violation (checked between sampling checkpoints, not step-to-step, since a
+//! single sub-cycle is not exactly energy-monotonic) means the contact/integration scheme injects energy.
 inline real_t totalMechanicalEnergy(DEMEngine& engine, real_t gravity)
 {
    real_t total = real_t(0);

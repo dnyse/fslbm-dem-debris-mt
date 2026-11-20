@@ -17,7 +17,7 @@
 //! \brief Fluid-free DEM validation dry-run: runs a battery of physically-grounded validation
 //!        experiments against the production DEM code (contact detection + LinearSpringDashpot +
 //!        VelocityVerlet, exactly as used by Antidunes.cpp's doDEMSubCycles), with NO fluid coupling.
-//!        Existing tests only check static contact geometry; this checks dynamics against closed-form
+//!        Unlike the static contact-geometry tests, this checks dynamics against closed-form
 //!        analytical solutions (Kodam et al. 2010, Housner 1963) and literature bulk-behaviour ranges.
 //!        See AnalyticalSolutions.h / DEMValidationScenarios.h for the physics and experiment design.
 //!
@@ -66,10 +66,6 @@ int main(int argc, char** argv)
    else if (testCase == "angleOfRepose") pass = dem_validation::runAngleOfRepose(block);
    else if (testCase == "packingSingleShape") pass = dem_validation::runPackingSingleShape(block);
    else if (testCase == "rotatingDrum") pass = dem_validation::runRotatingDrum(block);
-   // "archTunnelContainment" removed -- validated ComputeTunnelContacts for the real-scale bridge
-   // case study, intentionally excluded from the thesis (CLAUDE.md). The whole bridge case study,
-   // including ComputeTunnelContacts itself and the test_bridge_v1_* prm family, is now archived at
-   // archive/arch_tunnel_containment/.
    else WALBERLA_ABORT("Unknown testCase '" << testCase
                                              << "'. Valid values: wallImpactSphere, wallImpactCylinder, "
                                                 "wallImpactBox, boxFaceDropRestitution, "
@@ -77,8 +73,6 @@ int main(int argc, char** argv)
                                                 "pairRestitution, energyConservation, cylinderPairEnergyFuzz, "
                                                 "cuboidPairEnergyFuzz, packing, angleOfRepose, "
                                                 "packingSingleShape, rotatingDrum.");
-   // The corner-discontinuity, multi-point, pile, stiffness-sweep and collision-replay scenarios were archived on
-   // 2026-11-20 with the box-contact mitigation switches they compared, see archive/unused_contact_methods/.
 
    WALBERLA_LOG_INFO_ON_ROOT("[DEMValidation] FINAL RESULT for " << testCase << ": " << (pass ? "PASS" : "FAIL"));
    return pass ? EXIT_SUCCESS : EXIT_FAILURE;

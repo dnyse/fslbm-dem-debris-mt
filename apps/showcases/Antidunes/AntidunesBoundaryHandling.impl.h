@@ -75,8 +75,7 @@ class BoundaryBlockDataHandling
       lbm_mesapd_coupling::ParticleField_T* const particleField =
          block->getData< lbm_mesapd_coupling::ParticleField_T >(boundary_->getParticleFieldID());
 
-      // fill-level field, used to fill-weight the MovingObstacle (SimpleBB) momentum-exchange force at the
-      // free surface (three-phase MEM, Bogner & Rüde 2013 Eq. 5.9) — see the fillLevelFct below.
+      // fill-level field, used for the fill-weighting of the MovingObstacle force (see fillLevelFct below)
       ScalarField_T* const fillField = block->getData< ScalarField_T >(boundary_->getFillFieldID());
 
       auto interfaceFlag = flag_t(flagField->getFlag(walberla::free_surface::flagIDs::interfaceFlagID));
@@ -96,11 +95,10 @@ class BoundaryBlockDataHandling
                                              flagField, interfaceFlag, real_c(1.0));
       typename B::Outlet_T outlet(B::outletBoundaryID, B::outletFlagID, pdfField, flagField, domainMask);
       typename B::FreeSlip_T freeSlip(B::freeSlipBoundaryID, B::freeSlipFlagID, pdfField, flagField, domainMask);
-      // φ(x_b) accessor for the three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9): scales the
-      // SimpleBB momentum-exchange force by the near-boundary cell's fill level so interface cells at a
-      // floater's waterline do not inject a phantom full-liquid buoyant force.
-      // Gated by ModelParameters.useFillWeighting: when false a null accessor is passed, so SimpleBB
-      // applies the raw two-phase MEM force (reference / ablation run) instead of the Eq. 5.9 weighting.
+      // φ(x_b) accessor for the three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9): SimpleBB scales the
+      // momentum-exchange force by the fill level of the near-boundary cell, so interface cells at a floater's
+      // waterline do not contribute a full-liquid force. With useFillWeighting = false a null accessor is passed
+      // and SimpleBB applies the unweighted two-phase MEM force.
       std::function< real_t(const Cell&) > fillLevelFct =
          boundary_->getUseFillWeighting()
             ? std::function< real_t(const Cell&) >([fillField](const Cell& c) { return fillField->get(c); })
@@ -178,7 +176,7 @@ AntidunesBoundaryHandling< LatticeModel_T, FlagField_T, ScalarField_T, ParticleA
    outflowIDs += pressureOutflowFlagID;
    outflowIDs += outletFlagID;
 
-   // initialize outflowIDs
+   // initialize inflowIDs
    Set< FlagUID > inflowIDs;
    inflowIDs += ubbInflowFlagID;
 
@@ -186,8 +184,9 @@ AntidunesBoundaryHandling< LatticeModel_T, FlagField_T, ScalarField_T, ParticleA
    Set< FlagUID > freeSlipIDs;
    freeSlipIDs += freeSlipFlagID;
 
-   // create callable function wrapper with input arguments 1 and 2 unset, whereas arguments 3, 4 and 5 are set to be
-   // obstacleIDs, outflowIDs, and inflowIDs, respectively; this is necessary for field::addFlagFieldToStorage()
+   // create callable function wrapper with input arguments 1 and 2 unset, whereas arguments 3 to 6 are set to be
+   // obstacleIDs, outflowIDs, inflowIDs and freeSlipIDs, respectively; this is necessary for
+   // field::addFlagFieldToStorage()
    auto ffInitFunc = std::bind(internal::flagFieldInitFunction< FlagField_T >, std::placeholders::_1,
                                std::placeholders::_2, obstacleIDs, outflowIDs, inflowIDs, freeSlipIDs);
 

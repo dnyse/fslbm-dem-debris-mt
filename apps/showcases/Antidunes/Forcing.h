@@ -179,11 +179,9 @@ class MeanVelocityComputer
 class ForcingAdjuster
 {
  public:
-   // switchOffStep > 0 (PIDParameters.switchOffStep): PID control runs normally until that ABSOLUTE
-   // timestep (beginTimeStep + calls so far, so it stays correct across a checkpoint resume), then
-   // acceleration_[0] is frozen at the mean of the PID's own commanded values over the last
-   // switchOffAveragingWindow steps and never touched again -- a "constant force" phase that starts
-   // from a self-consistently spun-up flow instead of a hand-set force. 0 = feature off.
+   // switchOffStep > 0 (PIDParameters.switchOffStep): PID control until that absolute timestep (beginTimeStep +
+   // calls so far, so it survives a checkpoint resume), then acceleration_[0] is frozen at the mean of the PID's
+   // commands over the last switchOffAveragingWindow steps and never changed again. 0 = off.
    ForcingAdjuster(const shared_ptr< Vector3<real_t> >& meanVelocity,
                    const shared_ptr< Vector3<real_t> >& acceleration,
                    const shared_ptr< PIDController >& pidController,

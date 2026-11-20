@@ -14,22 +14,13 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file CollideIsolatedObstacleIterationRealSeedTest.cpp
-//! Follow-up to CollideIsolatedObstacleIterationTest.cpp (THESIS_PLAN.md, 2026-09-25): that test seeded
-//! the isolated-iteration check with job 4264997's step-2838 INTF-phase capture (a DIFFERENT occurrence's
-//! post-reseed state, not this cell's actual OBST-phase trajectory) and found zero drift over 20,000
-//! iterations -- an apparent refutation. But the real run's own OBST-phase trace (job 4265770, world
-//! (267.5,18.5,19.5), steps 2700 onward) shows the SAME cell's rho genuinely drifting by ~1e-4 to ~5e-4
-//! PER STEP while flag stays OBST at every one of ~9 probed hook points per step (i.e. no classification
-//! flicker is visible anywhere in the trace before the eventual collapse) -- meaning if collide alone,
-//! iterated with zero force and no other input, really is the whole mechanism, it should show exactly
-//! this kind of drift from THIS starting point, even though it didn't from the other test's (evidently
-//! coincidental near-fixed-point) starting value. This test re-seeds with the REAL captured state from
-//! this run's own step 2700 [WATCH ... HOPPER-after-collide] line (rho=1.007356, ordinary near-equilibrium
-//! PDFs) and iterates far enough to see whether it reproduces (a) the same small per-iteration drift and
-//! (b) eventual divergence to non-finite values, all from zero external input -- which would show the
-//! whole two-stage crash (drift then collapse) is explainable purely by omega=1.99753's marginal
-//! stability acting on repeated, unstabilised collide iteration, with no external corruption needed at
-//! all, fully consistent with the ASan-clean result (job 4265770).
+//! Variant of CollideIsolatedObstacleIterationTest.cpp seeded with the recorded state of the cell that later
+//! collapsed, taken at the start of its obstacle phase (world (267.5,18.5,19.5), step 2700, rho = 1.007356,
+//! near-equilibrium PDFs). The recorded trace shows this cell's rho drifting by ~1e-4 to ~5e-4 per step while its
+//! flag stays OBST at every probed hook point, before collapsing at step 2828. If isolated collide iteration (zero
+//! force, no other input, omega = 1.99753) is the whole mechanism, iterating from this seed should reproduce (a) the
+//! same per-iteration drift and (b) eventual divergence to non-finite values. Runs 200 iterations and logs rho and
+//! drho per iteration; diagnostic only, no assertion.
 //======================================================================================================================
 
 #include "lbm/blockforest/communication/SimpleCommunication.h"
@@ -61,7 +52,7 @@ void runTest()
    auto forceFieldID =
       field::addToStorage< VectorFieldFlattened_T >(blocks, "Force field", real_c(0), field::fzyx, uint_c(1));
 
-   const real_t omega = real_t(1.99753); // this scenario's own relaxationRate
+   const real_t omega = real_t(1.99753); // relaxationRate of the scenario
    LatticeModel_T latticeModel(forceFieldID, omega);
 
    auto pdfFieldID =
@@ -75,10 +66,8 @@ void runTest()
    const cell_idx_t iy = cell_idx_t(18);
    const cell_idx_t iz = cell_idx_t(19);
 
-   // REAL captured state from job 4265770's own trace: [WATCH t=2700 HOPPER-after-collide]
-   // world=(267.5,18.5,19.5) local=(11,18,19) flag=OBST rho=1.007356e+00 fill=1.0 force=(0,0,0) --
-   // i.e. this cell's OWN actual OBST-phase state, ~128 real steps before it eventually collapsed at
-   // t=2828 in that same run.
+   // Recorded state [WATCH t=2700 HOPPER-after-collide]: world=(267.5,18.5,19.5) local=(11,18,19) flag=OBST
+   // rho=1.007356e+00 fill=1.0 force=(0,0,0), 128 steps before the cell collapsed at t=2828.
    const real_t f[27] = { real_t(2.9844e-01), real_t(7.4683e-02), real_t(7.4412e-02), real_t(7.6309e-02),
                           real_t(7.2937e-02), real_t(7.3678e-02), real_t(7.5695e-02), real_t(1.9029e-02),
                           real_t(1.8316e-02), real_t(1.9093e-02), real_t(1.8122e-02), real_t(1.8451e-02),
@@ -89,7 +78,7 @@ void runTest()
    for (uint_t q = uint_t(0); q < uint_t(27); ++q)
       pdfField->get(ix, iy, iz, q) = f[q];
 
-   // Force is exactly zero for this cell throughout its whole OBST-phase history in the real run.
+   // Force was exactly zero for this cell throughout its recorded OBST phase.
    forceField->get(ix, iy, iz, uint_t(0)) = real_t(0);
    forceField->get(ix, iy, iz, uint_t(1)) = real_t(0);
    forceField->get(ix, iy, iz, uint_t(2)) = real_t(0);

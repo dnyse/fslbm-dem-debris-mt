@@ -17,8 +17,7 @@
 //! \brief Cylinder x Plane / Cylinder x Sphere closed-form contact: Kodam, Bharadwaj, Curtis, Hancock
 //! & Wassgren (2010), Chemical Engineering Science 65(22), 5852-5862 (Part I). CylinderState, the
 //! quartic/ellipse/rim-crossing solvers, cylinderPlaneContact, sphereCylinderContact,
-//! faceFaceStyleContactPoint. Split out of PaperAnalyticalContacts.h (namespace paper_analytical)
-//! 2026-10-29; see ClosedFormContactsInfra.h for the shared ContactResult type.
+//! faceFaceStyleContactPoint; shared ContactResult type in ClosedFormContactsInfra.h.
 
 #pragma once
 
@@ -67,17 +66,11 @@ inline real_t closestThetaOnCircleToPointClosedForm(const Vec3& C, const Vec3& u
 
 //! Real roots of c4*t^4 + c3*t^3 + c2*t^2 + c1*t + c0 = 0 via the Durand-Kerner method: all 4
 //! (possibly complex) roots are refined simultaneously, so unlike Ferrari's method there is no
-//! branching on the resolvent cubic's discriminant to get wrong. Fixed iteration count (matching
-//! this file's existing fixed-iteration-count style, e.g. the old golden-section refinement) --
-//! empirically converges to double precision within ~20-30 iterations for the geometries this is
-//! used on; 60 leaves comfortable margin. Validated against the previous golden-section
-//! implementation across thousands of random configurations (see git history / PR description) to
-//! confirm this replacement produces the same answers, not just plausible-looking ones.
-// maxIterations: default 30 (see below) preserves current behaviour for every one of this function's
-// existing call sites (none pass this argument). Exposed as a parameter (not just a local constant)
-// specifically so PaperAnalyticalContactTest.cpp can A/B/C-compare 30 against the original 60 directly
-// on identical trials -- see testEdgeEdgeFastReferenceAccuracy10k / any 3-way iteration-count
-// comparison built on top of it.
+//! branching on the resolvent cubic's discriminant to get wrong. Fixed iteration count; empirically
+//! converges to double precision within ~20-30 iterations for the geometries this is used on.
+// maxIterations: default 30, validated against the full PaperAnalyticalContactTest.cpp suite (fuzz tests included);
+// exposed so PaperAnalyticalContactTest.cpp can compare iteration counts on identical trials
+// (testEdgeEdgeFastReferenceAccuracy10k).
 inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
                                       std::complex< real_t > roots[4], int maxIterations = 30)
 {
@@ -97,16 +90,6 @@ inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1,
       p *= base;
    }
 
-   // Default 30 (down from the original 60): this file's own comment above already documented that
-   // convergence to double precision was empirically observed within ~20-30 iterations, with 60 kept
-   // purely as "comfortable margin" -- i.e. the original count was never load-bearing for correctness,
-   // just headroom. Halving it (to the upper end of the already-observed-sufficient range, not the
-   // aggressive low end) roughly halves the cost of every quartic solve in this file
-   // (closestThetaOnCircleToLine, allCriticalThetasOnEllipseToOrigin, and everything built on them:
-   // band-edge, special-contact, edge-edge, face-edge). Re-validated against the full
-   // PaperAnalyticalContactTest.cpp suite (fuzz tests included) after this change, not just asserted
-   // from the original comment's claim -- see also the direct 30-vs-60 A/B comparison enabled by this
-   // being a parameter now, not a hardcoded constant.
    for (int it = 0; it < maxIterations; ++it)
    {
       std::complex< real_t > next[4];
@@ -125,12 +108,10 @@ inline void solveQuarticDurandKerner(real_t c4, real_t c3, real_t c2, real_t c1,
 //! One real root of the depressed-then-un-depressed real cubic t^3 + a*t^2 + b*t + c = 0. A real cubic
 //! always has at least one real root, so this never needs to return a complex value -- used below only
 //! to pick a resolvent-cubic root for solveQuarticFerrari, which needs exactly one (any one) real root,
-//! not all three. Branches between Cardano's formula (one-real-root case, safe/direct) and the
-//! trigonometric form (three-real-roots case, avoids the cube root of a near-zero or catastrophically
-//! cancelling complex quantity that Cardano's formula would otherwise hit) -- precisely the kind of
-//! discriminant-sign branch that solveQuarticDurandKerner's own comment calls out as Ferrari's method's
-//! weak point; isolating it to a single real root of a cubic (rather than needing all 4 roots of the
-//! quartic to come out of the same branch) is the most that can be done to contain it.
+//! not all three. Branches between Cardano's formula (one-real-root case) and the trigonometric form
+//! (three-real-roots case, avoids the cube root of a near-zero or catastrophically cancelling complex
+//! quantity). This discriminant-sign branch is Ferrari's method's weak point; isolating it to a single
+//! real root of a cubic (rather than needing all 4 quartic roots from the same branch) contains it.
 inline real_t solveRealCubicOneRealRoot(real_t a, real_t b, real_t c)
 {
    const real_t p      = b - a * a / real_t(3);
@@ -158,14 +139,13 @@ inline real_t solveRealCubicOneRealRoot(real_t a, real_t b, real_t c)
 //! m^3 + p*m^2 + (p^2/4 - r)*m - q^2/8 = 0 for one real root m (solveRealCubicOneRealRoot), then factor
 //! the quartic into two quadratics via that m and solve each in closed form. No iteration at all --
 //! O(1) instead of solveQuarticDurandKerner's fixed 30 sweeps.
-//! This IS the production solver: every quartic solve in the cylinder-cylinder
-//! dispatch defaults to QuarticSolverMethod::Ferrari (closestThetaOnCircleToLine, findRimCrossing,
-//! cylinderCylinderContact). No case has been found where it fails. Known
-//! theoretical weak points, kept here as documentation: (1) the resolvent cubic's discriminant sign is a
-//! branch (handled in solveRealCubicOneRealRoot); (2) m = 0 (q = 0, biquadratic quartic) needs the
-//! special handling below to avoid dividing by sqrt(2m); (3) like any closed-form quartic formula it can
-//! lose accuracy through cancellation when roots nearly coincide, where iterative solvers degrade more
-//! gracefully. Durand-Kerner / Aberth-Ehrlich remain available for comparison only.
+//! This is the production solver: every quartic solve in the cylinder-cylinder dispatch defaults to
+//! QuarticSolverMethod::Ferrari (closestThetaOnCircleToLine, findRimCrossing, cylinderCylinderContact); no
+//! failing case is known. Theoretical weak points: (1) the resolvent cubic's discriminant sign is a branch
+//! (handled in solveRealCubicOneRealRoot); (2) m = 0 (q = 0, biquadratic quartic) needs the special handling
+//! below to avoid dividing by sqrt(2m); (3) like any closed-form quartic formula it can lose accuracy through
+//! cancellation when roots nearly coincide, where iterative solvers degrade more gracefully. Durand-Kerner /
+//! Aberth-Ehrlich remain for comparison only.
 inline void solveQuarticFerrari(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
                                  std::complex< real_t > roots[4])
 {
@@ -177,10 +157,8 @@ inline void solveQuarticFerrari(real_t c4, real_t c3, real_t c2, real_t c1, real
                      b3 * b1 / real_t(4) + b0;
    const real_t shift = -b3 / real_t(4);
 
-   // Biquadratic special case (q == 0, i.e. the depressed quartic has no odd-degree term): solving the
-   // resolvent cubic here would hit m=0 (or a spurious nonzero root that still works, but needlessly),
-   // since the general construction below divides by q. Solving y^4+p*y^2+r=0 directly as a quadratic
-   // in y^2 sidesteps that degeneracy entirely rather than special-casing sqrt2m~=0 further down.
+   // Biquadratic special case (q == 0, no odd-degree term in the depressed quartic): the general construction
+   // below divides by sqrt(2m) with m = 0, so y^4+p*y^2+r=0 is solved directly as a quadratic in y^2.
    if (std::abs(q) < real_t(1e-13) * std::max(real_t(1), std::abs(p)))
    {
       const std::complex< real_t > disc =
@@ -222,11 +200,9 @@ inline void solveQuarticFerrari(real_t c4, real_t c3, real_t c2, real_t c1, real
 //! together each sweep, no resolvent-cubic branching), but each step applies a full Newton correction
 //! w_i = P(x_i)/P'(x_i) with an Aberth correction term (the sum of reciprocal distances to the other
 //! current root estimates) rather than Durand-Kerner's plain Weierstrass product-of-differences
-//! correction. This gives locally cubic convergence per root (vs Durand-Kerner's quadratic), so it
-//! should in principle reach the same accuracy in fewer sweeps -- exactly what
-//! QuarticSolverComparisonTest.cpp checks directly, both at matched iteration count (30) and at a
-//! reduced count, rather than assuming the textbook convergence-order claim carries over unchanged to
-//! this file's specific coefficient scales. Not wired into any production call site.
+//! correction. This gives locally cubic convergence per root (vs Durand-Kerner's quadratic);
+//! QuarticSolverComparisonTest.cpp checks whether that holds at these coefficient scales, at matched (30)
+//! and reduced iteration counts. Not wired into any production call site.
 inline void solveQuarticAberthEhrlich(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
                                        std::complex< real_t > roots[4], int maxIterations = 30)
 {
@@ -271,10 +247,9 @@ inline void solveQuarticAberthEhrlich(real_t c4, real_t c3, real_t c2, real_t c1
    }
 }
 
-//! Selects which of the three quartic solvers above (see QuarticSolverComparisonTest.cpp for the
-//! time/accuracy comparison). Ferrari is the production default everywhere
-//! (closestThetaOnCircleToLine / findRimCrossing / cylinderCylinderContact); DurandKerner and
-//! AberthEhrlich are kept only as comparison alternatives.
+//! Selects one of the three quartic solvers above (time/accuracy comparison in QuarticSolverComparisonTest.cpp).
+//! Ferrari is the production default (closestThetaOnCircleToLine / findRimCrossing / cylinderCylinderContact);
+//! DurandKerner and AberthEhrlich are comparison alternatives.
 enum class QuarticSolverMethod
 {
    DurandKerner,
@@ -282,9 +257,8 @@ enum class QuarticSolverMethod
    AberthEhrlich
 };
 
-//! Dispatches to one of the three quartic solvers by QuarticSolverMethod tag, so every call site needs
-//! only one solver-choice parameter instead of duplicating itself per method. maxIterations is ignored
-//! for Ferrari (closed-form, nothing to iterate).
+//! Dispatches to one of the three quartic solvers by QuarticSolverMethod tag. maxIterations is ignored for
+//! Ferrari (closed form).
 inline void solveQuarticGeneric(real_t c4, real_t c3, real_t c2, real_t c1, real_t c0,
                                  std::complex< real_t > roots[4], QuarticSolverMethod method,
                                  int maxIterations = 30)
@@ -311,25 +285,22 @@ inline void solveQuarticGeneric(real_t c4, real_t c3, real_t c2, real_t c1, real
 //! base-disc edge (projected as an ellipse into the OTHER cylinder's cross-sectional plane) against
 //! that other cylinder's radius.
 //!
-//! Re-derived here from scratch rather than transcribing that paper's own Appendix A coefficients:
-//! the intermediate step there ("F(theta) = -a*x0*sin(theta)+b*y0*cos(theta) = -a*x*x'+b*y*y'", then
-//! "F(theta)=0 gives a*x*x'=b*y*y'") is inconsistent with its own stated substitution x'=cos(theta),
-//! y'=sin(theta) two lines above it -- substituting directly gives a*x0*y'=b*y0*x', not a*x*x'=b*y*y'.
-//! Rather than risk propagating whichever side of that inconsistency is the actual typo, this
-//! rederives the quartic independently (exactly the same Weierstrass-substitution technique as
-//! closestThetaOnCircleToLine below) and validates it against a brute-force numeric sweep in
-//! PaperAnalyticalContactTest.cpp before trusting it anywhere else.
+//! Re-derived here rather than transcribed from that paper's Appendix A: its intermediate step
+//! ("F(theta) = -a*x0*sin(theta)+b*y0*cos(theta) = -a*x*x'+b*y*y'", then "F(theta)=0 gives a*x*x'=b*y*y'") is
+//! inconsistent with its own substitution x'=cos(theta), y'=sin(theta) two lines above -- substituting directly
+//! gives a*x0*y'=b*y0*x', not a*x*x'=b*y*y'. The quartic is therefore derived independently (same Weierstrass-
+//! substitution technique as closestThetaOnCircleToLine below) and validated against a brute-force numeric sweep
+//! in PaperAnalyticalContactTest.cpp.
 //!
 //! f(theta) = (x0+a*cos theta)^2 + (y0+b*sin theta)^2; F(theta) = f'(theta)/2 =
 //! -a*x0*sin(theta) + b*y0*cos(theta) + (b^2-a^2)*sin(theta)*cos(theta) -- a mix of first- and
 //! second-harmonic terms. Substituting t=tan(theta/2) and clearing denominators gives a quartic in t
-//! with no cubic-resolvent branching needed (Durand-Kerner, same as every other quartic in this file).
-//! All (up to 5, including the t->infinity/theta=pi point the Weierstrass substitution can't reach
-//! directly) real critical thetas of theta -> x(theta)^2+y(theta)^2 -- i.e. every local min AND max
-//! on the ellipse, not just the global minimum. Needed by the constrained version of this search
-//! (closestThetaOnEllipseWithinAxialRange below): when the unconstrained global minimum falls outside
-//! a required range, the CONSTRAINED minimum is generically at another critical point or at the
-//! range boundary, not simply "no valid point at all."
+//! (c2 = 0), solved here with Durand-Kerner (no resolvent-cubic branching).
+//! Returns all (up to 5, including the t->infinity/theta=pi point the Weierstrass substitution cannot reach)
+//! real critical thetas -- every local min AND max on the ellipse, not just the global minimum. The
+//! constrained search (closestThetaOnEllipseWithinAxialRange below) needs them: when the unconstrained global
+//! minimum falls outside a required range, the CONSTRAINED minimum is generically at another critical point or
+//! at the range boundary.
 inline void allCriticalThetasOnEllipseToOrigin(real_t a, real_t b, real_t x0, real_t y0,
                                                 real_t (&thetasOut)[5], int& countOut)
 {
@@ -351,9 +322,8 @@ inline void allCriticalThetasOnEllipseToOrigin(real_t a, real_t b, real_t x0, re
          thetasOut[countOut++] = real_t(2) * std::atan(r.real());
 }
 
-//! See allCriticalThetasOnEllipseToOrigin's own comment: this is just its global-minimum reduction,
-//! kept as the simple entry point for callers (and the brute-force cross-check test) that don't need
-//! the constrained search.
+//! Global-minimum reduction of allCriticalThetasOnEllipseToOrigin, for callers (and the brute-force cross-check
+//! test) that do not need the constrained search.
 inline real_t closestThetaOnEllipseToOrigin(real_t a, real_t b, real_t x0, real_t y0)
 {
    auto distSq = [&](real_t theta) {
@@ -383,15 +353,13 @@ inline real_t closestThetaOnEllipseToOrigin(real_t a, real_t b, real_t x0, real_
 //! Closest point on the ellipse to the origin, CONSTRAINED to the sub-arc where a second quantity,
 //! zHost(theta) = zC + zA*cos(theta) + zB*sin(theta) (itself just a first-harmonic function of theta,
 //! since it's the axial coordinate of the same rim point along a fixed third direction), stays within
-//! [-zHalfRange, zHalfRange]. This is the exact fix for the gap Feng et al. (2017) themselves flag in
-//! their own unconstrained version of this check ("the master cylinder is implicitly assumed
-//! infinitely long, and no consideration is given to a possible overlap between the base discs") --
-//! but cutting the OTHER way from how they describe it: their concern is a false POSITIVE (finding a
-//! close point that's actually beyond the host's finite end); fuzz-testing this implementation found
-//! the reverse is at least as important in practice -- a false NEGATIVE, where the unconstrained
-//! global minimum falls just outside the valid range while a nearby, still-overlapping point on the
-//! same ellipse remains within it. Solving the constrained problem in closed form (rather than simply
-//! rejecting the unconstrained answer) closes both directions at once.
+//! [-zHalfRange, zHalfRange]. This closes the gap Feng et al. (2017) flag in their unconstrained version
+//! ("the master cylinder is implicitly assumed infinitely long, and no consideration is given to a possible
+//! overlap between the base discs") in both directions: their concern is a false POSITIVE (a close point beyond
+//! the host's finite end); fuzz-testing shows the false NEGATIVE matters at least as much -- the unconstrained
+//! global minimum falls just outside the valid range while a nearby, still-overlapping point on the same ellipse
+//! remains within it. Solving the constrained problem in closed form (rather than rejecting the unconstrained
+//! answer) handles both.
 //!
 //! Returns false if the valid sub-arc is empty (the entire rim lies outside the host's finite range).
 inline bool closestThetaOnEllipseWithinAxialRange(real_t a, real_t b, real_t x0, real_t y0, real_t zC,
@@ -428,10 +396,9 @@ inline bool closestThetaOnEllipseWithinAxialRange(real_t a, real_t b, real_t x0,
    for (int i = 0; i < count; ++i)
       consider(thetas[i]);
 
-   // Candidate set 2: the range boundary itself. zHost(theta) = +-zHalfRange is a plain
-   // R*cos(theta-phi) = k first-harmonic equation (no quartic needed) -- if |k/R| > 1 the entire rim
-   // lies on one side (either always in range, already covered by set 1, or never in range, and this
-   // loop simply adds nothing).
+   // Candidate set 2: the range boundary. zHost(theta) = +-zHalfRange is a first-harmonic equation
+   // R*cos(theta-phi) = k (no quartic); if |k/R| > 1 the entire rim lies on one side (always in range, covered
+   // by set 1, or never in range) and this adds nothing.
    if (zAmag > real_t(1e-12))
    {
       const real_t phi = std::atan2(zB, zA);
@@ -456,21 +423,16 @@ inline bool closestThetaOnEllipseWithinAxialRange(real_t a, real_t b, real_t x0,
 //! Returns up to 4 real thetas via thetasOut/countOut (countOut may be 0, 2, or 4; a tangency counts
 //! as a repeated root).
 //!
-//! Re-derived from scratch rather than transcribed from the paper's own printed equations, which
-//! have two internal inconsistencies here: (1) the circle is introduced as "radius r" but then
-//! written as x^2+y^2=1 (not r^2), while the resulting quartic's own a0=r^2(1-tau^2) coefficient only
-//! makes sense if the circle equation actually was x^2+y^2=r^2; (2) Appendix C's eq. (33), a
-//! one-line derivation from its own eq. (31)-(32) just above it, drops a minus sign (redoing that
-//! one line independently does not reproduce what eq. (33) prints). Given two independent
-//! transcription errors already found in this paper (see closestThetaOnEllipseToOrigin's own
-//! comment for a third, in Appendix A), this quartic is derived fresh here and cross-checked at
-//! theta=0, pi, and pi/2 (each independently re-deriving the corresponding coefficient) before ever
-//! being trusted, then validated against a brute-force numeric sweep in
-//! PaperAnalyticalContactTest.cpp, the same policy as every other quartic in this file.
+//! Re-derived rather than transcribed from the paper's printed equations, which are internally inconsistent here:
+//! (1) the circle is introduced as "radius r" but written as x^2+y^2=1 (not r^2), while the resulting quartic's
+//! a0=r^2(1-tau^2) coefficient only makes sense for x^2+y^2=r^2; (2) Appendix C's eq. (33), a one-line derivation
+//! from its eq. (31)-(32), drops a minus sign (redoing that line does not reproduce eq. (33)). (A third
+//! inconsistency, in Appendix A, is noted at closestThetaOnEllipseToOrigin.) This quartic is derived fresh,
+//! cross-checked at theta=0, pi and pi/2 (each re-deriving the corresponding coefficient), and validated against a
+//! brute-force numeric sweep in PaperAnalyticalContactTest.cpp.
 //!
-//! Derivation: substituting the ellipse's own parametrisation into x^2+y^2=R^2 and expanding
-//! cos^2(theta), sin^2(theta) via the double-angle identities gives a mix of first- and second-
-//! harmonic terms in theta, exactly the same shape as every other trig equation in this file;
+//! Derivation: substituting the ellipse's parametrisation into x^2+y^2=R^2 and expanding cos^2(theta),
+//! sin^2(theta) via the double-angle identities gives a mix of first- and second-harmonic terms in theta;
 //! substituting t=tan(theta/2) and clearing denominators gives:
 inline void intersectEllipseWithCircle(real_t a, real_t b, real_t x0, real_t y0, real_t R,
                                         real_t (&thetasOut)[4], int& countOut)
@@ -484,15 +446,13 @@ inline void intersectEllipseWithCircle(real_t a, real_t b, real_t x0, real_t y0,
    const real_t c2 = real_t(2) * x0 * x0 + real_t(2) * y0 * y0 - real_t(2) * R * R - real_t(2) * a * a +
                       real_t(4) * b * b;
 
-   // theta=pi is itself an exact root exactly when c4=0 (the point at theta=pi lies on the circle);
-   // the Weierstrass substitution can't reach it as a finite t, so it must be added explicitly rather
-   // than relying on solveQuarticDurandKerner to find it as t->infinity.
+   // theta=pi is an exact root exactly when c4=0 (the point at theta=pi lies on the circle); the Weierstrass
+   // substitution cannot reach it as a finite t, so it is added explicitly.
    if (std::abs(c4) < real_t(1e-12) * std::max(real_t(1), std::abs(c0)))
    {
       thetasOut[countOut++] = math::pi;
-      // Remaining roots solve the cubic c3 t^3 + c2 t^2 + c1 t + c0 = 0 -- reuse the quartic solver
-      // with c4 nudged to a small epsilon (same technique used throughout this file), which just
-      // sends one of the four roots towards a very large |t| (theta -> pi again, already added).
+      // Remaining roots solve the cubic c3 t^3 + c2 t^2 + c1 t + c0 = 0: the quartic solver with c4 nudged to a
+      // small epsilon sends one of the four roots towards a very large |t| (theta -> pi again, already added).
       const real_t c4Safe = real_t(1e-14);
       std::complex< real_t > roots[4];
       solveQuarticDurandKerner(c4Safe, c3, c2, c1, c0, roots);
@@ -517,17 +477,14 @@ inline void intersectEllipseWithCircle(real_t a, real_t b, real_t x0, real_t y0,
 //! gives const + M'cos(theta) + N'sin(theta) - R^2*Amag^2*cos^2(theta-psi) (a mix of first- and
 //! second-harmonic terms), whose stationary points satisfy R^2*Amag^2*sin(2*theta-2*psi) =
 //! M'*sin(theta) - N'*cos(theta). Substituting t=tan(theta/2) (Weierstrass) and clearing
-//! denominators turns this into a genuine quartic in t; solveQuarticDurandKerner finds its roots,
+//! denominators turns this into a genuine quartic in t; solveQuarticGeneric finds its roots,
 //! and each real root (plus theta=pi, the t->infinity point this substitution can't reach directly)
 //! is evaluated against the true squared-distance to pick the global minimum among what are, in
 //! general, 1-2 minima and 1-2 maxima of this function on the circle.
-// maxIterations forwarded to solveQuarticDurandKerner (default 30, unchanged behaviour for every
-// existing caller that doesn't pass it) -- see that function's own comment.
-// quarticSolver: default changed to Ferrari (this session, after QuarticSolverComparisonTest.cpp's
-// synthetic-quartic comparison and PaperAnalyticalContactTest.cpp's edge-edge N-way comparison on real
-// geometry both showed it ~2.3x faster than Durand-Kerner with bit-identical-or-indistinguishable
-// accuracy) -- see QuarticSolverMethod's own comment. Durand-Kerner/Aberth-Ehrlich remain fully
-// available via this parameter, not deleted.
+// maxIterations: forwarded to the iterative solvers (default 30, see solveQuarticDurandKerner).
+// quarticSolver: default Ferrari; QuarticSolverComparisonTest.cpp (synthetic quartics) and
+// PaperAnalyticalContactTest.cpp (edge-edge comparison on real geometry) show it ~2.3x faster than Durand-Kerner
+// with bit-identical-or-indistinguishable accuracy (see QuarticSolverMethod).
 inline real_t closestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                           const Vec3& linePos, const Vec3& lineDir, int maxIterations = 30,
                                           QuarticSolverMethod quarticSolver = QuarticSolverMethod::Ferrari)
@@ -539,8 +496,8 @@ inline real_t closestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec
    const real_t A1 = u * lineDir;
    const real_t A2 = v * lineDir;
 
-   // (The constant term K - A0^2 of f(theta) is omitted -- it doesn't affect where the minimum is,
-   // only its value, and distSq() below recomputes the true squared distance directly anyway.)
+   // (The constant term K - A0^2 of f(theta) is omitted: it does not move the minimum, and distSq() below
+   // recomputes the true squared distance.)
    const real_t Mp = M - real_t(2) * A0 * R * A1;
    const real_t Np = N - real_t(2) * A0 * R * A2;
 
@@ -584,12 +541,10 @@ inline real_t closestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec
 
    if (std::abs(c4) < real_t(1e-14) * std::max(real_t(1), std::abs(c0)))
    {
-      // Leading coefficient (numerically) vanishes -- t=infinity (theta=pi, already in
-      // bestTheta's initial candidate) is itself at least a double root; the remaining roots
-      // solve the cubic-or-lower c3 t^3 + c2 t^2 + c1 t + c0 = 0. Reuse the quartic solver with
-      // c4 nudged to an epsilon rather than special-casing a cubic solver separately: it just
-      // means one of the four roots runs off towards a very large |t| (theta -> pi again), which
-      // consider() naturally handles like any other candidate.
+      // Leading coefficient (numerically) vanishes: t=infinity (theta=pi, bestTheta's initial candidate) is a
+      // root; the remaining roots solve the cubic-or-lower c3 t^3 + c2 t^2 + c1 t + c0 = 0. The quartic solver
+      // with c4 nudged to an epsilon sends one root towards a very large |t| (theta -> pi again), which
+      // consider() handles like any other candidate.
       const real_t            c4Safe = std::abs(c4) > real_t(1e-30) ? c4 : real_t(1e-14);
       std::complex< real_t >  roots[4];
       solveQuarticGeneric(c4Safe, c3, c2, c1, c0, roots, quarticSolver, maxIterations);
@@ -610,8 +565,8 @@ inline real_t closestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec
 
 //! MAXIMIZING counterpart to closestThetaOnCircleToLine -- identical derivation and quartic (setting
 //! the derivative to zero finds ALL critical points of f(theta), minima and maxima alike; this just
-//! keeps the largest instead of the smallest). Used by ComputeTunnelContacts (ParticleKernels.h) for
-//! a Cylinder floater's exact farthest point from an arch tunnel's axis, per end-cap rim.
+//! keeps the largest instead of the smallest). Used by containment_detail::circleFarthestFromAxisClipped
+//! (ParticleKernels.h) for a cylinder floater's exact farthest rim point from a containment axis.
 inline real_t farthestThetaOnCircleToLine(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                            const Vec3& linePos, const Vec3& lineDir)
 {
@@ -710,12 +665,10 @@ inline void perpendicularBasis(const Vec3& axis, Vec3& u, Vec3& v)
 //! perpendicular pair, so both derivations below are the fully general versions of eq. 83 and
 //! eq. 84-85 rather than the paper's axis-aligned-basis special case).
 //!
-//! Eq. 83 (Px^2+Py^2=R_target^2, "radial distance from rim point to target's axis equals
-//! target's radius") expands -- exactly as the SAME expansion underlying closestThetaOnCircleToLine
-//! above, just set equal to a target value instead of minimized -- into a genuine quartic in
-//! t=tan(theta/2) after the Weierstrass substitution; solved via the same Durand-Kerner solver.
-//! Verified by direct numerical brute-force root-scanning against this closed form (see PR
-//! description / git history) to machine precision across thousands of random configurations.
+//! Eq. 83 (Px^2+Py^2=R_target^2, "radial distance from rim point to target's axis equals target's radius")
+//! expands -- the same expansion as in closestThetaOnCircleToLine, set equal to a target value instead of
+//! minimised -- into a genuine quartic in t=tan(theta/2) after the Weierstrass substitution. Matches direct
+//! numerical brute-force root-scanning to machine precision across thousands of random configurations.
 //!
 //! Eq. 84-85 (Pz=faceZ, "axial position of rim point equals target's face height") is
 //! A1*cos(theta)+A2*sin(theta)=rhs, i.e. Amag*cos(theta-phi)=rhs -- solved directly via
@@ -723,9 +676,8 @@ inline void perpendicularBasis(const Vec3& axis, Vec3& u, Vec3& v)
 //! A1=0 special case (only true for the paper's own axis-tied basis choice, not this file's).
 //!
 //! Point A can have up to 4 candidate roots (plus theta=pi); point B always has exactly 2
-//! (phi+-delta) when a solution exists at all. Neither the paper nor this file's predecessor
-//! implementation specifies a tie-break when multiple candidates pass the containment check --
-//! the choice here (nearest, angularly, to the rim's own closest point to target's axis) matches
+//! (phi+-delta) when a solution exists at all. The paper specifies no tie-break when multiple candidates pass
+//! the containment check; the choice here (nearest, angularly, to the rim's own closest point to target's axis) matches
 //! the "near first contact, small segments" regime eq. 87's linearity assumption already commits
 //! this whole scenario to.
 struct RimCrossing
@@ -734,50 +686,24 @@ struct RimCrossing
    Vec3 A, B;
 };
 
-// useFastReference: OPTIONAL simplification #1 from this session's own performance investigation
-// (see CylinderCylinderContactBenchmark.cpp's file header) -- thetaRef exists PURELY as a tie-break
-// among point A's (up to 4) candidate roots (see this function's own RimCrossing comment above: "the
-// choice here... matches the... regime", i.e. this file's own predecessor's heuristic, not something
-// Kodam's or Guo's paper specifies at all). false (DEFAULT, unchanged behaviour) computes it via
-// closestThetaOnCircleToLine -- the exact closest point on the rim to target's full axis LINE, itself
-// a second 60(30)-iteration Durand-Kerner quartic solve, on top of point A's own. true replaces that
-// with closestThetaOnCircleToPoint (a single atan2, already validated closed-form -- see that
-// function's own comment: "turned out to have an even simpler exact answer, no polynomial at all"),
-// using target's CENTRE POSITION as a cheap stand-in reference point instead of its full axis line --
-// geometrically a different (cheaper, approximate) reference, not merely a faster way to compute the
-// SAME reference, so this is genuinely an accuracy/speed trade-off, not a free simplification. Old
-// path kept fully intact (not deleted) specifically so the two can be A/B compared for accuracy --
-// see PaperAnalyticalContactTest.cpp's fuzz suite, run against both settings.
-// maxIterations forwarded to every Durand-Kerner/Aberth-Ehrlich solve this function performs (thetaRef
-// when NOT useFastReference, and point A's own quartic always) -- default 30, unchanged behaviour for
-// both of this function's existing callers (cylinderCylinderContact's edge-edge branch, which now
-// forwards its own maxIterations parameter -- see that function's own comment).
-// quarticSolver: forwarded to both of this function's own quartic solves (thetaRef's, when not using
-// the fast point-based reference, and point A's own) -- default Ferrari (see closestThetaOnCircleToLine's
-// own comment for why); see QuarticSolverMethod's own comment.
-// candidateCountA/candidateCountB: OPTIONAL diagnostic out-parameters (default nullptr, zero effect on
-// production behaviour) -- count how many candidate thetas pass EACH of point A's/B's own containment
-// checks, independent of thetaRef's tie-break, to answer directly whether that tie-break (and by
-// extension thetaRef's own quartic, when not using the fast reference) is ever actually load-bearing
-// for real geometry, or whether at most one candidate ever survives in practice. See
-// PaperAnalyticalContactTest.cpp's testThetaRefTieBreakNecessity10k, which found 0/832 real calls ever
-// had more than one candidate for EITHER point.
-// lazyThetaRef: OPTIONAL simplification (this session, on top of #1 above) -- defers thetaRef's
-// computation until AFTER point A's (and, if needed, point B's) candidates are actually collected, and
-// only computes it AT ALL if either list ends up with more than one entry (the collect-then-select
-// restructuring below is mathematically identical to the old inline considerA/considerB running-best
-// tracking either way -- same traversal order, same strict "<" tie-break, so ties resolve to the same
-// candidate). Default changed to true this session, after testThetaRefTieBreakNecessity10k found this
-// is NEVER needed on real geometry (0/832 calls ever had >1 candidate for either point) and
-// testLazyThetaRefAccuracy10k confirmed bit-identical results with it enabled. false (the original
-// eager behaviour, unconditional thetaRef computation up front) remains fully available.
+// useFastReference: thetaRef serves only as the tie-break among point A's (up to 4) candidate roots (see
+// RimCrossing; a heuristic of this file, not specified by Kodam or Guo). false (default) computes it via
+// closestThetaOnCircleToLine -- the exact closest rim point to target's axis LINE, a second quartic solve on top
+// of point A's. true uses closestThetaOnCircleToPoint (a single atan2) with target's CENTRE as reference point:
+// a different, approximate reference, i.e. an accuracy/speed trade-off (compared in PaperAnalyticalContactTest.cpp's
+// fuzz suite; see also CylinderCylinderContactBenchmark.cpp).
+// maxIterations: forwarded to the iterative solvers of thetaRef (when not useFastReference) and point A.
+// quarticSolver: forwarded to both quartic solves; default Ferrari (see closestThetaOnCircleToLine).
+// candidateCountA/candidateCountB: optional diagnostic out-parameters (default nullptr, no effect) counting the
+// candidate thetas passing each of point A's/B's containment checks, independent of the tie-break.
+// testThetaRefTieBreakNecessity10k found 0/832 real calls with more than one candidate for either point.
+// lazyThetaRef (default true): compute thetaRef only after the candidates are collected, and only if either list
+// has more than one entry. Collect-then-select keeps the same traversal order and strict "<" tie-break, so ties
+// resolve identically (bit-identical results, testLazyThetaRefAccuracy10k); false computes it eagerly up front.
 inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                     const Vec3& targetPos, const Vec3& eTarget, real_t targetRadius,
                                     real_t targetHalfLength, bool useFastReference = false,
                                     int maxIterations = 30,
-                                    // default changed DurandKerner -> Ferrari to match
-                                    // every other entry point (production always passed Ferrari explicitly
-                                    // via cylinderCylinderContact; the only direct test call passes a solver).
                                     QuarticSolverMethod quarticSolver = QuarticSolverMethod::Ferrari,
                                     int* candidateCountA = nullptr, int* candidateCountB = nullptr,
                                     bool lazyThetaRef = true)
@@ -795,7 +721,7 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
          : closestThetaOnCircleToLine(C, u, v, R, targetPos, eTarget, maxIterations, quarticSolver);
       thetaRefComputed = true;
    };
-   if (!lazyThetaRef) ensureThetaRef(); // EAGER (default): unconditional, matches original cost exactly.
+   if (!lazyThetaRef) ensureThetaRef(); // eager: unconditional
 
    auto pointAt = [&](real_t theta) { return C + R * std::cos(theta) * u + R * std::sin(theta) * v; };
    auto radialSqToAxis = [&](const Vec3& P) {
@@ -811,8 +737,7 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
    };
 
    // --- Point A: rim crosses target's infinite lateral surface (eq. 83). ------------------------
-   // The quartic below is Kodam's own eq. 83 -- unavoidable, unaffected by lazyThetaRef. What changes
-   // is only WHEN (if ever) thetaRef is computed to pick among the candidates this produces.
+   // Kodam's eq. 83; lazyThetaRef only changes when (if ever) thetaRef is computed to pick among its roots.
    const Vec3   a  = C - targetPos;
    const real_t A0 = a * eTarget;
    const real_t A1 = u * eTarget;
@@ -830,8 +755,7 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
    const real_t c1 = real_t(2) * Np + real_t(4) * Q2;
    const real_t c0 = K2 + Mp + P2;
 
-   // Every candidate theta passing containment is collected here FIRST (independent of thetaRef, which
-   // this containment check never references) -- at most 5: up to 4 quartic roots plus theta=pi.
+   // Candidates passing containment (independent of thetaRef): at most 5, up to 4 quartic roots plus theta=pi.
    real_t candidatesA[5];
    int    numA = 0;
    auto   collectA = [&](real_t theta) {
@@ -855,9 +779,8 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
 
    if (candidateCountA) *candidateCountA = numA;
 
-   // Selection: 0 candidates -> no point A at all; exactly 1 -> thetaRef is irrelevant, skip it
-   // entirely (this is the actual savings when lazyThetaRef); >1 -> thetaRef genuinely needed to break
-   // the tie (computed here, lazily, the FIRST time this ever actually happens for either point).
+   // Selection: 0 candidates -> no point A; exactly 1 -> thetaRef not needed (the saving of lazyThetaRef);
+   // >1 -> thetaRef breaks the tie (computed here on first need for either point).
    bool   haveA  = false;
    real_t thetaA = real_t(0);
    if (numA == 1) { thetaA = candidatesA[0]; haveA = true; }
@@ -930,9 +853,8 @@ inline RimCrossing findRimCrossing(const Vec3& C, const Vec3& u, const Vec3& v, 
 //! The point on `cyl`'s rim closest to a plane through `planePos` with normal `planeNormal` --
 //! shared closed-form building block for cylinder-plane edge-plane (eq. 15-17) AND, per Kodam et al.
 //! Section 3.2.3 eq. 45-47, cylinder-cylinder face-edge (identical formula, with the "plane" being
-//! the OTHER cylinder's flat face treated locally as a plane). CORRECTED per the derivation in
-//! cylinderPlaneContact's edge-plane comment (an earlier version had the radial direction and a sign
-//! wrong, caught by testCylinderPlaneEdge disagreeing with GJK/EPA by ~0.3).
+//! the OTHER cylinder's flat face treated locally as a plane). Validated against GJK/EPA by
+//! testCylinderPlaneEdge.
 inline Vec3 rimPointTowardPlane(const CylinderState& cyl, const Vec3& planePos, const Vec3& planeNormalIn)
 {
    const Vec3   nHat     = planeNormalIn.getNormalized();
@@ -956,8 +878,8 @@ inline Vec3 rimPointTowardPlane(const CylinderState& cyl, const Vec3& planePos, 
 //! findRimCrossing keeps only ONE crossing (tie-broken by a reference angle, as its edge-edge chord
 //! construction needs); the corrected special-contact depth below needs every crossing, so this returns
 //! all real roots that satisfy the crossing condition (up to 4, plus theta = pi, which the Weierstrass
-//! substitution t = tan(theta/2) cannot reach). Deliberately a separate function: findRimCrossing is left
-//! byte-for-byte unchanged so the edge-edge results cannot shift. Returns the number of thetas written.
+//! substitution t = tan(theta/2) cannot reach). Kept separate from findRimCrossing so the edge-edge results
+//! are unaffected. Returns the number of thetas written.
 inline int allRimCrossingsWithLateralSurface(const Vec3& C, const Vec3& u, const Vec3& v, real_t R,
                                              const Vec3& targetPos, const Vec3& eTarget, real_t targetRadius,
                                              real_t thetasOut[5])
@@ -1001,16 +923,11 @@ inline int allRimCrossingsWithLateralSurface(const Vec3& C, const Vec3& u, const
    return n;
 }
 
-//! Kodam et al. (2010) eq. 40-44: exact face-band contact point, replacing an earlier version of
-//! this file that approximated it by reusing the face-face/band-band-parallel point construction
-//! (faceFaceStyleContactPoint) with 2*cj.radius substituted for the radial overlap -- verified by
-//! hand against the paper's own PDF (Kodam, Bharadwaj, Curtis, Hancock & Wassgren (2010), Chemical
-//! Engineering Science 65(22), 5852-5862) to be a materially different point in general, not merely
-//! a stylistic simplification: for PaperAnalyticalContactTest.cpp's own testCylinderCylinderFaceBand
-//! geometry, the approximation returns cylinder i's own axis (0,0) purely because that test happens
-//! to use equal radii (ci.radius == cj.radius, cancelling eq. 43's (Ri-Rj) term to zero); the exact
-//! construction below returns (0, 0.45) instead -- offset toward cylinder j's actual centre, as
-//! physically expected.
+//! Kodam et al. (2010) eq. 40-44: exact face-band contact point. Reusing the face-face/band-band-parallel point
+//! construction (faceFaceStyleContactPoint) with 2*cj.radius substituted for the radial overlap gives a materially
+//! different point in general: for PaperAnalyticalContactTest.cpp's testCylinderCylinderFaceBand geometry it
+//! returns cylinder i's own axis (0,0) only because the test uses equal radii (cancelling eq. 43's (Ri-Rj) term),
+//! whereas the exact construction below returns (0, 0.45), offset toward cylinder j's centre as expected.
 //!
 //! `relI` is cylinder j's centre in cylinder i's body frame (so cylinder i's near face lies at
 //! z = sign(relI[2])*halfLi); `axisJInI` is cylinder j's axis expressed in the SAME frame; `halfLj`
@@ -1018,18 +935,16 @@ inline int allRimCrossingsWithLateralSurface(const Vec3& C, const Vec3& u, const
 //! overlap (eq. 38). Returns the contact point in cylinder i's body frame (caller transforms to
 //! world via ci.pos + ci.R * result).
 //!
-//! Eq. 40-41 construct line AB by taking cylinder j's own centreline and translating it (purely
-//! along cylinder i's z-axis, NOT radially -- there is no cj.radius term in eq. 40-41 at all) onto
-//! cylinder i's near face plane. Eq. 42/43 place the contact point at AB's own midpoint when AB lies
-//! fully inside i's face disc (radius Ri); eq. 44 places it at the midpoint of B and the disc-
-//! boundary crossing point D when AB pokes out through one end, a line-circle intersection the paper
-//! declines to spell out ("the solution is straightforward and will not be presented here"). Solved
-//! here directly via the standard finite line-segment/circle intersection quadratic, which reduces
-//! exactly to eq. 43 (both endpoints inside -> tLo=-halfLj, tHi=halfLj -> midpoint = AB's own centre)
-//! and eq. 44 (one endpoint inside -> tLo or tHi = the surviving endpoint, the other = the crossing
-//! point) in their respective regimes, and additionally covers a case neither eq. 42 nor eq. 44
-//! explicitly names -- AB poking out through BOTH ends (a long, narrow cylinder j straddling a much
-//! smaller face i, as in the geometry above) -- by midpointing the two crossing points instead.
+//! Eq. 40-41 construct line AB by translating cylinder j's centreline (purely along cylinder i's z-axis, NOT
+//! radially -- eq. 40-41 have no cj.radius term) onto cylinder i's near face plane. Eq. 42/43 place the contact
+//! point at AB's midpoint when AB lies fully inside i's face disc (radius Ri); eq. 44 places it at the midpoint of
+//! B and the disc-boundary crossing point D when AB pokes out through one end, a line-circle intersection the
+//! paper does not spell out ("the solution is straightforward and will not be presented here"). Solved here via
+//! the finite segment/circle intersection quadratic, which reduces exactly to eq. 43 (both endpoints inside ->
+//! tLo=-halfLj, tHi=halfLj -> AB's centre) and eq. 44 (one endpoint inside -> tLo or tHi = the surviving endpoint,
+//! the other = the crossing point), and also covers AB poking out through BOTH ends (a long, narrow cylinder j
+//! straddling a much smaller face i, as in the geometry above), which neither eq. 42 nor eq. 44 names, by
+//! midpointing the two crossing points.
 inline Vec3 faceBandContactPoint(const Vec3& relI, const Vec3& axisJInI, real_t halfLj, real_t Ri,
                                   real_t halfLi, real_t overlap)
 {
@@ -1056,9 +971,8 @@ inline Vec3 faceBandContactPoint(const Vec3& relI, const Vec3& axisJInI, real_t 
       }
       if (clampToNearest)
       {
-         // Shouldn't occur given the caller's own containment gate (eq. 34/36/37) already established
-         // a real contact; if floating-point edge cases ever land here anyway, degrade gracefully to
-         // the point on the finite segment nearest cylinder i's axis rather than an undefined chord.
+         // Should not occur after the caller's containment gate (eq. 34/36/37); on floating-point edge cases,
+         // use the point on the finite segment nearest cylinder i's axis rather than an undefined chord.
          const real_t tNear = std::clamp(-m / k, -halfLj, halfLj);
          tLo = tHi = tNear;
       }
@@ -1069,10 +983,9 @@ inline Vec3 faceBandContactPoint(const Vec3& relI, const Vec3& axisJInI, real_t 
    return Vec3(cx + tMid * ux, cy + tMid * uy, pz);
 }
 
-//! Closest squared distance between two finite line segments P1->Q1 and P2->Q2 -- thin wrapper around
-//! detail::closestPointsBetweenSegments (defined near the top of this file, before boxBoxSAT, since
-//! that function needs it too -- kept as its own entry point since most callers, e.g. the
-//! cylinder-cylinder capsule bound below, only need the distance, not the witness points).
+//! Closest squared distance between two finite line segments P1->Q1 and P2->Q2: wrapper around
+//! detail::closestPointsBetweenSegments (ClosedFormContactsBoxPoint.h) for callers that need only the distance,
+//! e.g. the cylinder-cylinder capsule bound.
 inline real_t closestDistanceSqBetweenSegments(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec3& q2)
 {
    Vec3 c1, c2;
@@ -1089,10 +1002,8 @@ inline void cylinderAxisEndpoints(const CylinderState& c, Vec3& p0, Vec3& p1)
 }
 
 //! An oriented box's own support-function value (half-width of its projection) along a given WORLD
-//! direction -- dirWorld MUST be unit length. Standard OBB-projection formula (the same one full SAT
-//! uses internally for each of its 15 candidate axes, here applied to just ONE direction): the box's
-//! projected half-extent is the sum of each local half-extent weighted by how aligned that local axis
-//! is with dirWorld.
+//! direction -- dirWorld MUST be unit length. Standard OBB-projection formula (as used by full SAT for each of
+//! its 15 candidate axes): the sum of each local half-extent weighted by |local axis . dirWorld|.
 inline real_t boxSupportAlongDirection(const Vec3& halfExtents, const Mat3& R, const Vec3& dirWorld)
 {
    return halfExtents[0] * std::abs(dirWorld * Vec3(R(0, 0), R(1, 0), R(2, 0))) +
@@ -1100,16 +1011,12 @@ inline real_t boxSupportAlongDirection(const Vec3& halfExtents, const Mat3& R, c
           halfExtents[2] * std::abs(dirWorld * Vec3(R(0, 2), R(1, 2), R(2, 2)));
 }
 
-//! CONSERVATIVE box-box separation test using only ONE candidate separating axis (the line between
-//! the two centres) instead of full SAT's 15 -- cheap (a handful of dot products, no iteration), at
-//! the cost of completeness: unlike full SAT, this can produce false NEGATIVES (says "can't rule out
-//! contact" for a pair that's actually separated along some other axis, e.g. a true edge-edge
-//! separating axis this never tests), but per the separating-axis theorem it can NEVER produce a
-//! false positive rejection -- if the two boxes' projections onto this one legitimate candidate axis
-//! don't overlap, the boxes themselves provably don't overlap, regardless of what any other axis
-//! would have shown. Intended purely as a cheap Layer 1 pre-filter ahead of the real (exact) boxBoxSAT
-//! test, exactly mirroring closestDistanceSqBetweenSegments's role for cylinders -- NOT a replacement
-//! for SAT, which remains the sole source of truth for actual contact/overlap/normal.
+//! CONSERVATIVE box-box separation test using only ONE candidate separating axis (the line between the two
+//! centres) instead of full SAT's 15: a handful of dot products, but incomplete -- it can fail to reject a pair
+//! separated along some other axis (e.g. an edge-edge axis), yet by the separating-axis theorem it never rejects
+//! an overlapping pair: if the projections onto this legitimate candidate axis do not overlap, the boxes do not
+//! overlap. A cheap pre-filter ahead of the exact boxBoxSAT (as closestDistanceSqBetweenSegments is for
+//! cylinders), not a replacement for it.
 inline bool boxesDefinitelySeparatedAlongCenterLine(const Vec3& posA, const Mat3& RA, const Vec3& halfA,
                                                      const Vec3& posB, const Mat3& RB, const Vec3& halfB)
 {
@@ -1124,9 +1031,8 @@ inline bool boxesDefinitelySeparatedAlongCenterLine(const Vec3& posA, const Mat3
 
 //! Cylinder-plane contact: face-plane, band-plane, edge-plane (eq. 2-21). Formulated directly in
 //! world-space vectors rather than constructing the paper's separate plane-local rotation matrix
-//! R^{PG} -- mathematically equivalent (R^{PG} is only ever used to take components along
-//! `planeNormal` and within the plane), simpler to implement correctly without a compiler in the
-//! loop to catch a transposed-matrix mistake.
+//! R^{PG} -- mathematically equivalent (R^{PG} is only used to take components along `planeNormal` and within
+//! the plane) and less prone to a transposed-matrix mistake.
 inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& planePos,
                                            const Vec3& planeNormalIn)
 {
@@ -1174,13 +1080,10 @@ inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& 
       result.contact  = true;
       result.overlap  = std::abs(zE);                                          // eq. 19
       result.normal   = math::sign(zCyl) * nHat;                               // eq. 20
-      // eq. 21 is z_E^P - sign(z_E^P)*0.5*delta, i.e. measured from E's OWN height, not from the
-      // plane (z=0). An earlier version first projected E onto the plane (eOnPlane = E - zE*nHat,
-      // height forced to exactly 0) before applying this offset, which silently shifts the result by
-      // an extra zE and places the point on the wrong side of the plane entirely -- e.g. zCyl=+2,
-      // zE=-1 (a genuine overlap, midpoint physically at z=-0.5) previously produced z=+0.5, outside
-      // the overlap region altogether. rimVsFaceOrBand's structurally identical face-edge branch
-      // (below) never had this bug, since it applies the offset to E directly; this now matches it.
+      // eq. 21 is z_E^P - sign(z_E^P)*0.5*delta, i.e. measured from E's OWN height, not from the plane (z=0).
+      // Applying the offset to E projected onto the plane would shift the result by an extra zE onto the wrong
+      // side of the plane (e.g. zCyl=+2, zE=-1: midpoint at z=-0.5, not +0.5). rimVsFaceOrBand's face-edge branch
+      // applies the offset to E the same way.
       result.point    = E - math::sign(zE) * real_t(0.5) * result.overlap * nHat; // eq. 21
       result.scenario = "edge-plane";
    }
@@ -1190,13 +1093,12 @@ inline ContactResult cylinderPlaneContact(const CylinderState& cyl, const Vec3& 
 //! Sphere-Cylinder contact -- NOT part of Kodam et al. or Guo et al. (neither paper addresses mixed
 //! shape pairs at all); developed for this project, unlike sphere-sphere and sphere-box, which predate
 //! it in mesa_pd's own AnalyticCollisionFunctions.h (detectSphereSphereCollision/detectSphereBoxCollision,
-//! S. Eibl 2019). Exact and closed-form, and -- like boxBoxSAT -- needs no GJK/EPA fallback at all: the
-//! cylinder's own closest-point-to-an-external-point mapping (the natural "clamp" counterpart to its
-//! own support mapping, exactly the relationship detectSphereBoxCollision's box clamp has to the box's
-//! own support mapping) is a COMPLETE, exact solution to the sphere-cylinder minimum-translation-
-//! distance problem, not a named-scenario heuristic the way Kodam et al.'s cylinder-cylinder dispatch
-//! is -- there is no configuration this construction fails to cover, so unlike cylinderCylinderContact
-//! it carries no companion "is this result uncertain" gate.
+//! S. Eibl 2019). Exact and closed-form and, like boxBoxSAT, needs no GJK/EPA fallback: the cylinder's
+//! closest-point-to-an-external-point mapping (the "clamp" counterpart to its support mapping, as
+//! detectSphereBoxCollision's clamp is for the box) is a COMPLETE, exact solution to the sphere-cylinder
+//! minimum-translation-distance problem, not a named-scenario heuristic like Kodam et al.'s cylinder-cylinder
+//! dispatch. It covers every configuration, so unlike cylinderCylinderContact it has no "is this result
+//! uncertain" gate.
 //!
 //! Convention matches this file throughout: normal points from the 2nd argument (the cylinder) toward
 //! the 1st (the sphere); overlap positive = penetrating.
@@ -1212,19 +1114,16 @@ inline ContactResult sphereCylinderContact(const Vec3& spherePos, real_t sphereR
    const Vec3   radialVec = rel - z * eZ;           // radial component, world frame
    const real_t rho   = radialVec.length();
 
-   // Arbitrary but well-defined radial direction for the degenerate case (sphere centre exactly ON
-   // the cylinder's own axis, rho=0) -- same "pick any consistent perpendicular" resolution already
-   // used throughout this file (detail::perpendicularBasis) rather than leaving a 0/0 direction.
+   // Arbitrary but well-defined radial direction for the degenerate case (sphere centre exactly ON the axis,
+   // rho=0), via detail::perpendicularBasis, instead of a 0/0 direction.
    Vec3 uArb, vArb;
    detail::perpendicularBasis(eZ, uArb, vArb);
    const Vec3 radialDir = (rho > real_t(1e-12)) ? radialVec / rho : uArb;
 
    if (rho > cyl.radius || std::abs(z) > halfL)
    {
-      // Sphere centre outside the (solid, capped) cylinder: closest surface point is the independent
-      // radial/axial clamp -- covers band, cap, and rim proximity uniformly, with no separate case
-      // count the way a box's 3 independent per-axis clamps need (a cylinder has only two surface
-      // families, band and cap, instead of three pairs of faces).
+      // Sphere centre outside the (solid, capped) cylinder: the closest surface point is the independent
+      // radial/axial clamp, covering band, cap and rim proximity uniformly (two surface families, band and cap).
       const real_t rhoC = std::min(rho, cyl.radius);
       const real_t zC   = std::clamp(z, -halfL, halfL);
       const Vec3   q    = rhoC * radialDir + zC * eZ; // closest point, relative to cylinder centre
@@ -1239,10 +1138,8 @@ inline ContactResult sphereCylinderContact(const Vec3& spherePos, real_t sphereR
    }
    else
    {
-      // Sphere centre embedded inside the cylinder: push out through whichever surface (band or
-      // nearer cap) has the least remaining clearance, the same "closest way out" logic
-      // detectSphereBoxCollision uses for an embedded sphere centre, generalized from 3 face pairs
-      // to this shape's 2 surface families.
+      // Sphere centre embedded inside the cylinder: push out through the surface (band or nearer cap) with the
+      // least clearance, the "closest way out" logic of detectSphereBoxCollision for an embedded centre.
       const real_t radialClearance = cyl.radius - rho;
       const real_t axialClearance  = halfL - std::abs(z);
 
@@ -1275,7 +1172,8 @@ inline Vec3 faceFaceStyleContactPoint(const Vec3& relBodyI, real_t Ri, real_t Li
    const Vec3   rHat = (rho > real_t(1e-10)) ? Vec3(x, y, real_t(0)) / rho : Vec3(real_t(1), real_t(0), real_t(0));
    const Vec3   xyContact = (Ri - real_t(0.5) * deltaRadial) * rHat;                        // eq. 31
    const real_t zContact  = z - math::sign(z) * (real_t(0.5) * Li - real_t(0.5) * deltaAxial); // eq. 32
-   return Vec3(xyContact[0], xyContact[1], zContact);                                        // body-i frame; caller transforms to world
+   // body-i frame; caller transforms to world
+   return Vec3(xyContact[0], xyContact[1], zContact);
 }
 
 } // namespace closed_form_contacts

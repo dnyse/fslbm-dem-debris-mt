@@ -95,14 +95,13 @@ class VectorFieldFlattenedHandling : public field::BlockDataHandling< VectorFiel
 
 class HydrostaticDensityFtor {
 public:
-   // Static reference height (legacy / useDynamicReferenceHeight=false): a fixed constant for the whole run.
+   // Static reference height (useDynamicReferenceHeight=false): a fixed constant for the whole run.
    HydrostaticDensityFtor(const std::shared_ptr< Vector3 < real_t > >& acceleration, const real_t absoluteLiquidHeight) :
    acceleration_(acceleration), absoluteLiquidHeight_(absoluteLiquidHeight), dynamicHeight_(nullptr) {}
 
-   // Live reference height (useDynamicReferenceHeight=true): re-read every call from a shared_ptr that
-   // ParticleKernels' computeSubmergedVolumes() EMA-updates each step from the floaters' fitted local
-   // waterlines. Force-side only (see SimpleBB.h: rhoHydStat feeds only forceMEM, never the fluid field),
-   // so updating it here has no PDF/reconstruction feedback.
+   // Live reference height (useDynamicReferenceHeight=true): re-read on every call from a shared_ptr that
+   // ParticleKernels' computeSubmergedVolumes() EMA-updates each step from the floaters' fitted local waterlines.
+   // Force side only (SimpleBB.h: rhoHydStat feeds only forceMEM, never the fluid field).
    HydrostaticDensityFtor(const std::shared_ptr< Vector3 < real_t > >& acceleration,
                           const std::shared_ptr< real_t >& dynamicHeight) :
    acceleration_(acceleration), absoluteLiquidHeight_(real_t(0)), dynamicHeight_(dynamicHeight) {}
@@ -181,14 +180,10 @@ void initPdfFieldPoiseuille(const std::shared_ptr<const SimulationParams>& simPa
    auto bf = simObjs->blockForest;
    const real_t rho = real_c(1);
 
-   // Deliberately NOT (*simObjs->acceleration)[0] here: that value can be a fixed driving force
-   // calibrated against an obstacle's own hydraulic drag (PIDParameters.accelerationXOverride),
-   // many times larger than an unobstructed channel needs for the same target mean velocity.
-   // Feeding an obstacle-inclusive force into this unobstructed-channel formula overshoots the true
-   // profile by the same factor, producing an initial peak velocity that can violate the LBM's
-   // low-Mach stability limit. Always use the plain-channel analytical estimate for this initial
-   // guess; the flow develops its own correct profile near the obstacle over subsequent timesteps
-   // regardless of the starting guess.
+   // Deliberately not (*simObjs->acceleration)[0]: that may be an obstacle-calibrated driving force
+   // (PIDParameters.accelerationXOverride), many times larger than an unobstructed channel needs, which would make
+   // this plain-channel profile overshoot and violate the low-Mach limit. The plain-channel estimate is only the
+   // initial guess; the flow develops its own profile near the obstacle.
    const real_t accelerationXInitGuess = real_c(3) * simParams->pid.targetMeanVelocityMagnitude *
                                           simParams->computed.viscosity /
                                           (simParams->computed.liquidHeight * simParams->computed.liquidHeight);

@@ -14,37 +14,26 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file QuarticSolverComparisonTest.cpp
-//! Direct time/accuracy comparison of the three quartic-root-finding methods available in
-//! PaperAnalyticalContacts.h's `detail` namespace: solveQuarticDurandKerner (production default, both
-//! at its current 30-iteration default and the original 60), solveQuarticFerrari (closed-form, no
-//! iteration), and solveQuarticAberthEhrlich (same simultaneous-refinement family as Durand-Kerner, but
-//! with a full-Newton correction term -- textbook claim: cubic vs quadratic convergence order, tested
-//! here both at the same 30-iteration budget and at a reduced 10 to see whether that faster convergence
-//! actually lets it get away with fewer sweeps).
+//! Time/accuracy comparison of the three quartic root finders in the `detail` namespace of
+//! ClosedFormContactsCylinderPlaneGeometry.h: solveQuarticDurandKerner (default; at its 30-iteration default and at
+//! 60), solveQuarticFerrari (closed form, no iteration) and solveQuarticAberthEhrlich (same simultaneous-refinement
+//! family with a full Newton correction: cubic instead of quadratic convergence order; tested at 30 and at 10
+//! iterations to see whether it gets away with fewer sweeps).
 //!
-//! Unlike PaperAnalyticalContactTest.cpp's fuzz tests (which generate cylinder-cylinder GEOMETRY and
-//! only indirectly probe the quartic through the resulting contact classification), this file generates
-//! quartics from KNOWN roots directly and compares each solver's output against that ground truth --
-//! the only way to answer "how accurate is this solver" without the answer being relative to another
-//! solver's own possible error. Five categories of root configuration are covered, chosen specifically
-//! because they stress the two methods differently:
-//!   0) four real roots, widely separated                    -- the "easy" case for everything.
-//!   1) four real roots with one CLOSE pair                   -- stresses iterative convergence rate.
-//!   2) two real roots + one complex-conjugate pair            -- the common case in the actual
-//!      geometric application (a quartic-in-tan(theta/2) generally has 0 or 2 real roots, not 4).
-//!   3) two complex-conjugate pairs, NO real roots             -- the "no valid theta" case.
-//!   4) a near-REPEATED real root pair                         -- the genuinely hard case: this is
-//!      exactly where Ferrari's resolvent-cubic discriminant sits near its own branch boundary, and
-//!      where Durand-Kerner/Aberth-Ehrlich's denominators (products/sums of root differences) get
-//!      small and convergence slows.
+//! Quartics are built from known roots, so each solver is compared with ground truth rather than with another
+//! solver. Five root configurations, chosen because they stress the methods differently:
+//!   0) four real roots, widely separated                     -- easy for every method.
+//!   1) four real roots with one close pair                   -- stresses the iterative convergence rate.
+//!   2) two real roots + one complex-conjugate pair           -- the common case in the geometric application
+//!      (a quartic in tan(theta/2) generally has 0 or 2 real roots, not 4).
+//!   3) two complex-conjugate pairs, no real roots            -- the "no valid theta" case.
+//!   4) a near-repeated real root pair                        -- the hard case: Ferrari's resolvent-cubic
+//!      discriminant is near its branch boundary, and the Durand-Kerner/Aberth-Ehrlich denominators (products/sums
+//!      of root differences) get small and convergence slows.
 //!
-//! Timing uses ONE fixed representative quartic (category 2, the realistic case) in a tight repeated
-//! call loop, same methodology as CylinderCylinderContactBenchmark.cpp (volatile sink to defeat
-//! dead-code elimination; fixed input so what's measured is pure per-call algorithmic cost).
-//!
-//! NOT wired into any production call site -- PaperAnalyticalContacts.h's file header already states
-//! this whole header is unused by the actual simulation; this file exists purely to inform whether
-//! solveQuarticDurandKerner should ever be replaced.
+//! Timing uses one fixed category-2 quartic in a tight call loop, as in CylinderCylinderContactBenchmark.cpp
+//! (volatile sink against dead-code elimination; fixed input, so only per-call cost is measured).
+//! Informs whether solveQuarticDurandKerner should be replaced.
 //======================================================================================================================
 
 #include "ClosedFormContacts.h"
@@ -73,9 +62,8 @@ namespace quartic_compare
 using Complex = std::complex< real_t >;
 
 //======================================================================================================================
-// Ground-truth generation: build (c4,c3,c2,c1,c0) by expanding c4*(x-r0)(x-r1)(x-r2)(x-r3) from four
-// KNOWN roots (real or complex-conjugate-paired, so the expanded coefficients come out real by
-// construction -- .real() below only strips floating-point noise, never a genuine imaginary residual).
+// Ground truth: expand c4*(x-r0)(x-r1)(x-r2)(x-r3) from four known roots (real or conjugate pairs, so the
+// coefficients are real by construction; .real() only strips floating-point noise).
 //======================================================================================================================
 struct QuarticProblem
 {
@@ -146,9 +134,8 @@ QuarticProblem randomProblem(FuzzRng& fuzz, int category)
    }
 }
 
-//! Greedy nearest-neighbour matching between the 4 known true roots and a solver's 4 computed roots --
-//! returns the WORST (max) matched distance, since a single badly-wrong root among four is exactly the
-//! kind of failure that a mean would dilute into invisibility.
+//! Greedy nearest-neighbour matching of the 4 true roots to a solver's 4 roots; returns the worst (max) matched
+//! distance, because a mean would dilute a single badly wrong root.
 real_t maxMatchedRootError(const Complex trueRoots[4], const Complex computed[4])
 {
    bool   used[4] = { false, false, false, false };
@@ -194,9 +181,8 @@ void report(const char* categoryLabel, const char* solverLabel, const AccuracySt
 }
 
 //======================================================================================================================
-// Timing harness -- same methodology as CylinderCylinderContactBenchmark.cpp's timeIt: a volatile sink
-// forces the compiler to materialize each call's result so the optimizer cannot prove the loop has no
-// observable effect and delete it.
+// Timing harness as in CylinderCylinderContactBenchmark.cpp's timeIt: a volatile sink keeps the optimizer from
+// deleting the loop.
 //======================================================================================================================
 volatile const void* g_optimizationSink = nullptr;
 
@@ -233,7 +219,7 @@ int main(int argc, char** argv)
    using namespace walberla::antidunes::closed_form_contacts::quartic_compare;
 
    //===================================================================================================================
-   // Phase 1: accuracy, against known ground-truth roots, across 5 root-configuration categories.
+   // Phase 1: accuracy against known roots, 5 root-configuration categories.
    //===================================================================================================================
    constexpr int numTrialsPerCategory = 4000;
    const char*   categoryLabels[5]    = { "0) 4 real, well-separated", "1) 4 real, one CLOSE pair",
@@ -270,8 +256,7 @@ int main(int argc, char** argv)
    }
 
    //===================================================================================================================
-   // Phase 2: timing, fixed representative geometry (category-2 style: 2 real + 1 conjugate pair, the
-   // realistic case for this file's actual geometric application), tight repeated-call loop.
+   // Phase 2: timing, one fixed category-2 quartic (2 real roots + 1 conjugate pair), tight call loop.
    //===================================================================================================================
    constexpr uint64_t N = 2000000;
    const QuarticProblem timingProblem =

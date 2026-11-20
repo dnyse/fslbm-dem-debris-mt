@@ -1,11 +1,11 @@
 //======================================================================================================================
 //! \file KodamRoundSpikeProbeTest.cpp
-//! [Claude, 2026-10-10] Diagnostic for the energy spike of the round-container drop test (job 4292501, step 125000,
-//! REV2-I-015): cylinders A (uid 2882303761517117441, upright on the floor at the container wall) and B (uid
-//! 5764607523034234885, stacked on A) overlap by ~0.46 LU in the VTK output from step 118000 on. Poses from
-//! vtk-out/floaterCylinder (VTK rows = R col0, R col2, -R col1; converted to quaternions by the scratch script poses.py).
-//! For each output step: raw closed form, production dispatch (closed form + GJK/EPA fallback, useTightLayer1 as in the
-//! prm) and plain GJK/EPA, plus the axial face-face overlap of the two (nearly coaxial) cylinders as a geometric check.
+//! Diagnostic for an energy spike in the round-container drop test: cylinder A (upright on the floor at the container
+//! wall) and cylinder B (stacked on A) overlap by ~0.46 LU in the recorded VTK output from step 118000 on. Poses are
+//! taken from that output (VTK rows = R col0, R col2, -R col1, converted to quaternions).
+//! For each output step: raw and refined closed form, production dispatch (closed form + GJK/EPA fallback,
+//! useTightLayer1) and plain GJK/EPA, plus the axial face-face overlap of the two (nearly coaxial) cylinders as a
+//! geometric check. No pass criterion. KODAM_AXIAL enables kodamBandEdgeAxialCheck, KODAM_SWEEP runs sweep() instead.
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
@@ -79,9 +79,9 @@ void probe(const Sample& s)
       std::cout << "\n";
    }
 }
-// Sweep around the step-125000 pose: B's relative rotation to A scaled by f (0 = coaxial-parallel, 1 = as in the run) and
-// B's lateral offset (perpendicular to A's axis) scaled by g; axial position unchanged. Prints scenario / depth / normal z
-// of the production dispatch and the plain GJK/EPA depth.
+// Sweep around the step-125000 pose: B's rotation relative to A scaled by f (0 = coaxial-parallel, 1 = as in the run)
+// and B's lateral offset (perpendicular to A's axis) scaled by g; axial position unchanged. Prints scenario / depth /
+// normal z of the production dispatch and the plain GJK/EPA depth.
 void sweep()
 {
    const Sample& s0 = samples[14]; // step 125000
@@ -98,8 +98,8 @@ void sweep()
    const Vec3 dAx = (d * axA) * axA, dLat = d - dAx;
    std::cout << "sweep at step 125000: relative rotation " << ang * real_t(180) / math::pi << " deg, lateral offset " << dLat.length() << "\n";
    const mesa_pd::data::Cylinder shape(r, L);
-   // (1) B's own orientation (anti-parallel to A, own spin kept), its axis turned so that the angle to -axA is fDeg in the
-   //     plane of the actual tilt; (2) the same with B flipped to be parallel to A (rotated 180 deg about a horizontal axis).
+   // (1) B's own orientation (anti-parallel to A, own spin kept), its axis turned so that the angle to -axA is fDeg
+   //     in the plane of the actual tilt; (2) the same with B flipped parallel to A (180 deg about a horizontal axis).
    const auto Rb0 = rotB.getMatrix();
    const Vec3 axB0(Rb0(0, 2), Rb0(1, 2), Rb0(2, 2));
    for (int flip = 0; flip < 2; ++flip)
@@ -145,7 +145,8 @@ int main(int argc, char** argv)
 {
    walberla::Environment env(argc, argv); WALBERLA_UNUSED(env);
    walberla::mpi::MPIManager::instance()->useWorldComm();
-   walberla::antidunes::closed_form_contacts::kodamBandEdgeAxialCheck = (std::getenv("KODAM_AXIAL") != nullptr); // [Claude, 2026-10-10] the fix
+   // KODAM_AXIAL set: enable the band-edge consistency check
+   walberla::antidunes::closed_form_contacts::kodamBandEdgeAxialCheck = (std::getenv("KODAM_AXIAL") != nullptr);
    std::cout << "kodamBandEdgeAxialCheck = " << walberla::antidunes::closed_form_contacts::kodamBandEdgeAxialCheck << "\n";
    if (std::getenv("KODAM_SWEEP")) { walberla::antidunes::sweep(); return EXIT_SUCCESS; }
    for (const auto& s : walberla::antidunes::samples) walberla::antidunes::probe(s);

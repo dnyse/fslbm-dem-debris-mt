@@ -1,30 +1,24 @@
 //======================================================================================================================
 //! \file RodSpinSubstepResolutionTest.cpp
-//! Follow-up to CylinderTippingRodJamTest.cpp for the job 4255679 crash: that test showed GJK/EPA correctly tracked a
-//! genuine, large geometric overlap as rod uid 3530822107858468888 toppled past its neighbour uid ...885 -- so the
-//! open question is why the rod rotated fast enough, within the window bracketed by the [CylForces] log, to sweep
-//! through that overlap-generating arc at all. This does NOT recover the (unlogged) instantaneous angular velocity --
-//! no FloaterHistoryLogger was enabled for this run, and the tiltY diagnostic is only printed once per
-//! evaluationFrequency (100 steps here) -- instead it makes the DEM contact model's own substep-resolution assumption
-//! explicit and checks the real, logged data against it:
+//! Companion to CylinderTippingRodJamTest.cpp: that test shows GJK/EPA correctly tracks a genuine, large overlap as a
+//! rod topples past its neighbour. This test asks whether the rod's rotation was fast enough to be under-resolved by
+//! the DEM contact model. The instantaneous angular velocity was not logged, so it compares the model's substep
+//! resolution with the logged data instead:
 //!
-//!   - the model's own calibrated collision duration is tc = collisionTimeFactor * avgParticleDiameter [main LBM
-//!     steps] (SimulationParams.h's own documented formula: LinearSpringDashpot's stiffness is picked so a normal
-//!     head-on collision between two average-diameter particles resolves in ~tc steps, independent of numSubCycles).
-//!     For hopper_clog_cyl_frontblock_pidon_2node_halfrows_gas.prm (job 4255679's own prm): collisionTimeFactor is
-//!     not overridden (default 4), avgParticleDiameterOverride=8.001943372119138, numSubCycles=10.
-//!   - the real log brackets uid 888's tiltY at -3.634916 deg (step 2700) and +167.240066 deg (step 2900): the only
-//!     two logged points either side of the flip, net ~170.87 deg over 200 main steps.
-//!   - re-runs CylinderTippingRodJamTest.cpp's own tilt sweep (same real logged centre separation, rod A at rest) to
-//!     find the theta-interval where the true overlap exceeds 1 LU -- the part of the rotation that actually matters.
+//!   - calibrated collision duration tc = collisionTimeFactor * avgParticleDiameter [main LBM steps]
+//!     (SimulationParams.h: LinearSpringDashpot's stiffness is chosen so a head-on collision of two average-diameter
+//!     particles lasts ~tc steps, independent of numSubCycles). Run parameters: collisionTimeFactor 4 (default),
+//!     avgParticleDiameterOverride 8.001943372119138, numSubCycles 10.
+//!   - the logged tiltY of the rod is -3.634916 deg at step 2700 and +167.240066 deg at step 2900, the only two logged
+//!     points either side of the flip: net ~170.87 deg over 200 main steps.
+//!   - the tilt sweep of CylinderTippingRodJamTest.cpp (same logged centre separation, rod A at rest) gives the
+//!     theta interval where the exact overlap exceeds 1 LU (the "dangerous arc").
 //!
-//! What this computes: IF the observed net rotation happened at a perfectly UNIFORM rate across the whole 200-step
-//! bracket (the best case for the model -- any real burstiness only makes the true local rate faster), how many
-//! sub-steps would the rod have spent crossing the dangerous arc, versus tc? This is a LOWER BOUND on how fast the
-//! true, local rotation must have been; it cannot identify WHAT made the rod spin up (a lost supporting contact, an
-//! upstream collision, ...), but it can show whether the bracket's own average rate is already marginal against the
-//! model's own calibration, or whether a substantially bursty rotation is required to explain the force spike via
-//! genuine under-resolution.
+//! Computed: assuming the net rotation happened at a uniform rate over the 200-step bracket (best case; any burstiness
+//! only makes the local rate faster), the number of sub-steps spent crossing the dangerous arc, compared with tc. This
+//! is a lower bound on the true local rate. It cannot identify what spun the rod up, only whether the average rate is
+//! already marginal against the calibration or whether a bursty rotation is needed to explain the force spike by
+//! under-resolution. Checks are sanity checks only (tc > 0, net rotation > 90 deg, dangerous arc exists).
 //======================================================================================================================
 #include <core/Environment.h>
 
@@ -58,8 +52,8 @@ inline double support(const Vec3d& n, const Vec3d& a)
 }
 inline double needed(const Vec3d& n, const Vec3d& a1, const Vec3d& a2, const Vec3d& d) { return support(n, a1) + support(n, a2) - d.dot(n); }
 
-//! same ground-truth machinery as CylinderClosedFormRangeTest.cpp / CylinderTippingRodJamTest.cpp, re-derived here
-//! (no header shared between these self-contained diagnostic tests, matching this test directory's own pattern).
+//! same ground-truth machinery as CylinderClosedFormRangeTest.cpp / CylinderTippingRodJamTest.cpp (duplicated, these
+//! diagnostic tests are self-contained).
 double exactPenetrationDepth(const Vec3d& a1, const Vec3d& a2, const Vec3d& d)
 {
    constexpr int N = 4000;
@@ -102,10 +96,10 @@ int main(int argc, char** argv)
    auto check = [&](bool ok, const std::string& what) { if (!ok) { ++failures; std::cout << "FAIL: " << what << std::endl; } };
    std::cout << std::fixed << std::setprecision(3);
 
-   // ---- the DEM model's own calibrated collision duration, from job 4255679's own prm ----
-   const double collisionTimeFactor = 4.0;               // default (SimulationParams.h), not overridden in this prm
+   // ---- calibrated DEM collision duration, parameters of the recorded run ----
+   const double collisionTimeFactor = 4.0;               // default (SimulationParams.h), not overridden
    const double avgParticleDiameter = 8.001943372119138;  // avgParticleDiameterOverride
-   const double numSubCycles        = 10.0;               // this prm's own numSubCycles
+   const double numSubCycles        = 10.0;               // numSubCycles of the run
    const double tcMainSteps = collisionTimeFactor * avgParticleDiameter;
    const double tcSubSteps  = tcMainSteps * numSubCycles;
    std::cout << "calibrated DEM collision duration tc = " << tcMainSteps << " main steps = " << tcSubSteps << " sub-steps\n";
@@ -113,7 +107,7 @@ int main(int argc, char** argv)
              << ", numSubCycles=" << numSubCycles << ")\n\n";
    check(tcSubSteps > 0.0, "calibrated collision duration must be positive");
 
-   // ---- real logged bracket for uid 888's tiltY flip (this run's own [CylForces] stdout, steps 2700/2900) ----
+   // ---- logged tiltY bracket of the toppling rod ([CylForces] output, steps 2700/2900) ----
    const double thetaStart = -3.634916, thetaEnd = 167.240066;
    const double stepStart = 2700.0, stepEnd = 2900.0;
    const double dTheta = thetaEnd - thetaStart, dStep = stepEnd - stepStart;
@@ -124,7 +118,8 @@ int main(int argc, char** argv)
              << avgRateDegPerMainStep / numSubCycles << " deg/sub-step)\n\n";
    check(dTheta > 90.0, "the logged bracket should show a large (>90 deg) net rotation -- sanity check on the pasted-in numbers");
 
-   const Vec3d pa{ 287.687, 9.46882, 57.8675 }, pb{ 283.45, 10.1355, 61.9644 }; // real step-3100 positions, uids 885/888
+   // logged step-3100 positions of rods A and B
+   const Vec3d pa{ 287.687, 9.46882, 57.8675 }, pb{ 283.45, 10.1355, 61.9644 };
    const Vec3d d = pb - pa;
    const Vec3d restAxis{ 0, 1, 0 };
    struct Sweep { const char* name; Vec3d rotAxis; };

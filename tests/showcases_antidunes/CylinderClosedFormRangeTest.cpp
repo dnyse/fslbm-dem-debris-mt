@@ -1,15 +1,19 @@
 //======================================================================================================================
 //! \file CylinderClosedFormRangeTest.cpp
-//! Characterisation test: for which overlap depths is the closed-form Kodam+Guo Cylinder x Cylinder result (closed_form_contacts::cylinderCylinderContact) a correct penetration depth?
+//! Characterisation test: for which overlap depths is the closed-form Kodam+Guo cylinder-cylinder result
+//! (closed_form_contacts::cylinderCylinderContact) a correct penetration depth?
 //!
-//! Background (THESIS_PLAN.md 2026-09-20): in the cylinder hopper rods pile up and interpenetrate by 30-90 % of their volume. There the closed-form dispatch returns e.g. face-edge overlap 0.001 LU or edge-edge
-//! overlap 18 LU for a pair whose true penetration depth is ~5.9 LU (GJK/EPA agrees with the truth). Claim to prove here:
-//!   (1) the exact penetration depth of two convex bodies is  PD = min_n [ h_A(n) + h_B(n) - d.n ]  (h = support function; h(n) = (L/2)|n.a| + R sqrt(1-(n.a)^2)); this is the independent ground truth,
-//!   (2) the closed form is accurate for SHALLOW overlaps and wrong for deep ones (the range is measured below, per depth class),
-//!   (3) a cheap self-consistency check on the closed form -- "how far must B move ALONG THE REPORTED NORMAL to separate?"  needed(n) = h_A(n)+h_B(n)-d.n (min over the two normal orientations) --
-//!       exposes the wrong results: needed(n) >= PD always, so an UNDER-estimate `overlap < needed - tol` is always detectable, and for shallow contacts needed(n) == overlap;
+//! Background: rods piled up in the cylinder hopper interpenetrate by 30-90 % of their volume; there the closed form
+//! returned e.g. face-edge overlap 0.001 LU or edge-edge overlap 18 LU for a pair with true depth ~5.9 LU (GJK/EPA
+//! agrees with the truth). The test shows:
+//!   (1) ground truth: the exact penetration depth of two convex bodies is PD = min_n [ h_A(n) + h_B(n) - d.n ]
+//!       (support function h(n) = (L/2)|n.a| + R sqrt(1-(n.a)^2));
+//!   (2) the closed form is accurate for shallow overlaps and wrong for deep ones (measured per depth class);
+//!   (3) a cheap self-consistency check, needed(n) = h_A(n)+h_B(n)-d.n along the reported normal (min over both
+//!       orientations), exposes wrong results: needed(n) >= PD always, so an under-estimate overlap < needed - tol is
+//!       always detectable, and for shallow contacts needed(n) == overlap;
 //!   (4) GJK/EPA (analytic path off) is accurate at every depth.
-//! The check in (3) is NOT used by production (no fallback is implemented yet); this test only shows that it would separate right from wrong.
+//! The check in (3) is not a production fallback; this test only shows that it would separate right from wrong.
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
@@ -37,8 +41,9 @@ inline double support(const Vec3& n, const Vec3& a)
 }
 inline double needed(const Vec3& n, const Vec3& a1, const Vec3& a2, const Vec3& d) { return support(n, a1) + support(n, a2) - double(d * n); }
 
-//! cheap UPPER bound on the exact depth: PD <= needed(n) for EVERY direction n, so the minimum over a few canonical candidate directions bounds it from above
-//! (axes, centre line, common perpendicular, radial directions of each rod). An analytic overlap above this bound (+tol) is certainly an over-estimate.
+//! cheap upper bound on the exact depth: PD <= needed(n) for every n, so the minimum over a few candidate directions
+//! (axes, centre line, common perpendicular, radial directions of each rod) bounds it. An analytic overlap above this
+//! bound (+tol) is certainly an over-estimate.
 double upperBound(const Vec3& a1, const Vec3& a2, const Vec3& d, const Vec3& reported)
 {
    auto unit = [](const Vec3& v, Vec3& out) { const double l = v.length(); if (l < 1e-9) return false; out = v / real_t(l); return true; };
@@ -140,7 +145,7 @@ int main(int argc, char** argv)
    auto check = [&](bool ok, const std::string& what) { if (!ok) { ++failures; std::cout << "FAIL: " << what << std::endl; } };
    const double tol = 0.05 * kR;   // verifier tolerance: 5 % of the radius
 
-   // ---------------- (A) real pairs from the cylinder-hopper floater log (job 4250907, steps 5650/5850): deeply nested rods ----------------
+   // ---- (A) recorded pairs from a cylinder-hopper floater history (steps 5650/5850): deeply nested rods ----
    struct Real { const char* name; double x1, y1, z1, q1[4], x2, y2, z2, q2[4]; };
    const Real real[] = {
       { "step5650 rods 176/180", 353.428, 10.0374, 33.9364, { 0.675649, -0.632585, 0.378261, 0.0159054 }, 352.427, 10.0585, 34.7087, { 0.662445, -0.664601, -0.116257, -0.325508 } },
@@ -182,7 +187,7 @@ int main(int argc, char** argv)
       ++accepted; ++b->n;
       if (wantGjk) { ++b->gjkN; b->gjkMax = std::max(b->gjkMax, std::abs(e.gjk - exact)); if (std::abs(e.gjk - exact) > 0.25) ++b->gjkBad; }
       if (e.contact) ++b->detected;
-      // a missed contact (closed form finds nothing) is NOT a silent error in production -- the dispatch falls back to GJK/EPA then -- so it is counted as "flagged" under-estimate
+      // a missed contact is not silent in production (the dispatch falls back to GJK/EPA): flagged under-estimate
       const double err = e.contact ? e.overlap - exact : -exact;
       b->sumErr += std::abs(err);
       const bool flaggedUnder = !e.contact || (e.need - e.overlap > tol);

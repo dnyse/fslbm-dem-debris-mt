@@ -14,34 +14,21 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file CapsuleShapeTest.cpp
-//! [Claude, 2026-09-26] Unit tests for mesa_pd::data::Capsule ("pill" shape: a cylinder with two
-//! hemispherical end caps), per explicit request ("Create a test suite for the pills"). Written
-//! directly off the back of a real bug found and fixed in this same session: Capsule had NO
-//! mesa_pd::ContainsPointFunctor overload in src/mesa_pd/common/Contains.h -- the fluid-obstacle
-//! mapping (MovingParticleMapping.h, via SingleCast) would have hard-aborted with
-//! "ContainsPoint not implemented!" at the very first particle-to-lattice mapping call, caught only
-//! by manual code audit before a cluster job ever ran with capsule rods. This file's
-//! testCapsuleContainsPoint_* cases are written specifically to catch a regression of exactly that
-//! class of gap -- and specifically to distinguish a TRUE capsule (rounded caps) from a flat-capped
-//! cylinder of the same (radius, height), since that distinction is precisely where a lazy/wrong
-//! implementation (e.g. accidentally reusing isPointInsideCylinderBF) would still pass a naive
-//! on-axis-only test but fail at the rounded corners.
+//! Unit tests for mesa_pd::data::Capsule (a cylinder with two hemispherical end caps).
+//!
+//! The ContainsPoint cases guard the ContainsPointFunctor overload in src/mesa_pd/common/Contains.h; without it
+//! the fluid-obstacle mapping (MovingParticleMapping.h, via SingleCast) aborts with "ContainsPoint not implemented!".
+//! They distinguish rounded caps from flat caps, which an on-axis-only test would not.
 //!
 //! Coverage:
-//!  - Volume/mass/inertia: analytic volume formula, and the degenerate height<=2*radius limit where
-//!    a capsule must reduce to an exact solid sphere (volume AND inertia).
-//!  - support() (GJK): cardinal on-axis/radial directions, checked against the Minkowski-sum
-//!    definition (segment support + ball support) directly, not just plausibility.
-//!  - ContainsPointFunctor / SingleCast dispatch: the exact call path MovingParticleMapping.h uses
-//!    (mesa_pd::kernel::SingleCast -> mesa_pd::ContainsPointFunctor), including the discriminating
-//!    "beyond the flat cap but still within the rounded cap" case a flat-cylinder test would get
-//!    wrong, and the symmetric "just outside the rounded corner" case.
-//!  - Contact detection parity with Cylinder, exercised through the SAME production dispatch class
-//!    (SolidCylinderContactDetection) real scenarios use: Capsule x HalfSpace ("wall"), Capsule x
-//!    CylindricalBoundary ("pillar"), and Capsule x Capsule -- all three fall through to the
-//!    inherited generic GJK/EPA path (no analytic Capsule overload exists), so these tests also
-//!    stand as regression coverage for that fallback itself.
-//!  - pack()/unpack() MPI serialisation round-trip.
+//!  - Volume/mass/inertia: analytic volume, and the height <= 2*radius limit where the capsule is an exact sphere.
+//!  - support() (GJK): cardinal and oblique directions against the Minkowski-sum definition (segment + ball).
+//!  - ContainsPointFunctor through SingleCast, the call path of MovingParticleMapping.h, including points
+//!    beyond the core end but inside the rounded cap, and just outside the rounded corner.
+//!  - Contact detection through the production class SolidCylinderContactDetection: Capsule x HalfSpace,
+//!    Capsule x CylindricalBoundary and Capsule x Capsule. No analytic Capsule overload exists, so all three
+//!    use the generic GJK/EPA fallback.
+//!  - pack()/unpack() MPI round-trip.
 //======================================================================================================================
 
 #include "lbm/blockforest/communication/SimpleCommunication.h"
@@ -87,8 +74,7 @@ void testCapsuleVolumeFormula()
 
 void testCapsuleDegenerateSphereLimit()
 {
-   // height <= 2*radius -> coreHalfLength = 0 -> the capsule IS exactly a sphere of that radius,
-   // in both volume and inertia (not just approximately -- this must be exact).
+   // height <= 2*radius -> coreHalfLength = 0 -> exactly a sphere of that radius (volume and inertia).
    const real_t r = real_t(1.5);
    const mesa_pd::data::Capsule capsule(r, real_t(2) * r); // height == 2r, the boundary case
    WALBERLA_CHECK_FLOAT_EQUAL(capsule.getCoreHalfLength(), real_t(0));
@@ -111,10 +97,8 @@ void testCapsuleDegenerateSphereLimit()
 
 void testCapsuleThinRodLimitApproachesRod()
 {
-   // As radius -> tiny relative to height, a capsule approaches an idealised massless-radius thin
-   // rod: Iperp -> m*Lc^2/12 (Lc = full core length, ~= height here since radius is negligible),
-   // Iaxis -> 0. Not exact (there is always some O(r^2) correction) -- checked to a loose 1% only,
-   // as a sanity/limiting-behaviour check, not a precision one.
+   // For r << h the capsule approaches a thin rod: Iperp -> m*Lc^2/12 (Lc = core length ~= h), Iaxis -> 0.
+   // Not exact (O(r^2) correction), so checked to 1% as a limiting-behaviour check.
    const real_t r = real_t(0.001), h = real_t(10);
    mesa_pd::data::Capsule capsule(r, h);
    capsule.updateMassAndInertia(real_t(1));
@@ -137,17 +121,16 @@ void testCapsuleSupportCardinalDirections()
    const mesa_pd::data::Capsule capsule(r, h);
    const real_t a = capsule.getCoreHalfLength();
 
-   // +z: segment support is the +z end of the core, ball support is r*(0,0,1) -- the cap TIP.
+   // +z: segment support is the +z end of the core, ball support is r*(0,0,1): the cap tip.
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(capsule.support(Vec3(0, 0, 1)), Vec3(0, 0, a + r), real_t(1e-10));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(capsule.support(Vec3(0, 0, -1)), Vec3(0, 0, -(a + r)), real_t(1e-10));
 
-   // Purely radial: segment support is the CENTRE point (0,0,0) by the near-perpendicular guard
-   // (bfD[2] == 0 exactly), ball support is r*(1,0,0) -- the equatorial band surface, not a cap.
+   // Purely radial: segment support is the centre (0,0,0) via the near-perpendicular guard (bfD[2] == 0),
+   // ball support is r*(1,0,0), i.e. the equatorial band.
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(capsule.support(Vec3(1, 0, 0)), Vec3(r, 0, 0), real_t(1e-10));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(capsule.support(Vec3(0, 1, 0)), Vec3(0, r, 0), real_t(1e-10));
 
-   // Oblique direction: must equal segment_support(d) + r*d exactly (the Minkowski-sum definition),
-   // verified against that formula directly rather than a hand-picked numeric expectation.
+   // Oblique direction: must equal segment_support(d) + r*d (Minkowski-sum definition).
    Vec3 d(real_t(0.6), real_t(0), real_t(0.8)); // already unit length
    Vec3 expected(real_t(0), real_t(0), a) ; // sign(d.z)=+1
    expected = expected + d * r;
@@ -156,26 +139,19 @@ void testCapsuleSupportCardinalDirections()
 
 void testCapsuleContainedWithinSameParameterCylinder()
 {
-   // Capsule.h's own doc comment says `height` matches Cylinder's `height` convention exactly (full
-   // end-to-end extent) so the two are "directly comparable/swappable at the same radius+height
-   // numbers" -- which means, geometrically, Capsule(r,h) is always CONTAINED WITHIN Cylinder(r,h)
-   // as a set: the rounded caps shave the flat cylinder's sharp rim corners off, they never add
-   // reach beyond it. The two shapes touch (support points coincide) exactly on-axis (the capsule's
-   // rounded tip reaches precisely as far as the cylinder's flat cap, both at height/2) and at the
-   // equator (both reach exactly radius r radially) -- and the cylinder reaches STRICTLY farther
-   // for any genuinely oblique direction, because its rim is a sharp corner (simultaneously at the
-   // full radius AND the full height/2) while the capsule's surface there is smoothly rounded.
+   // Capsule uses Cylinder's height convention (full end-to-end extent), so Capsule(r,h) is contained in
+   // Cylinder(r,h): the caps round off the rim. Support points coincide on-axis (both reach h/2) and radially
+   // (both reach r); for an oblique direction the cylinder's sharp rim reaches strictly farther.
    const real_t r = real_t(2), h = real_t(10);
    const mesa_pd::data::Capsule  capsule(r, h);
    const mesa_pd::data::Cylinder cylinder(r, h);
 
-   // Touching points: pure axial and pure radial directions give IDENTICAL support points.
+   // Axial and radial directions give identical support points.
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(capsule.support(Vec3(0, 0, 1)), cylinder.support(Vec3(0, 0, 1)), real_t(1e-10));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(capsule.support(Vec3(1, 0, 0)), cylinder.support(Vec3(1, 0, 0)), real_t(1e-10));
 
-   // Oblique direction: the cylinder's sharp rim corner must reach strictly farther along z than
-   // the capsule's rounded surface, and the capsule's support point must lie within (or on) the
-   // cylinder's own radius/height bounds everywhere -- never poking outside it.
+   // Oblique direction: the cylinder rim reaches strictly farther along z, and the capsule's support point
+   // stays within the cylinder's radius/height bounds.
    const Vec3 d(real_t(0.6), real_t(0), real_t(0.8));
    const Vec3 capSupport = capsule.support(d);
    const Vec3 cylSupport = cylinder.support(d);
@@ -185,14 +161,13 @@ void testCapsuleContainedWithinSameParameterCylinder()
 }
 
 // ---------------------------------------------------------------------------------------------
-// ContainsPointFunctor via SingleCast -- the EXACT dispatch path MovingParticleMapping.h uses.
-// This is the direct regression coverage for the bug found this session.
+// ContainsPointFunctor via SingleCast, the dispatch path MovingParticleMapping.h uses
 // ---------------------------------------------------------------------------------------------
 
 bool capsuleContains(std::shared_ptr< mesa_pd::data::ParticleStorage > ps, size_t idx, const Vec3& point)
 {
-   // SingleCast needs getShape() (a raw BaseShape*), which plain ParticleAccessor does not expose
-   // (only getBaseShape(), a shared_ptr) -- ParticleAccessorWithBaseShape adds it.
+   // SingleCast needs getShape() (raw BaseShape*); plain ParticleAccessor only has getBaseShape() (shared_ptr),
+   // ParticleAccessorWithBaseShape adds it.
    mesa_pd::data::ParticleAccessorWithBaseShape ac(ps);
    mesa_pd::kernel::SingleCast                  singleCast;
    mesa_pd::ContainsPointFunctor                containsPointFctr;
@@ -216,11 +191,8 @@ void testCapsuleContainsPoint_OnAxisAndCentre()
 
 void testCapsuleContainsPoint_BeyondFlatCapButInsideRoundedCap()
 {
-   // THE discriminating case: a point beyond the core segment's end (z > coreHalfLength) but still
-   // within the hemispherical cap (radial offset small enough that distance-to-segment-end <=
-   // radius). A flat-capped-cylinder test (isPointInsideCylinderBF, which requires |z| <=
-   // height/2 == a+r... no: Cylinder's OWN height IS a+r-equivalent for a flat cap of the SAME
-   // nominal height) would reject this point; a true capsule test must ACCEPT it.
+   // A point beyond the core segment's end (z > coreHalfLength) but within the hemispherical cap
+   // (distance to the segment end <= radius) must be accepted.
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
    auto p  = ps->create();
    p->setPosition(Vec3(0, 0, 0));
@@ -228,16 +200,13 @@ void testCapsuleContainsPoint_BeyondFlatCapButInsideRoundedCap()
    const real_t r = real_t(2), h = real_t(10), a = real_t(3);
    p->setBaseShape(std::make_shared< mesa_pd::data::Capsule >(r, h));
 
-   // Point at z = a + 1.5 (i.e. 1.5 beyond the flat core's end -- OUTSIDE a flat cylinder of height
-   // 2a==6, since |z|=4.5 > a=3), radial offset chosen so the 3D distance to the segment endpoint
-   // (0,0,a) is sqrt(1.5^2 + radial^2) = 1.9 < r=2 -- strictly inside the rounded cap.
+   // z = a + 1.5 = 4.5 (outside a flat cylinder of height 2a = 6); radial offset such that the distance to the
+   // segment end (0,0,a) is sqrt(1.5^2 + radial^2) = 1.9 < r = 2: inside the rounded cap.
    const real_t radial = std::sqrt(real_t(1.9) * real_t(1.9) - real_t(1.5) * real_t(1.5));
    WALBERLA_CHECK(capsuleContains(ps, 0, Vec3(radial, 0, a + real_t(1.5))));
 
-   // Same axial offset, but radial offset pushed out so the distance to the segment endpoint is
-   // now 2.1 > r=2 -- just outside the rounded cap (and would ALSO be outside a flat cylinder,
-   // so this alone isn't discriminating, but confirms the corner rounding has a real edge, not an
-   // unbounded/always-true bug).
+   // Same axial offset, radial offset such that the distance to the segment end is 2.1 > r: just outside the
+   // rounded cap (also outside the height-2a flat cylinder); rules out an always-true test.
    const real_t radialOutside = std::sqrt(real_t(2.1) * real_t(2.1) - real_t(1.5) * real_t(1.5));
    WALBERLA_CHECK(!capsuleContains(ps, 0, Vec3(radialOutside, 0, a + real_t(1.5))));
 }
@@ -258,9 +227,8 @@ void testCapsuleContainsPoint_RadialBand()
 
 void testCapsuleContainsPoint_RespectsPositionAndRotation()
 {
-   // Off-origin, rotated 90 deg about world X (body-z axis now points along world -y): a point that
-   // is "on-axis, at the cap tip" in world coordinates must be derived from the ACTUAL transform,
-   // not accidentally always tested in body frame at the origin.
+   // Off-origin, rotated 90 deg about world X: checks that the test uses the particle's actual transform,
+   // not the body frame at the origin.
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
    auto p  = ps->create();
    const Vec3 centre(real_t(5), real_t(7), real_t(-3));
@@ -270,39 +238,32 @@ void testCapsuleContainsPoint_RespectsPositionAndRotation()
    const real_t r = real_t(2), h = real_t(10), a = real_t(3);
    p->setBaseShape(std::make_shared< mesa_pd::data::Capsule >(r, h));
 
-   // Derive the +z cap tip's world position from the SAME rotation matrix the shape's own
-   // world<->body transform uses, rather than hand-deriving the library's sign convention (which
-   // way "rotate 90 deg about world X" turns +z is an easy thing to get backwards by inspection --
-   // this way the test is self-consistent regardless of that convention).
+   // The cap tip's world position comes from the same rotation matrix, so the test does not depend on the
+   // library's rotation sign convention.
    const Vec3 capTipWorld    = centre + rot.getMatrix() * Vec3(0, 0, a + r);
    const Vec3 outwardOneStep = (capTipWorld - centre).getNormalized() * real_t(1e-6);
    WALBERLA_CHECK(capsuleContains(ps, 0, capTipWorld - outwardOneStep));
    WALBERLA_CHECK(!capsuleContains(ps, 0, capTipWorld + outwardOneStep));
-   // A point offset purely along world X from the centre (perpendicular to the body axis) at
-   // distance r-eps must be inside (equatorial band), matching the un-rotated case exactly since
-   // this rotation doesn't move the world-X direction.
+   // A point at distance r - eps along world X (unchanged by this rotation, perpendicular to the axis) is inside.
    WALBERLA_CHECK(capsuleContains(ps, 0, centre + Vec3(r - real_t(1e-6), 0, 0)));
 }
 
 // ---------------------------------------------------------------------------------------------
-// Contact detection, through the SAME production dispatch class real scenarios use
-// (SolidCylinderContactDetection, ParticleKernels.h) -- no analytic Capsule overload exists for
-// any of these pairs, so this also stands as regression coverage for the inherited generic
-// GeneralContactDetection fallback itself, specifically for Capsule.
+// Contact detection through the production class SolidCylinderContactDetection (ParticleKernels.h). No analytic
+// Capsule overload exists, so these also cover the generic GeneralContactDetection fallback.
 // ---------------------------------------------------------------------------------------------
 
 void testCapsuleHalfSpaceContact()
 {
-   // Wall at x=0 with outward normal +x (matches testSphereHalfSpaceContact/testBoxHalfSpaceContact's
-   // convention in ContactDetectionTest.cpp). Capsule lying along world z (identity rotation),
-   // radius 1, positioned so its equatorial band overlaps the wall by 0.3.
+   // Wall at x=0 with outward normal +x (as in ContactDetectionTest.cpp). Capsule along world z, radius 1,
+   // band overlapping the wall by 0.3.
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
    mesa_pd::data::ParticleAccessor ac(ps);
 
    auto wall = ps->create();
    wall->setPosition(Vec3(0, 0, 0));
    auto rod = ps->create();
-   rod->setPosition(Vec3(real_t(0.7), 0, 0)); // 0.7 + 0 (wall at x=0) ... penetration = radius - 0.7 = 0.3
+   rod->setPosition(Vec3(real_t(0.7), 0, 0)); // penetration = radius - 0.7 = 0.3
    rod->setRotation(mesa_pd::Rot3());
 
    const mesa_pd::data::HalfSpace wallShape(Vec3(1, 0, 0));
@@ -311,12 +272,10 @@ void testCapsuleHalfSpaceContact()
    SolidCylinderContactDetection scd;
    WALBERLA_CHECK(scd(0, 1, wallShape, rodShape, ac));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(std::abs(scd.getPenetrationDepth()), real_t(0.3), real_t(1e-6));
-   // NOTE: falls through to GeneralContactDetection's generic HalfSpace template, which (per this
-   // session's audit) returns contactNormal pointing INTO the wall for pairs with no dedicated
-   // analytic override -- the OPPOSITE convention from Sphere/Box/Cylinder x HalfSpace. Proven
-   // algebraically harmless to the force actually applied (LinearSpringDashpot is symmetric under
-   // the corresponding index-swap+negate), but asserted explicitly here so a future change to
-   // either convention is caught rather than silently drifting.
+   // The generic HalfSpace template of GeneralContactDetection returns a normal pointing into the wall, the
+   // opposite convention from the analytic Sphere/Box/Cylinder x HalfSpace overloads. The applied force is
+   // unaffected (LinearSpringDashpot is symmetric under index swap + negated normal); asserted so that a change
+   // of either convention is noticed.
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactNormal(), Vec3(real_t(-1), 0, 0), real_t(1e-6));
 }
 
@@ -340,15 +299,15 @@ void testCapsuleHalfSpaceNoContact()
 
 void testCapsuleCylindricalBoundaryContact()
 {
-   // "Pillar" contact -- CylindricalBoundary at the origin, radius 5, infinite along world z.
-   // Capsule rod alongside it, radius 1, offset so its band overlaps the pillar surface by 0.2.
+   // Pillar: CylindricalBoundary at the origin, radius 5, infinite along world z. Capsule of radius 1 alongside,
+   // band overlapping the pillar surface by 0.2.
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
    mesa_pd::data::ParticleAccessor ac(ps);
 
    auto pillar = ps->create();
    pillar->setPosition(Vec3(0, 0, 0));
    auto rod = ps->create();
-   rod->setPosition(Vec3(real_t(5.8), 0, real_t(7))); // z=7 arbitrary -- pillar is axially invariant
+   rod->setPosition(Vec3(real_t(5.8), 0, real_t(7))); // z=7 arbitrary: pillar is axially invariant
    rod->setRotation(mesa_pd::Rot3());
 
    const mesa_pd::data::CylindricalBoundary pillarShape(real_t(5), Vec3(0, 0, 1));
@@ -385,11 +344,9 @@ void testCapsuleCylindricalBoundaryNoContact()
 
 void testCapsuleCapsuleContact()
 {
-   // Two parallel capsules (radius 0.5, axis = world z via identity rotation), centres 0.8 apart
-   // along x -> overlap = 0.5+0.5-0.8 = 0.2, exactly mirroring
-   // ContactDetectionTest.cpp's testCylinderCylinderContact geometry so the two are directly
-   // comparable (same numbers, Capsule instead of Cylinder -- confirms the generic GJK/EPA fallback
-   // gives the same answer as Cylinder's analytic path in a case unaffected by end-cap shape).
+   // Two parallel capsules (radius 0.5, axis world z), centres 0.8 apart along x -> overlap 0.5+0.5-0.8 = 0.2.
+   // Same geometry as testCylinderCylinderContact in ContactDetectionTest.cpp; the end caps play no role, so
+   // the GJK/EPA fallback must match the cylinder result.
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
    mesa_pd::data::ParticleAccessor ac(ps);
 
@@ -428,11 +385,8 @@ void testCapsuleCapsuleNoContact()
 
 void testCapsuleEndCapContactDiffersFromCylinder()
 {
-   // The physically-meaningful difference from Cylinder: two capsules approaching END-ON (along
-   // their shared axis) contact at a ROUNDED tip, so the penetration depth for a given centre
-   // separation is LARGER than two same-size flat-capped cylinders would report end-on (a flat
-   // cylinder's end-on contact is ambiguous/degenerate -- rim-to-rim -- while a capsule's is a
-   // clean, unambiguous sphere-sphere-equivalent contact between the two cap tips).
+   // Two coaxial capsules end-on: the rounded tips touch like two spheres, giving a well-defined contact,
+   // whereas the end-on contact of flat-capped cylinders is degenerate (face to face).
    auto ps = std::make_shared< mesa_pd::data::ParticleStorage >(10);
    mesa_pd::data::ParticleAccessor ac(ps);
 
@@ -450,10 +404,8 @@ void testCapsuleEndCapContactDiffersFromCylinder()
    SolidCylinderContactDetection scd;
    WALBERLA_CHECK(scd(0, 1, capsuleShape, capsuleShape, ac));
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getPenetrationDepth(), real_t(-0.5), real_t(1e-3));
-   // Looser epsilon than usual: this is a perfectly axis-aligned, tip-to-tip (sphere-sphere-
-   // equivalent) contact -- a genuinely degenerate case for an iterative GJK/EPA polytope
-   // refinement, which is known to leave a small amount of numerical noise in the normal direction
-   // for exactly-symmetric configurations even though the penetration depth itself stays precise.
+   // Looser epsilon: an exactly symmetric tip-to-tip contact is degenerate for the iterative EPA refinement,
+   // which leaves some noise in the normal while the depth stays precise.
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(scd.getContactNormal(), Vec3(0, 0, real_t(-1)), real_t(0.02));
    WALBERLA_UNUSED(a);
 }

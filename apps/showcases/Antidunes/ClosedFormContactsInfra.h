@@ -14,10 +14,9 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file ClosedFormContactsInfra.h
-//! \brief Shared return type (ContactResult) for every closed-form contact-detection function in
-//! this split -- renamed from PaperAnalyticalContacts.h / namespace paper_analytical 2026-10-29.
-//! See the sibling files: ClosedFormContactsBoxPoint.h, ClosedFormContactsCylinderPlaneGeometry.h,
-//! ClosedFormContactsCylinderCylinder.h, all of which include this one.
+//! \brief Shared return type (ContactResult) of every closed-form contact-detection function; included by
+//!        ClosedFormContactsBoxPoint.h, ClosedFormContactsCylinderPlaneGeometry.h and
+//!        ClosedFormContactsCylinderCylinder.h.
 
 #pragma once
 
@@ -42,11 +41,9 @@ namespace closed_form_contacts
 using mesa_pd::Mat3;
 using mesa_pd::Vec3;
 
-//! Common return type for every function in this file. Overlap follows the PAPERS' OWN convention
-//! (positive = penetrating), which is the OPPOSITE sign from SolidCylinderContactDetection's
-//! penetrationDepth (negative = penetrating) -- callers/tests comparing the two must negate one of
-//! them. Kept this way deliberately so the numbers here can be checked directly against the papers'
-//! own equations without an extra sign translation layer while reading this file.
+//! Overlap follows the PAPERS' convention (positive = penetrating), the OPPOSITE sign of
+//! SolidCylinderContactDetection's penetrationDepth (negative = penetrating); callers comparing the two must negate
+//! one. Kept so the numbers can be checked directly against the papers' equations.
 struct ContactResult
 {
    bool        contact  = false;

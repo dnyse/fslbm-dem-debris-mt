@@ -190,14 +190,10 @@ public:
    }
 };
 
-// FloatingBox is a freely rotating mesa_pd Box — translation AND rotation are fully free.
-// The base Box::updateMassAndInertia computes the correct uniform-box inertia tensor:
-//   I_x = m/12 * (Ly² + Lz²),  I_y = m/12 * (Lx² + Lz²),  I_z = m/12 * (Lx² + Ly²).
-// Contact detection (Box×HalfSpace, Box×CylindricalBoundary) accounts for the current rotation
-// via the R^T body-frame transform. The submerged-volume estimate in computeSubmergedVolumesBox()
-// integrates the fill field over the box transformed into its body frame, so it is EXACT for any
-// tilt angle (not an axis-aligned / small-angle approximation). Orientation is written to VTK
-// ("floaterBox" output, "rotation" 3x3 tensor) for rendering the oriented solid in ParaView.
+// FloatingBox: a freely rotating mesa_pd Box (translation and rotation free). Box::updateMassAndInertia gives the
+// uniform-box inertia I_x = m/12 (Ly^2 + Lz^2), I_y = m/12 (Lx^2 + Lz^2), I_z = m/12 (Lx^2 + Ly^2). Contact detection
+// (Box x HalfSpace, Box x CylindricalBoundary) and computeSubmergedVolumesBox() work in the body frame, so any tilt is
+// handled. The orientation is written to VTK ("floaterBox", "rotation") for rendering in ParaView.
 class FloatingBox : public mesa_pd::data::Box {
 public:
    explicit FloatingBox(const mesa_pd::Vec3& edgeLength) : Box(edgeLength) {}
@@ -240,10 +236,10 @@ inline auto createCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Ve
    return p0;
 }
 
-// Vertical round container (DropTest, SimulationParams.h ContainerCylinderParams): a
-// CylindricalBoundary in CONTAINMENT mode with its axis along z, no axial bounds and no half clip, so bodies are kept
-// inside radius `radius` around (center.x, center.y) at every height. Same flags as createArchTunnel below; the
-// containment contact overloads (ParticleKernels.h, SolidCylinderContactDetection) use the shape's own axis.
+// Vertical round container (DropTest, SimulationParams.h ContainerCylinderParams): a CylindricalBoundary in
+// containment mode with its axis along z, no axial bounds and no half clip, so bodies are kept inside radius `radius`
+// around (center.x, center.y) at every height. Fixed, infinite, global and non-communicating like the other boundary
+// bodies; the containment contact overloads (ParticleKernels.h, SolidCylinderContactDetection) use the shape's axis.
 inline auto createContainerCylinder(mesa_pd::data::ParticleStorage& ps, const mesa_pd::Vec3& center, real_t radius)
 {
    auto p0 = ps.create(true);

@@ -1,31 +1,20 @@
 //======================================================================================================================
 //! \file CylinderTippingRodJamTest.cpp
-//! Reproduction attempt for the job 4255679 crash (antidunes-hopper-clog-cyl-halfrows-gjk-noguards-60k, half-density
-//! rod hopper, useAnalyticalContactDetection=false i.e. GJK/EPA-only cylinder-cylinder dispatch, no sealed-cell guard).
+//! Reconstruction of a recorded crash in the half-density rod hopper with GJK/EPA-only cylinder-cylinder dispatch
+//! (useAnalyticalContactDetection=false): the [STALE-PARTICLE-IDX] guard in SimpleBB.h aborted after the
+//! hydrodynamic force/torque of two neighbouring rods jumped by roughly 10-30x within 100 steps, while one rod's
+//! tiltY diagnostic (ParticleKernels.h, atan2(R(0,2),R(0,0))) sat at ~167-171 deg, i.e. nearly axis-reversed.
+//! The exact quaternions were not logged, so the test approximates the configuration from what was:
+//!   - rod geometry: radius 3, length 18;
+//!   - the logged relative position at step 3100, magnitude ~5.93 LU (just under 2R = 6, barely touching if parallel);
+//!   - rod A at rest orientation (axis = world Y; its tiltY stayed below 10 deg);
+//!   - rod B swept through tilt theta in [0,180] deg about world X or Z, covering the observed range.
 //!
-//! What actually happened (sacct + logs): at step 3133 the [STALE-PARTICLE-IDX] guard in SimpleBB.h:298 aborted on
-//! rank 49/50, for particle uids 3530822107858468885/888. The per-particle [CylForces]/[CylTorque] log (evaluationFrequency,
-//! NOT a per-substep trace) shows both rods' hydrodynamic force/torque jumping by roughly 10-30x between step 3000 and
-//! step 3100 (33 steps before the abort), and uid 888's own "tiltY" diagnostic (ParticleKernels.h, atan2(R(0,2),R(0,0)) --
-//! the world-X component of the rod's own axis vs. a reference direction) sitting at ~167-171 deg from step 2900 onward,
-//! i.e. this rod had already rotated close to axis-reversed well before the blow-up. No FloaterHistoryLogger was enabled
-//! for this run (logFloaterHistory not set in the prm), so the EXACT quaternions at the crash are not recoverable -- this
-//! test instead reconstructs the closest physically-motivated approximation from what WAS logged:
-//!   - rod geometry: radius 3, length 18 (FloatingCylinder block in hopper_clog_cyl_frontblock_pidon_2node_halfrows_gas.prm)
-//!   - the real relative position at step 3100 (uid 888 pos - uid 885 pos), magnitude ~5.93 LU (just under 2R=6, i.e.
-//!     "barely touching" IF both rods were simply parallel and side-by-side)
-//!   - rod A (uid 885) left at rest orientation (axis = world Y): its own tiltY stayed small (<10 deg) through this window
-//!   - rod B (uid 888) swept through a tilt angle theta in [0,180] deg about a transverse axis, covering the observed
-//!     ~170 deg range, to see how the TRUE geometric overlap and each contact-detection path behave as the rod topples
+//! Question: is the force/torque explosion a GJK/EPA correctness bug, or a correctly detected genuine deep overlap
+//! (the rod tipped fast enough between DEM sub-cycles to penetrate deeply), i.e. a substep-resolution question?
+//! Pass criterion: |GJK/EPA depth - exact depth| < 0.25 LU over the whole sweep.
 //!
-//! Question this answers: is the force/torque explosion a GJK/EPA correctness bug (the same GJK/EPA path that
-//! CylinderClosedFormRangeTest.cpp already showed IS accurate at every depth for OTHER deeply-nested pairs), or is it a
-//! genuine, correctly-detected deep overlap -- i.e. the rod tipped over fast enough between DEM sub-cycles to develop a
-//! large TRUE penetration before the contact response had a chance to push it back out, which is a time-stepping /
-//! substep-resolution question, not a geometry-dispatch bug.
-//!
-//! Reuses the exact-ground-truth support-function machinery from CylinderClosedFormRangeTest.cpp verbatim (both files
-//! are self-contained diagnostic tests, matching this test directory's own established pattern).
+//! The exact-depth support-function machinery is duplicated from CylinderClosedFormRangeTest.cpp.
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
@@ -55,8 +44,8 @@ inline double support(const Vec3& n, const Vec3& a)
 }
 inline double needed(const Vec3& n, const Vec3& a1, const Vec3& a2, const Vec3& d) { return support(n, a1) + support(n, a2) - double(d * n); }
 
-//! ground truth: minimum over unit directions (Fibonacci grid, then pattern-search refinement of the best few) --
-//! identical method to CylinderClosedFormRangeTest.cpp's own exactPenetrationDepth.
+//! ground truth: minimum over unit directions (Fibonacci grid, then pattern-search refinement of the best few), as in
+//! CylinderClosedFormRangeTest.cpp.
 double exactPenetrationDepth(const Vec3& a1, const Vec3& a2, const Vec3& d)
 {
    constexpr int N = 6000;
@@ -116,7 +105,8 @@ Row evaluate(const Vec3& axisA, const Vec3& axisB, const Vec3& pa, const Vec3& p
    auto c0 = ps->create(); c0->setPosition(pa); c0->setRotation(ra);
    auto c1 = ps->create(); c1->setPosition(pb); c1->setRotation(rb);
    const mesa_pd::data::Cylinder shape{ real_t(kR), real_t(kL) };
-   SolidCylinderContactDetection scd; scd.useAnalyticalContactDetection = false; scd.useTightLayer1 = true; // matches job 4255679's own prm + ModelParameters defaults
+   // GJK/EPA-only dispatch with tight layer 1, as in the recorded run
+   SolidCylinderContactDetection scd; scd.useAnalyticalContactDetection = false; scd.useTightLayer1 = true;
    row.gjk = scd(0, 1, shape, shape, ac) ? -double(scd.getPenetrationDepth()) : 0.0;
    return row;
 }
@@ -130,9 +120,9 @@ int main(int argc, char** argv)
    int failures = 0;
    auto check = [&](bool ok, const std::string& what) { if (!ok) { ++failures; std::cout << "FAIL: " << what << std::endl; } };
 
-   // Real step-3100 positions from job 4255679's own stdout log (rank 49/50 [CylForces] lines).
-   const Vec3 pa(real_t(287.687), real_t(9.46882), real_t(57.8675));  // uid ...885
-   const Vec3 pb(real_t(283.45), real_t(10.1355), real_t(61.9644));   // uid ...888
+   // Logged step-3100 positions ([CylForces] output).
+   const Vec3 pa(real_t(287.687), real_t(9.46882), real_t(57.8675));  // rod A
+   const Vec3 pb(real_t(283.45), real_t(10.1355), real_t(61.9644));   // rod B
    const double sep = double((pb - pa).length());
    std::cout << "real step-3100 centre separation: " << sep << " LU (2R = " << 2 * kR << ")\n\n";
 

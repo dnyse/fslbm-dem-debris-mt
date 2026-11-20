@@ -1,13 +1,15 @@
 //======================================================================================================================
 //! \file CylinderClosedFormJumpTest.cpp
-//! Why does the closed-form Kodam+Guo cylinder dispatch report an overlap of 0.0034 LU and one sub-cycle later 2.5 LU for the SAME geometry?
-//! Data: rods ...486/...489 of job 4251049 (analytic hybrid; launched at step 3493), poses of steps 3484..3489 as logged (CylinderClosedFormJumpData.h). We
-//!   (1) recompute the closed form, GJK/EPA (the reference) and the exact penetration depth for EVERY logged sub-cycle,
-//!   (2) walk between two consecutive logged poses in 50 tiny steps and locate the discontinuity,
-//!   (3) show that it comes from the band-edge branch's choice of WHICH rim circle of the probe cylinder is examined: rimVsFaceOrBand() only looks at the probe's NEARER end-cap circle
-//!       (cap centre closest to the host's centre) and returns the closest point of THAT circle to the host's axis; when the two caps are about equally far, the choice flips and the reported
-//!       radial overlap jumps between the two circles' values (one circle just grazes the band, the other one dips deep into it).
-//! The exact penetration depth stays ~3.5 LU throughout; GJK/EPA reports it (within EPA accuracy).
+//! Closed-form Kodam+Guo cylinder contact: overlap jump from 0.0034 LU to 2.5 LU between two sub-cycles of nearly
+//! the same geometry. Data: logged poses of two rods over steps 3484..3489 (CylinderClosedFormJumpData.h).
+//!   (1) recompute closed form, GJK/EPA (reference) and exact penetration depth for every logged sub-cycle;
+//!   (2) walk between two consecutive logged poses in 50 steps and locate the discontinuity;
+//!   (3) check that it coincides with a flip of the probe rim circle examined by the band-edge branch: with the 3D
+//!       centre-distance cap rule, rimVsFaceOrBand() examines the probe cap closer to the host's centre; when both caps
+//!       are about equally far the choice flips and the radial overlap jumps between a grazing and a deep circle;
+//!   (4) optional tables (CYL_JUMP_TABLE) comparing that rule with Kodam's axis-distance rule (Eq. 68-70);
+//!   (5) with Kodam's rule (the default) the closed form is continuous over the interval and reports the deep circle.
+//! The exact penetration depth stays ~3.5 LU throughout; GJK/EPA reports it within EPA accuracy.
 //======================================================================================================================
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
@@ -58,7 +60,8 @@ double gjkDepth(const Pose& a, const Pose& b)
    SolidCylinderContactDetection scd; scd.useAnalyticalContactDetection = false;
    return scd(0, 1, shape, shape, ac) ? -double(scd.getPenetrationDepth()) : 0.0;
 }
-//! Radial distance from the HOST's axis line of the closest point of one of the PROBE's two rim circles (brute-force over the angle): overlap the band-edge branch would report for that circle.
+//! Radial overlap the band-edge branch would report for one of the probe's two rim circles: distance from the host's
+//! axis line of that circle's closest point (brute force over the angle).
 double rimOverlap(const closed_form_contacts::CylinderState& host, const closed_form_contacts::CylinderState& probe, int cap)
 {
    const Vec3 e = probe.axis(), eh = host.axis();
@@ -74,7 +77,8 @@ double rimOverlap(const closed_form_contacts::CylinderState& host, const closed_
    }
    return kR - best;
 }
-//! which of the probe's caps rimVsFaceOrBand examines: the cap centre closer to the host's centre (0 = +axis end, 1 = -axis end)
+//! which probe cap rimVsFaceOrBand examines: the one whose centre is closer to the host's centre
+//! (0 = +axis end, 1 = -axis end)
 int chosenCap(const closed_form_contacts::CylinderState& host, const closed_form_contacts::CylinderState& probe)
 {
    const Vec3 e = probe.axis(); const Vec3 top = probe.pos + real_t(0.5) * probe.length * e, bot = probe.pos - real_t(0.5) * probe.length * e;
@@ -95,7 +99,8 @@ int main(int argc, char** argv)
    walberla::mpi::MPIManager::instance()->useWorldComm();
    using namespace walberla::antidunes;
    int failures = 0;
-   closed_form_contacts::kodamCapSelectionByAxisDistance = false;   // parts (1)-(3) reproduce the behaviour at the time of the crash (3D centre-distance cap choice, deviation from Kodam Eq. 68-70)
+   // (1)-(3) use the 3D centre-distance cap rule that produced the log (deviates from Kodam Eq. 68-70)
+   closed_form_contacts::kodamCapSelectionByAxisDistance = false;
    auto check = [&](bool ok, const std::string& what) { if (!ok) { ++failures; std::cout << "FAIL: " << what << std::endl; } };
    constexpr size_t N = sizeof(kLoggedRows) / sizeof(kLoggedRows[0]);
 
@@ -129,7 +134,7 @@ int main(int argc, char** argv)
    }
    std::cout << "   recomputed == logged for " << reproduced << " of " << N << " sub-cycles (positions have only 6 significant digits in the CSV)\n";
 
-   // (2)+(3): walk between logged poses 3485.6 and 3485.7 (the jump 0.0034 -> 2.53 in the log)
+   // (2)+(3): walk between logged poses 3485.6 and 3485.7 (logged jump 0.0034 -> 2.53)
    const LoggedPoseRow *r0 = nullptr, *r1 = nullptr;
    for (size_t k = 0; k + 1 < N; ++k) if (kLoggedRows[k].step == 3485 && kLoggedRows[k].sub == 6) { r0 = &kLoggedRows[k]; r1 = &kLoggedRows[k + 1]; }
    check(r0 && r1, "logged rows 3485.6/3485.7 present");
@@ -160,7 +165,8 @@ int main(int argc, char** argv)
    check(capFlipAt >= 0, "the probe rim circle examined by the band-edge branch (host=A) flips within the interval");
    check(capFlipAt >= 0 && std::abs(jumpAt - capFlipAt / 50.0) < 0.041, "the jump coincides with the flip of the examined rim circle");
 
-   // ---------------- (4) cross-check against the paper: Kodam Eq. 68-70 choose the cap closer to the host's AXIS (in the host's xy-plane), this implementation chooses the cap closer to the host's CENTRE (3D) ----------------
+   // ---- (4) Kodam Eq. 68-70 choose the cap closer to the host's axis (host xy-plane); the centre rule the cap closer
+   //          to the host's centre (3D) ----
    if (std::getenv("CYL_JUMP_TABLE") != nullptr)
    {
       std::cout << "TABLE2 step.sub | 3D-centre rule: scenario overlap | Kodam axis rule: scenario overlap | GJK\n";
@@ -193,7 +199,7 @@ int main(int argc, char** argv)
          }
       }
    }
-   // ---------------- (5) with the paper's cap rule (now the default) the jump between the two logged poses is gone, and the early rows report the deep circle ----------------
+   // ---- (5) with Kodam's cap rule (default) the jump is gone and the early rows report the deep circle ----
    {
       closed_form_contacts::kodamCapSelectionByAxisDistance = true;
       double maxStep = 0, prevOv = -1;

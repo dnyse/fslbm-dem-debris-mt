@@ -14,49 +14,30 @@
 //  with waLBerla (see COPYING.txt). If not, see <http://www.gnu.org/licenses/>.
 //
 //! \file ObstacleOwnershipHandoffTest.cpp
-//! Small, isolated regression test for the 2026-09-27 THESIS_PLAN.md origin finding and its fix:
-//! tracing a real crashed run's own box-logger data (job 4271714) found that cell
-//! (603.5,20.5,27.5) was owned by rod uid...162 through step 21936 (rock-steady, density~1.003),
-//! that ownership switched DIRECTLY to rod uid...780 at step 21938 (the cell stayed flagged obstacle
-//! throughout -- no intervening liquid/interface state), and a growing odd-even (checkerboard)
-//! oscillation began in that SAME step and never stopped until the eventual blow-up and crash.
-//! Reading lbm_mesapd_coupling::MovingParticleMapping's own "cell is already an obstacle (maybe from
-//! another particle)" branch found why: when a second particle's containment test finds a cell
-//! already flagged obstacle (owned by a first, non-fixed particle), the code ONLY updated
-//! `(*particleField)(x,y,z) = particleUid` -- it never touched the PDF field at all, so the second
-//! particle silently inherited whatever the first particle's own obstacle dynamics left behind, with
-//! zero re-initialization.
+//! Regression test for the obstacle-to-obstacle ownership handoff in lbm_mesapd_coupling::MovingParticleMapping.
+//! In a recorded crash, an obstacle cell passed directly from one rod to another (no liquid/interface state in
+//! between) and an odd-even (checkerboard) oscillation started in that step and grew until the blow-up. In the
+//! "cell is already an obstacle (maybe from another particle)" branch, MovingParticleMapping only updates
+//! (*particleField)(x,y,z) = particleUid and leaves the PDF field alone, so the new owner inherits whatever the
+//! previous owner's obstacle dynamics left in the cell.
 //!
-//! **Fix** (MovingParticleMapping.h, same branch): on a GENUINE handoff (formerParticleUid !=
-//! particleUid -- NOT the routine same-owner re-confirmation that fires every step a particle keeps
-//! a cell it already owns), the cell's PDF is now also reset to rest equilibrium via PdfField's own
-//! stencil-agnostic setToEquilibrium(), breaking the silent-inheritance chain at its source.
+//! Fix: on a genuine handoff (formerParticleUid != particleUid, not the routine same-owner re-confirmation of every
+//! step) MovingParticleMapping calls the optional onOwnershipHandoff_ callback (default no-op). Antidunes' callback in
+//! BuildTimeloop.h (prm switch useOwnershipHandoffPdfReset) resets the cell's PDF to D3Q27 rest equilibrium.
 //!
-//! This test exercises the REAL, patched MovingParticleMapping class (not a reimplementation) with
-//! two real mesa_pd Sphere particles to prove the fix directly: particle A maps a cell, an arbitrary
-//! (deliberately non-equilibrium, i.e. "whatever A's own imperfect obstacle dynamics might have left
-//! behind") PDF is written into it, then A moves away and B moves in during the SAME mapping sweep
-//! call (matching the real per-main-step cadence, where MovingParticleMapping's operator() iterates
-//! every particle once per step) -- reproducing a direct, same-step handoff. Checked: ownership
-//! (particleField) switches to B's uid, AND the cell's PDF is now rest equilibrium (rho=1, u=0),
-//! NOT the stale injected values -- confirming the fix actually breaks the inheritance. A second
-//! check confirms the OTHER, routine case (same particle re-confirming a cell it already owns) does
-//! NOT reset the PDF -- the fix must not turn every covered cell into a permanently-frozen one.
+//! The test drives the real MovingParticleMapping with two mesa_pd spheres: A maps a cell, a non-equilibrium PDF is
+//! written into it, then A moves away and B moves in before the next mapping call (a direct, same-step handoff).
+//! Checked: ownership switches to B, the cell is still obstacle, the PDF equals rest equilibrium (rho=1, u=0) and
+//! not the injected values, and the callback fired. A second check: the routine case (B re-confirming its own cell)
+//! must not reset the PDF, otherwise every covered cell would be frozen at equilibrium.
 //!
-//! Scope note: this test deliberately does NOT attempt to also reproduce the subsequent exponential
-//! growth phase in equal isolation. `CollideIsolatedObstacleIterationTest.cpp` (2026-09-25) already
-//! tested repeated ISOLATED collide iteration (zero force, zero streaming input) on two different
-//! real near-equilibrium seeds and found NEITHER diverges -- a genuine fixed point in both cases. So
-//! whatever drives the real, observed growth needs more than "collide alone, forever" -- most likely
-//! the interplay with SimpleBB's own per-step partial PDF rewrite (2026-09-25 finding: SimpleBB
-//! writes directly into an obstacle cell's own PDF array every step, for the links facing fluid
-//! neighbours) against a genuinely time-varying real neighbour flow field, which a single isolated
-//! cell with no real neighbours cannot reproduce. That would need a heavier, less "isolated" two-rod
-//! real-time reproduction (a small full scenario, not a unit test) -- not attempted here.
+//! Scope: the subsequent growth phase is not reproduced. Isolated collide iteration (CollideIsolatedObstacle*Test)
+//! does not diverge from the recorded seeds, so the growth presumably needs SimpleBB's per-step partial rewrite of
+//! an obstacle cell's fluid-facing links against a time-varying neighbour flow, which needs a small full scenario.
 //======================================================================================================================
 
 // SimulationObjects.h (pulled in transitively by ParticleKernels.h) uses blockforest::SimpleCommunication
-// without including its definition itself -- match ClipAnalyticGeometryTest.cpp's own workaround.
+// without including its definition, same workaround as ClipAnalyticGeometryTest.cpp.
 #include "lbm/blockforest/communication/SimpleCommunication.h"
 
 #include "ParticleKernels.h" // pulls in SimulationObjects.h -> LatticeModel_T, PdfField_T, VectorFieldFlattened_T
@@ -88,10 +69,8 @@
 
 namespace walberla { namespace antidunes {
 
-// flag_t, FlagField_T, ParticleAccessor_T, ParticleField_T are already defined by SimulationObjects.h
-// (pulled in transitively via ParticleKernels.h above) -- reused directly rather than redeclared,
-// both to avoid a conflicting-declaration error and because these ARE exactly the real production
-// types (flag_t=uint32_t, ParticleAccessor_T=ParticleAccessorWithBaseShape).
+// flag_t, FlagField_T, ParticleAccessor_T, ParticleField_T come from SimulationObjects.h (via ParticleKernels.h):
+// the production types (flag_t=uint32_t, ParticleAccessor_T=ParticleAccessorWithBaseShape), not redeclared.
 
 const FlagUID Fluid_Flag( "fluid" );
 const FlagUID Obstacle_Flag( "moving obstacle" );
@@ -100,9 +79,7 @@ const FlagUID FormerObstacle_Flag( "former moving obstacle" );
 using SBB_T             = lbm_mesapd_coupling::SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >;
 using BoundaryHandling_T = BoundaryHandling< FlagField_T, LatticeModel_T::Stencil, SBB_T >;
 
-// Minimal single-block factory, mirroring IbbEquivalenceDragTest.cpp's own MyBoundaryHandling (that
-// test already exercises MovingParticleMappingKernel + SimpleBB together; this reuses the identical
-// construction pattern for the per-step MovingParticleMapping class instead).
+// Minimal single-block factory, same construction as IbbEquivalenceDragTest.cpp's MyBoundaryHandling.
 class TestBoundaryHandling
 {
 public:
@@ -145,7 +122,7 @@ void runTest()
       }
    };
 
-   // Tiny single-block domain -- only large enough to hold both spheres and a comfortable margin.
+   // Single-block domain, just large enough for both spheres plus a margin.
    auto blocks = blockforest::createUniformBlockGrid( uint_t( 1 ), uint_t( 1 ), uint_t( 1 ), uint_t( 12 ),
                                                        uint_t( 12 ), uint_t( 12 ), real_t( 1 ), uint_t( 1 ),
                                                        uint_t( 1 ), uint_t( 1 ), false, false, false );
@@ -165,9 +142,8 @@ void runTest()
    auto particleFieldID = field::addToStorage< lbm_mesapd_coupling::ParticleField_T >(
       blocks, "particle field", accessor->getInvalidUid(), field::fzyx, uint_t( 1 ) );
 
-   // Both particles exist from the start; B starts far outside the domain so only A maps the test
-   // cell in the FIRST mapping call -- matching the real scenario where both rods already exist and
-   // simply move relative to each other over time.
+   // Both particles exist from the start; B starts far outside the domain, so only A maps the test cell in the
+   // first mapping call.
    const Vector3< real_t > testCellCentre( real_t( 5.5 ), real_t( 5.5 ), real_t( 5.5 ) );
    const Vector3< real_t > farAway( real_t( 1000 ), real_t( 1000 ), real_t( 1000 ) );
 
@@ -177,7 +153,7 @@ void runTest()
       p.setPosition( testCellCentre );
       p.setInteractionRadius( radius );
       p.setOwner( 0 );
-      p.setBaseShape( std::make_shared< mesa_pd::data::Sphere >( radius ) ); // matches SetupStages.h's own pattern
+      p.setBaseShape( std::make_shared< mesa_pd::data::Sphere >( radius ) ); // as in SetupStages.h
       uidA = p.getUid();
    }
    {
@@ -199,16 +175,9 @@ void runTest()
 
    const cell_idx_t ix = cell_idx_t( 5 ), iy = cell_idx_t( 5 ), iz = cell_idx_t( 5 ); // == testCellCentre
 
-   // [Claude, 2026-09-27] The reset itself now lives in an OPT-IN callback (MovingParticleMapping's
-   // onOwnershipHandoff_, default no-op) rather than being unconditional inside the generic class --
-   // see MovingParticleMapping.h's own doc comment for why (the generic lbm::Equilibrium<>::set()/
-   // PdfField::setToEquilibrium() API turned out to be unsafe to call from that generic file for
-   // Antidunes' generated Cumulant model in the real multi-file production link, confirmed by direct
-   // bisection on the cluster: jobs 4271763/4271773 segfaulted with it inside the generic class,
-   // job 4271777 -- same code, callback removed -- got the ordinary STALE-PARTICLE-IDX abort
-   // instead). This test's own callback mirrors BuildTimeloop.h's real one exactly (manual D3Q27
-   // weight assignment, the same convention repairDegenerateObstacleCells already uses), so it
-   // verifies the SAME reset Antidunes itself now performs, not a simplified stand-in.
+   // The reset is an opt-in callback (onOwnershipHandoff_), so the generic class makes no PDF/stencil assumption.
+   // This callback mirrors BuildTimeloop.h's: manual D3Q27 weights (as in repairDegenerateObstacleCells) instead of
+   // the generic setToEquilibrium() (see MovingParticleMapping.h).
    uint_t handoffCallbackInvocations = uint_t( 0 );
    auto onOwnershipHandoff = [&]( IBlock&, cell_idx_t hx, cell_idx_t hy, cell_idx_t hz,
                                    walberla::id_t, walberla::id_t ) {
@@ -224,21 +193,15 @@ void runTest()
       mapping( blocks, pdfFieldID, boundaryHandlingID, particleFieldID, accessor, Obstacle_Flag,
                FormerObstacle_Flag, mesa_pd::kernel::SelectAll(), false, real_t( 0 ), onOwnershipHandoff );
 
-   // Step 1: map particle A only (B is far away) -- the test cell should become obstacle, owned by A.
+   // Step 1: map particle A only (B is far away): the test cell becomes obstacle, owned by A.
    mapping( block );
 
    check( boundaryHandling->isBoundary( ix, iy, iz ), "the test cell must be an obstacle after mapping particle A" );
    check( ( *particleField )( ix, iy, iz ) == uidA, "the test cell must be owned by particle A after the first mapping" );
 
-   // Inject a deliberately NON-equilibrium PDF -- standing in for "whatever A's own imperfect
-   // obstacle dynamics (unmasked collide, SimpleBB's own per-step partial rewrite) might have left
-   // behind after some real time under A's ownership". Base state: D3Q27 rest equilibrium (rho=1,
-   // u=0; same weights used throughout this session's own repairDegenerateObstacleCells/
-   // trackWatchCells code: w0=8/27, w[1-6]=2/27, w[7-18]=1/54, w[19-26]=1/216), perturbed on one
-   // arbitrary component pair -- the specific direction/magnitude is not the point; ANY nonzero,
-   // asymmetric deviation from equilibrium is what a real, slightly-imperfect obstacle-cell history
-   // would leave behind, and the claim under test is that the handoff preserves it UNCHANGED,
-   // whatever it is.
+   // Inject a non-equilibrium PDF, standing in for what A's obstacle dynamics may leave behind: D3Q27 rest
+   // equilibrium (w0=8/27, w[1-6]=2/27, w[7-18]=1/54, w[19-26]=1/216) with one asymmetric perturbation. Any nonzero
+   // deviation would do; the question is whether the handoff keeps it unchanged.
    std::array< real_t, 27 > injectedPdf{};
    injectedPdf[0] = real_t( 8.0 / 27.0 );
    for (uint_t q = uint_t( 1 ); q <= uint_t( 6 ); ++q) injectedPdf[q] = real_t( 2.0 / 27.0 );
@@ -250,11 +213,9 @@ void runTest()
    for (uint_t q = uint_t( 0 ); q < uint_t( 27 ); ++q)
       pdfField->get( ix, iy, iz, q ) = injectedPdf[q];
 
-   // Step 2: move A far away, move B into the SAME position A just vacated, then call the SAME
-   // mapping sweep ONCE MORE -- reproducing a direct, same-step handoff (the cell is still flagged
-   // obstacle throughout; A's own pass this step no longer visits it at all since A moved away, so
-   // only B's pass touches it, hitting the "cell is already an obstacle (maybe from another
-   // particle)" branch, MovingParticleMapping.h:180-193).
+   // Step 2: move A away, move B to the position A vacated, and call the mapping once more: a direct handoff. The cell
+   // stays obstacle; only B's pass visits it, hitting the "cell is already an obstacle (maybe from another particle)"
+   // branch of MovingParticleMapping.h.
    {
       const size_t idxA = accessor->uidToIdx( uidA );
       const size_t idxB = accessor->uidToIdx( uidB );
@@ -269,10 +230,7 @@ void runTest()
    check( boundaryHandling->isBoundary( ix, iy, iz ),
           "the test cell must STILL be flagged obstacle after the handoff (never became fluid in between)" );
 
-   // Expected D3Q27 rest equilibrium (rho=1, u=0) -- computed the SAME manual way the callback
-   // itself does (and repairDegenerateObstacleCells elsewhere in this codebase), deliberately NOT
-   // via PdfField::setToEquilibrium() -- see this file's own header comment for why that generic
-   // API is not used here at all any more.
+   // Expected D3Q27 rest equilibrium (rho=1, u=0), set manually as in the callback (not via setToEquilibrium()).
    std::array< real_t, 27 > expectedEquilibrium{};
    expectedEquilibrium[0] = real_t( 8.0 / 27.0 );
    for (uint_t q = uint_t( 1 ); q <= uint_t( 6 ); ++q) expectedEquilibrium[q] = real_t( 2.0 / 27.0 );
@@ -299,26 +257,19 @@ void runTest()
           "FIX CHECK: the handoff must NOT leave the stale injected PDF in place -- if this fails, "
           "the fix did not actually change anything (the pre-fix bug this test previously proved is "
           "still present)." );
-   // NOTE: particle B's own sphere (radius 2.5) covers a whole VOLUME of cells centred on
-   // testCellCentre, not just the single tracked (ix,iy,iz) -- and A occupied that SAME volume in
-   // step 1, so EVERY cell in it undergoes a genuine handoff here, not only the one this test
-   // otherwise tracks. That is correct, expected behaviour (matching two real overlapping rods
-   // handing off their whole shared region, not one point) -- so ">= 1", not "== 1", is the right
-   // check; the important thing is that it fired AT LEAST once (the callback is wired up and
-   // reachable), not an exact count for an incidental sphere volume.
+   // B's sphere (radius 2.5) covers a volume of cells that A also covered in step 1, so every cell in it is handed
+   // off; hence ">= 1" invocations, not "== 1".
    const uint_t handoffInvocationsAfterGenuineHandoff = handoffCallbackInvocations;
    check( handoffInvocationsAfterGenuineHandoff >= uint_t( 1 ),
           "FIX CHECK: the handoff callback must fire at least once for this genuine handoff -- zero "
           "would mean the callback is not wired up or not being invoked." );
 
-   // Second scenario: the ROUTINE case -- particle B re-confirms a cell it ALREADY owns on a later
-   // step (formerParticleUid == particleUid, no real handoff). Inject a fresh non-equilibrium PDF
-   // and re-run the mapping sweep with B still in place (no position change) -- the fix must NOT
-   // reset this, or every covered cell would be permanently frozen at rest equilibrium forever.
+   // Second scenario, the routine case: B re-confirms a cell it already owns (formerParticleUid == particleUid).
+   // Inject a fresh non-equilibrium PDF and map again without moving B; the PDF must not be reset.
    std::array< real_t, 27 > secondInjection{};
    for (uint_t q = uint_t( 0 ); q < uint_t( 27 ); ++q) secondInjection[q] = injectedPdf[q] + real_t( 1e-4 ) * real_c( q );
    for (uint_t q = uint_t( 0 ); q < uint_t( 27 ); ++q) pdfField->get( ix, iy, iz, q ) = secondInjection[q];
-   mapping( block ); // B has not moved -- this must be the routine "re-confirm my own cell" pass
+   mapping( block ); // B has not moved: routine re-confirmation pass
 
    check( ( *particleField )( ix, iy, iz ) == uidB, "particle B must still own the cell after re-confirming it" );
    real_t maxAbsDiffAfterReconfirm = real_t( 0 );
