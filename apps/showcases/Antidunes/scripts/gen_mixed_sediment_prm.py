@@ -313,6 +313,6 @@ VTK
    }}
 }}
 """
-out = pathlib.Path(__file__).parent / "prms" / "mixed_sediment_showcase_100floaters_gas.prm"
+out = pathlib.Path(__file__).resolve().parent.parent / "prms" / "mixed_sediment_showcase_100floaters_gas.prm"
 out.write_text(prm)
 print("wrote", out)

@@ -10,7 +10,7 @@ The ideal reference is recomputed at the shifted heave. Base prms: prms/bogner_r
 """
 import json, math, pathlib, re
 
-root = pathlib.Path(__file__).parent / "prms"
+root = pathlib.Path(__file__).resolve().parent.parent / "prms"
 base = json.load(open(root / "bogner_righting_scan2_s16_manifest.json"))
 s, G, ZW, L_BOX = base["s"], base["g"], base["z_water"], base["box_length"]
 BASE_TAGS = ["a25p5", "a26p565", "a29", "a30p5"]

@@ -10,7 +10,7 @@ face-alignment tie at once. The analytic arm is tilted too so both arms start fr
 usage: gen_buoyancy_tilted25_box_prm.py   (no args; regenerates all 6 from prms/buoyancy_compare_box_r{1,2,4}_{mem,analytic}_gas.prm)
 """
 import pathlib, re
-D = pathlib.Path(__file__).parent / "prms"
+D = pathlib.Path(__file__).resolve().parent.parent / "prms"
 for R in (1, 2, 4):
     for method in ("mem", "analytic"):
         src = D / f"buoyancy_compare_box_r{R}_{method}_gas.prm"

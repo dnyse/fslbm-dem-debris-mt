@@ -10,7 +10,7 @@ every 10000, ClogMeasurement.flowRateEnabled true (pillar probe pair dropped), h
 every 10 steps.
 """
 import re, pathlib, sys
-D = pathlib.Path(__file__).parent / "prms"
+D = pathlib.Path(__file__).resolve().parent.parent / "prms"
 
 def strip_block(t, name):
     m = re.search(r"^%s\s*\n\{" % name, t, flags=re.M)

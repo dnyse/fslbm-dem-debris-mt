@@ -236,7 +236,7 @@ VTK
    }}
 }}
 """
-out = pathlib.Path(__file__).parent / "prms" / f"bogner_exact_3box_s{s}{TAG}_gas.prm"
+out = pathlib.Path(__file__).resolve().parent.parent / "prms" / f"bogner_exact_3box_s{s}{TAG}_gas.prm"
 out.write_text(prm)
 print(f"ghost-sync hops needed {hops} (<=4 ok)")
 print(f"s={s}: domain {LX}x{LY}x{LZ}, water {W:g}, g {G:g}, {TIMESTEPS} steps, VTK every {VTK_EVERY}, blocks {blocks} -> {nr} ranks")

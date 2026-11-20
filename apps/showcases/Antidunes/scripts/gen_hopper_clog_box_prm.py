@@ -327,6 +327,6 @@ VTK
    }}
 }}
 """
-out = pathlib.Path(__file__).parent / args.out
+out = pathlib.Path(__file__).resolve().parent.parent / args.out
 out.write_text(prm)
 print("wrote", out)

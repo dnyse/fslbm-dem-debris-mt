@@ -6,7 +6,7 @@ everything else unchanged."""
 import re
 from pathlib import Path
 
-P = Path(__file__).resolve().parent / "prms"
+P = Path(__file__).resolve().parent.parent / "prms"
 STEPS = "0,250,500,1000,2000,4000,8000,12000,16000,20000,24000,28000,32000,36000,39999"
 VTK = """VTK
 {
