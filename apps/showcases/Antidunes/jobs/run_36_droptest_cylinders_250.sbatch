@@ -11,11 +11,9 @@
 
 # NOTE: --constraint=el9 omitted, see run_36_droptest_all.sbatch's own comment for why.
 #
-# Cylinders scenario (prms/DropTest_cylinders_250_gas.prm), reduced to 250 floaters (per explicit
-# request 2026-09-13) -- this phase never got to run at all in job 4226400 (the box phase crashed
-# first). Same box-box-irrelevant contact model as DropTest_cylinders_gas.prm (cylinder-cylinder
-# contact uses the Kodam analytical path regardless of useSpheroBoxContact/useFraigeBoxContactModel,
-# which only affect Box x Box).
+# Cylinder version of run_36_droptest_250.sbatch: 250 cylinders (radius 1, length 12) in the same staggered
+# waves, 46000 steps (prms/DropTest_cylinders_250_gas.prm). Cylinder x Cylinder contacts use the closed form
+# (Kodam/Guo) with GJK/EPA fallback for results flagged uncertain.
 set -euo pipefail
 
 module load gcc/11.5.0

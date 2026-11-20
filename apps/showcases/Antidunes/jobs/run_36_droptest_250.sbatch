@@ -11,11 +11,8 @@
 
 # NOTE: --constraint=el9 omitted, see run_36_droptest_all.sbatch's own comment for why.
 #
-# Original (useSpheroBoxContact=true) box-box contact model -- the SAME contact model job 4226400
-# crashed with at 1000 floaters -- but at the reduced 250-floater scale (prms/DropTest_250_gas.prm,
-# per explicit request 2026-09-13). Companion to run_36_droptest_fraige_250.sbatch (which completed
-# cleanly at 250 floaters using the Fraige contact model instead) -- this tests whether the ORIGINAL
-# contact model also survives at this smaller scale, or whether the crash is scale-dependent.
+# Fluid-free DEM drop test of 250 cuboids (12 x 2 x 3) in staggered waves into a closed box, 46000 steps
+# (prms/DropTest_250_gas.prm). Box x Box contacts use boxBoxSAT.
 set -euo pipefail
 
 module load gcc/11.5.0
