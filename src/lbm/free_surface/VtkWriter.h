@@ -48,16 +48,11 @@ namespace free_surface
  * Add VTK output to time loop that includes all relevant free surface information. It must be configured via
  * config-file.
  **********************************************************************************************************************/
-// denseStepPtr/denseFromStep/denseToStep: optional windowed-execution gate for a VTK output block
-// named "fluid_field_dense" (if the prm's "VTK" block defines one -- see VTKParams::denseEnabled's
-// own doc comment). denseStepPtr left null (the default) disables gating entirely -- every other
-// discovered block (including "fluid_field" itself) always fires on its own writeFrequency,
-// unaffected, exactly as before this parameter was added.
-//
-// snapshotStepPtr/snapshotSteps: same idea, but for a DISCRETE, typically non-uniform set of steps
-// instead of a continuous window -- gates a VTK output block named "fluid_field_snapshots" (see
-// VTKParams::snapshotsEnabled's own doc comment) to fire ONLY on steps contained in snapshotSteps.
-// snapshotStepPtr left null (the default) disables gating entirely, same contract as denseStepPtr.
+// denseStepPtr/denseFromStep/denseToStep: if denseStepPtr is non-null, a VTK output block named "fluid_field_dense"
+// writes on every step in [denseFromStep, denseToStep) instead of on its writeFrequency (see VTKParams::denseEnabled
+// in the Antidunes SimulationParams.h). snapshotStepPtr/snapshotSteps: likewise, a block named "fluid_field_snapshots"
+// writes only on the steps in snapshotSteps (VTKParams::snapshotsEnabled). A null pointer (the default) disables the
+// gate; all other blocks always write on their own writeFrequency.
 template< typename LatticeModel_T, typename FreeSurfaceBoundaryHandling_T, typename PdfField_T, typename FlagField_T,
           typename ScalarField_T, typename VectorField_T, bool useCodegen = false,
           typename VectorFieldFlattened_T = GhostLayerField< real_t, 3 > >
@@ -226,22 +221,10 @@ void addVTKOutput(const std::weak_ptr< StructuredBlockForest >& blockForestPtr, 
    vtk::initializeVTKOutput(vtkOutputFunctions, vtkConfigFunc, blockForest, config, "VTK", &vtkOutputObjects);
    for (auto const &[label, function] : vtkOutputFunctions)
    {
-      // "fluid_field_dense" and "fluid_field_snapshots" (see this function's own doc comment) gate
-      // their actual invocation to a window / a discrete set of steps below, instead of firing on
-      // their own writeFrequency like every other block. [Claude, 2026-11-16, bugfix]: this used to
-      // call the plain wrapped function() (-> VTKOutput::write()) only on the selected steps, and
-      // nowhere else -- which silently broke VTKOutput's own output numbering whenever the selected
-      // steps are not uniformly spaced (fluid_field_snapshots' whole point). write()'s numbering
-      // (with continuousNumbering=false, the default used here) is simply "how many times write()
-      // has been called so far", which only equals the real simulation step if write() is called on
-      // EVERY timeloop step; skipping the call outside the window/set instead numbers outputs
-      // 0,1,2,... in the order they fire, discarding the real, possibly non-uniform step values
-      // entirely (e.g. steps 0,250,500,1000,2000,4000,... were renumbered 0,1,2,3,4,5,...). Fixed by
-      // calling VTKOutput::forceWrite(step) directly with the real simulation step as the explicit
-      // output number: this bypasses write()'s counter-based numbering (and its writeFrequency
-      // gate, already irrelevant here) entirely, and also writes that same number into the
-      // .pvd/.vthb collection's "timestep" attribute, so ParaView plays the sequence back at its
-      // true, non-uniform times instead of assuming uniform spacing.
+      // The gated blocks call VTKOutput::forceWrite(step) with the simulation step as output number. VTKOutput::write()
+      // numbers outputs by its call count, which matches the step only if it is called on every step. forceWrite also
+      // stores that number as the time of each entry in the .pvd or .vthb.series collection file, so ParaView shows the
+      // true, possibly non-uniform output times.
       if (label == "fluid_field_dense" && denseStepPtr)
       {
          auto vtkOutput = vtkOutputObjects.at(label);

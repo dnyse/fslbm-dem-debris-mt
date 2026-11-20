@@ -73,11 +73,11 @@ class CurvatureSweepFiniteDifferences
 
    void operator()(IBlock* const block);
 
-   // [Claude, 2026-10-02] Antidunes prm ModelParameters.guardCurvatureInputs (default false = unchanged upstream code).
-   // true: a neighbour that is neither liquid/interface/gas nor obstacle is skipped (upstream falls through and uses an
-   // UNINITIALISED neighborNormal -- Vector3() = default -- although its own comment says such directions are not
-   // considered); a neighbour whose normal is not finite is skipped; if no direction remains, curvature = 0. Each such
-   // event is logged (throttled) with cell, neighbour flag and neighbour normal. For valid inputs the result is identical.
+   // Set from the Antidunes parameter ModelParameters.guardCurvatureInputs (default false = upstream behaviour).
+   // If true, a neighbour that is neither liquid/interface/gas nor obstacle is skipped (upstream counts it with a zero
+   // neighborNormal, so its weight still enters weightSum), a liquid/interface/gas neighbour with a non-finite normal is
+   // skipped, and curvature is 0 if no direction remains. Each case is logged (throttled) as [CURVATURE-GUARD]. If every
+   // neighbour is in one of these flag groups and all normals are finite, the result is identical to upstream.
    void setGuardInvalidNeighbours(bool on) { guardInvalidNeighbours_ = on; }
 
    /********************************************************************************************************************

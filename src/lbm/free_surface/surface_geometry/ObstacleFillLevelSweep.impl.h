@@ -59,23 +59,13 @@ void ObstacleFillLevelSweep< Stencil_T, FlagField_T, ScalarField_T, VectorField_
       if (isPartOfMaskSet(flagFieldPtr, obstacleFlagMask) &&
           isFlagInNeighborhood< Stencil_T >(flagFieldPtr, liquidInterfaceGasFlagMask))
       {
-         // A zero obstacle normal can legitimately occur when the obstacle cell's fluid
-         // neighbours are in exactly opposing directions (e.g. a sphere equatorial cell with
-         // liquid directly below and gas directly above: direction vectors ±z cancel in the
-         // D3Q27 sum). In that case fall back to an equal-weight average of fluid-neighbour
-         // fill levels instead of the normal-weighted projection.
-         // Log once per cell so we know when the former assertion would have fired.
-         // Logging disabled (this session): fires for dozens of cells every timestep and, combined
-         // with WALBERLA_LOG_DEVEL's uncached ignore-regex check (never gated by WALBERLA_LOGLEVEL,
-         // see Logging::isInIgnoreCallerPaths), was both flooding sbatch-output past the shared
-         // /home quota AND measurably slowing every run down even when suppressed via regex.
+         // A zero obstacle normal occurs when the directions to the obstacle cell's liquid/interface/gas neighbours
+         // sum to zero (see ObstacleNormalSweep). Such a cell takes the equal-weight average of its fluid neighbours'
+         // fill levels instead of the normal-weighted one. Not logged, for the reason given in ObstacleNormalSweep.
          const real_t obstNormalSqrLen = obstacleNormalField->get(x, y, z).sqrLength();
          if (obstNormalSqrLen <= real_c(0))
          {
-            // WALBERLA_LOG_DEVEL_ON_ROOT("ObstacleFillLevelSweep: zero obstacle normal at cell ("
-            //                            << x << "," << y << "," << z
-            //                            << ") — using equal-weight fill-level average "
-            //                            << "(former CHECK_GREATER assertion would have fired here).");
+            // nothing to do: handled by the weight choice below
          }
 
          real_t sum       = real_c(0);

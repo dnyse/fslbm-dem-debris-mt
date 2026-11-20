@@ -67,7 +67,8 @@ void writeOutput(std::ostream& os, const Rot3& data, const uint_t component)
    walberla::vtk::toStream(os, (data.getMatrix() * Vec3(1_r, 0_r, 0_r))[component]);
 }
 
-// 9-component rotation matrix (row-major): allows ParaView Tensor Glyph without a Python script.
+// 9-component array (e.g. a 3x3 tensor for a ParaView Tensor Glyph), written in array order; the
+// selector chooses the element layout.
 template <>
 inline
 void writeOutput(std::ostream& os, const std::array<real_t, 9>& data, const uint_t component)

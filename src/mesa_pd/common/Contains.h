@@ -87,9 +87,9 @@ inline
 bool isPointInsideCapsuleBF(const Vec3& pointBF,
                             const real_t radius, const real_t coreHalfLength )
 {
-   // closest point on the body-z-axis core segment [-coreHalfLength, +coreHalfLength] to pointBF,
-   // then a plain sphere-radius test against that point -- the Minkowski-sum-of-segment-and-ball
-   // definition of a capsule, mirroring Capsule::support()'s own construction.
+   // Closest point on the body-z core segment [-coreHalfLength, +coreHalfLength] to pointBF, then a
+   // sphere-radius test against it: a capsule is the Minkowski sum of that segment and a ball, as in
+   // Capsule::support().
    const real_t zClamped = std::clamp(pointBF[2], -coreHalfLength, coreHalfLength);
    const real_t dx = pointBF[0];
    const real_t dy = pointBF[1];

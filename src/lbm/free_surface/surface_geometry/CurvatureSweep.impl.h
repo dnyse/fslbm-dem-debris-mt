@@ -72,16 +72,10 @@ void CurvatureSweepFiniteDifferences< Stencil_T, FlagField_T, ScalarField_T, Vec
 
             if (normalFieldIt->sqrLength() < real_c(1e-14))
             {
-               // Degenerate (zero-length) normal at this interface cell -- leave curvature at 0 (no
-               // surface-tension force here) and move on. Diagnostic logging that used to run here
-               // (contact-line detection, per-cell coordinate reporting) is disabled: it fired for
-               // dozens of interface cells every timestep and, combined with WALBERLA_LOG_WARNING's
-               // uncached ignore-regex check (never gated by WALBERLA_LOGLEVEL, see
-               // Logging::isInIgnoreCallerPaths), was both flooding sbatch-output past the shared
-               // /home quota AND measurably slowing every run down even when suppressed via regex (a
-               // regex_search scan still runs per call whether or not the message is printed) --
-               // confirmed via THESIS_PLAN.md's phase1 (unfiltered, 43m32s) vs phase1.5
-               // (regex-filtered to zero output, 92m27s) timing, same 144-rank scenario.
+               // Degenerate (zero-length) normal: leave curvature at 0 (no surface-tension force here).
+               // Not logged: it can occur in many interface cells every time step, and WALBERLA_LOG_WARNING is not
+               // gated by WALBERLA_LOGLEVEL and runs its ignore-regex check (Logging::isInIgnoreCallerPaths) on
+               // every call, so it would flood the output or, if filtered, still cost time.
                continue;
             }
 
@@ -94,7 +88,7 @@ void CurvatureSweepFiniteDifferences< Stencil_T, FlagField_T, ScalarField_T, Vec
 
                Vector3< real_t > neighborNormal;
 
-               // [Claude, 2026-10-02] guardInvalidNeighbours_ (prm guardCurvatureInputs): see setGuardInvalidNeighbours
+               // guardInvalidNeighbours_ (prm guardCurvatureInputs): see setGuardInvalidNeighbours
                if (guardInvalidNeighbours_)
                {
                   neighborNormal = Vector3< real_t >(real_c(0));
@@ -176,7 +170,7 @@ void CurvatureSweepFiniteDifferences< Stencil_T, FlagField_T, ScalarField_T, Vec
             // directions would implicitly influence the finite difference scheme by assuming a normal of zero
             if (guardInvalidNeighbours_ && weightSum <= real_c(0))
             {
-               // [Claude, 2026-10-02] no usable direction left: no curvature (instead of 0/0)
+               // no usable direction left: no curvature (instead of 0/0)
                static uint_t emptyLogCount = 0;
                if (++emptyLogCount <= uint_t(20) || emptyLogCount % uint_t(5000) == uint_t(0))
                   WALBERLA_LOG_WARNING("[CURVATURE-GUARD] (#" << emptyLogCount << ", no usable direction) interface cell ("

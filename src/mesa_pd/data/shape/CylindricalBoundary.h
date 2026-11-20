@@ -49,18 +49,17 @@ public:
    void pack(walberla::mpi::SendBuffer& buf) override;
    void unpack(walberla::mpi::RecvBuffer& buf) override;
 
-   // --- Optional containment-mode fields. Default (isContainment=false, no axial bounds, no half
-   // clip) is byte-for-byte the original shape: a solid, axially-infinite pillar a body collides with
-   // from OUTSIDE. Setting isContainment=true instead makes this a HOLLOW TUBE INTERIOR -- a body is
-   // contained by / pushed back toward the axis instead of repelled from it. axialMin_/axialMax_
-   // (optional) bound the tube to a finite span along its own axis, measured as an offset from this
-   // shape's own body position (0 = at the body's own centre); a halfClipNormal_ (optional) further
-   // restricts the solid material to the half of the tube on its positive side of a plane THROUGH the
-   // axis (e.g. a bridge arch is only a semicircle of solid material above its own springing line,
-   // open below -- clip normal = world Z, plane through the arch body's own position). All three are
-   // additive/backward-compatible: any existing CylindricalBoundary user (pillars, domain-boundary
-   // containment in AnalyticCollisionFunctions.h, ParticlePacking/Mixer) never sets them and sees no
-   // behavior change.
+   // Optional fields, read only by the Antidunes showcase's SolidCylinderContactDetection
+   // (apps/showcases/Antidunes/ParticleKernels.h); mesa_pd's own contact functions ignore them and treat
+   // this shape as a hollow container. In that class's Sphere, Box, Cylinder and Capsule overloads,
+   // isContainment=false (default) is a solid, axially infinite pillar contacted from outside;
+   // isContainment=true is a hollow tube that pushes bodies back toward its axis. The following two apply
+   // in containment mode only, and only in the Sphere, Box and Cylinder overloads (a capsule in containment
+   // mode takes mesa_pd's generic GeneralContactDetection path, which ignores them).
+   // axialMin_/axialMax_ bound the tube along its axis, as offsets from this particle's position
+   // (default +-infinity = unbounded). A nonzero halfClipNormal_ keeps only the material on the positive
+   // side of the plane through this particle's position with that normal (e.g. an arch solid only above
+   // its springing line); the zero vector (default) disables the clip. All three fields are packed for MPI.
    bool   isContainment() const { return isContainment_; }
    void   setContainment(bool v) { isContainment_ = v; }
 

@@ -96,8 +96,9 @@ class StreamReconstructAdvectSweep
    bool useSimpleMassExchange_;
    real_t cellConversionThreshold_;
    real_t cellConversionForceThreshold_;
-   // [Claude, 2026-09-28] false (DEFAULT, upstream behaviour): the scratch PDF clone keeps its uninitialised first-creation memory.
-   // true: copy the real PDF field into the clone once on its first creation (see the 2026-09-25 comment in operator()).
+   // false (default, upstream behaviour): the scratch PDF clone starts as uninitialised memory.
+   // true: copy the PDF field into the clone once when it is first created (see operator()).
+   // Set from the Antidunes parameter ModelParameters.seedStreamPdfCloneOnFirstUse.
    bool seedPdfCloneOnFirstUse_;
 }; // class StreamReconstructAdvectSweep
 
@@ -120,18 +121,11 @@ void StreamReconstructAdvectSweep< LatticeModel_T, BoundaryHandling_T, FlagField
    FlagField_T* const neighborhoodFlagField = neighborhoodFlagFieldClone_.get(block);
    ScalarField_T* const fillDstField        = fillFieldClone_.get(block);
 
-   // [Claude, 2026-09-25] FIX (THESIS_PLAN.md, Antidunes hopper-clogging investigation): pdfFieldClone_
-   // allocates its buffer via cloneUninitialized() (FieldClone.h) on its ONE-TIME first creation -- this
-   // does NOT copy the real field's actual values, genuinely uninitialized memory. The obstacle branch
-   // below never writes into pdfDstFieldIt at all (only the fill level is carried forward), so any PDF
-   // component of an obstacle-flagged cell that is ALSO never independently refreshed by a boundary
-   // condition's per-link bounce-back (i.e. one facing another obstacle cell, not real fluid) can remain
-   // on this never-written memory indefinitely -- which typical OS zero-fill-on-first-touch behaviour
-   // makes read back as exactly 0.0, and a subsequent 1/rho collision-kernel division then turns that
-   // into a full NaN once this buffer becomes "current" via the src/dst swap below. This only matters on
-   // the FIRST-ever creation of this clone (every later call reuses the same persistent object), so fix
-   // it at the source: seed the fresh clone with the real field's own current, properly-initialised
-   // contents once, so it starts as a genuine mirror rather than blank memory.
+   // pdfFieldClone_ (one per process, shared by all blocks) is created once via cloneUninitialized() (FieldClone.h),
+   // i.e. without the field's values. The obstacle/outflow branch below never writes PDFs into the clone, so
+   // obstacle-cell PDFs that no boundary condition refreshes (links facing other obstacle cells) can keep this
+   // uninitialised memory (typically 0) after the src/dst swap, and a later division by rho turns it into NaN.
+   // Optionally seed the new clone's interior cells with the current PDF field once.
    if (pdfCloneJustCreated && seedPdfCloneOnFirstUse_)
    {
       WALBERLA_FOR_ALL_CELLS_XYZ(pdfSrcField,
@@ -183,15 +177,10 @@ void StreamReconstructAdvectSweep< LatticeModel_T, BoundaryHandling_T, FlagField
             *fillDstFieldIt        = (*fillSrcFieldIt * oldRho + deltaMass) / newRho;
             const real_t deltaFill = *fillDstFieldIt - *fillSrcFieldIt;
 
-            // [Claude, 2026-09-25] DIAGNOSTIC: prove/disprove the hypothesis that a near-total obstacle
-            // enclosure degrades reconstructInterfaceCellLegacy's curvature/normal-based reconstruction
-            // enough to make newRho itself degenerate (zero or non-finite), which this division then
-            // turns directly into a non-finite fill level with no guard at all (THESIS_PLAN.md,
-            // hopper clogging investigation). Fires only when the fill actually IS non-finite, so a
-            // healthy run stays silent; throttled the same way as PdfReconstructionManager.h's own
-            // [FALLBACK-ISOLATED-INTERFACE]/[PASS3-UNRESOLVED-ISLAND] warnings (first 20, then every
-            // 5000th) since this is a generic library file with no Antidunes-specific step-window config
-            // available here.
+            // Diagnostic: a degenerate newRho (zero or non-finite) makes the fill level above non-finite. Suspected
+            // cause: a cell almost enclosed by obstacles, which degrades the curvature/normal-based reconstruction in
+            // reconstructInterfaceCellLegacy. Silent unless the fill level is non-finite; logs the first 20, then
+            // every 5000th occurrence.
             if (!std::isfinite(*fillDstFieldIt))
             {
                static uint_t degenerateFillLogCount = uint_t(0);

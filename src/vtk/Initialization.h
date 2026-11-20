@@ -47,11 +47,9 @@ void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFuncti
                           const std::map< std::string, VTKOutput::CellFilter > & filters,
                           const std::map< std::string, VTKOutput::BeforeFunction > & beforeFunctions );
 
-// vtkOutputsOut: optional out-param, null by default. When non-null, this is additionally filled
-// with the shared_ptr<VTKOutput> constructed for each discovered block (keyed the same way as
-// outputFunctions), for callers that need to bypass OutputFunction's write()-with-internal-counter
-// numbering (e.g. to call VTKOutput::forceWrite() with an externally-known, possibly non-uniform
-// step number -- see free_surface::addVTKOutput in VtkWriter.h). Existing callers are unaffected.
+// vtkOutputsOut: optional output (default null). If non-null, it receives the VTKOutput object of each configured
+// block, keyed like outputFunctions, so that callers can call VTKOutput::forceWrite() with their own output number
+// instead of the call-counter numbering of write() (see free_surface::addVTKOutput in lbm/free_surface/VtkWriter.h).
 void initializeVTKOutput( std::map< std::string, OutputFunction > & outputFunctions,
                           const shared_ptr< const StructuredBlockStorage > & storage,
                           const Config::BlockHandle & parentBlockHandle,

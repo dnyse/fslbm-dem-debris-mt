@@ -30,8 +30,8 @@ namespace data {
 
 /**
  * Finite solid cylinder. The cylinder axis is the BODY-FRAME Z-AXIS; the world-frame axis
- * direction follows from the particle's rotation. In contrast to CylindricalBoundary (an
- * infinite hollow container boundary), this is a finite convex solid, so it works with the
+ * direction follows from the particle's rotation. Unlike CylindricalBoundary (an axially
+ * infinite boundary shape of infinite mass), this is a finite convex solid, so it works with the
  * GJK/EPA-based GeneralContactDetection via support().
  */
 class Cylinder : public BaseShape
@@ -94,14 +94,10 @@ Vec3 Cylinder::support( const Vec3& bfD ) const
       supportPoint[0] = real_t(0);
       supportPoint[1] = real_t(0);
    }
-   // Axial component: zero unless bfD has a genuinely nonzero axial component. Without this guard,
-   // sign(bfD[2]) still resolves to a definite +-1 even when bfD[2] is floating-point noise around an
-   // intended-exactly-perpendicular direction (band-on, axis exactly tangent to the queried direction)
-   // -- the true support region there is the WHOLE band length (every axial position is an equally
-   // valid maximizer), and jumping to a full +-height_/2 offset picks an arbitrary end instead of the
-   // physically-symmetric band-centre point, injecting a spurious lever arm (found via
-   // DEMValidation's wallImpactCylinder + useRotationalEffectiveMass at tilt=90 degrees: a real,
-   // nonzero contact torque appeared at an orientation where the true physics has none by symmetry).
+   // Axial component: zero when |bfD[2]| <= 1e-12. For a direction (numerically) perpendicular to the
+   // axis, a whole lateral-surface segment parallel to the axis maximises the support function; sign()
+   // of floating-point noise would pick an arbitrary end (+-h/2) instead of the mid-length point and add
+   // a spurious lever arm, i.e. a contact torque where symmetry gives none.
    supportPoint[2] = (std::abs(bfD[2]) > real_t(1e-12)) ? math::sign(bfD[2]) * height_ * real_t(0.5) : real_t(0);
    return supportPoint;
 }

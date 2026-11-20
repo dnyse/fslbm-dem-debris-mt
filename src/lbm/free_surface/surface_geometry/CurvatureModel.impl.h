@@ -95,10 +95,11 @@ void FiniteDifferenceMethod< Stencil_T, LatticeModel_T, FlagField_T, ScalarField
    BlockDataID smoothFillFieldID = field::addToStorage< ScalarField_T >(
       geometryHandler.blockForest_, "Smooth fill level field", real_c(0), fillFieldLayout, uint_c(1));
 
-   // Compute obstacle normals and reflect fill levels into obstacle cells so that interface cells adjacent to the
-   // obstacle have a complete fill-level gradient stencil. This is required by the FiniteDifferenceMethod whenever an
-   // obstacle touches the free surface (moving particles, walls at the contact line), regardless of wetting.
-   // Without these sweeps, obstacle cells have no fill level → gradient ≈ 0 → zero normal → NaN cascade.
+   // Compute obstacle normals and reflect fill levels into obstacle cells regardless of wetting: the NormalSweep below
+   // always includes obstacle neighbours (includeObstacleNeighbors = true), which requires meaningful fill levels in
+   // obstacle cells of the smoothed fill level field. Without these sweeps, those cells keep the field's initial value
+   // 0, so an obstacle next to the free surface (moving particle, wall at the contact line) enters the normal's
+   // gradient stencil with fill level 0.
    ObstacleNormalSweep< Stencil_T, FlagField_T, VectorField_T > obstacleNormalSweep(
       geometryHandler.obstacleNormalFieldID_, geometryHandler.flagFieldID_, flagIDs::interfaceFlagID,
       flagIDs::liquidInterfaceGasFlagIDs, geometryHandler.obstacleFlagIDSet_, false, true, true);
@@ -131,7 +132,8 @@ void FiniteDifferenceMethod< Stencil_T, LatticeModel_T, FlagField_T, ScalarField
 
    // compute interface normals (using smoothed fill level field);
    // always include obstacle neighbors and compute in ghost layer so obstacle-adjacent interface cells get a
-   // complete stencil — the contact-angle curvature correction (enableWetting_) is kept separate
+   // complete stencil (modifyNearObstacles has no effect when obstacle neighbors are included); enableWetting_ still
+   // controls SmoothingSweep's use of obstacle cells and the contact-angle correction in the curvature sweep
    NormalSweep< Stencil_T, FlagField_T, ScalarField_T, VectorField_T > normalSweep(
       geometryHandler.normalFieldID_, smoothFillFieldID, geometryHandler.flagFieldID_, flagIDs::interfaceFlagID,
       flagIDs::liquidInterfaceGasFlagIDs, geometryHandler.obstacleFlagIDSet_, true, true,

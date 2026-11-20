@@ -31,15 +31,14 @@ namespace data {
 /**
  * Finite solid capsule ("pill" shape): a cylindrical core with two hemispherical caps, i.e. the
  * Minkowski sum of a line segment (the body-frame Z-axis, from -coreHalfLength to +coreHalfLength)
- * and a ball of the given radius. `height` is the FULL end-to-end extent INCLUDING the rounded caps
- * (matching Cylinder's own `height` = full flat-capped length, so the two are directly comparable /
- * swappable at the same radius+height numbers); the straight core segment's half-length is therefore
+ * and a ball of the given radius. `height` is the FULL end-to-end extent INCLUDING the rounded caps,
+ * like Cylinder's `height`, so both shapes take the same (radius, height); hence
  * coreHalfLength = max(0, height/2 - radius). A capsule with height <= 2*radius degenerates to a
  * sphere of that radius (coreHalfLength = 0).
  *
- * Added specifically so GJK/EPA-based GeneralContactDetection (support()-only, no closed form) can be
- * exercised without writing any analytic capsule contact algorithm: see this shape's own support()
- * below, which is a 3-line reduction to Cylinder's own analytic support() plus a radius offset.
+ * mesa_pd provides no analytic capsule contact functions; GeneralContactDetection handles capsules
+ * through support() alone (GJK/EPA, or a single support query against a HalfSpace or
+ * CylindricalBoundary); support() is the segment's support point plus radius * direction.
  */
 class Capsule : public BaseShape
 {
@@ -83,27 +82,17 @@ void Capsule::updateMassAndInertia(const real_t density)
    const real_t mCaps = (real_t(4) / real_t(3)) * math::pi * r * r * r * density;      // BOTH hemispheres combined (= one full sphere)
    const real_t mHemi = real_t(0.5) * mCaps;                                          // ONE hemisphere's mass
 
-   // Axial (spin) moment: the core cylinder's own m r^2/2, plus the caps' contribution -- by symmetry a
-   // hemisphere's moment about the axis THROUGH ITS OWN POLE is identical to a full sphere's, (2/5) m r^2,
-   // regardless of where along that axis it sits, so both hemispheres combined contribute (2/5) mCaps r^2.
+   // Axial (spin) moment: core cylinder m r^2/2 plus the caps. A hemisphere's moment about its symmetry
+   // axis equals a full sphere's, (2/5) m r^2, independent of its axial position, so both caps add
+   // (2/5) mCaps r^2.
    const real_t Iaxis = mCyl * r * r * real_t(0.5) + mCaps * (real_t(2) / real_t(5)) * r * r;
 
-   // Perpendicular moment about the capsule's own centre (parallel-axis theorem for the two caps):
+   // Perpendicular moment about the capsule centre (parallel-axis theorem for the two caps):
    // core cylinder about its own centre (= capsule centre): m(3r^2+Lc^2)/12.
-   // Each hemisphere's own-centroid perpendicular moment is (83/320) m_hemi r^2 -- derived here
-   // rather than quoted, since an earlier version of this derivation had the two standard values
-   // swapped (caught by ANTIDUNES_CapsuleShape's testCapsuleDegenerateSphereLimit, which checks the
-   // exact height<=2r sphere limit): split a full sphere of mass M=2*m_hemi through its own centre;
-   // the flat-face-diameter axis of either resulting hemisphere lies EXACTLY IN that splitting
-   // plane, so by mirror symmetry (z -> -z swaps the two hemispheres and fixes that axis) each
-   // hemisphere contributes EQUALLY to the full sphere's own (2/5) M r^2 about it -- i.e. (1/5) M r^2
-   // = (2/5) m_hemi r^2 per hemisphere, about the FLAT-FACE diameter (through the flat face's own
-   // centre, not the hemisphere's centroid). Shifting via parallel axis IN REVERSE to the
-   // hemisphere's own centroid, a distance 3r/8 further along the symmetry axis, SUBTRACTS
-   // m_hemi*(3r/8)^2: 2/5 - 9/64 = 128/320 - 45/320 = 83/320. (Sanity check: at a=0, degenerating to
-   // a single sphere, hemiOffset=3r/8 and adding that same m_hemi*(3r/8)^2 back via the forward
-   // parallel-axis step below exactly restores 2/5 m_hemi r^2 per hemisphere, i.e. (2/5) M r^2 total
-   // -- the correct, exact solid-sphere moment.)
+   // Hemisphere about a diameter of its flat face: by mirror symmetry half of a full sphere's moment,
+   // (2/5) m_hemi r^2. Its centroid lies 3r/8 from the flat face, so about the centroid:
+   // (2/5 - 9/64) m_hemi r^2 = (83/320) m_hemi r^2. The centroid sits at a + 3r/8 from the capsule
+   // centre (hemiOffset). For a = 0 this gives the solid-sphere value (2/5) m r^2.
    const real_t IcylPerp   = mCyl * (real_t(3) * r * r + Lc * Lc) / real_t(12);
    const real_t hemiOffset = a + (real_t(3) / real_t(8)) * r;
    const real_t IhemiPerp  = (real_t(83) / real_t(320)) * mHemi * r * r + mHemi * hemiOffset * hemiOffset;
@@ -122,11 +111,9 @@ void Capsule::updateMassAndInertia(const real_t density)
 inline
 Vec3 Capsule::support( const Vec3& bfD ) const
 {
-   // Minkowski sum of the core segment's own support (identical construction to Cylinder::support(),
-   // with height_/2 replaced by coreHalfLength -- including the same near-perpendicular guard: without
-   // it, floating-point noise in bfD[2] around an intended-exactly-zero axial component still resolves
-   // sign(bfD[2]) to a definite +-1, picking an arbitrary end instead of the physically-symmetric
-   // segment-centre point) and the cap sphere's own support (radius_ * bfD, bfD already normalised).
+   // Support of the core segment plus the ball's support radius_ * bfD (bfD is normalised). The segment
+   // end is chosen as in Cylinder::support()'s axial component, with the same near-perpendicular guard
+   // (segment centre when |bfD[2]| <= 1e-12).
    const real_t coreHalfLen = getCoreHalfLength();
    Vec3 segPoint(real_t(0), real_t(0),
                  (std::abs(bfD[2]) > real_t(1e-12)) ? math::sign(bfD[2]) * coreHalfLen : real_t(0));

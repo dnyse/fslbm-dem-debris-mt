@@ -64,7 +64,7 @@ namespace lbm_mesapd_coupling {
 */
 //**************************************************************************************************************************************
 
-// [Claude, 2026-10-09] momentum budget diagnostic (Antidunes ModelParameters.logMomentumBudget): rank-local sums over the
+// Momentum budget diagnostic (Antidunes ModelParameters.logMomentumBudget): rank-local sums over the
 // inner links treated since the last reset, x and z components each, pre dx scaling. With phi the clamped fill of the
 // near-boundary cell (1 without fill weighting):
 //   [0,1] c (f_old + f_new)          momentum the fluid cell loses through the link
@@ -141,20 +141,22 @@ private:
 
    std::function<real_t(const Vector3<real_t>&)> hydrostaticDensityFct_;
 
-   // Optional fill-level (φ) accessor for the three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9).
-   // Returns the free-surface fill level of a given cell (1 = full liquid, 0 = gas). When set, the
-   // hydrodynamic force from each obstacle link is scaled by φ of the near-boundary cell, so interface
-   // cells at a floating particle's waterline do not inject a phantom (full-liquid) buoyant force. Left
-   // null for non-free-surface couplings, in which case the standard (Eq. 5.6) force is used unchanged.
+   // Optional fill-level (φ) accessor for the three-phase MEM fill weighting (Bogner 2017, Eq. 5.9): returns a
+   // cell's free-surface fill level (1 = liquid, 0 = gas). When set, each link's force is scaled by φ of the
+   // near-boundary cell, so waterline interface cells do not act as full liquid. Null (non-free-surface couplings, or
+   // Antidunes with useFillWeighting = false): the unweighted momentum exchange (Bogner 2017, Eq. 5.6).
    std::function<real_t(const Cell&)> fillLevelFct_;
 
    real_t lengthScalingFactor_;
    real_t forceScalingFactor_;
 
-   // [Claude, 2026-09-21] OPTIONAL interpolated bounce-back (default OFF = plain simple bounce-back, unchanged behaviour). true: every link whose FURTHER fluid cell x_ff = x - c_i is a liquid/interface cell
-   // uses the CLI scheme of Ginzburg, d'Humieres & Verhaeghe (2008), Eq. 4.1 / Tables 3-4 (identical to lbm_mesapd_coupling::CurvedLinear) with the exact wall distance delta from a ray-particle
-   // intersection (analytic for spheres, bisection for every other shape, e.g. boxes and cylinders); all other links (no second fluid cell, non-finite PDFs, inconsistent ray) fall back to simple bounce-back.
-   // delta = 1/2 reproduces simple bounce-back exactly (kappa0 = 0, alpha = 2). The force computation below is unchanged (uses the post-treatment pdf_new).
+   // Optional interpolated bounce-back (default false: simple bounce-back). true: a link whose further fluid cell
+   // x_ff = x - c_i is in the domain mask (Antidunes: liquid/interface) uses the CLI scheme of Ginzburg et al. (2008),
+   // Eq. 4.1 / Tables 3-4 (as lbm_mesapd_coupling::CurvedLinear), with the wall distance delta from a ray-particle
+   // intersection (analytic for spheres, half-spaces and ellipsoids, bisection for other shapes such as boxes and
+   // cylinders). Other links (x_ff outside the field or not in the domain mask, non-finite PDFs, delta not in [0,1])
+   // fall back to simple bounce-back; delta = 1/2 reproduces it exactly (kappa0 = 0, alpha = 2). The force below uses
+   // the resulting pdf_new.
    bool useInterpolatedBounceBack_;
 
 }; // class SimpleBB
@@ -200,21 +202,15 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
    WALBERLA_ASSERT_UNEQUAL( particleField_->get(nx,ny,nz), ac_->getInvalidUid(), "UID of particle is invalid!" );
 
    real_t pdf_old = pdfField_->get( x, y, z, Stencil_T::idx[dir] );
-   const real_t pdf_old_raw = pdf_old; // pre-hydrostatic-subtraction value, kept only for [NAN-LINK] logging below
+   const real_t pdf_old_raw = pdf_old; // value before the reference subtraction below (garbage-link guard, diagnostics)
 
-   // Dry-link guard for free-surface coupling: a cell on the fluid side of this obstacle link may be
-   // a GAS cell (e.g. at the waterline of a floating particle), which carries no valid PDF — its value
-   // can be NaN/Inf. Performing momentum exchange across such a link would (a) write the garbage back
-   // into the obstacle cell and (b) inject it into the hydrodynamic force on the particle (forceMEM
-   // below), producing a NaN particle force / invalid quaternion. Physically, an air cell exerts no
-   // momentum on the particle, so we skip the link entirely. NOTE: in a fully submerged setup this can
-   // never trigger (all obstacle-adjacent cells are liquid/interface); it is specific to particles at
-   // the free surface. Genuine corruption of a *liquid/interface* PDF is caught separately by the
-   // checkPdfNaN scanner, which is not silenced by this guard.
+   // Dry-link guard for free-surface coupling: a non-finite PDF in the near-boundary cell (liquid or interface, as the
+   // domain mask excludes gas; e.g. a drained interface cell at a floater's waterline) would be written into the
+   // obstacle cell and into the particle force (NaN force, invalid quaternion). Such a cell exerts no momentum, so the
+   // link is skipped.
+   // Corrupted liquid/interface PDFs elsewhere are still caught by Antidunes' checkPdfNaN scan.
    if( !std::isfinite(pdf_old) ) {
-      // TEMP DIAGNOSTIC (remove after verifying): log the flag of the dry-link fluid cell. The domain
-      // mask is liquid|interface, so this cell can never be gas — the expectation is that it is a
-      // drained INTERFACE cell (ρ→0). Throttled to the first 30 hits per rank to avoid flooding.
+      // Logs the near-boundary cell's flags, first 30 hits per rank.
       static uint_t dryLinkLogCount = uint_t(0);
       if( dryLinkLogCount < uint_t(30) ) {
          const auto fl = flagField_->get(x, y, z);
@@ -228,26 +224,13 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
             << ") flags=[ " << flagStr << "] rawFlag=" << uint_t(fl) << " pdf_old=" << pdf_old);
          ++dryLinkLogCount;
       }
-      // Expected for a free-surface particle; skip the link (air / drained cell exerts no momentum).
       return;
    }
 
-   // [Claude, 2026-09-25] PROMOTED from diagnostic-only to an active guard (THESIS_PLAN.md, hopper
-   // pinched-cell investigation): a FINITE but absurd single population (job 4251049: raw hydro force
-   // -4.6e21 on a rod, i.e. one link with |pdf| ~ 2e21; also directly observed jobs 4266507/4266539: a
-   // pinched liquid cell between two rods with net density looking only mildly off, e.g. rho=8.52 or
-   // rho=-1.12, while its INDIVIDUAL populations had already exploded to ~1e10 or ~1e2-1e5 respectively
-   // -- density is a SUM and can hide this entirely) used to pass the finite-check above and get fed
-   // straight into the momentum exchange (forceMEM = pdf_old + pdf_new), directly launching the particle
-   // to an absurd velocity within a few DEM sub-cycles (confirmed: MEM-GARBAGE-LINK immediately preceded
-   // SUBCYCLE-LEFT-RANK/GHOST-VANISHED/cascading deep contacts with neighbouring particles in both jobs).
-   // Since forceMEM reads pdf_old directly and unconditionally -- no averaging or density-weighting
-   // dilutes a single bad component -- skip the link entirely here, exactly like the dry-link (non-
-   // finite) guard above: this cell's fluid-side data cannot be trusted for momentum exchange, so this
-   // link contributes zero force/momentum this step rather than corrupting the particle. PDFs are
-   // O(0.01..0.3) in lattice units in ordinary operation (zero-centred deviation O(1e-3)); 10 is
-   // already comfortably above any physically plausible value and matches this diagnostic's own
-   // pre-existing threshold (in place since 2026-09-20, only now actually acted upon).
+   // Garbage-link guard: a finite but absurd population (|pdf_old| > 10; ordinary PDFs are about w_q rho, i.e.
+   // 0.005-0.3) is skipped like a dry link. forceMEM uses pdf_old directly, so a single exploded population would
+   // launch the particle, and the cell density (a sum) can look sane while individual populations have diverged, e.g.
+   // in a liquid cell pinched between two bodies.
    if( std::abs(pdf_old_raw) > real_c(10) )
    {
       static uint_t garbageLinkLogCount = uint_t(0);
@@ -276,9 +259,6 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
             << "] dir=" << uint_t(dir) << " pdf_old(dir)=" << pdf_old_raw << " | all populations of the fluid cell: " << pdfs.str() << " | neighbour flags:" << nb.str()
             << " -- SKIPPING this link (no momentum exchange contributed) rather than feeding this value into forceMEM.");
       }
-      // Skip the link entirely, same reasoning/pattern as the dry-link (non-finite) guard above: this
-      // fluid cell's data along this direction cannot be trusted, so contribute no momentum exchange
-      // from it this step instead of launching the particle via a corrupted force.
       return;
    }
 
@@ -300,41 +280,12 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
    auto particleIdx = ac_->uidToIdx(particleField_->get( nx, ny, nz ));
    WALBERLA_ASSERT_UNEQUAL( particleIdx, ac_->getInvalidIdx(), "Index of particle is invalid!" );
 
-   // Stale-mapping guard, same reasoning as the dry-link guard above: particleField_'s UID -> idx
-   // lookup can go stale (the owning particle's storage slot was reused, migrated, or removed
-   // without this cell's obstacle-ownership entry being refreshed yet) between when a cell was last
-   // mapped as this particle's obstacle and when this sweep actually runs. The WALBERLA_ASSERT above
-   // only catches this in a Debug build -- in Release/RelWithDebInfo (i.e. every production run, and
-   // the previous ASan run that WAS built RelWithDebInfo) it's compiled out, so an invalid index
-   // would otherwise silently proceed into getVelocityAtWFPoint() below, reading position/velocity
-   // through a garbage index -- an AddressSanitizer-confirmed heap-buffer-overflow (8 bytes before a
-   // ParticleStorage-backed vector's allocation), consistent with this project's own history of
-   // heap-corruption / invalid-quaternion crashes whose symptom varied run to run depending on what
-   // happened to occupy the over-read memory.
-   //
-   // Originally this silently skipped the link (no momentum exchange contributed) to avoid the
-   // memory-unsafe read. That stopped the crash but not the underlying desync: silently dropping a
-   // subset of a particle's obstacle links -- while its OTHER links (mapped before the desync, or
-   // on other ranks) still contribute -- leaves reduceAndAvgHydroForces() with an internally
-   // inconsistent, partial momentum-exchange sum for that particle. Root-caused via a real crash
-   // (job 4166479, antidunes-bridge-lv3-DEBUG-widerstacks): this exact desync fired 30x on rank 39/57
-   // for one floating box at step 73525, and that box's hydrodynamic force was already |F_hydro|~1.2e7
-   // at the very next force reduction -- versus O(1e-4) every step prior. That corrupted force,
-   // applied for a full doDEMSubCycles() burst, launched the particle to absurd velocity, contaminated
-   // neighbouring particles through real contact, and ultimately produced the invalid (NaN) quaternion
-   // that aborted the run -- i.e. this guard was converting a memory-safety bug into a silent
-   // physics-corruption bug with the same downstream symptom. Promoted to a hard abort so the
-   // desync itself is caught at its source, with full diagnostic context, instead of manifesting
-   // steps later as an unexplained force/velocity blowup.
+   // Stale-mapping guard: the owner UID stored in particleField_ may no longer map to a local particle (the
+   // obstacle mapping has desynced from mesa_pd's storage). The assert above is compiled out in release builds, where
+   // the invalid index would read out of bounds in getVelocityAtWFPoint() below; skipping the link instead would leave
+   // reduceAndAvgHydroForces() with a partial force sum for the particle (which can cause a force spike and then an
+   // invalid quaternion). Hence a hard abort here, reporting the near-boundary cell's fill, density and populations.
    if( particleIdx == ac_->getInvalidIdx() ) {
-      // [Claude, 2026-09-27] Per explicit request ("when it aborts due to stale id we still get
-      // the current status so we can see this better"): dump the SAME fluid-cell diagnostic detail
-      // MEM-GARBAGE-LINK reports (full PDF list, density, fill) directly into THIS abort message,
-      // captured at the exact moment of detection -- rather than needing to separately cross-
-      // reference a MEM-GARBAGE-LINK line from a possibly-different cell/step and infer whether
-      // this cell's own fluid data was already corrupted. Answers directly, every time this fires:
-      // was the underlying fluid state already garbage here, or still numerically sane at the
-      // moment the stale ownership was caught?
       std::ostringstream pdfsAtAbort;
       for( uint_t q = 0; q < Stencil_T::Size; ++q ) pdfsAtAbort << (q ? "," : "") << pdfField_->get(x, y, z, q);
       const real_t fillAtAbort = fillLevelFct_ ? fillLevelFct_(Cell(x, y, z)) : std::numeric_limits< real_t >::quiet_NaN();
@@ -355,7 +306,7 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
          << " | all populations of the fluid cell: " << pdfsAtAbort.str());
    }
 
-   // Optional interpolated bounce-back (see the member comment of useInterpolatedBounceBack_): CLI scheme, needs the further fluid cell x_ff = x - c_i (liquid/interface, finite PDFs) and a consistent ray.
+   // Optional interpolated bounce-back, see the member comment of useInterpolatedBounceBack_.
    if( useInterpolatedBounceBack_ )
    {
       static uint_t ibbAppliedCount = uint_t(0), ibbFallbackCount = uint_t(0);
@@ -399,12 +350,8 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
    auto boundaryVelocity = mesa_pd::getVelocityAtWFPoint(particleIdx, *ac_, boundaryPosition );
 
    // include effect of boundary velocity
-   // Hoisted out of the compressible branch (was block-scoped to the `if` below) so [NAN-LINK] logging
-   // further down can report it -- this is the near-boundary cell's FULL 27-PDF density (same quantity
-   // ReconstructInterfaceCellABB.h's [LOW-RHO] guard checks), not just the single pdf_old already
-   // finite-checked above. If OTHER PDF components at this cell have gone non-finite while pdf_old
-   // (this one link's direction) is still finite, this density read silently carries that corruption
-   // into pdf_new/forceMEM/force below without ever tripping the dry-link guard above.
+   // density is declared outside the branch so [NAN-LINK] below can report it (NaN on the incompressible path). It
+   // sums all populations of the cell, so it can carry a corrupted population that the pdf_old checks above miss.
    real_t density = std::numeric_limits< real_t >::quiet_NaN(); // stays NaN (marker for "n/a") on the incompressible path
    if( LatticeModel_T::compressible )
    {
@@ -431,7 +378,7 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
       return;
    }
 
-   const real_t rawExchange = pdf_old + pdf_new; // [Claude, 2026-10-09] momentum budget: before the reference subtraction below
+   const real_t rawExchange = pdf_old + pdf_new; // momentum budget: before the reference subtraction below
 
    // calculate the force on the obstacle
    // original work (MEM):      Ladd - Numerical simulations of particulate suspensions via a discretized Boltzmann equation. Part 1. Theoretical foundation (1994)
@@ -469,14 +416,8 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
                           real_c( stencil::cy[dir] ) * forceMEM - correction * boundaryVelocity[1],
                           real_c( stencil::cz[dir] ) * forceMEM - correction * boundaryVelocity[2] );
 
-   // TEMP DIAGNOSTIC (remove after investigation): dumps every intermediate quantity that feeds into
-   // this link's contribution to the particle's hydrodynamic force, the first time that contribution
-   // comes out non-finite despite pdf_old (this link's own PDF) having passed the dry-link finite-check
-   // above. This is the gap that check leaves open: pdf_old is only ONE of 27 populations at cell
-   // (x,y,z); `density` (used above, compressible path) is getDensity(x,y,z) -- the SUM of all 27 --
-   // so another direction's PDF can be corrupted (a [LOW-RHO] cell) while this link's own pdf_old is
-   // still perfectly finite, silently carrying the corruption through pdf_new/forceMEM/correction into
-   // `force` here without ever tripping [DRY-LINK]. Throttled to the first 50 hits per rank.
+   // Diagnostic: logs all intermediate quantities when this link's force is non-finite although pdf_old passed the
+   // checks above (e.g. via density), first 50 hits per rank.
    if( !(std::isfinite(force[0]) && std::isfinite(force[1]) && std::isfinite(force[2])) )
    {
       static uint_t nanLinkLogCount = uint_t(0);
@@ -494,25 +435,19 @@ inline void SimpleBB< LatticeModel_T, FlagField_T, ParticleAccessor_T >::treatDi
       }
    }
 
-   // Three-phase MEM fill-weighting (Bogner & Rüde 2013, Eq. 5.9). The bounce-back force above (Eq. 5.6)
-   // treats the near-boundary cell as full liquid (ρ≈1) regardless of its actual fill — but at a floating
-   // particle's waterline that cell is an INTERFACE cell that is mostly gas. Counting it at full weight
-   // injects a phantom buoyant force that holds floaters too high. Scaling the link's momentum exchange by
-   // the boundary cell's fill level φ(x_b) makes an almost-empty interface cell contribute proportionally
-   // less, recovering Eq. 5.9's liquid term c_q·φ·[f̃+f]. φ is clamped to [0,1] (free-surface dynamics can
-   // briefly push it slightly outside). IMPORTANT: only the force returned to the particle is weighted — the
-   // bounce-back PDF written back into the fluid (above) is untouched, so the free-surface LBM is unaffected.
+   // Three-phase MEM fill weighting (Bogner 2017, Eq. 5.9): the force above treats the near-boundary cell as full
+   // liquid, but at a floater's waterline it is an interface cell that is partly gas, and full weight overstates the
+   // momentum exchanged there. The link force (Wen correction included) is scaled by the clamped fill level φ(x_b) of
+   // that cell. With the rho_ref = 1 subtraction above (compressible, no hydrostaticDensityFct_) the momentum-exchange
+   // part becomes c_q φ [f̃ + f - 2 w_q], which is Eq. 5.9 with gas density 1, c_q φ [f̃ + f] + 2 c_q (1 - φ) w_q,
+   // minus the constant 2 c_q w_q; gas cells, whose links are not treated (domain mask), give 0, the same expression
+   // at φ = 0. Only the force on the particle is weighted; the PDF written back into the fluid is not.
    if( fillLevelFct_ )
    {
       const real_t fillRaw    = fillLevelFct_( nearBoundaryCell );
       const real_t fillWeight = std::clamp( fillRaw, real_c(0), real_c(1) );
 
-      // TEMP DIAGNOSTIC (remove after verifying the fill-weighting): this branch is ONLY reached when a
-      // fill-level accessor was wired in (i.e. the Eq. 5.9 fix is compiled in), so any line below is itself
-      // proof the fix is live. We log the cells whose force is actually changed by the weighting (fillWeight
-      // noticeably below 1), reporting the cell type, the raw/clamped fill, and the z-force before vs after
-      // weighting (pre-dx-scaling). This shows which cell types + φ values carry the phantom buoyant force.
-      // Throttled to the first 60 hits per rank to avoid flooding.
+      // Diagnostic: logs links whose force the weighting reduces (weight < 0.99), first 60 hits per rank.
       if( fillWeight < real_c(0.99) )
       {
          static uint_t fillWeightLogCount = uint_t(0);

@@ -90,16 +90,15 @@ void reconstructInterfaceCellLegacy(const FlagField_T* flagField, const ConstPdf
    WALBERLA_ASSERT_NOT_NULLPTR(pdfField);
    const real_t rho = lbm::getDensityAndMomentumDensity(u, pdfField->latticeModel(), pdfFieldIt);
 
-   // TEMP DIAGNOSTIC (remove after investigation): warn when the interface-cell density collapses toward
-   // zero — this is the `u /= rho` site where a near-zero or non-finite rho produces NaN/Inf velocities.
-   // At this point `u` still holds the momentum density (Σ c_i f_i), before the division. The negated
-   // comparison also fires for rho == NaN. Throttled to the first 50 hits per rank to avoid flooding.
+   // Diagnostic: warn when the interface-cell density is near zero or non-finite, since `u /= rho` below then
+   // produces NaN/Inf velocities. `u` still holds the momentum density here. The negated comparison also catches
+   // rho == NaN. Logs only the first 50 occurrences per process.
    if (!(std::abs(rho) > real_t(1e-3)))
    {
       static uint_t lowRhoLogCount = uint_t(0);
       if (lowRhoLogCount < uint_t(50))
       {
-         // dump all 27 populations f_i (the local sum that makes up rho) with their lattice directions
+         // dump all populations f_i of Stencil_T (whose sum is rho) with their lattice directions
          std::ostringstream pdfDump;
          for (auto d = Stencil_T::begin(); d != Stencil_T::end(); ++d)
             pdfDump << " f[" << d.toIdx() << "](" << d.cx() << "," << d.cy() << "," << d.cz()

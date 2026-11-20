@@ -43,14 +43,10 @@
 namespace walberla {
 namespace mesa_pd {
 
-// Optional app-supplied diagnostic hook: given the two uids of a contact whose history entry just
-// collided in reduce() below, return a description of which contact-detection algorithm produced
-// it on this rank this cycle (e.g. "closed-form" vs "GJK/EPA fallback"). Defaults to nullptr (no-op)
-// so apps that never set it -- i.e. every mesa_pd user other than Antidunes -- pay no cost. See
-// apps/showcases/Antidunes/ParticleKernels.h (ComputeContacts's constructor) for the wiring, added
-// to help distinguish whether the mesa_pd::mpi::ContactFilter double-accept race below (see the
-// WALBERLA_LOG_WARNING further down) reproduces via the closed-form path or only via its GJK/EPA
-// fallback.
+// Optional diagnostic hook: given the two uids of a contact whose history entry is a duplicate in
+// reduce() below, return a description of how this rank detected that contact (e.g. closed form vs.
+// GJK/EPA fallback); printed with the duplicate warning. nullptr (default) disables it. Set by the
+// Antidunes showcase (apps/showcases/Antidunes/ParticleKernels.h, ComputeContacts constructor).
 inline std::function<std::string(id_t, id_t)> contactHistoryDuplicateDiagnosticHook = nullptr;
 
 /**
@@ -84,14 +80,11 @@ inline void reduce(data::Particle&& p, const ContactHistoryNotification::Paramet
       auto ret = ch.insert(entry);
       if (!ret.second)
       {
-         // Diagnostic dump before the WALBERLA_CHECK below aborts: this fires when two different
-         // ranks each submitted a NEW contact-history entry for the SAME (owner, partner) pair in
-         // the same reduction cycle -- i.e. mesa_pd::mpi::ContactFilter accepted the same contact on
-         // two ranks at once (typically near a rank/block boundary or a periodic wrap, where two
-         // ranks' independently-computed contact points can disagree about who owns it). Printing
-         // both contributions side by side (not just the rejected one) makes it possible to tell
-         // whether they're near-duplicates of the same physical event (confirms the double-accept
-         // race) or genuinely different (points at a different bug).
+         // Diagnostic output before the WALBERLA_CHECK below aborts. Two ranks submitted a new
+         // contact-history entry for the same (particle, partner) pair in one reduction, i.e.
+         // ContactFilter accepted the contact on both (typically near a rank or periodic boundary).
+         // Both entries are printed so that near-identical copies of one contact can be told apart
+         // from genuinely different ones.
          WALBERLA_LOG_WARNING(
             "[ContactHistory DUPLICATE] rank=" << walberla::mpi::MPIManager::instance()->rank()
             << " -- two ranks each submitted a NEW contact-history entry for the same pair in the "

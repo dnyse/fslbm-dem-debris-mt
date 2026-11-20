@@ -81,33 +81,19 @@ namespace lbm_mesapd_coupling
 enum class BognerNeighbourhoodState { Gas, Liquid, Interface };
 
 //**************************************************************************************************************************************
-/*!\brief Pure decision logic for the Bogner state-selection classifier (bognerTargetFlag).
+/*!\brief Default (non-strict) decision rule of the Bogner state selection (bognerTargetFlag).
  *
- * Given only whether the D3Q27 neighbourhood contains a REAL gas cell, a REAL liquid cell, and/or
- * an unresolved ("formerObstacle") neighbour, decide the target state for the cell itself:
- *  - hasGas && !hasLiquid && !hasUnknown -> Gas       (provably bulk gas, fully resolved)
- *  - hasGas && !hasLiquid &&  hasUnknown -> Interface (an unresolved neighbour could still become
- *                                                       liquid later in the same reconstruction pass)
- *  - hasLiquid && !hasGas && !hasUnknown -> Liquid   (provably bulk liquid, fully resolved)
- *  - hasLiquid && !hasGas &&  hasUnknown -> Interface (an unresolved neighbour could still become
- *                                                       gas later in the same reconstruction pass)
- *  - hasGas && hasLiquid                -> Interface (genuine mixed/free-surface neighbourhood)
- *  - !hasGas && !hasLiquid               -> Interface (neither real phase reachable within one
- *                                                       cell -- e.g. only interface/unresolved
- *                                                       neighbours; safest fallback)
+ * Inputs: whether the D3Q27 neighbourhood contains a real gas cell, a real liquid cell and/or a cell freed in the same
+ * pass ("unknown", formerObstacle):
+ *  - gas,    no liquid, no unknown -> Gas
+ *  - liquid, no gas,    no unknown -> Liquid
+ *  - gas or liquid only, + unknown -> Interface (the unknown neighbour may still turn into the other phase in this
+ *                                     pass; the rule is symmetric for both phases)
+ *  - gas and liquid                -> Interface (free surface)
+ *  - neither                       -> Interface (only interface or unknown neighbours; safe fallback)
  *
- * The gas and liquid branches are symmetric on purpose: an unresolved same-pass neighbour is exactly
- * as dangerous from the gas side as from the liquid side -- promoting to gas now, only for the
- * neighbour to resolve to liquid a few cells later in the same pass, produces the same illegal
- * direct liquid/gas contact as the mirror-image case, just discovered from the other side.
- *
- * hasGas/hasLiquid must be computed from REAL bognerGas/bognerLiquid flags only -- an interface
- * neighbour must NOT be counted toward either. Interface cells are the legal buffer between liquid
- * and gas (a liquid cell next to an interface cell is an ordinary free surface), so counting them
- * as gas-equivalent enforces nothing beyond what checking real gas alone already guarantees, while
- * causing a self-propagating misclassification in densely packed, actively-jittering particle beds
- * (one interface cell seeded near a contact point makes its neighbour's hasGas true next pass, and
- * so on outward through the narrow gaps between particles, with no real gas anywhere nearby).
+ * hasGas/hasLiquid count real gas/liquid flags only. Interface cells are the legal buffer between the phases; counting
+ * them as gas would spread interface cells, pass by pass, through the narrow gaps of a packed particle bed.
  */
 //**************************************************************************************************************************************
 inline BognerNeighbourhoodState classifyFormerObstacleNeighbourhood(bool hasGas, bool hasLiquid, bool hasUnknown)
@@ -119,30 +105,17 @@ inline BognerNeighbourhoodState classifyFormerObstacleNeighbourhood(bool hasGas,
 }
 
 //**************************************************************************************************************************************
-/*!\brief Scans a cell's D3Q27 neighbourhood and classifies it (bognerTargetFlag's actual per-cell
- * logic, factored out so it can be driven by a literal neighbourhood -- e.g. in tests -- as well as
- * by a real FlagField).
+/*!\brief Scans a cell's D3Q27 neighbourhood and classifies it with classifyFormerObstacleNeighbourhood (the per-cell
+ * logic of bognerTargetFlag, separated so that tests can pass a literal neighbourhood).
  *
- * getNeighbourFlag(dx, dy, dz) must return the flag at the given offset from the centre cell for
- * every (dx, dy, dz) in {-1,0,1}^3 except (0,0,0) (the centre itself is never queried). Flag_T only
- * needs to support isFlagSet(value, testFlag) (field::isFlagSet, an integer bitmask test) -- the
- * real production flag_t (BoundaryHandling_T::flag_t) and a small test-local flag type both work.
+ * getNeighbourFlag(dx, dy, dz) returns the flag at that offset for every (dx, dy, dz) in {-1,0,1}^3 except (0,0,0).
+ * Flag_T only needs isFlagSet(value, testFlag), so the production flag_t and a test flag type both work.
  *
- * `obstacle` excludes a neighbour from ALL evidence (hasGas/hasLiquid/hasUnknown) the moment it's
- * set, checked before any other flag on that neighbour -- a cell currently covered by a particle is
- * definitively solid right now, unlike `formerObstacle` (genuinely mid-reclassification, still
- * counted as evidence of ambiguity) or real liquid/gas (genuine evidence). This matters because
- * MovingParticleMapping's obstacle-covering step only clears/sets the `domain_` mask (liquid |
- * interface for Antidunes) -- a cell that was GAS when a particle's geometry swept over it is never
- * routed through that step at all (gas isn't part of `domain_`), so it can end up simultaneously
- * `obstacle`-flagged (from some other mapping path) or simply left mid-transition while still
- * carrying its old gas bit. Without this exclusion, such a stale bit would be read as genuine gas
- * evidence by any FormerMO neighbour scanning it. Confirmed via direct VTK inspection of a real run:
- * mapped_flag=GAS cells sitting >=1 LU inside 42-54 of 81 spheres, persisting across many timesteps.
+ * A neighbour flagged `obstacle` (currently covered by a particle) is checked first and excluded from all evidence, so
+ * liquid/gas bits left on a covered cell are never counted. A `formerObstacle` neighbour counts as unknown.
  *
- * hasGas/hasLiquid/hasUnknown/unknownNbr are written back to the caller (needed for the per-branch
- * conversion counters and the same-pass-race warning, which need the raw booleans, not just the
- * final Gas/Liquid/Interface classification).
+ * hasGas/hasLiquid/hasUnknown and unknownNbr (number of formerObstacle neighbours) are returned for the per-branch
+ * conversion counters.
  */
 //**************************************************************************************************************************************
 template< typename Flag_T, typename NeighbourFlagGetter >
@@ -169,15 +142,14 @@ inline BognerNeighbourhoodState classifyFormerObstacleCell(NeighbourFlagGetter g
 }
 
 //**************************************************************************************************************************************
-/*!\brief [Claude, 2026-10-08] Strict Bogner rule (prm ModelParameters.strictBognerClassification), Bogner (2017) pp. 113-114,
- * Bogner & Ruede (2013) Sec. 5.2, applied literally and in his order:
+/*!\brief Strict Bogner rule (ModelParameters.strictBognerClassification), Bogner (2017) Sec. 5.2, pp. 113-114, and
+ * Bogner & Rüde (2013) Sec. 2.4, applied literally and in this order:
  *  - B(x) contains no liquid -> Gas
  *  - B(x) contains no gas    -> Liquid
  *  - B(x) contains both      -> Interface
  * B(x) is the non-obstacle neighbourhood. A neighbour freed in the same step (formerObstacle) was an obstacle when the
- * step began, so it is not in B(x) -- it is neither evidence nor "unknown", unlike classifyFormerObstacleNeighbourhood,
- * which falls back to interface for such cells. Bogner gives no same-step rule: he assumes the body is slow enough that a
- * freed cell always borders fluid that already has a state.
+ * step began, so it is not in B(x), whereas classifyFormerObstacleNeighbourhood treats it as unknown. Bogner gives no
+ * same-step rule: he assumes the body is slow enough that a freed cell always borders fluid that already has a state.
  */
 //**************************************************************************************************************************************
 inline BognerNeighbourhoodState classifyStrictBognerNeighbourhood(bool hasGas, bool hasLiquid)
@@ -187,7 +159,7 @@ inline BognerNeighbourhoodState classifyStrictBognerNeighbourhood(bool hasGas, b
    return BognerNeighbourhoodState::Interface;
 }
 
-//! [Claude, 2026-10-08] Scan for classifyStrictBognerNeighbourhood: neighbours flagged obstacle or formerObstacle are not in
+//! Scan for classifyStrictBognerNeighbourhood: neighbours flagged obstacle or formerObstacle are not in
 //! B(x); hasGas/hasLiquid count real gas/liquid flags only (an interface neighbour counts toward neither, as in
 //! classifyFormerObstacleCell).
 template< typename Flag_T, typename NeighbourFlagGetter >
@@ -210,16 +182,12 @@ inline BognerNeighbourhoodState classifyFormerObstacleCellStrict(NeighbourFlagGe
 }
 
 //**************************************************************************************************************************************
-/*!\brief Pass-3 candidacy rule: should this FormerMO cell's fallback-to-interface outcome from
- * Pass 2 be re-examined once every same-pass FormerMO cell in the block has a final state?
+/*!\brief Pass-3 candidacy: should a cell that Pass 2 set to interface be re-examined once every cell freed in the
+ * block has a final state?
  *
- * True only for the two same-pass-ambiguity fallback branches (A': hasGas&&!hasLiquid&&hasUnknown,
- * and C: hasLiquid&&!hasGas&&hasUnknown) plus branch E (!hasGas&&!hasLiquid) when it ALSO had an
- * unresolved neighbour (hasUnknown) -- a branch-E cell with zero unresolved neighbours at Pass-2
- * time cannot have anything change in its neighbourhood by Pass-3 time, so it is structurally
- * unrescuable and not worth queuing. Never true for branch D (hasGas&&hasLiquid): that is already a
- * genuine, correct free-surface cell, and re-scanning the single largest bucket for zero benefit
- * would be pure waste.
+ * True for the interface fallbacks with an unknown neighbour: A' (gas + unknown), C (liquid + unknown) and E (neither
+ * phase) if it has an unknown neighbour. A branch-E cell without one cannot change by Pass 3, and branch D (gas and
+ * liquid) is a genuine surface cell.
  */
 //**************************************************************************************************************************************
 inline bool isPass3Candidate(BognerNeighbourhoodState state, bool hasGas, bool hasLiquid, bool hasUnknown)
@@ -230,29 +198,22 @@ inline bool isPass3Candidate(BognerNeighbourhoodState state, bool hasGas, bool h
 }
 
 //**************************************************************************************************************************************
-/*!\brief [Claude, 2026-10-01] Fill level (volume fraction) seeded into a freshly uncovered cell that became INTERFACE.
+/*!\brief Fill level (volume fraction) seeded into a freed cell that became interface.
  *
  * getNeighbourFlag(dx, dy, dz) / getNeighbourFill(dx, dy, dz) return flag and fill of the D3Q27 neighbour at that offset
  * (the centre is never queried); a neighbour outside the field should be reported with flag 0 (no evidence).
  *
- * allResolvedNeighbours == false (legacy, Bogner & Ruede 2013 Sec. 5.2 as implemented so far): mean fill of the
- *   INTERFACE neighbours; 0.5 if there is none.
- * allResolvedNeighbours == true (prm ModelParameters.seedFillFromAllNeighbours): mean volume fraction of every
- *   resolved neighbour -- gas 0, liquid 1, interface its fill; currently covered (obstacle) and still-unclassified
- *   (formerObstacle) neighbours are excluded; 0.5 only if no neighbour is resolved at all.
- *   Why: the legacy rule ignores real gas and liquid evidence. A cell that became interface only because a
- *   same-pass neighbour was still unclassified (branch C: liquid + unknown, branch A': gas + unknown) usually has no
- *   interface neighbour and was seeded 0.5 -- a half-empty cell inside the water (C) or half a cell of water in the
- *   air (A'); the hopper runs seeded ~1300 C cells per 100 steps. With all evidence, C seeds ~1, A' ~0, and a real
- *   surface cell (D) the local liquid fraction. Only the fill changes, never the cell state, so the liquid/gas
- *   separation invariant is unaffected.
+ * allResolvedNeighbours == false (default; Bogner 2017, Sec. 5.2): mean fill of the interface neighbours.
+ * allResolvedNeighbours == true (ModelParameters.seedFillFromAllNeighbours): mean volume fraction of every resolved
+ *   neighbour (gas 0, liquid 1, interface its fill). The default ignores gas and liquid evidence: a cell that is
+ *   interface only because of an unknown neighbour (branch C or A') usually has no interface neighbour and is seeded
+ *   0.5, i.e. half empty inside the water (C) or half full in the air (A'). With all evidence C seeds about 1, A' about
+ *   0 and a surface cell (D) the local liquid fraction. Only the fill changes, never the cell state.
+ * In both rules the result is clamped to [0,1], and 0.5 is used if no neighbour contributes.
  *
- * skipObstacleNeighbours (prm ModelParameters.seedSkipObstacleNeighbours, default true) -- [Claude, 2026-10-08]: true
- *   (behaviour since 2026-10-01) excludes every neighbour flagged obstacle or formerObstacle, in both rules. false restores
- *   the legacy rule as it was before 2026-10-01: an INTERFACE-flagged neighbour counts even if it also carries an obstacle
- *   or formerObstacle flag (the exclusion then applies to the all-neighbour rule only). The 2026-10-01 refactor changed the
- *   legacy rule unintentionally: with it, the free r075 equilibrium cylinder (bogner3_r075_cyl_s32_*_freesharedstart)
- *   goes NaN at step 8750, without it it does not (crash bisect 4314813 / 4314814, THESIS_PLAN.md 2026-10-08).
+ * skipObstacleNeighbours (ModelParameters.seedSkipObstacleNeighbours, default true) excludes neighbours flagged obstacle
+ *   or formerObstacle in both rules. false: the all-neighbour rule still excludes them, but the interface-only rule
+ *   counts an interface-flagged neighbour even if it also carries one of these flags.
  *
  * fallbackOut is set when no evidence was found and 0.5 was used.
  */
@@ -293,8 +254,8 @@ inline real_t seedInterfaceFillFromNeighbourhood(NeighbourFlagGetter getNeighbou
 
 // ScalarField_T (defaulted to void) is the fill-level field type, used only by the Bogner
 // state-selection path to seed the volume fraction φ of freshly converted cells
-// (Bogner & Rüde 2013, §5.2). For the non-Bogner path it stays void and all fill code is
-// compiled out via `if constexpr`.
+// (Bogner 2017, Sec. 5.2) and to weight the freed-cell momentum budget. For the non-Bogner path it
+// stays void and all fill code is compiled out via `if constexpr`.
 template< typename PdfField_T, typename BoundaryHandling_T, typename ParticleAccessor_T, typename Reconstructor_T,
           typename ScalarField_T = void >
 class PdfReconstructionManager
@@ -306,7 +267,7 @@ class PdfReconstructionManager
    using FlagField_T = typename BoundaryHandling_T::FlagField;
    using flag_t      = typename BoundaryHandling_T::flag_t;
 
-   // Original constructor — all FormerMO cells are uniformly set to `fluid`.
+   // Plain constructor — all FormerMO cells are uniformly set to `fluid`.
    inline PdfReconstructionManager(const shared_ptr< StructuredBlockStorage >& blockStorage,
                                    const BlockDataID& pdfFieldID, const BlockDataID& boundaryHandlingID,
                                    const BlockDataID& particleFieldID, const shared_ptr< ParticleAccessor_T >& ac,
@@ -322,14 +283,11 @@ class PdfReconstructionManager
         fillFieldID_(BlockDataID())
    {}
 
-   // Bogner state-selection constructor [Bogner, 2009].
-   // Each FormerMO cell x is converted to the FSLBM state determined by its
-   // non-obstacle neighbourhood B(x) = {x + e_q : x + e_q is not an obstacle}:
-   //   • B(x) has no liquid cells  → gas       (φ = 0)
-   //   • B(x) has no gas cells     → liquid    (φ = 1, PDFs from EquilibriumReconstructor)
-   //   • B(x) has liquid AND gas   → interface (φ = mean fill of interface cells in B(x))
-   // The fill-level seeding of converted cells (Bogner & Rüde 2013, §5.2) is performed here in
-   // pass 2 via `fillFieldID`; this replaces the role that ObstacleFillLevelSweep would play.
+   // Bogner state-selection constructor (Bogner 2017, Sec. 5.2, after Bogner 2009): each FormerMO cell is converted to
+   // gas, liquid or interface from its non-obstacle neighbourhood B(x) (classifyFormerObstacleCell, or
+   // classifyFormerObstacleCellStrict with setStrictBognerClassification), and its fill level is seeded in Pass 2 via
+   // fillFieldID (gas 0, liquid 1, interface see seedInterfaceFillFromNeighbourhood).
+   // useBognerStateSelection = false sets every FormerMO cell to `fluid`, as the plain constructor does.
    inline PdfReconstructionManager(const shared_ptr< StructuredBlockStorage >& blockStorage,
                                    const BlockDataID& pdfFieldID, const BlockDataID& boundaryHandlingID,
                                    const BlockDataID& particleFieldID, const shared_ptr< ParticleAccessor_T >& ac,
@@ -358,19 +316,19 @@ class PdfReconstructionManager
 
    void inline operator()(IBlock* const block);
 
-   //! [Claude, 2026-10-01] prm ModelParameters.seedFillFromAllNeighbours (see seedInterfaceFillFromNeighbourhood)
+   //! ModelParameters.seedFillFromAllNeighbours (see seedInterfaceFillFromNeighbourhood)
    void setSeedFillFromAllNeighbours(bool on) { seedFillFromAllNeighbours_ = on; }
-   //! [Claude, 2026-10-08] prm ModelParameters.seedSkipObstacleNeighbours (see seedInterfaceFillFromNeighbourhood)
+   //! ModelParameters.seedSkipObstacleNeighbours (see seedInterfaceFillFromNeighbourhood)
    void setSeedSkipObstacleNeighbours(bool on) { seedSkipObstacleNeighbours_ = on; }
-   //! [Claude, 2026-10-08] prm ModelParameters.strictBognerClassification (see classifyStrictBognerNeighbourhood)
+   //! ModelParameters.strictBognerClassification (see classifyStrictBognerNeighbourhood)
    void setStrictBognerClassification(bool on) { strictBognerClassification_ = on; }
-   //! [Claude, 2026-10-10] prm ModelParameters.strictBognerNoLiquidAtGas: with the strict rule, a freed cell decided liquid that
-   //! touches a (non-obstacle) gas cell once all decisions of the step are applied becomes interface with fill 1 instead (see Pass 2)
+   //! ModelParameters.strictBognerNoLiquidAtGas: with the strict rule, a freed cell decided liquid that touches a
+   //! (non-obstacle) gas cell once all decisions of the step are applied becomes interface with fill 1 (see Pass 2)
    void setStrictBognerNoLiquidAtGas(bool on) { strictBognerNoLiquidAtGas_ = on; }
-   //! [Claude, 2026-11-12] prm ModelParameters.strictBognerRelaxInterface -- see member doc below.
+   //! ModelParameters.strictBognerRelaxInterface, see the member comment below
    void setStrictBognerRelaxInterface(bool on) { strictBognerRelaxInterface_ = on; }
 
-   //! [Claude, 2026-10-09] momentum budget diagnostic: what the cells freed since the last call carry into the fluid, weighted
+   //! Momentum budget diagnostic: what the cells freed since the last call carry into the fluid, weighted
    //! like fluid mass (liquid 1, interface its fill, gas 0) after this step's classification -- {Px, Py, Pz, L_y about the
    //! freeing particle's centre, mass, cells}. Rank-local (caller reduces); resets.
    std::array< real_t, 6 > takeFreedMomentum()
@@ -397,7 +355,7 @@ class PdfReconstructionManager
          << " | pass3ToLiquid=" << c[6] << " pass3ToGas=" << c[7] << " pass3StillInterface=" << c[8]
          << " pass3UnresolvedIsland=" << c[9]);
 
-      // Phantom-force investigation: how many unknowns, and how clustered are they?
+      // Unknown-neighbour statistics (see unknownNbrHist_)
       std::vector< uint_t > u    = { formerMoTotal_, formerMoWithUnknownNbr_, unknownNbrSum_ };
       std::vector< uint_t > umax = { unknownNbrMax_ };
       std::vector< uint_t > hist(unknownNbrHist_.begin(), unknownNbrHist_.end());
@@ -419,7 +377,7 @@ class PdfReconstructionManager
             << " | hist[#unknownNbr:count]=" << histStr.str());
       }
 
-      // [Claude, 2026-10-01] seeding bookkeeping (see seededInterfaceCells_)
+      // Seeding bookkeeping (see seededInterfaceCells_)
       {
          std::vector< uint_t > sc = { seededInterfaceCells_, seededInterfaceFallback_ };
          real_t                sv = seededInterfaceFillSum_;
@@ -432,8 +390,8 @@ class PdfReconstructionManager
          seededInterfaceCells_ = seededInterfaceFallback_ = uint_t(0);
          seededInterfaceFillSum_ = real_t(0);
       }
-      // [Claude, 2026-10-08] strict Bogner rule: cells that became gas with no gas in B(x) (only interface, or nothing), and
-      // cells that became liquid while a cell of the same step next to them became gas (liquid touching gas)
+      // Strict Bogner rule: cells that became gas with no gas in B(x) (only interface neighbours, or none), cells that
+      // became liquid but touch gas after the step's decisions, and how many of those were made interface
       if (strictBognerClassification_)
       {
          std::vector< uint_t > sb = { strictGasWithoutGas_, strictLiquidTouchingGas_, strictLiquidToInterface_ };
@@ -458,9 +416,8 @@ class PdfReconstructionManager
    }
 
  private:
-   // Seed the volume fraction φ of a just-converted cell (Bogner & Rüde 2013, §5.2):
-   //   gas → 0, liquid → 1, interface → mean fill of the interface cells in the D3Q27
-   //   neighbourhood B(x) (fallback 0.5 if none). Only instantiated for non-void ScalarField_T.
+   // Seeds the fill level of a just-converted cell: gas 0, liquid 1, interface from its D3Q27 neighbourhood
+   // (seedInterfaceFillFromNeighbourhood). Only instantiated for non-void ScalarField_T.
    template< typename ScalarFieldPtr_T >
    void seedConvertedCellFill(ScalarFieldPtr_T fillField, FlagField_T* flagField, cell_idx_t x, cell_idx_t y,
                               cell_idx_t z, flag_t targetFlag, flag_t gasFlag, flag_t liquidFlag,
@@ -471,14 +428,8 @@ class PdfReconstructionManager
       else if (isFlagSet(targetFlag, liquidFlag)) { seededFill = real_t(1); }
       else // interface
       {
-         // Bounds-checked D3Q27 read -- same fix as getBoundedNeighbourFlag above (commit d8c0a265
-         // fixed the analogous unguarded read in bognerTargetFlag/classifyFormerObstacleCell; this
-         // function has its OWN, separate unguarded 3x3x3 read that fix never covered). A cell
-         // converted at the OUTERMOST ghost layer has a D3Q27 neighbour one cell beyond flagField's/
-         // fillField's allocated (ghost-inclusive) extent. Confirmed with AddressSanitizer:
-         // heap-buffer-overflow READ at this exact loop (job 4063969, 1000-sphere v6 scenario).
-         // [Claude, 2026-10-01] the averaging itself moved to seedInterfaceFillFromNeighbourhood (pure, unit-tested);
-         // an out-of-range neighbour is reported with flag 0 (no evidence), as before.
+         // Bounds-checked neighbour read: a cell in the outermost ghost layer has neighbours outside the allocated
+         // field; they are reported with flag 0 (no evidence), so their fill is never read.
          const auto   ghostBounds = flagField->xyzSizeWithGhostLayer();
          auto inRange = [&](int dx, int dy, int dz) {
             const cell_idx_t nx = x + cell_idx_c(dx), ny = y + cell_idx_c(dy), nz = z + cell_idx_c(dz);
@@ -509,12 +460,8 @@ class PdfReconstructionManager
             seededInterfaceFillSum_ += seededFill;
          }
 
-         // [Claude, 2026-09-24] FALLBACK-ISOLATED-INTERFACE: cnt==0 means this newly-converted
-         // interface cell found NO real interface neighbour to average its fill from -- it is being
-         // seeded from nothing (fill=0.5, no informed velocity/density either), the same fragile
-         // starting condition traced to a real crash (THESIS_PLAN.md, step-444 investigation: such a
-         // cell's PDFs survive streaming intact but blow up on the VERY NEXT LBM collision step).
-         // Same throttling/world-coordinate convention as this file's own [PASS3-UNRESOLVED-ISLAND].
+         // Logs interface cells seeded with the 0.5 fallback (no neighbour evidence, an uninformed start); first 20,
+         // then every 5000th.
          if (cnt == uint_t(0) && block != nullptr)
          {
             static uint_t fallbackIsolatedLogCount = uint_t(0);
@@ -555,17 +502,14 @@ class PdfReconstructionManager
 
    // Bogner state selection
    const bool useBognerStateSelection_;
-   // Depth-consistent (hydrostatic) reconstruction density. The EquilibriumReconstructor seeds a freed
-   // cell with the UNWEIGHTED mean of its domain neighbours' density, which is fill-blind: interface
-   // cells report ρ≈1 however empty they are, so a cell uncovered AT or ABOVE the waterline is assigned
-   // a full-liquid ρ≈1 while the correct hydrostatic value ρ_hyd(z) = 1 + 3·a_z·(z − H) is < 1 there.
-   // The MEM then reads ρ − ρ_hyd > 0 → spurious upward (phantom) lift. When enabled we re-seed the cell
-   // to ρ_hyd(z) (a_z = hydrostaticAccelerationZ_ < 0, H = absoluteLiquidHeight_). This uses no fill
-   // field, so it is robust to the negative contact-line fill drift that makes Σφ-weighting degenerate.
-   // Off by default → identical to the legacy path when unset.
+   // Hydrostatic reconstruction density (ModelParameters.useHydrostaticReconstruction). The EquilibriumReconstructor
+   // uses the unweighted mean density of the domain neighbours, which ignores the fill: interface cells report rho ~ 1
+   // however empty they are, so a cell freed at or above the waterline gets rho ~ 1 instead of the hydrostatic
+   // rho_hyd(z) = 1 + 3 a_z (z - H) < 1, an over-density at the floater's waterline. When enabled, the cell is
+   // re-seeded to rho_hyd(z) (see reseedHydrostatic). Does not use the fill field. Off by default.
    const bool useHydrostaticReconstruction_ = false;
    const real_t hydrostaticAccelerationZ_   = real_t(0); // a_z (≤ 0); same value fed to HydrostaticDensityFtor
-   const real_t absoluteLiquidHeight_       = real_t(0); // H: undisturbed free-surface height in lattice units
+   const real_t absoluteLiquidHeight_       = real_t(0); // H: reference liquid height [LU]
    const FlagUID liquidFlagUID_;
    const FlagUID gasFlagUID_;
    const FlagUID interfaceFlagUID_;
@@ -584,26 +528,22 @@ class PdfReconstructionManager
    uint_t     strictLiquidTouchingGas_    = uint_t(0);
    bool       strictBognerNoLiquidAtGas_  = false;    // see setStrictBognerNoLiquidAtGas
    uint_t     strictLiquidToInterface_    = uint_t(0);
-   // [Claude, 2026-11-12] third local pass, after strictBognerNoLiquidAtGas's liquid-touching-gas fix: relax
-   // any cell now INTERFACE (whether from the strict rule's own both/neither branches or just promoted above)
-   // back to GAS or LIQUID if its real, now-fully-decided D3Q27 neighbourhood shows only one phase. A no-op
-   // unless strictBognerClassification_ and strictBognerNoLiquidAtGas_ are also on. See the setter and the
-   // SimulationParams.h member doc for the motivating argument (usePass3Reresolution can reintroduce the exact
-   // violation strictBognerNoLiquidAtGas fixes; this pass is verified not to, decide-then-apply like Pass 3).
+   // Relax pass (ModelParameters.strictBognerRelaxInterface; acts only together with strictBognerClassification_ and
+   // strictBognerNoLiquidAtGas_): every inner freed cell that is now interface is set to gas or liquid if its decided
+   // D3Q27 neighbourhood shows only one phase. Decide-then-apply; unlike usePass3Reresolution it reads the corrected
+   // flags (LiquidPromoteRelaxClassificationTest.cpp finds no liquid-gas contact in its synthetic scenarios).
    bool       strictBognerRelaxInterface_ = false;
    uint_t     strictRelaxedToGas_         = uint_t(0);
    uint_t     strictRelaxedToLiquid_      = uint_t(0);
    uint_t     strictRelaxedStillInterface_= uint_t(0);
-   // [Claude, 2026-10-01] seeding bookkeeping (inner cells, since the last logAndResetConversionCounts): interface cells
+   // Seeding bookkeeping (inner cells, since the last logAndResetConversionCounts): interface cells
    // seeded, how many of them fell back to 0.5, and the sum of their seeded fill (= liquid volume created, in cells)
    mutable uint_t seededInterfaceCells_    = uint_t(0);
    mutable uint_t seededInterfaceFallback_ = uint_t(0);
    mutable real_t seededInterfaceFillSum_  = real_t(0);
 
-   // FormerMO → state conversion counters, one per branch of bognerTargetFlag (see the table in
-   // contact_ring_crash_analysis.md §5.3). Accumulated over inner cells across blocks; flushed by
-   // logAndResetConversionCounts. Mutable-free: operator() is non-const, the counting lambda
-   // captures `this`.
+   // FormerMO → state conversion counters over inner cells, one per branch of classifyFormerObstacleNeighbourhood (the
+   // strict path uses convGas_, convLiquid_ and convIntfSurface_); flushed by logAndResetConversionCounts.
    uint_t convGas_            = uint_t(0); // branch A:  hasGas && !hasLiquid && !hasUnknown → gas
    uint_t convIntfUnknownGas_ = uint_t(0); // branch A': hasGas && !hasLiquid &&  hasUnknown → interface (fallback, symmetric to C)
    uint_t convLiquid_         = uint_t(0); // branch B:  hasLiquid && !hasGas && !hasUnknown → liquid
@@ -611,12 +551,9 @@ class PdfReconstructionManager
    uint_t convIntfSurface_    = uint_t(0); // branch D:  hasGas &&  hasLiquid                → interface (real surface)
    uint_t convIntfUnresolved_ = uint_t(0); // branch E: !hasGas && !hasLiquid                → interface (fallback, no real fluid neighbour yet)
 
-   // Unknown-neighbour diagnostics (phantom-force investigation). For every inner FormerMO cell we
-   // count how many of its 26 D3Q27 neighbours are themselves still-unknown FormerMO cells — i.e.
-   // cells whose PDFs are *also* being reconstructed this same pass. This tells us whether the
-   // unknowns are isolated (a reconstructed cell leans on well-defined fluid/gas neighbours) or
-   // clustered (it leans on neighbours that are themselves unknown → reconstruction error compounds,
-   // the suspected phantom-force amplifier). Flushed together with the conversion counts.
+   // Unknown-neighbour statistics (non-strict path): for every inner FormerMO cell, how many of its 26 D3Q27 neighbours
+   // are FormerMO cells of the same pass, i.e. also being reconstructed. Shows whether reconstructed cells lean on
+   // resolved fluid or on other reconstructed cells. Flushed together with the conversion counts.
    uint_t formerMoTotal_          = uint_t(0); // total inner FormerMO cells classified this period
    uint_t formerMoWithUnknownNbr_ = uint_t(0); // of those, how many have >=1 unknown FormerMO neighbour
    uint_t unknownNbrSum_          = uint_t(0); // sum of unknown-neighbour counts (→ mean per cell)
@@ -627,7 +564,7 @@ class PdfReconstructionManager
    // decision is one of: promote to liquid/gas, or stay interface -- convPass3StillInterface_ counts
    // every "stay interface" outcome, convPass3UnresolvedIsland_ is the subset of those that are
    // genuinely !hasGas && !hasLiquid even after full same-pass resolution (see isPass3Candidate's
-   // doc and the [PASS3-UNRESOLVED-ISLAND] log below) -- a strict subset, not an alternative bucket.
+   // doc and the [PASS3-UNRESOLVED-ISLAND] log below) -- a subset, not an alternative bucket.
    uint_t convPass3ToLiquid_        = uint_t(0);
    uint_t convPass3ToGas_           = uint_t(0);
    uint_t convPass3StillInterface_  = uint_t(0);
@@ -659,13 +596,11 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
    WALBERLA_ASSERT_NOT_NULLPTR(flagField);
    WALBERLA_ASSERT_NOT_NULLPTR(particleField);
 
-   // Depth-consistent reconstruction (useHydrostaticReconstruction_): after the reconstructor sets a
-   // freed cell to PURE equilibrium at the fill-blind mean neighbour density, re-seed it to the
-   // hydrostatic density ρ_hyd(z) = 1 + 3·a_z·(z − H) at the cell centre. f_i^eq ∝ ρ at fixed u, so
-   // scaling every PDF by ρ_hyd/ρ_assigned yields f_i^eq(ρ_hyd, u_particle) with the velocity preserved
-   // exactly. In the bulk ρ_assigned ≈ ρ_hyd → near-no-op; at/above the waterline it removes the ρ≈1
-   // over-density that the MEM reads as phantom lift. Uses no fill field → robust to the negative
-   // contact-line fill drift that made Σφ-weighting degenerate. Call right after the reconstructor.
+   // Hydrostatic reconstruction (useHydrostaticReconstruction_), called right after the reconstructor: rescales the
+   // freed cell's PDFs from the assigned density to rho_hyd(z) = 1 + 3 a_z (z - H) at the cell centre. A compressible
+   // equilibrium is proportional to rho at fixed u, so this gives f_i^eq(rho_hyd, u_particle). Nearly a no-op in the
+   // bulk; at or above the waterline it removes the rho ~ 1 over-density. Skipped if the assigned density is <= 1e-6
+   // or rho_hyd <= 0.
    auto reseedHydrostatic = [&](const cell_idx_t x, const cell_idx_t y, const cell_idx_t z) {
       if (!useHydrostaticReconstruction_) return;
       const real_t rhoAssigned = pdfField->getDensity(x, y, z);
@@ -707,51 +642,21 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       movingObstacle  = flagField->getFlag(movingObstacleFlagUID_);
    }
 
-   // Helper lambda: per-cell Bogner target flag.
-   // Must be evaluated inside each cell loop — the neighbourhood state varies per cell.
+   // Per-cell Bogner target flag (bognerTargetFlag below), evaluated inside each cell loop.
    //
-   // The neighbourhood is scanned over the full D3Q27 stencil (all 26 neighbours), not just
-   // the 6 face neighbours: the LBM stencil couples to edge/corner neighbours as well, so a gas
-   // cell sitting on a diagonal direction must be seen — otherwise a liquid cell could be placed
-   // directly adjacent to gas, violating the FSLBM invariant (liquid must never be a stencil
-   // neighbour of gas) and producing NaNs.
+   // The neighbourhood is the full D3Q27 stencil, not only the 6 face neighbours: the LBM stencil couples to edge and
+   // corner neighbours too, and a liquid cell must never be a stencil neighbour of a gas cell (FSLBM invariant).
+   // hasGas/hasLiquid count real gas/liquid neighbours only (see classifyFormerObstacleNeighbourhood). A cell becomes
+   // liquid only with real liquid, no real gas and no unknown neighbour; with neither phase in reach it falls back to
+   // interface, which the free-surface cell conversion resolves once a real phase is reachable.
    //
-   // hasGas/hasLiquid count ONLY real bognerGas/bognerLiquid neighbours — an interface neighbour
-   // counts toward NEITHER. Interface cells are the legal buffer between liquid and gas (a liquid
-   // cell sitting next to an interface cell is exactly what a normal free surface looks like), so
-   // there is nothing to protect by treating "interface nearby" as gas-equivalent. Counting it that
-   // way (as an earlier version of this code did) causes a self-propagating misclassification in
-   // densely packed, actively-jittering particle beds: one interface cell seeded near a contact
-   // point makes its neighbour's hasGas true on the next FormerMO pass, which makes THAT cell
-   // interface too, and so on outward through the narrow gaps between packed particles — with no
-   // real gas anywhere nearby. Confirmed empirically: buried floating cylinders in
-   // cylinder_sedimentation_showcase_gas.prm showed persistent locally-fitted "interface" cells and
-   // oscillating (17-86%) submersion 30+ LU below the true free surface (~55 LU), long after
-   // settling into the packed bed (see changes.md).
-   //
-   // A cell is only promoted to `liquid` when the neighbourhood provably contains real liquid, no
-   // real gas, AND no still-unclassified FormerMO neighbour (those are converted in the same pass
-   // and may yet become gas). If neither real gas nor real liquid is found at all (only interface
-   // and/or unresolved FormerMO neighbours — e.g. a cell whose entire 1-cell neighbourhood has
-   // itself just been through this same classifier), neither promotion is provably safe, so it
-   // falls back to the safe `interface` buffer; the ordinary free-surface conversion sweep resolves
-   // it later once a real liquid/gas neighbour actually becomes reachable.
-   //
-   // formerObstacleGhostBounds: the field's full ghost-inclusive extent, computed once here so the
-   // neighbour-read lambda below can bounds-check against it. Needed because the Pass-2 update loop
-   // (below) iterates x/y/z over this SAME full ghost-inclusive range, but classifyFormerObstacleCell
-   // reads a further +/-1 cell around whichever cell it's given -- a formerObstacle cell sitting at
-   // the OUTERMOST ghost layer therefore has a neighbour one cell beyond the field's actual allocated
-   // buffer. Confirmed with AddressSanitizer on a real cluster run (27-floater mixed-shape pillars
-   // showcase, job 3893620): SEGV, invalid READ, exactly at the flagField->get() call directly below.
+   // formerObstacleGhostBounds: Pass 2 iterates over the full ghost-inclusive range and the classification reads one
+   // cell further, so a cell in the outermost ghost layer has neighbours outside the allocated field.
    const auto formerObstacleGhostBounds = flagField->xyzSizeWithGhostLayer();
 
-   // Bounds-checked D3Q27 neighbour read, shared by bognerTargetFlag (Pass 2) and the Pass-3 decide
-   // loop below -- factored out so there is only one copy of the logic whose original hand-inlined
-   // version caused the ASAN-fixed OOB read (commit d8c0a265). A neighbour falling outside the
-   // field's allocated (ghost-inclusive) range is reported as unresolved ("formerObstacle") -- the
-   // same conservative fallback used for a genuine same-pass-unresolved neighbour -- rather than
-   // reading invalid memory.
+   // Bounds-checked D3Q27 neighbour read, shared by bognerTargetFlag (Pass 2), the strict path and Pass 3. A neighbour
+   // outside the allocated (ghost-inclusive) field is reported as formerObstacle, the same conservative fallback as a
+   // cell freed in the same pass.
    auto getBoundedNeighbourFlag = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz, int dx, int dy,
                                       int dz) -> flag_t {
       const cell_idx_t nx = cx + cell_idx_c(dx);
@@ -764,19 +669,15 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       return flagField->get(nx, ny, nz);
    };
 
-   // Pass-3 candidates collected during Pass 2 below (see isPass3Candidate) -- a plain local vector
-   // is sufficient since Pass 2 and Pass 3 run back-to-back within this single operator() call, no
-   // persistent BlockDataID/flag bit needed. Always collected (cheap push_backs); only the Pass-3
-   // processing loop further down is gated by usePass3Reresolution_.
+   // Pass-3 candidates (see isPass3Candidate), collected by bognerTargetFlag in Pass 2; processed only if
+   // usePass3Reresolution_.
    struct Pass3Candidate { Cell cell; bool inner; };
    std::vector< Pass3Candidate > pass3Candidates;
 
    auto bognerTargetFlag = [&](cell_idx_t cx, cell_idx_t cy, cell_idx_t cz) -> flag_t {
-      // Scan + decision both live in classifyFormerObstacleCell()/classifyFormerObstacleNeighbourhood()
-      // (top of this file) as pure, directly unit-tested functions
-      // (tests/showcases_antidunes/BognerStateClassificationTest.cpp) — this lambda only supplies
-      // the real field access and attaches the side effects (per-branch counters, the same-pass-race
-      // warning) that need cx/cy/cz/inner and can't live in the pure functions themselves.
+      // Scan and decision are the unit-tested pure functions at the top of this file
+      // (tests/showcases_antidunes/BognerStateClassificationTest.cpp); this lambda adds the field access and the
+      // per-branch counters.
       bool hasLiquid, hasGas, hasUnknown;
       uint_t unknownNbr;
       const BognerNeighbourhoodState state = classifyFormerObstacleCell(
@@ -806,11 +707,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
          if (inner) ++convGas_;
          return bognerGas;
       case BognerNeighbourhoodState::Liquid:
-         // Provably real liquid nearby, no real gas, no unresolved neighbour -> genuinely bulk
-         // liquid. (Diagnostic under-resolved-waterline check removed with the old interface-only
-         // branch B: promoting to liquid here is now the intended, invariant-safe behaviour, not an
-         // over-promotion — the real gas/interface flags right next to this cell are what enforce
-         // the liquid-never-touches-gas invariant, not the choice made here.)
+         // Real liquid, no real gas, no unknown neighbour: bulk liquid.
          if (inner) ++convLiquid_;
          return bognerLiquid;
       case BognerNeighbourhoodState::Interface:
@@ -822,20 +719,15 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             return bognerInterface;
          }
 
-         // The remaining sub-cases (would-be-liquid/gas blocked by an unresolved same-pass
-         // neighbour, and branch E with neither real phase within 1 cell) fall back to interface
-         // here, exactly as Pass 2 always has -- Pass 3 (usePass3Reresolution_, below, after every
-         // FormerMO cell in the block has a final state) is what actually resolves most of these,
-         // not this fallback itself.
+         // Interface only because of an unknown neighbour (A', C) or with neither phase in reach (E); Pass 3
+         // (usePass3Reresolution_) re-examines those with an unknown neighbour once every cell of the pass has a state.
          if (hasLiquid && !hasGas && hasUnknown)
          {
             if (inner) ++convIntfUnknown_;
             static uint_t provisionalLogCount = uint_t(0);
             ++provisionalLogCount;
-            // Logging disabled (this session): fires for dozens of cells every timestep and, combined
-            // with the uncached ignore-regex check every WALBERLA_LOG_INFO call pays regardless of
-            // whether the message is filtered (see Logging::isInIgnoreCallerPaths), was both flooding
-            // sbatch-output past the shared /home quota AND measurably slowing every run down.
+            // Log disabled: it fires for dozens of cells per step and slows runs (every WALBERLA_LOG_INFO call pays
+            // the ignore-regex check, see Logging::isInIgnoreCallerPaths).
             if (provisionalLogCount <= uint_t(20) || (provisionalLogCount % uint_t(5000) == uint_t(0)))
             {
                // WALBERLA_LOG_INFO("Bogner state selection: cell (" << cx << ", " << cy << ", " << cz << ") has "
@@ -852,7 +744,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             if (inner) ++convIntfUnknownGas_;
             static uint_t provisionalGasLogCount = uint_t(0);
             ++provisionalGasLogCount;
-            // Logging disabled (this session): same reason as the symmetric liquid case above.
+            // Log disabled, as above.
             if (provisionalGasLogCount <= uint_t(20) || (provisionalGasLogCount % uint_t(5000) == uint_t(0)))
             {
                // WALBERLA_LOG_INFO("Bogner state selection: cell (" << cx << ", " << cy << ", " << cz << ") has "
@@ -927,11 +819,11 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
    // ---- Pass 2: update flags formerObstacle → target (inner domain + ghost layers),
    //             invalidate particle field entries --------------------------------
 
-   // [Claude, 2026-10-08] strict Bogner rule (strictBognerClassification_, see classifyStrictBognerNeighbourhood): every
-   // freed cell is decided against the flags as they are before this pass -- the other cells freed now still carry
-   // formerObstacle there, so they are not in B(x) -- and the decisions are applied only afterwards, so the result does not
-   // depend on the loop order. Interface fill: mean fill of the interface cells in B(x) (Bogner), 0.5 if there is none
-   // (Bogner gives no rule for that case). Pass 3 has no candidates in this mode.
+   // Strict Bogner rule (strictBognerClassification_, see classifyStrictBognerNeighbourhood): every freed cell is
+   // decided against the flags as they are before this pass (the other cells freed now still carry formerObstacle, so
+   // they are not in B(x)), and the decisions are applied only afterwards, so the result does not depend on the loop
+   // order. Interface fill: mean fill of the interface cells in B(x) (Bogner), 0.5 if there is none (Bogner gives no
+   // rule for that case). Pass 3 has no candidates in this mode.
    if (useBognerStateSelection_ && strictBognerClassification_)
    {
       struct StrictDecision { Cell cell; flag_t target; real_t fill; };
@@ -996,19 +888,16 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
          particleField->get(d.cell) = ac_->getInvalidUid();
       }
 
-      // [Claude, 2026-11-12] Per-sweep, per-RANK-local promote/relax activity, for the next real clogging run:
-      // deliberately NOT mpi::reduceInplace'd like strictLiquidToInterface_/strictRelaxedToGas_/
-      // strictRelaxedToLiquid_ above (those accumulate across many sweeps and are only reported, reduced,
-      // on the periodic logAndResetConversionCounts() call) -- this is a raw, immediate, rank-local dump
-      // of THIS single operator() call only, printed below with no cross-process communication at all.
+      // Rank-local counts of this call only, logged below without MPI reduction (the strict* members accumulate and
+      // are reduced in logAndResetConversionCounts).
       uint_t localPromotedThisSweep = uint_t(0), localRelaxedToGasThisSweep = uint_t(0),
              localRelaxedToLiquidThisSweep = uint_t(0);
 
-      // a new liquid cell next to gas (possible when cells freed in the same step go different ways: Y has no gas in B(x) and
-      // becomes liquid, its freed neighbour Z no liquid and becomes gas). Counted; with strictBognerNoLiquidAtGas_ (prm
-      // strictBognerNoLiquidAtGas) the liquid cell becomes interface with fill 1, since a liquid cell next to gas streams the
-      // gas cell's invalid PDFs (THESIS_PLAN.md 2026-10-10: NaN of the r025 cuboid 4320573 at step 14439). Inner cells only:
-      // the flag field is communicated right after this sweep, so the owner's decision reaches the ghost layers.
+      // A new liquid cell can touch gas when cells freed in the same step go different ways (Y has no gas in B(x) and
+      // becomes liquid, its freed neighbour Z no liquid and becomes gas). Counted; with strictBognerNoLiquidAtGas_ the
+      // liquid cell becomes interface with fill 1, since a liquid cell next to gas streams the gas cell's invalid PDFs.
+      // Inner cells only: the flag field is communicated right after this sweep, so the owner's decision reaches the
+      // ghost layers.
       for (auto& d : decisions)
       {
          if (d.target != bognerLiquid || !isInner(d.cell.x(), d.cell.y(), d.cell.z())) continue;
@@ -1028,21 +917,14 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
                if (fillField != nullptr) fillField->get(d.cell) = real_t(1);
             ++strictLiquidToInterface_;
             ++localPromotedThisSweep;
-            d.target = bognerInterface; // [Claude, 2026-11-12] so the relax pass below sees this cell's FINAL
-                                         // (post-promotion) state, not its stale Round-0 "liquid" classification
+            d.target = bognerInterface; // so the relax pass below sees the promoted state
          }
       }
 
-      // [Claude, 2026-11-12] Round 2 (strictBognerRelaxInterface_, no-op unless strictBognerNoLiquidAtGas_ is
-      // also on): every cell now INTERFACE -- whether from the strict rule's own both/neither branches above,
-      // or just promoted by the loop directly above -- is re-scanned against the real flag field, which by
-      // this point already reflects every Round-0 and Round-1 decision (both loops above call setDomain
-      // immediately). Decide-then-apply, same as Pass 3, so relax decisions don't see each other mid-pass:
-      // verified (thesis Overleaf session 2026-11-12, ~7,884 synthetic 3D scenarios) that this still produces
-      // zero liquid-directly-touching-gas violations, unlike usePass3Reresolution, which reads neighbours'
-      // frozen PASS-2 (pre-correction) values and so can let two independently-corrected neighbours end up on
-      // opposite sides of the invariant. A cell relaxes to GAS/LIQUID only if its real neighbourhood now shows
-      // just one phase; genuinely mixed (both) or still-no-evidence (neither) cells stay interface.
+      // Relax pass (strictBognerRelaxInterface_, needs strictBognerNoLiquidAtGas_): every inner freed cell that is now
+      // interface is re-scanned against the flag field, which already holds the decisions above, and set to gas or
+      // liquid if its neighbourhood shows only one phase; mixed or empty neighbourhoods stay interface.
+      // Decide-then-apply, so relax decisions do not see each other.
       if (strictBognerNoLiquidAtGas_ && strictBognerRelaxInterface_)
       {
          struct RelaxDecision { Cell cell; flag_t target; };
@@ -1075,11 +957,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
          }
       }
 
-      // [Claude, 2026-11-12] Per-sweep, per-rank dump (no MPI communication -- every rank prints its OWN
-      // count independently, so this scales to production process counts without a reduction every step):
-      // only when this single operator() call actually promoted a liquid cell to interface
-      // (strictBognerNoLiquidAtGas_) or relaxed an interface cell back to gas/liquid (strictBognerRelaxInterface_)
-      // -- silent otherwise, so a quiet sweep produces no output at all.
+      // Logged per rank, only if this call promoted or relaxed a cell.
       const uint_t localRelaxedThisSweep = localRelaxedToGasThisSweep + localRelaxedToLiquidThisSweep;
       if (localPromotedThisSweep > uint_t(0) || localRelaxedThisSweep > uint_t(0))
       {
@@ -1127,18 +1005,12 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
 
    // ---- Pass 3: local re-resolution (usePass3Reresolution_ only) ------------------------------
    //
-   // By the time Pass 2 above has finished, every FormerMO cell in this block has a final,
-   // definite state -- there is no more "unknown" anywhere. pass3Candidates (collected during
-   // bognerTargetFlag above) holds every cell that fell back to interface purely because of
-   // same-pass ambiguity (isPass3Candidate). Re-running the same classifier on them now, with
-   // hasUnknown guaranteed false (except the literal outermost ghost layer, which degrades safely
-   // to "stays interface" via getBoundedNeighbourFlag), resolves most of them directly.
+   // After Pass 2 every FormerMO cell of the block has a state, so the candidates (cells set to interface only because
+   // of an unknown neighbour) are classified again; hasUnknown is now false except at the outermost ghost layer, where
+   // getBoundedNeighbourFlag keeps such cells interface.
    //
-   // MUST be decide-then-apply (two sub-loops), not decide-and-apply-immediately: two mutual-
-   // neighbour candidates must both be classified against the SAME frozen post-Pass-2 snapshot,
-   // otherwise the one processed second would see the first's fresh promotion and could cascade
-   // into an incorrect classification -- the exact same class of same-pass-order bug Pass 3 exists
-   // to fix in Pass 2, reappearing one level in if this isn't respected.
+   // Decide-then-apply: all candidates are classified against the same post-Pass-2 snapshot, so the loop order cannot
+   // cascade a fresh promotion into a neighbour's decision.
    if (usePass3Reresolution_ && !pass3Candidates.empty())
    {
       struct Pass3Decision { Cell cell; bool inner; BognerNeighbourhoodState state; bool hasGas; bool hasLiquid; };
@@ -1161,12 +1033,8 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
             if (candidate.inner) ++convPass3StillInterface_;
             if (!hasG && !hasL)
             {
-               // Genuinely unresolvable: even after every same-pass FormerMO cell in the block has
-               // a final state, this cell still has no real liquid and no real gas within 1 cell in
-               // any direction -- unlike an ordinary Pass-2 branch-E cell (which might simply not
-               // have had time to resolve yet), this is an anomalous signal worth surfacing
-               // distinctly rather than folding into the generic still-interface count. It must stay
-               // interface either way -- there is no safe basis to pick liquid or gas here.
+               // Still no real liquid or gas within one cell after every cell of the pass is resolved: an anomaly,
+               // logged separately; the cell stays interface (no basis to pick a phase).
                if (candidate.inner) ++convPass3UnresolvedIsland_;
                static uint_t unresolvedIslandLogCount = uint_t(0);
                ++unresolvedIslandLogCount;
@@ -1207,7 +1075,7 @@ void PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_
       }
    }
 
-   // [Claude, 2026-10-09] momentum budget (takeFreedMomentum): the freed cells' final state decides how much of their PDFs'
+   // Momentum budget (takeFreedMomentum): the freed cells' final state decides how much of their PDFs'
    // momentum is fluid -- liquid all of it, interface its fill, gas none
    if constexpr (!std::is_void_v< ScalarField_T >)
       if (fillField != nullptr)
@@ -1264,7 +1132,7 @@ shared_ptr< PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAc
 
 // Bogner state-selection overload: determines gas/liquid/interface per cell from
 // the non-obstacle neighbourhood B(x) rather than assigning a uniform target flag, and seeds
-// the volume fraction φ of converted cells from `fillFieldID` (Bogner & Rüde 2013, §5.2).
+// the volume fraction φ of converted cells from `fillFieldID` (Bogner 2017, Sec. 5.2).
 // ScalarField_T (the fill-level field type) is given explicitly; ParticleAccessor_T is deduced.
 template< typename PdfField_T, typename BoundaryHandling_T, typename ScalarField_T, typename ParticleAccessor_T >
 shared_ptr< PdfReconstructionManager< PdfField_T, BoundaryHandling_T, ParticleAccessor_T,

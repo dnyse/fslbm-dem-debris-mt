@@ -57,15 +57,11 @@ namespace lbm_mesapd_coupling {
  *
  * The 'mappingParticleSelector' can be used to include/exclude certain particles from the mapping.
  *
- * cellCenterTestOffset (fraction of a cell, default 0 = off): the containment test is done at the cell centre plus
- * cellCenterTestOffset * (dx, 1.3 dy, 1.7 dz). Reason: 'inside' is inclusive, so a body face plane that passes exactly
- * through cell centres (e.g. an axis-aligned box with z = 41.5, half extent 8) maps one FULL extra cell layer on both
- * sides, and floating-point noise in the body's rotation can flip that whole layer from step to step (mapped-volume
- * jump +/-0.5 cell, F_hydro noise 10x, see THESIS_PLAN.md 'TIE TEST'). A tiny fixed offset (e.g. 1e-4) resolves every
- * tie the same way for all steps and all bodies (the layer on one side of the body is included, the other not), at a
- * 1e-4-cell shift of the mapped surface elsewhere. The offset must be identical in MovingParticleMappingKernel
- * (initial mapping) and MovingParticleMapping (per-step mapping). Cell-centre positions used for the momentum
- * bookkeeping are NOT shifted.
+ * cellCenterTestOffset (fraction of a cell, default 0 = off): the containment test uses the cell centre shifted by
+ * cellCenterTestOffset * (dx, 1.3 dy, 1.7 dz). 'Inside' is inclusive, so a body face lying exactly on cell centres maps
+ * an extra cell layer, which floating-point noise in the body's pose can flip from step to step; a small fixed offset
+ * (e.g. 1e-4) resolves every such tie the same way. Use the same offset in MovingParticleMappingKernel (initial
+ * mapping). Cell centres used for the momentum bookkeeping are not shifted.
  */
 template< typename PdfField_T, typename BoundaryHandling_T, typename ParticleAccessor_T, typename ParticleSelector_T>
 class MovingParticleMapping
@@ -77,27 +73,15 @@ public:
    using FlagField_T = typename BoundaryHandling_T::FlagField;
    using flag_t = typename BoundaryHandling_T::flag_t;
 
-   // [Claude, 2026-09-27] Per THESIS_PLAN.md's "ownership handoff" origin finding: fires exactly
-   // once, right before a GENUINE cross-particle obstacle-ownership handoff is committed (i.e. NOT
-   // the routine same-owner re-confirmation that runs every step a particle keeps a cell it already
-   // owns) -- (block, x, y, z, formerUid, newUid). Deliberately generic/no-op by default (this file
-   // is shared library code, used by non-Antidunes callers with other LatticeModel_T stencils too --
-   // see IbbEquivalenceDragTest.cpp's D3Q19 use) so this class itself never touches the PDF field or
-   // makes any stencil-specific assumption. A caller that WANTS the handed-off cell's PDF reset
-   // (breaking the silent-inheritance-of-stale-history chain the origin finding traced) supplies its
-   // own callback that does so using ITS OWN LatticeModel_T-appropriate method -- see
-   // BuildTimeloop.h's own callback for the exact approach that works safely for Antidunes'
-   // generated Cumulant model (manual D3Q27 weight assignment, NOT the generic
-   // lbm::Equilibrium<>::set()/PdfField::setToEquilibrium() API: that path reads a static
-   // LatticeModel_T::w[] weight table whose specialization is apparently not safe to call from this
-   // generic file's own translation unit for a pystencils-generated model in the real multi-file
-   // production link -- confirmed directly by bisection, job 4271763/4271773 segfaulted with it,
-   // job 4271777 (same code, this callback removed) got the ordinary STALE-PARTICLE-IDX abort
-   // instead).
+   // Called right before a cell's obstacle ownership passes from one particle to another (not on the per-step
+   // re-confirmation by its current owner), only for cells in the PDF field's inner part:
+   // (block, x, y, z, formerUid, newUid). No-op by default. This class never writes PDFs itself, since it is used with
+   // other lattice models too; a caller that wants the handed-off cell reset does so with its own model (Antidunes:
+   // BuildTimeloop.h assigns the D3Q27 rest weights by hand, as SetupStages.h's repairDegenerateObstacleCells does).
    using OwnershipHandoffCallback_T =
       std::function< void( IBlock&, cell_idx_t, cell_idx_t, cell_idx_t, walberla::id_t, walberla::id_t ) >;
-   // [Claude, 2026-10-09] diagnostic: fires for an inner domain cell right before the particle (particleIdx) covers it
-   // (block, x, y, z, particleIdx); the cell's PDFs and flags are still the fluid's. No-op by default.
+   // Diagnostic: called for an inner domain cell right before the particle covers it (block, x, y, z, particleIdx);
+   // the cell's PDFs and flags are still the fluid's. No-op by default.
    using NewlyCoveredCallback_T = std::function< void( IBlock&, cell_idx_t, cell_idx_t, cell_idx_t, size_t ) >;
 
    MovingParticleMapping( const shared_ptr<StructuredBlockStorage> & blockStorage,
@@ -211,20 +195,9 @@ private:
                      auto formerParticleUid = (*particleField)(x, y, z);
                      auto formerParticleIdx = ac_->uidToIdx(formerParticleUid);
 
-                     // [Claude, 2026-09-27] BUG FIX: ac_->uidToIdx() returns
-                     // std::numeric_limits<size_t>::max() when formerParticleUid is no longer known
-                     // locally (its ghost copy was dropped -- an ORDINARY event, see
-                     // THESIS_PLAN.md's own "ghost-drop" mechanism entries; SimpleBB.h's
-                     // STALE-PARTICLE-IDX check normally catches this and aborts the whole run first,
-                     // but that is a race against exactly this code path, not a guarantee). The
-                     // original code called ac_->getFlags(formerParticleIdx) completely unguarded --
-                     // indexing with SIZE_MAX is undefined behaviour and segfaults immediately
-                     // (confirmed directly: job 4271763 crashed with SIGSEGV at this exact call site
-                     // once the ownership-handoff fix below made this code path get exercised on a
-                     // real crashed run's own trajectory). A former owner that is no longer known
-                     // locally obviously cannot be FIXED (fixed/global particles are never dropped),
-                     // so this treats an invalid index the same as "not fixed" -- proceed with the
-                     // claim below -- rather than reading out-of-bounds memory to find out.
+                     // uidToIdx() returns SIZE_MAX if the former owner is no longer known locally (its ghost copy
+                     // was dropped). Such an owner cannot be fixed (fixed particles are never dropped), so it is
+                     // treated as not fixed and the cell is claimed, instead of indexing getFlags() out of bounds.
                      const bool formerParticleKnownLocally = formerParticleIdx != std::numeric_limits< size_t >::max();
                      if( !formerParticleKnownLocally ||
                          !isSet(ac_->getFlags(formerParticleIdx), mesa_pd::data::particle_flags::FIXED) )
@@ -234,42 +207,12 @@ private:
                         // occupied by a moving particle as well (during collision and the there present overlap),
                         // since the fixed particle usually do not get remapped in every timestep
 
-                        // [Claude, 2026-09-27] BUG FIX (THESIS_PLAN.md, "ownership handoff" origin finding):
-                        // this branch runs EVERY step for EVERY cell a particle continues to own (a covered
-                        // cell stays obstacle-flagged, so its owner's own pass re-enters here every step with
-                        // formerParticleUid == particleUid -- a routine no-op reassignment, NOT a handoff).
-                        // Only on a GENUINE cross-particle handoff (formerParticleUid != particleUid, i.e. a
-                        // second particle's surface has reached a cell still owned by a first, different
-                        // particle -- the two bodies are touching or all-but-touching there) do we invoke the
-                        // optional onOwnershipHandoff_ callback (see its own doc comment above -- deliberately
-                        // NOT a direct PDF write here, since this is generic library code and the generic
-                        // lbm::Equilibrium<>/PdfField::setToEquilibrium() API turned out to be unsafe to call
-                        // from here for Antidunes' generated Cumulant model, confirmed by bisection). Root
-                        // cause this addresses: previously, a handoff silently carried the FIRST particle's
-                        // own obstacle-cell PDF history (whatever it was, healthy or already slightly
-                        // corrupted by the unmasked collision kernel having no per-cell obstacle mask) forward
-                        // into the SECOND particle's ownership completely unchanged -- confirmed directly via
-                        // a real crashed run's own per-step fluid-box log (job 4271714: a growing checkerboard
-                        // oscillation began in the exact same step as an ownership handoff between two
-                        // recurring rods) and reproduced independently in
-                        // tests/showcases_antidunes/ObstacleOwnershipHandoffTest.cpp.
-                        //
-                        // [Claude, 2026-09-27] REAL ROOT CAUSE of the segfault chased across three cluster
-                        // attempts (jobs 4271763/4271773/4271821/4271830), finally pinned down via bracketing
-                        // logs: flagField and pdfField do NOT have the same number of ghost layers in the real
-                        // Antidunes setup (FreeSurfaceBoundaryHandling.impl.h allocates its flag field with 2
-                        // ghost layers; SetupStages.h's addPdfFieldToStorage call gives pdfField only 1). This
-                        // function's own cellBB is sized via flagField->nrOfGhostLayers() (2, see operator()
-                        // above and getParticleCellBB's own call), so for a large body (or two deeply
-                        // overlapping ones, which is exactly what triggered this: uid...780/...782 flickered
-                        // ownership of the SAME cell back and forth within a single operator() call, logged
-                        // directly) whose cellBB reaches that SECOND ghost layer, x/y/z can be valid for
-                        // flagField but genuinely OUT OF BOUNDS for pdfField -- any callback that
-                        // unconditionally writes pdfField there (mine did) segfaults. The PRE-EXISTING code
-                        // right above this branch already knows about exactly this hazard: its own PDF read
-                        // (getMomentumDensity, for the "cell newly occupied" case) is guarded by
-                        // `pdfField->isInInnerPart(Cell(x,y,z))` for precisely this reason. Applying the SAME
-                        // guard here, rather than assuming every cellBB cell is safe for every field.
+                        // The current owner re-enters this branch every step (formerParticleUid == particleUid);
+                        // only a genuine handoff to another particle calls onOwnershipHandoff_, so the caller can
+                        // reset the PDF history the cell would otherwise carry over from its former owner (see
+                        // tests/showcases_antidunes/ObstacleOwnershipHandoffTest.cpp). cellBB spans the flag
+                        // field's ghost layers, which can outnumber the PDF field's (Antidunes: 2 vs. 1), hence
+                        // the same isInInnerPart guard as for the getMomentumDensity read above.
                         if( formerParticleUid != particleUid && onOwnershipHandoff_ && pdfField->isInInnerPart( Cell( x, y, z ) ) )
                         {
                            onOwnershipHandoff_( *block, x, y, z, formerParticleUid, particleUid );
