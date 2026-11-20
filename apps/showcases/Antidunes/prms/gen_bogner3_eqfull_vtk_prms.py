@@ -1,20 +1,19 @@
-"""[Claude, 2026-10-08] Full-length equilibrium reruns with whole-domain VTK, periodic in x and y (per "rerun all the shapes for the
-full timesteps like in the runs that we have the data from in the thesis, but with vtk activated and periodic in xy, pin the
-cylinder in the same way as the cuboid, the rest like starting position should be taken from these thesis original runs").
+"""Floating-body equilibrium runs after Bogner (2017) Sec. 5.3.3: free cuboid / cylinder / sphere (densityRatio 0.75 /
+0.50 / 0.25, s = 32) in a still-water basin, with whole-domain VTK and periodic in x and y.
 
-Sources = the prms of the thesis runs (verified against their logged parameters, THESIS_PLAN.md 2026-10-08):
-  spheres   bogner3_r{075,050,025}_sphere_s32_101k_vtk_gas.prm               (4278714 / 4278486 / 4278485, 101000 steps)
-  cylinders bogner3_r{075,050,025}_cyl_s32_101k_vtk_freesharedstart_gas.prm  (4278476 / 4278477 / 4278484, 101000 steps)
-  cuboids   bogner3_r{075,050,025}_deep_s32_100k_gas.prm                     (4273570 / 4273582 / 4273583, 100000 steps)
-Changes, nothing else:
-  * VTK block: whole domain (192 x 90 x 120), velocity + fill_level + mapped_flag, floaters at the same steps (STEPS);
-  * periodicity <1,1,0> and the explicit N/S NoSlip Border lines removed (SetupStages.h adds no y walls / DEM y planes when y is
+Base prms bogner3_r{r}_{sphere,cyl,deep}_s32_eqfull_vtk_gas.prm are derived from the original equilibrium runs:
+  spheres   bogner3_r{075,050,025}_sphere_s32_101k_vtk_gas.prm               (101000 steps)
+  cylinders bogner3_r{075,050,025}_cyl_s32_101k_vtk_freesharedstart_gas.prm  (101000 steps)
+  cuboids   bogner3_r{075,050,025}_deep_s32_100k_gas.prm                     (100000 steps)
+with only these changes:
+  * VTK block: whole domain (192 x 90 x 120), velocity + fill_level + mapped_flag, at the discrete steps STEPS;
+  * periodicity <1,1,0> and the N/S NoSlip Border lines removed (SetupStages.h adds no y walls / DEM y planes when y is
     periodic);
   * cylinders: pinPosition false / pinRotation true / pinRotationAxes <1,0,1>, as the cuboids (rotation about y only);
   * own snapshot folder (suffix _eqfull_pxy);
-  * ModelParameters.seedSkipObstacleNeighbours false: interface-fill seeding as before 2026-10-01 (THESIS_PLAN.md 2026-10-08).
-Timesteps and starting positions are those of the thesis prms (cuboids per density, z 52.085 / 60.075 / 68.065 with 2.86 deg heel;
-spheres and cylinders the shared start z 60.0746). Output: bogner3_r{r}_{sphere,cyl,deep}_s32_eqfull_vtk_gas.prm.
+  * ModelParameters.seedSkipObstacleNeighbours false: FormerMO fill seeding as before 2026-10-01.
+Timesteps and start positions are unchanged (cuboids z 52.085 / 60.075 / 68.065 with 2.86 deg heel; spheres and
+cylinders z 60.0746). The variants further down are built from the base prms, each with its own snapshot folder.
 """
 import re
 from pathlib import Path
@@ -37,7 +36,7 @@ BLOCK = """   %s
       before_functions { gas_cell_zero_setter; }
    }
 """
-VTK = ("VTK\n{\n   // [Claude, 2026-10-08] whole domain, velocity + fill_level + mapped_flag, discrete steps over the full run\n"
+VTK = ("VTK\n{\n   // whole domain, velocity + fill_level + mapped_flag, only at the fluid_field_snapshots steps\n"
        + BLOCK % ("fluid_field", 0, "") + BLOCK % ("fluid_field_snapshots", 1, '\n      steps "%s";' % STEPS)
        + "   domain_decomposition\n   {\n      writeFrequency             0;\n      baseFolder                 vtk-out;\n"
        "      outputDomainDecomposition  true;\n   }\n}\n")
@@ -49,103 +48,89 @@ for shape, pattern in SRC.items():
         src = P / pattern.format(r=r)
         s = src.read_text()
         s = s[:s.index("\nVTK\n") + 1] + VTK
-        s, k = re.subn(r"(\n\s*periodicity\s+)<\s*1\s*,\s*0\s*,\s*0\s*>;", r"\g<1>< 1, 1, 0 >;   // [Claude, 2026-10-08] periodic in x and y", s)
+        s, k = re.subn(r"(\n\s*periodicity\s+)<\s*1\s*,\s*0\s*,\s*0\s*>;", r"\g<1>< 1, 1, 0 >;   // periodic in x and y", s)
         assert k == 1, src
         s, k = re.subn(r"\n\s*Border\s*\{\s*direction\s+[NS];[^\n]*\}", "", s)
         assert k == 2, (src, k)
         s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+)(\w+);", r"\g<1>\g<2>_eqfull_pxy;", s)
         assert k == 1, src
-        # [Claude, 2026-10-08] legacy interface-fill seeding as before 2026-10-01 (per "make it toggleable and turn it off for
-        # the equilibrium run"); the 2026-10-01 behaviour makes the free r075 cylinder go NaN at step 8750
-        s, k = re.subn(r"(\nModelParameters\s*\n\{\n)", r"\1   seedSkipObstacleNeighbours false;   // [Claude, 2026-10-08] pre-2026-10-01 seeding\n", s)
+        # FormerMO fill seeding as before 2026-10-01; with the later rule the free r075 cylinder went NaN
+        s, k = re.subn(r"(\nModelParameters\s*\n\{\n)", r"\1   seedSkipObstacleNeighbours false;   // FormerMO fill seeding as before 2026-10-01\n", s)
         assert k == 1, src
         if shape == "cyl":
             s, k = re.subn(r"(\n(\s*)settlingSteps\s+0;)", r"\1\n\2pinPosition          false;\n\2pinRotation          true;\n"
                            r"\2pinRotationAxes      < 1, 0, 1 >;", s, count=1)
             assert k == 1, src
-        hdr = ("// [Claude, 2026-10-08] GENERATED by gen_bogner3_eqfull_vtk_prms.py from %s (thesis run): whole-domain VTK with velocity,\n"
-               "// periodic in x and y (N/S walls removed)%s, seeding as before 2026-10-01, own snapshot folder; timesteps and start\n// position unchanged.\n"
+        hdr = ("// Generated by gen_bogner3_eqfull_vtk_prms.py from %s: whole-domain VTK,\n"
+               "// periodic in x and y (no N/S walls)%s, FormerMO fill seeding as before 2026-10-01,\n// own snapshot folder; timesteps and start position unchanged.\n"
                % (src.name, ", rotation pinned about y as the cuboids" if shape == "cyl" else ""))
         out = P / f"bogner3_r{r}_{shape}_s32_eqfull_vtk_gas.prm"
         out.write_text(hdr + s)
         print(out.name)
 
-# [Claude, 2026-10-08] _ypin variant of the cylinders: additionally the y-translation pinned (pinPosition true, pinAxes <0,1,0>,
-# x and z free). Reason: with periodic y, 4314847 (r025) slid along its axis with a self-induced v_y growing to 0.027 LU/step and
-# went NaN at step 30745 (4314844, r050, reached 0.009 and recovered); in the walled thesis runs |v_y| <= 0.0006. No physical drive
-# exists (symmetric body, still water), so the axial slide is a spurious coupling effect that the y walls used to stop.
+# _ypin (cylinders): y-translation pinned as well (pinAxes <0,1,0>, x and z free). With periodic y the symmetric
+# cylinder in still water develops a spurious axial slide (no physical drive) that the y walls used to stop.
 for r in ("075", "050", "025"):
     f = P / f"bogner3_r{r}_cyl_s32_eqfull_vtk_gas.prm"
     s = f.read_text()
-    s, k = re.subn(r"\n(\s*)pinPosition\s+false;", r"\n\1pinPosition          true;\n\1pinAxes              < 0, 1, 0 >;   // [Claude, 2026-10-08] y only", s)
+    s, k = re.subn(r"\n(\s*)pinPosition\s+false;", r"\n\1pinPosition          true;\n\1pinAxes              < 0, 1, 0 >;   // y only", s)
     assert k == 1, f
     s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_eqfull_pxy;", r"\1_eqfull_pxy_ypin;", s)
     assert k == 1, f
     out = P / f"bogner3_r{r}_cyl_s32_eqfull_vtk_ypin_gas.prm"
-    out.write_text("// [Claude, 2026-10-08] _ypin: as %s, plus the y-translation pinned (spurious axial slide with periodic y, see\n"
-                   "// gen_bogner3_eqfull_vtk_prms.py).\n" % f.name + s)
+    out.write_text("// _ypin: as %s, plus the y-translation pinned\n"
+                   "// (spurious axial slide with periodic y).\n" % f.name + s)
     print(out.name)
 
-# [Claude, 2026-10-08] _newseed variant of the r025 cuboid: seeding rule as since 2026-10-01 (seedSkipObstacleNeighbours true).
-# Reason: 4314843 (old rule) went NaN at step 12341 at the waterline next to the rolling cuboid (DEGENERATE-FILL-RECONSTRUCTION,
-# 9/26 obstacle neighbours); with the current rule the same cuboid passed this point (40k rerun 4313911, walls in y). Its motion up to
-# step 12000 matched the thesis run 4273583 and 4313911 (x drift 0.007-0.009 LU/step, heel 53 -> 10 -> 34 deg).
+# _newseed (r025 cuboid): seedSkipObstacleNeighbours true, the seeding rule since 2026-10-01; with the older rule this
+# case goes NaN at the waterline next to the rolling cuboid.
 f = P / "bogner3_r025_deep_s32_eqfull_vtk_gas.prm"
 s = f.read_text()
-s, k = re.subn(r"seedSkipObstacleNeighbours false;[^\n]*", "seedSkipObstacleNeighbours true;   // [Claude, 2026-10-08] _newseed: rule since 2026-10-01", s)
+s, k = re.subn(r"seedSkipObstacleNeighbours false;[^\n]*", "seedSkipObstacleNeighbours true;   // _newseed: FormerMO fill seeding since 2026-10-01", s)
 assert k == 1, f
 s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_eqfull_pxy;", r"\1_eqfull_pxy_newseed;", s)
 assert k == 1, f
 out = P / "bogner3_r025_deep_s32_eqfull_vtk_newseed_gas.prm"
-out.write_text("// [Claude, 2026-10-08] _newseed: as %s with seedSkipObstacleNeighbours true (see gen_bogner3_eqfull_vtk_prms.py).\n" % f.name + s)
+out.write_text("// _newseed: as %s with seedSkipObstacleNeighbours true.\n" % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-08] _pass3 variant of the r075 cuboid (per "Fix this issue and rerun this specific case"): usePass3Reresolution true,
-# nothing else changed. Reason: 4314846 grew water pools on the DRY upper face of the cuboid while it sank (126 wet cells above the
-# water at step 1000, 2202 / mass ~900 at 2000, with the face 4.6-6.5 LU above the free surface; ~340 cell volumes still there at
-# 70000). The sinking face uncovers a sheet of cells with gas above and still-unclassified (formerObstacle) cells beside them ->
-# branch A' (hasGas, !hasLiquid, hasUnknown) -> interface, seeded with the mean fill of interface neighbours or 0.5: water created in
-# the air. Pass 3 re-classifies these cells once the whole sheet has a state (no unknown left) -> gas, fill 0 (THESIS_PLAN.md
-# 2026-09-24: tested on the Bogner box family, recommended there, never enabled for the thesis cuboid runs).
-# [Claude, 2026-10-08] extended to all three cuboids (per "Why only the 0.75 run"): the r050 / r025 eqfull runs created even more
-# water above the surface during the heel-up (peak ~1570 / ~2720 cell volumes at steps 2000-8000, vs ~960 for r075); they lost it
-# later only because they roll further and wash it back. All three with the old seeding rule (seedSkipObstacleNeighbours false),
-# so r025 is also a test whether pass 3 avoids its NaN at step 12341 (4314843).
+# _pass3 (cuboids): usePass3Reresolution true. While the cuboid sinks or heels up, the uncovered sheet of cells on its
+# dry upper face has gas above and still-unclassified neighbours, so the fallback rule makes them interface cells
+# seeded with fill (water created in the air). Pass 3 re-classifies them once the whole sheet has a state -> gas, fill
+# 0.
 for r in ("075", "050", "025"):
   f = P / f"bogner3_r{r}_deep_s32_eqfull_vtk_gas.prm"
   s = f.read_text()
   s, k = re.subn(r"(\n(\s*)seedSkipObstacleNeighbours false;[^\n]*)",
-               r"\1\n\2usePass3Reresolution true;   // [Claude, 2026-10-08] _pass3: re-classify same-pass-ambiguous uncovered cells", s)
+               r"\1\n\2usePass3Reresolution true;   // _pass3: re-classify same-pass-ambiguous uncovered cells", s)
   assert k == 1, f
   s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_eqfull_pxy;", r"\1_eqfull_pxy_pass3;", s)
   assert k == 1, f
   out = P / f"bogner3_r{r}_deep_s32_eqfull_vtk_pass3_gas.prm"
-  out.write_text("// [Claude, 2026-10-08] _pass3: as %s with usePass3Reresolution true (see gen_bogner3_eqfull_vtk_prms.py).\n" % f.name + s)
+  out.write_text("// _pass3: as %s with usePass3Reresolution true.\n" % f.name + s)
   print(out.name)
 
-# [Claude, 2026-10-08] _strict variant of the r075 cuboid (per "Try todo what bogner does and rerun 0.75"): strictBognerClassification
-# true, nothing else changed (pass 3 stays off; in strict mode it has nothing to do). Freed cells follow Bogner's rule literally
-# (Bogner 2017 pp. 113-114): B(x) = non-obstacle neighbours, cells freed in the same step count as obstacle; no liquid -> gas, else
-# no gas -> liquid, else interface with the mean fill of the interface cells in B(x) (0.5 if none). Reason: the fallback rule (default)
-# created water on the dry upper face (4314846), pass 3 (4316523) removed it but drifted in -x, held a 30.5 deg heel and went NaN at 96500.
+# _strict (r075 cuboid): strictBognerClassification true, Bogner's rule for freed cells literally (Bogner 2017 pp.
+# 113-114): B(x) = non-obstacle neighbours, cells freed in the same step count as obstacle; no liquid -> gas, else no
+# gas -> liquid, else interface with the mean fill of the interface cells in B(x) (0.5 if none). Pass 3 stays off
+# (nothing to do here).
 f = P / "bogner3_r075_deep_s32_eqfull_vtk_gas.prm"
 s = f.read_text()
 s, k = re.subn(r"(\n(\s*)seedSkipObstacleNeighbours false;[^\n]*)",
-              r"\1\n\2strictBognerClassification true;   // [Claude, 2026-10-08] _strict: Bogner's rule literally", s)
+              r"\1\n\2strictBognerClassification true;   // _strict: Bogner's freed-cell rule literally", s)
 assert k == 1, f
 s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_eqfull_pxy;", r"\1_eqfull_pxy_strict;", s)
 assert k == 1, f
 out = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_gas.prm"
-out.write_text("// [Claude, 2026-10-08] _strict: as %s with strictBognerClassification true (see gen_bogner3_eqfull_vtk_prms.py).\n" % f.name + s)
+out.write_text("// _strict: as %s with strictBognerClassification true.\n" % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-09] _strict_mom: the _strict r075 cuboid, 25000 steps, with logMomentumBudget true (per "start debugging why it
-# doesn't stay"): 4316885 / 4316523 gained total x momentum -687 by 70k (old rule ~0), the whole upper water layer flows in -x and the
-# body rides it at a ~30 deg heel. The [MOMENTUM-BUDGET] line splits the change into what freed cells carry in and covered cells take out.
+# _strict_mom: _strict, 25000 steps, logMomentumBudget true. The [MOMENTUM-BUDGET] line splits the change of total
+# momentum into what freed cells carry in and covered cells take out (the strict rule builds up a -x drift).
 f = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_gas.prm"
 s = f.read_text()
 s, k = re.subn(r"(\n(\s*)strictBognerClassification true;[^\n]*)",
-              r"\1\n\2logMomentumBudget true;   // [Claude, 2026-10-09] _strict_mom: [MOMENTUM-BUDGET] diagnostic", s)
+              r"\1\n\2logMomentumBudget true;   // [MOMENTUM-BUDGET] diagnostic", s)
 assert k == 1, f
 s, k = re.subn(r"(\n\s*timesteps\s+)100000;", r"\g<1>25000;", s)
 assert k == 1, f
@@ -154,16 +139,15 @@ assert k == 1, f
 s, k = re.subn(r'(\n\s*steps\s+)"[^"]*";', r'\1"0,1000,2000,4000,8000,12000,16000,20000,24999";', s)
 assert k == 1, f
 out = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom_gas.prm"
-out.write_text("// [Claude, 2026-10-09] _strict_mom: as %s, 25000 steps, logMomentumBudget true (see gen_bogner3_eqfull_vtk_prms.py).\n"
+out.write_text("// _strict_mom: as %s, 25000 steps, logMomentumBudget true.\n"
                % f.name + s.split("\n", 1)[1])
 print(out.name)
 
-# [Claude, 2026-10-09] _mom: the same budget run with the default (fallback) rule, as the control -- 4314846 kept its total momentum
-# (~0) but had water on top.
+# _mom: the same budget run with the default (fallback) rule, as the control.
 f = P / "bogner3_r075_deep_s32_eqfull_vtk_gas.prm"
 s = f.read_text()
 s, k = re.subn(r"(\n(\s*)seedSkipObstacleNeighbours false;[^\n]*)",
-              r"\1\n\2logMomentumBudget true;   // [Claude, 2026-10-09] _mom: [MOMENTUM-BUDGET] diagnostic", s)
+              r"\1\n\2logMomentumBudget true;   // [MOMENTUM-BUDGET] diagnostic", s)
 assert k == 1, f
 s, k = re.subn(r"(\n\s*timesteps\s+)100000;", r"\g<1>25000;", s)
 assert k == 1, f
@@ -172,40 +156,38 @@ assert k == 1, f
 s, k = re.subn(r'(\n\s*steps\s+)"[^"]*";', r'\1"0,1000,2000,4000,8000,12000,16000,20000,24999";', s)
 assert k == 1, f
 out = P / "bogner3_r075_deep_s32_eqfull_vtk_mom_gas.prm"
-out.write_text("// [Claude, 2026-10-09] _mom: as %s, 25000 steps, logMomentumBudget true (see gen_bogner3_eqfull_vtk_prms.py).\n"
+out.write_text("// _mom: as %s, 25000 steps, logMomentumBudget true.\n"
                % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-09] _strict_mom2: _strict_mom rerun after the per-stage momentum instrumentation (per "Yes" to splitting the
-# budget): 4317122 showed freed minus covered cells explain only -5.7 of the -138 total x momentum created by 25k. The same prm
-# now also prints [MOMENTUM-STAGES] (fluid / body momentum change per timeloop stage + SimpleBB link sums); own snapshot folder.
+# _strict_mom2: _strict_mom with its own snapshot folder, for the per-stage momentum output [MOMENTUM-STAGES] (fluid /
+# body momentum change per timeloop stage + SimpleBB link sums) printed by the same prm.
 f = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom_gas.prm"
 s = f.read_text()
 s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_strict_mom;", r"\1_strict_mom2;", s)
 assert k == 1, f
 out = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_gas.prm"
-out.write_text("// [Claude, 2026-10-09] _strict_mom2: as %s with its own snapshot folder, for the [MOMENTUM-STAGES] run (see gen_bogner3_eqfull_vtk_prms.py).\n"
+out.write_text("// _strict_mom2: as %s with its own snapshot folder, for the [MOMENTUM-STAGES] output.\n"
                % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-09] _strict_mom2_sigma0: _strict_mom2 with surfaceTensionOverride 0 (per "Yes" to the surface-tension test).
-# 4317356 located the created momentum in the streaming step: the free-surface gas BC (gas density incl. the Laplace pressure) and
-# the MEM dry-side reference (rho0 = 1) differ by 0.04 % of ~4e5. With sigma = 0 both use the same gas pressure; if the -x drift and
-# the 30 deg heel disappear, the Laplace pressure mismatch is the source. Own snapshot folder.
+# _strict_mom2_sigma0: surfaceTensionOverride 0. The momentum is created in the streaming step, where the free-surface
+# gas BC (gas density incl. the Laplace pressure) and the MEM dry-side reference (rho0 = 1) differ; with sigma = 0
+# both use the same gas pressure, so a vanishing -x drift and heel error identify the Laplace pressure mismatch as the
+# source.
 f = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_gas.prm"
 s = f.read_text()
-s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)", r"\1   surfaceTensionOverride 0;   // [Claude, 2026-10-09] _sigma0: Laplace pressure off\n", s)
+s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)", r"\1   surfaceTensionOverride 0;   // _sigma0: surface tension (Laplace pressure) off\n", s)
 assert k == 1, f
 s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_strict_mom2;", r"\1_strict_mom2_sigma0;", s)
 assert k == 1, f
 out = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigma0_gas.prm"
-out.write_text("// [Claude, 2026-10-09] _strict_mom2_sigma0: as %s with surfaceTensionOverride 0 (see gen_bogner3_eqfull_vtk_prms.py).\n"
+out.write_text("// _strict_mom2_sigma0: as %s with surfaceTensionOverride 0.\n"
                % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-09] _strict_mom2_sigma0_100k: _strict_mom2_sigma0 over the full 100000 steps with the VTK steps of the 100k
-# runs (incl. 70000 for eq_views3d), per "Yes do it" to the long sigma = 0 run. 4318172 removed the momentum source and the -x
-# drift, but the heel was still swinging at 25k (36.6 -> 24.1 deg); this run shows whether it settles at the analytic 26.6 deg.
+# _strict_mom2_sigma0_100k: _strict_mom2_sigma0 over the full 100000 steps with the VTK steps of the 100k runs (incl.
+# 70000 for eq_views3d), to show whether the heel settles at the analytic 26.6 deg.
 f = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigma0_gas.prm"
 s = f.read_text()
 s, k = re.subn(r"(\n\s*timesteps\s+)25000;", r"\g<1>100000;", s)
@@ -215,140 +197,133 @@ assert k == 1, f
 s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_strict_mom2_sigma0;", r"\1_strict_mom2_sigma0_100k;", s)
 assert k == 1, f
 out = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigma0_100k_gas.prm"
-out.write_text("// [Claude, 2026-10-09] _strict_mom2_sigma0_100k: as %s, 100000 steps, VTK steps of the 100k runs (see gen_bogner3_eqfull_vtk_prms.py).\n"
+out.write_text("// _strict_mom2_sigma0_100k: as %s, 100000 steps, VTK steps of the 100k runs.\n"
                % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-09] _strict_mom2_sigmadiv10_100k: _strict_mom2_sigma0_100k with surfaceTensionOverride sigma/10 = 8.49592e-5
-# instead of 0 (per "queue a second run on another mirror with reduced surface tension"). Between the nominal-sigma run (momentum
-# source, -x drift, ~30 deg) and sigma = 0: shows whether the momentum creation and the heel error scale with sigma.
+# _strict_mom2_sigmadiv10_100k: as _strict_mom2_sigma0_100k with surfaceTensionOverride sigma/10 = 8.49592e-5 instead
+# of 0, to show whether the momentum creation and the heel error scale with sigma.
 f = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigma0_100k_gas.prm"
 s = f.read_text()
 s, k = re.subn(r"\n(\s*)surfaceTensionOverride 0;[^\n]*",
-               r"\n\1surfaceTensionOverride 8.49592e-5;   // [Claude, 2026-10-09] _sigmadiv10: sigma/10 (We-derived 8.49592e-4)", s)
+               r"\n\1surfaceTensionOverride 8.49592e-5;   // _sigmadiv10: sigma/10 (We-derived 8.49592e-4)", s)
 assert k == 1, f
 s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_strict_mom2_sigma0_100k;", r"\1_strict_mom2_sigmadiv10_100k;", s)
 assert k == 1, f
 out = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigmadiv10_100k_gas.prm"
-out.write_text("// [Claude, 2026-10-09] _strict_mom2_sigmadiv10_100k: as %s with surfaceTensionOverride 8.49592e-5 = sigma/10 (see gen_bogner3_eqfull_vtk_prms.py).\n"
+out.write_text("// _strict_mom2_sigmadiv10_100k: as %s with surfaceTensionOverride 8.49592e-5 = sigma/10.\n"
                % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-09] _sigma0_tau{0526,051}[_half]_100k: _strict_mom2_sigma0_100k with a higher viscosity via relaxationRateOverride
-# (per "run the 0.75 cuboid run with 0 surface tension and a better viscosity ... one starting close to the equilibrium in z and
-# another one in 50% submerged starting position ... another viscosity value to try out"). 4318312 (sigma 0, production
-# omega 1.99743, nu 2.14e-4) kept swinging +-1.3 deg around 27.6 deg up to 100k while the basin wave did not decay (e-folding
-# 1/(2 nu k^2) ~ 2.2e6 steps). tau 0.526 = Bogner's floating-cube value (nu 8.67e-3, wave e-folding ~5.4e4 steps); tau 0.51
-# (nu 3.33e-3) as an intermediate. Start: the unchanged z_c = 52.085 (equilibrium height at the 2.86 deg seed, level 60.0746)
-# or, for _half, z_c = 60.0746 = centre on the initial free surface (50 % submerged at any heel), 8 LU above equilibrium.
+# _sigma0_tau{0526,051}[_half]_100k: _strict_mom2_sigma0_100k with a higher viscosity via relaxationRateOverride. At
+# the water viscosity (omega 1.99743, nu 2.14e-4) the basin wave barely decays (e-folding 1/(2 nu k^2) ~ 2.2e6 steps)
+# and the heel keeps swinging. tau 0.526 = Bogner's floating-cube value (nu 8.67e-3, e-folding ~5.4e4 steps); tau 0.51
+# (nu 3.33e-3) as an intermediate. Start: z_c = 52.085 (equilibrium at the 2.86 deg seed, level 60.0746) or, for
+# _half, z_c = 60.0746 = centre on the initial free surface (50 % submerged at any heel), 8 LU above equilibrium.
 f = P / "bogner3_r075_deep_s32_eqfull_vtk_strict_mom2_sigma0_100k_gas.prm"
 base = f.read_text()
 for tag, omega, tau, half in [("tau0526", "1.90114068", "0.526", False), ("tau0526_half", "1.90114068", "0.526", True),
                               ("tau051", "1.96078431", "0.51", False)]:
    s = base
    s, k = re.subn(r"(\n(\s*)surfaceTensionOverride 0;[^\n]*)",
-                  r"\1\n\2relaxationRateOverride " + omega + r";   // [Claude, 2026-10-09] _" + tag + ": tau " + tau, s)
+                  r"\1\n\2relaxationRateOverride " + omega + r";   // _" + tag + ": tau " + tau, s)
    assert k == 1, tag
    if half:
-      s, k = re.subn(r"(\n\s*position\s+)< 96, 45, 52.085 >;", r"\1< 96, 45, 60.0746 >;   // [Claude, 2026-10-09] _half: centre on the initial surface", s)
+      s, k = re.subn(r"(\n\s*position\s+)< 96, 45, 52.085 >;", r"\1< 96, 45, 60.0746 >;   // _half: centre on the still-water level", s)
       assert k == 1, tag
    s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+)_strict_mom2_sigma0_100k;", r"\1_sigma0_" + tag + "_100k;", s)
    assert k == 1, tag
    out = P / f"bogner3_r075_deep_s32_eqfull_vtk_sigma0_{tag}_100k_gas.prm"
-   out.write_text("// [Claude, 2026-10-09] _sigma0_%s_100k: as %s with relaxationRateOverride %s (tau %s)%s (see gen_bogner3_eqfull_vtk_prms.py).\n"
+   out.write_text("// _sigma0_%s_100k: as %s with relaxationRateOverride %s (tau %s)%s.\n"
                   % (tag, f.name, omega, tau, ", start z_c 60.0746 (50 % submerged)" if half else "") + s)
    print(out.name)
 
-# [Claude, 2026-10-09] rho 0.25 / 0.5 cuboid with the settings of 4320453 (per "Only rerun only the cuboid 0.25 and the 0.5,
-# tau 0.526, start 50% submerged"): from the eqfull base prm of each density, the same changes as
-# bogner3_r075_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_gas.prm vs its base: surfaceTensionOverride 0, relaxationRateOverride
-# 1.90114068 (tau 0.526), start z_c 60.0746 (centre on the initial surface), strictBognerClassification true, logMomentumBudget true,
-# own snapshot folder. 100000 steps and the VTK steps are those of the base (unchanged).
+# rho 0.25 / 0.5 cuboid with the settings of the rho 0.75 _sigma0_tau0526_half_100k run: from the eqfull base prm of
+# each density, surfaceTensionOverride 0, relaxationRateOverride 1.90114068 (tau 0.526), start z_c 60.0746 (centre on
+# the initial surface), strictBognerClassification true, logMomentumBudget true, own snapshot folder. Steps and VTK as
+# the base.
 for rho in ("025", "050"):
    f = P / f"bogner3_r{rho}_deep_s32_eqfull_vtk_gas.prm"
    s = f.read_text()
    s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+_eqfull_pxy);", r"\1_sigma0_tau0526_half_100k;", s)
    assert k == 1, f
    s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)",
-                  r"\1   surfaceTensionOverride 0;   // [Claude, 2026-10-09] _sigma0: Laplace pressure off\n"
-                  r"   relaxationRateOverride 1.90114068;   // [Claude, 2026-10-09] _tau0526_half: tau 0.526\n", s)
+                  r"\1   surfaceTensionOverride 0;   // _sigma0: surface tension (Laplace pressure) off\n"
+                  r"   relaxationRateOverride 1.90114068;   // _tau0526: tau = 0.526\n", s)
    assert k == 1, f
-   s, k = re.subn(r"(\n\s*position\s+)< 96, 45, [\d.]+ >;", r"\1< 96, 45, 60.0746 >;   // [Claude, 2026-10-09] _half: centre on the initial surface", s)
+   s, k = re.subn(r"(\n\s*position\s+)< 96, 45, [\d.]+ >;", r"\1< 96, 45, 60.0746 >;   // _half: centre on the still-water level", s)
    assert k == 1, f
    s, k = re.subn(r"(\n(\s*)seedSkipObstacleNeighbours false;[^\n]*)",
-                  r"\1\n\2strictBognerClassification true;   // [Claude, 2026-10-09] as the rho 0.75 _strict runs"
-                  r"\n\2logMomentumBudget true;   // [Claude, 2026-10-09] as the rho 0.75 _mom runs", s)
+                  r"\1\n\2strictBognerClassification true;   // _strict: Bogner's freed-cell rule literally"
+                  r"\n\2logMomentumBudget true;   // [MOMENTUM-BUDGET] diagnostic", s)
    assert k == 1, f
    out = P / f"bogner3_r{rho}_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_gas.prm"
-   out.write_text("// [Claude, 2026-10-09] _sigma0_tau0526_half_100k: as %s with surfaceTensionOverride 0, relaxationRateOverride 1.90114068 "
-                  "(tau 0.526), start z_c 60.0746, strictBognerClassification, logMomentumBudget = settings of the rho 0.75 run 4320453 "
-                  "(see gen_bogner3_eqfull_vtk_prms.py).\n" % f.name + s)
+   out.write_text("// _sigma0_tau0526_half_100k: as %s with surfaceTensionOverride 0, relaxationRateOverride 1.90114068 "
+                  "(tau 0.526), start z_c 60.0746, strictBognerClassification true, logMomentumBudget true, "
+                  "as the rho 0.75 run.\n" % f.name + s)
    print(out.name)
 
-# [Claude, 2026-10-10] rho 0.25 retry with the 2026-10-01 interface seeding (per "Yes do 1"): 4320573 (_sigma0_tau0526_half_100k)
-# died at step 14440 with NaN at the waterline next to the cuboid corner; the only periodic-y rho 0.25 cuboid that survived (4316290)
-# used seedSkipObstacleNeighbours true. Identical to bogner3_r025_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_gas.prm otherwise.
+# _newseed of the rho 0.25 _sigma0_tau0526_half_100k cuboid: seedSkipObstacleNeighbours true (seeding since
+# 2026-10-01), otherwise identical; that prm goes NaN at the waterline next to the cuboid corner.
 f = P / "bogner3_r025_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_gas.prm"
 s = f.read_text().split("\n", 1)[1]
 s, k = re.subn(r"\n(\s*)seedSkipObstacleNeighbours false;[^\n]*",
-               r"\n\1seedSkipObstacleNeighbours true;   // [Claude, 2026-10-10] _newseed: 2026-10-01 seeding (as 4316290)", s)
+               r"\n\1seedSkipObstacleNeighbours true;   // _newseed: FormerMO fill seeding since 2026-10-01", s)
 assert k == 1, f
 s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+_sigma0_tau0526_half_100k);", r"\1_newseed;", s)
 assert k == 1, f
 out = P / "bogner3_r025_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_newseed_gas.prm"
-out.write_text("// [Claude, 2026-10-10] _newseed: as %s with seedSkipObstacleNeighbours true (see gen_bogner3_eqfull_vtk_prms.py).\n" % f.name + s)
+out.write_text("// _newseed: as %s with seedSkipObstacleNeighbours true.\n" % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-10] r025 waterline-NaN bisection (per "find the cause of the waterline NaN ... start with the differences of the
-# run that worked"): W = bogner3_r025_deep_s32_eqfull_vtk_newseed_gas.prm (4316290, ran 100000 steps) on the current code, and W plus
-# ONE of the physical differences of the crashing 4320573 / 4320930 (NaN at step 14440): surface tension 0, tau 0.526, start
-# centre on the initial surface (z_c 60.0746 instead of 68.065), strict Bogner classification. 40000 steps (crash at 14440); the
-# fluid snapshot steps are those of W up to 36000 (the snapshot writer's gas_cell_zero_setter changes the state, so they are kept),
-# plus 39999; own snapshot folder each.
+# r025 waterline-NaN bisection: W = bogner3_r025_deep_s32_eqfull_vtk_newseed_gas.prm (runs 100000 steps), and W plus
+# ONE of the physical differences of the r025 _sigma0_tau0526_half_100k prm (NaN at step 14440): surface tension 0,
+# tau 0.526, start centre on the initial surface (z_c 60.0746 instead of 68.065), strict Bogner classification. 40000
+# steps; fluid snapshot steps those of W up to 36000 plus 39999 (kept, since the snapshot writer's
+# gas_cell_zero_setter changes the state).
 WBASE = P / "bogner3_r025_deep_s32_eqfull_vtk_newseed_gas.prm"
 for tag, desc in [("_bisW", "W unchanged"), ("_bisWsig0", "W + surfaceTensionOverride 0"),
                   ("_bisWtau", "W + relaxationRateOverride 1.90114068 (tau 0.526)"),
                   ("_bisWhalf", "W + start z_c 60.0746 (centre on the initial surface)"),
                   ("_bisWstrict", "W + strictBognerClassification true")]:
    s = WBASE.read_text()
-   s, k = re.subn(r"(\n\s*timesteps\s+)100000;", r"\g<1>40000;   // [Claude, 2026-10-10] bisection: 40000 steps", s); assert k == 1, tag
+   s, k = re.subn(r"(\n\s*timesteps\s+)100000;", r"\g<1>40000;   // bisection: 40000 steps", s); assert k == 1, tag
    s, k = re.subn(r'steps "0,250,500,1000,2000,4000,8000,12000,16000,20000,24000,28000,32000,36000,40000,50000,60000,70000,80000,90000,99999";',
                   'steps "0,250,500,1000,2000,4000,8000,12000,16000,20000,24000,28000,32000,36000,39999";', s); assert k == 1, tag
    s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+_eqfull_pxy_newseed);", r"\1" + tag + ";", s); assert k == 1, tag
    if tag == "_bisWsig0":
-      s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)", r"\1   surfaceTensionOverride 0;   // [Claude, 2026-10-10] bisection\n", s); assert k == 1, tag
+      s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)", r"\1   surfaceTensionOverride 0;   // bisection\n", s); assert k == 1, tag
    if tag == "_bisWtau":
-      s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)", r"\1   relaxationRateOverride 1.90114068;   // [Claude, 2026-10-10] bisection: tau 0.526\n", s); assert k == 1, tag
+      s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)", r"\1   relaxationRateOverride 1.90114068;   // bisection: tau 0.526\n", s); assert k == 1, tag
    if tag == "_bisWhalf":
-      s, k = re.subn(r"(\n\s*position\s+)< 96, 45, 68.065 >;", r"\1< 96, 45, 60.0746 >;   // [Claude, 2026-10-10] bisection: centre on the initial surface", s); assert k == 1, tag
+      s, k = re.subn(r"(\n\s*position\s+)< 96, 45, 68.065 >;", r"\1< 96, 45, 60.0746 >;   // bisection: centre on the initial surface", s); assert k == 1, tag
    if tag == "_bisWstrict":
-      s, k = re.subn(r"(\n(\s*)seedSkipObstacleNeighbours true;[^\n]*)", r"\1\n\2strictBognerClassification true;   // [Claude, 2026-10-10] bisection", s); assert k == 1, tag
+      s, k = re.subn(r"(\n(\s*)seedSkipObstacleNeighbours true;[^\n]*)", r"\1\n\2strictBognerClassification true;   // bisection", s); assert k == 1, tag
    out = P / f"bogner3_r025_deep_s32_eqfull_vtk{tag}_gas.prm"
-   out.write_text("// [Claude, 2026-10-10] %s: %s, 40000 steps (see gen_bogner3_eqfull_vtk_prms.py, NaN bisection).\n" % (tag, desc) + s)
+   out.write_text("// %s: %s, 40000 steps (NaN bisection).\n" % (tag, desc) + s)
    print(out.name)
 
-# [Claude, 2026-10-10] r025 waterline NaN: the crashing prm (4320573 / 4320930, bit-identical, NaN from step 14440) with the
-# sweep-by-sweep NaN scan (PhysicsParameters.denseNanScanEnabled, BuildTimeloop.h scanIntraStepNaN) over steps 14430-14445,
-# stopped at step 14600 (the abort comes at the 14500 check). The scan only reads, so the run is the same as 4320573.
+# _nanscan: the r025 _sigma0_tau0526_half_100k prm (NaN from step 14440) with the sweep-by-sweep NaN scan
+# (PhysicsParameters.denseNanScanEnabled, BuildTimeloop.h scanIntraStepNaN) over steps 14430-14445, stopped at step
+# 14600 (the abort comes at the 14500 check). The scan only reads, so the run is otherwise unchanged.
 f = P / "bogner3_r025_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_gas.prm"
 s = f.read_text()
-s, k = re.subn(r"(\n\s*timesteps\s+)100000;", r"\g<1>14600;   // [Claude, 2026-10-10] nanscan: stop after the crash", s); assert k == 1
-s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)", r"\1   denseNanScanEnabled true;   // [Claude, 2026-10-10] nanscan\n   denseNanScanFromStep 14430;\n   denseNanScanToStep 14446;\n", s); assert k == 1
+s, k = re.subn(r"(\n\s*timesteps\s+)100000;", r"\g<1>14600;   // nanscan: stop after the crash", s); assert k == 1
+s, k = re.subn(r"(\nPhysicsParameters\s*\n\{\n)", r"\1   denseNanScanEnabled true;   // nanscan\n   denseNanScanFromStep 14430;\n   denseNanScanToStep 14446;\n", s); assert k == 1
 s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+_sigma0_tau0526_half_100k);", r"\1_nanscan;", s); assert k == 1
 out = P / "bogner3_r025_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_nanscan_gas.prm"
-out.write_text("// [Claude, 2026-10-10] _nanscan: as %s with the dense NaN scan over steps 14430-14445, 14600 steps.\n" % f.name + s)
+out.write_text("// _nanscan: as %s with the dense NaN scan over steps 14430-14445, 14600 steps.\n" % f.name + s)
 print(out.name)
 
-# [Claude, 2026-10-10] the r025 / r050 cuboid reruns of 4320573 / 4320574 with strictBognerNoLiquidAtGas true (cause of the r025
-# NaN at step 14439: a freed cell made liquid next to a freed cell made gas in the same step, then streaming the gas cell's invalid
-# PDFs; the NaN-scan rerun 4320945 shows it). r050 had 4 such cells at ~11250 (survived), r075 4320453 none (identical with the
-# fix, not rerun). Otherwise identical to the _sigma0_tau0526_half_100k prms; own snapshot folder.
+# _noliqgas (r025 / r050 cuboids): _sigma0_tau0526_half_100k with strictBognerNoLiquidAtGas true. Cause of the r025
+# NaN: a freed cell made liquid next to a freed cell made gas in the same step, which then streams the gas cell's
+# invalid PDFs; such a cell now becomes interface instead. The r075 run has no such cells (identical with the fix).
 for rho in ("025", "050"):
    f = P / f"bogner3_r{rho}_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_gas.prm"
    s = f.read_text().split("\n", 1)[1]
    s, k = re.subn(r"(\n(\s*)strictBognerClassification true;[^\n]*)",
-                  r"\1\n\2strictBognerNoLiquidAtGas true;   // [Claude, 2026-10-10] _noliqgas: no new liquid next to gas", s); assert k == 1, f
+                  r"\1\n\2strictBognerNoLiquidAtGas true;   // _noliqgas: no new liquid next to gas", s); assert k == 1, f
    s, k = re.subn(r"(\n\s*snapshotBaseFolder\s+\w+_sigma0_tau0526_half_100k);", r"\1_noliqgas;", s); assert k == 1, f
    out = P / f"bogner3_r{rho}_deep_s32_eqfull_vtk_sigma0_tau0526_half_100k_noliqgas_gas.prm"
-   out.write_text("// [Claude, 2026-10-10] _noliqgas: as %s with strictBognerNoLiquidAtGas true (see gen_bogner3_eqfull_vtk_prms.py).\n" % f.name + s)
+   out.write_text("// _noliqgas: as %s with strictBognerNoLiquidAtGas true.\n" % f.name + s)
    print(out.name)

@@ -1,7 +1,7 @@
-// [Claude, 2026-09-30] Configuration reported in the thesis (Section 5.2, wall impact): identical to
-// dem_validation_wall_cylinder_kodam_test1.prm plus useRotationalEffectiveMass true and dt = collisionTime/500 (10x finer
-// than the harness default collisionTime/50). Rerun 2026-09-30: PASS (32/32); worst tilt 30 deg, velocity error 1.94 %.
-// Without these two settings the same sweep gives FAIL (20/32); with the rotational effective mass only, FAIL (31/32).
+// Configuration reported in the thesis (Section 5.2, wall impact): dem_validation_wall_cylinder_kodam_test1.prm plus
+// useRotationalEffectiveMass true and dt = collisionTime/500 (10x finer than the harness default collisionTime/50).
+// Result: PASS (32/32), worst tilt 30 deg with a velocity error of 1.94 %. Without these two settings the same sweep
+// gives FAIL (20/32); with the rotational effective mass only, FAIL (31/32).
 // DEM validation: a REPLICA of Kodam, Bharadwaj, Curtis, Hancock & Wassgren (2010), Chemical
 // Engineering Science 65(22), 5863-5871, Part II, Section 3.1 "Test 1" -- using their EXACT reported
 // geometry/material parameters (Table 1, p. 5865) and their EXACT stated protocol (p. 5866), not just
@@ -20,7 +20,7 @@
 // thesis), not a physical experiment -- there is no drop-test rig for this one. Their own paper reports
 // only two explicit numeric anchor points in the text (not a full data table): at tilt=0deg (face-on)
 // and tilt=90deg (band-on), the dimensionless rebound speed Vz+/Vz- equals EXACTLY their coefficient of
-// restitution, 0.85 (p. 5866) -- DEMValidationScenarios.h checks the simulated value against that
+// restitution, 0.85 (p. 5866) -- DEMValidationWallImpact.h checks the simulated value against that
 // STATED NUMBER directly at those two angles, not just against our own re-derived formula. At
 // intermediate angles we still only have our own analytical solver to compare against (same one used
 // for the non-replica cylinder test) since Kodam et al.'s Figs. 4-5 curves were never digitized here --

@@ -1,56 +1,36 @@
 #!/usr/bin/env python3
-"""Recreate Kodam et al. (2010) Part II, Section 3.3 "Static packing in a cylinder" locally, using
-this project's own DropTest.cpp/SetupStages_drop_test.h machinery (fluid-free DEM + floaterCylinder
-VTK output, already supports cylinders -- see DropTest.cpp's own header).
+"""Recreate Kodam et al. (2010) Part II, Sec. 3.3 "Static packing in a cylinder" with this project's fluid-free
+DropTest.cpp / SetupStages_drop_test.h (DEM only, floaterCylinder VTK output).
 
-Kodam's real test (Table 1 + Section 3.3, checked directly against the paper via Zotero):
-  - Cylinder: diameter 8.0mm, length 5.3mm  -> aspect ratio L/D = 0.6625
-  - Container: Plexiglas cylinder, internal diameter 50.6mm, height 130mm
-  - 250 cylindrical particles, dropped ONE AT A TIME with negligible initial KE and random initial
-    orientation, from random positions at the top of the container; the next particle is released
-    only once the previous one has come to rest.
-  - friction coefficient 0.5, coefficient of restitution 0.85 (Table 1)
-  - Reported result (true cylinder DEM vs. experiment): fill height 55.8+-2.2mm vs 53.3+-2.0mm
-    (~5% high); bulk solid fraction 0.589+-0.023 vs 0.617+-0.023 (~5% low).
+Kodam's test (Table 1 and Sec. 3.3):
+  - Cylinder: diameter 8.0 mm, length 5.3 mm -> aspect ratio L/D = 0.6625
+  - Container: Plexiglas cylinder, internal diameter 50.6 mm, height 130 mm
+  - 250 cylindrical particles, dropped one at a time with negligible initial kinetic energy and random initial
+    orientation from random positions at the top of the container; the next particle is released only once the
+    previous one has come to rest.
+  - Friction coefficient 0.5, coefficient of restitution 0.85 (Table 1)
+  - Result (true-cylinder DEM vs. experiment, Table 2): fill height 55.8+-2.2 mm vs 53.3+-2.0 mm (~5% high); bulk
+    solid fraction 0.589+-0.023 vs 0.617+-0.023 (~5% low).
 
-What this recreation keeps EXACT: cylinder aspect ratio (L/D=0.6625), particle count (250), friction
-(0.5) and restitution (0.85) from Kodam's own Table 1, and (see below) the SAME real-gravity
-calibration and batched-wave release TIMING already proven stable in this project's own
-DropTest_cylinders_250_gas.prm.
+Kept exactly: aspect ratio, particle count, friction and restitution; gravity (real gravity) and the batched-wave
+release timing are those of DropTest_cylinders_250_gas.prm.
 
-DELIBERATE approximations, and why:
-  - Container cross-section: DropTest's walls are 6 axis-aligned planes (SetupStages_drop_test.h) --
-    a true round container wall is not implemented anywhere in this project. Rather than build a new
-    curved-wall contact type, the container is a SQUARE footprint with the SAME cross-sectional AREA
-    as Kodam's real circular container (bulk solid fraction = volume/[(footprint area)*height] stays a
-    fair comparison; only near-wall packing structure right at the boundary differs).
-  - Release protocol: NOT strictly one-at-a-time. Two things were tried and found unsafe for a
-    one-at-a-time schedule at a LOCAL-run-tractable step count (both found empirically, this session):
-      1. Giving every one of 250 particles its own unique, simultaneously-created random (x,y) (all
-         250 exist as real bodies from t=0, only "startInactive" distinguishing them) collapsed the
-         particle count during the run (250 -> 193 by step 23000, ~1 lost per release event).
-      2. Even after fixing that (a small, reused set of well-separated spawn COLUMNS instead), the
-         collapse persisted just as badly with a "demo-speed" gravityOverride chosen to make a
-         one-at-a-time schedule finish quickly (0.005 LU/step^2, ~250x the value below) -- confirmed
-         BY A DIRECT A/B TEST that the established, real-gravity-calibrated DropTest_cylinders_250_gas.prm
-         does NOT collapse (numParticles held at 250 across the same step range under normal wave
-         release), isolating the cause to gravity magnitude, not particle placement: the fast gravity
-         drives impact velocities (~1.3 LU/step over this container's fall height) far outside what
-         this project's LinearSpringDashpot contact-time calibration (collisionTimeFactor=4) has ever
-         been exercised at elsewhere in this codebase, causing a fast-moving body to tunnel through a
-         thin wall within a single DEM sub-step once contact forces spike.
-    Given a genuinely safe one-at-a-time schedule at REAL gravity would need ~1.5M timesteps for 250
-    particles (impractical for a local interactive run), this recreation instead reuses the EXACT
-    proven-stable real-gravity value and the established BATCHED-wave release timing (9 columns fired
-    together each wave, matching the working file's own 10-column pattern, just resized for Kodam's
-    larger, real cylinder footprint) -- trading strict one-at-a-time for guaranteed stability at a
-    tractable local runtime. Small-batch vs. strictly-sequential release is not expected to materially
-    change the FINAL static packing outcome this test is actually about.
-  - 1 LU = 1 mm (avgParticleDiameterOverride/dxSIOverride copied EXACTLY from the proven file, which
-    happen to give this to within 0.02%): every length below reads directly as millimetres, directly
-    comparable to the paper's own reported numbers with no conversion.
+Approximations:
+  - Container: the 6 axis-aligned domain walls form a square footprint with the same cross-sectional area as
+    Kodam's round container, so the bulk solid fraction (particle volume / (footprint area * fill height)) stays
+    comparable; only the near-wall packing differs. gen_kodam_round_prm.py builds a round-container variant
+    (ContainerCylinders block) from this file's output.
+  - Release: waves of 9 (one per reused spawn column) instead of one at a time. One-at-a-time attempts lost
+    particles during the run (250 -> 193 by step 23000), both with a unique random spawn point per particle and
+    with fixed spawn columns at a fast "demo" gravity (gravityOverride 0.005, ~250x real): the resulting impact
+    speeds (~1.3 LU/step) lie far outside the range the default contact calibration (collisionTimeFactor 4) had
+    been used at, while DropTest_cylinders_250_gas.prm at real gravity kept all 250 particles. (These losses predate
+    the SyncNextNeighbors fix, see gen_kodam_round_prm.py.) One-at-a-time release at real gravity would need ~1.5M
+    steps; small batches are not expected to change the final static packing materially.
+  - 1 LU = 1 mm: lengths read directly as millimetres, and gravityOverride is then real gravity at dt = 4.67e-5 s.
+    avgParticleDiameterOverride / dxSIOverride are copied from DropTest_cylinders_250_gas.prm.
 
-Run:  python3 gen_kodam_packing_prm.py   ->  prms/DropTest_kodam_packing_gas.prm
+Run (from apps/showcases/Antidunes): python3 scripts/gen_kodam_packing_prm.py  ->  prms/DropTest_kodam_packing_gas.prm
 """
 import argparse
 import math
@@ -81,15 +61,14 @@ if side % 3 != 0:
     side += (3 - side % 3)                      # round up to a multiple of 3 for a clean 3x3x1 block decomposition
 
 domain_height = int(round(args.container_height_mm + args.drop_clearance))
-spawn_z = domain_height - 10.0                  # 10 LU clearance below the domain's own ceiling plane, matching the
-                                                 # proven file's own ~10 LU spawn-to-ceiling gap (170 of 180)
+spawn_z = domain_height - 10.0                  # 10 LU below the ceiling, as in DropTest_cylinders_250_gas.prm
+                                                 # (170 of 180)
 
 lo = R + L / 2.0 + args.wall_margin
 hi = side - lo
 
-# 3x3 = 9 reused spawn columns (resized for Kodam's real, much larger cylinder footprint than the
-# original rod-shaped DropTest cylinders) -- same "fixed columns, reused across waves" structure as
-# the proven file's own 10 columns, just fewer of them since each column needs far more clearance now.
+# 3 x 3 = 9 spawn columns, reused every wave (as the 10 columns of DropTest_cylinders_250_gas.prm); the assert
+# below checks that columns are farther apart than a cylinder's footprint diagonal plus the wall margin.
 ncols_grid = 3
 step = (hi - lo) / (ncols_grid - 1)
 columns = [(lo + gx * step, lo + gy * step) for gy in range(ncols_grid) for gx in range(ncols_grid)]
@@ -111,17 +90,17 @@ print(f"Reference: Kodam's true-cylinder fill height 55.8mm = {55.8/D:.3f} diame
       f"solid fraction 0.589 (dimensionless, compare directly)")
 
 lines = []
-lines.append(f"// DropTest_kodam_packing_gas.prm  (auto-generated by gen_kodam_packing_prm.py)")
+lines.append(f"// DropTest_kodam_packing_gas.prm  (generated by gen_kodam_packing_prm.py)")
 lines.append("// ─────────────────────────────────────────────────────────────────────────────")
-lines.append("// Local recreation of Kodam et al. (2010) Part II Sec. 3.3 \"Static packing in a cylinder\":")
+lines.append("// Fluid-free DEM recreation of Kodam et al. (2010) Part II Sec. 3.3 \"Static packing in a cylinder\":")
 lines.append(f"// {args.n} cylinders (R={R:g}, L={L:g} LU=mm, L/D={L/D:.4f}, matching Kodam's real 8.0/5.3mm exactly),")
 lines.append(f"// dropped in waves of up to {batch} (one per reused spawn column) into a square, area-matched stand-in")
-lines.append("// for Kodam's real 50.6mm-diameter circular container. friction/restitution taken directly from Kodam's")
-lines.append("// Table 1 (0.5/0.85). Gravity and wave timing REUSE THE EXACT PROVEN-STABLE VALUES from the existing")
-lines.append("// DropTest_cylinders_250_gas.prm -- see this script's own module docstring for why a faster \"demo")
-lines.append("// speed\" gravity was tried and found to cause the particle count to collapse (contact-model")
-lines.append("// instability at the resulting impact velocity), and why strict one-at-a-time release was dropped")
-lines.append("// in favour of the already-validated batched-wave schedule. 1 LU = 1 mm.")
+lines.append("// for Kodam's 50.6 mm round container. Friction and restitution from Kodam's Table 1 (0.5/0.85). Gravity")
+lines.append("// (real gravity) and wave timing as in DropTest_cylinders_250_gas.prm: a faster gravity lost particles,")
+lines.append("// and strict one-at-a-time release at real gravity would need ~1.5M steps (see gen_kodam_packing_prm.py).")
+lines.append("// 1 LU = 1 mm. Only the near-wall packing differs from a round container; gen_kodam_round_prm.py builds")
+lines.append("// a round-container, one-at-a-time variant from this file.")
+lines.append("// Cylinder x Cylinder contacts: closed form (Kodam/Guo) with GJK/EPA fallback.")
 lines.append("// ─────────────────────────────────────────────────────────────────────────────")
 lines.append("")
 lines.append("BlockForestParameters")
@@ -162,8 +141,8 @@ lines.append("   Re                3100;")
 lines.append("   Fr                1.31;")
 lines.append("   We                15.6188;")
 lines.append("   useHardcodedUnits true;")
-lines.append("   gravityOverride   2.1371500584054327e-05;  // EXACT value from the proven DropTest_cylinders_250_gas.prm")
-lines.append("                                              // (\"true g_SI=9.81\"); confirmed empirically stable this session.")
+lines.append("   gravityOverride   2.1371500584054327e-05;  // as in DropTest_cylinders_250_gas.prm (real gravity);")
+lines.append("                                              // a faster gravity lost particles, see gen_kodam_packing_prm.py")
 lines.append("}")
 lines.append("")
 lines.append("ParticleParameters")
@@ -179,12 +158,12 @@ lines.append("   numSubCycles                20;")
 lines.append("   useLubricationCorrection    false;")
 lines.append("   useNoSlipParticles          false;")
 lines.append("   useParticleBed               false;")
-lines.append("   avgParticleDiameterOverride 8.001943372119138;   // EXACT value from the proven file (gives 1 LU ~ 1mm to 0.02%)")
-lines.append("   dxSIOverride                0.000362694127490625; // EXACT value from the proven file")
+lines.append("   avgParticleDiameterOverride 8.001943372119138;   // as in DropTest_cylinders_250_gas.prm; collision time 4 * this")
+lines.append("   dxSIOverride                0.000362694127490625; // as in DropTest_cylinders_250_gas.prm")
 lines.append("}")
 lines.append("")
-lines.append("// No Pillars / CylinderPillars / ArchTunnels -- just the 6 auto-created domain walls")
-lines.append("// (SetupStages_drop_test.h) standing in for Kodam's cylindrical container (see module docstring).")
+lines.append("// No Pillars / CylinderPillars / ArchTunnels: the 6 domain walls (SetupStages_drop_test.h) form the square,")
+lines.append("// area-matched stand-in for Kodam's round container.")
 lines.append("FloatingCylinders")
 lines.append("{")
 count = 0
@@ -194,8 +173,8 @@ while count < args.n:
     settling = wave * args.wave_gap
     for ci in range(this_batch):
         x, y = columns[ci]
-        # deterministic pseudo-random-looking orientation per (column, wave), no RNG needed for reproducibility:
-        # a low-discrepancy-ish spread over the unit sphere using the golden angle, distinct per particle index.
+        # deterministic, well-spread orientation per particle index (golden-ratio sequence over the unit sphere),
+        # reproducible without an RNG
         idx = count + ci
         theta = math.acos(1 - 2 * ((idx * 0.6180339887498949) % 1.0))
         phi = 2 * math.pi * ((idx * 0.7548776662466927) % 1.0)
@@ -210,11 +189,6 @@ lines.append("")
 lines.append("ModelParameters")
 lines.append("{")
 lines.append("   useAnalyticalContactDetection true;  // Kodam/Guo cylinder-cylinder closed form (ClosedFormContactsCylinderCylinder.h)")
-lines.append("   useMultiPointBoxContact       false;")
-lines.append("   useBoxOverlapCap              false;")
-lines.append("   useSpheroBoxContact           false;")
-lines.append("   spheroBoxRadius               0.05;")
-lines.append("   useSpheroBoxAnalytical        false;")
 lines.append("   useTightLayer1                true;")
 lines.append("   useContactFilterOwnerTiebreak true;")
 lines.append("   pdfReconstructionModel        OnlyMissing;")
@@ -227,7 +201,7 @@ lines.append("   cellConversionForceThreshold  1e-1;")
 lines.append("   useBognerReconstruction       true;")
 lines.append("   usePass3Reresolution          true;")
 lines.append("   useBognerThreePhaseMEM        true;")
-lines.append("   useMemOnlyBuoyancy            true;  // REQUIRED true -- see DropTest.cpp's own header comment")
+lines.append("   useMemOnlyBuoyancy            true;  // REQUIRED true, see DropTest.cpp's header")
 lines.append("   logFloaterHistory              false;")
 lines.append("   logFloaterHistoryStartStep     0;")
 lines.append("   logFloaterHistoryEndStep       10000;")

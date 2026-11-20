@@ -1,6 +1,6 @@
-// [Claude, 2026-09-30] Oblique sphere-wall impact extended from the sticking into the sliding regime (tangential/normal
-// velocity ratio 0..6 instead of 0..1.5). With mu = 0.3 and e = 0.85, rigid-body impulse theory predicts sliding
-// throughout for ratios above (7/2) mu (1 + e) = 1.94. Rerun 2026-09-30: sliding regime (ratio >= 3) within 0.3 %;
+// Oblique sphere-wall impact extended from the sticking into the sliding regime (tangential/normal velocity ratio
+// 0..6 instead of 0..1.5). With mu = 0.3 and e = 0.85, rigid-body impulse theory predicts sliding throughout for
+// ratios above (7/2) mu (1 + e) = 1.94. Result: sliding regime (ratio >= 3) within 0.3 %;
 // sticking regime deviates by up to 24 % in the spin (tangential spring vs. rigid Coulomb impulse, cf. Chung & Ooi 2011).
 // DEM dry-run validation: sphere oblique wall impact vs. the classic rigid-body-with-Coulomb-friction
 // analytical solution (AnalyticalSolutions.h::sphereWallImpact), sweeping the tangential/normal

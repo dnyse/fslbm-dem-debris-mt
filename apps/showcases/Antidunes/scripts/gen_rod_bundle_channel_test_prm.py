@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""LOCAL test prm: ONE bundle of three mutually touching PARALLEL rods dragged through still water (THESIS_PLAN.md 2026-09-21, 'why rods and not spheres').
+"""LOCAL test prm: ONE bundle of three mutually touching PARALLEL rods dragged through still water ('why rods and not spheres').
 
-In the PID-off GJK crash 4252482 (t=16377) the failing interface cell sat in the thin triangular channel between three parallel rods (..8404, ..8407, ..8408) that stayed locked together (surface gaps -0.03 LU) for >= 7000 steps, moving
-at ~0.012 and tilted (axis (-0.74,0.65,-0.15)). Three touching parallel cylinders of radius r enclose a channel of inscribed radius 0.1547 r = 0.46 LU (< half a cell). This prm reproduces ONLY that geometry, at the production unit system
+In a PID-off GJK-only hopper run that broke down, the failing interface cell sat in the thin triangular channel between three parallel rods that
+stayed locked together (surface gaps -0.03 LU) for >= 7000 steps, moving at ~0.012 and tilted (axis (-0.74,0.65,-0.15)). Three touching parallel cylinders of radius r enclose a channel of inscribed radius 0.1547 r = 0.46 LU (< half a cell). This prm reproduces ONLY that geometry, at the production unit system
 (omega 1.99753, g 5.8258e-5, sigma 1.63945e-3) and production rod size (r=3, L=18), in a small box (48x36x48) periodic in X and Y with a free surface, on 9 MPI ranks (3x3x1 blocks of 16x12x48 cells):
 
     python3 gen_rod_bundle_channel_test_prm.py [--vx -0.0096 --vy 0.0043 --vz 0 --dz 0 --dx 0 --dy 0 --steps 20000 --axis -0.74,0.65,-0.15 --name rod_bundle_channel_test]
@@ -19,13 +19,13 @@ ap.add_argument("--axis", default="-0.74,0.65,-0.15", help="rod axis (default: t
 ap.add_argument("--gap", type=float, default=-0.03, help="surface gap between the rods (crash bundle: -0.01..-0.03 LU)")
 ap.add_argument("--name", default="rod_bundle_channel_test")
 ap.add_argument("--cpb", default="", help="override cellsPerBlock, e.g. 12,9,48 (16 ranks) -- decomposition-independence test")
-ap.add_argument("--guard", type=int, default=0, help="ModelParameters.closeSealedCellsMinNeighbours (0 = off)")
-ap.add_argument("--skin", type=float, default=0.0, help="[Claude, 2026-09-30] ModelParameters.cylinderContactSkin in LU (0 = off); with --vx/--vy/--vz 0 the rods are free (no prescribed motion), so the DEM skin can separate them")
+ap.add_argument("--guard", type=int, default=0, help="ModelParameters.closeSealedCellsMinNeighbours (0 = off; the sealed-cell guard has since been removed from the solver)")
+ap.add_argument("--skin", type=float, default=0.0, help="ModelParameters.cylinderContactSkin in LU (0 = off); with --vx/--vy/--vz 0 the rods are free (no prescribed motion), so the DEM skin can separate them")
 ap.add_argument("--accel", type=float, default=1e-15, help="accelerationXOverride (driving body acceleration); default = still water")
 ap.add_argument("--flowtest", action="store_true", help="flow-rate evaluator test: ClogMeasurement.flowRateEnabled, planes at x=15 (through the bundle) and x=40 (rod-free), sampled every 100 steps")
 ap.add_argument("--nobundle", action="store_true", help="control: three SPHERES-like isolated rods far apart instead of a bundle (spacing 14 LU)")
-ap.add_argument("--pair", action="store_true", help="TWO parallel rods only (matches the real 2-rod parallel-slit geometry of job 4255679's own crash, e.g. --gap -0.069 --axis 0,1,0): lower obstacle-neighbour count than the 3-rod bundle (~9-15/26 vs ~20/26), the sub-mechanism SealedCellGuard.h's default threshold 24 was NOT validated against")
-ap.add_argument("--raft", default="", help="R,C: hex-packed raft of R rows x C cols touching rods instead of the 3-rod triangle (log-jam stress test for SealedCellGuard: many long-lived closures + many simultaneous real formerObstacle conversions, unlike the 3-rod case). Bumps the domain/blocks unless --cpb/--dom given.")
+ap.add_argument("--pair", action="store_true", help="TWO parallel rods only (the 2-rod parallel-slit geometry seen in another crash, e.g. --gap -0.069 --axis 0,1,0): lower obstacle-neighbour count than the 3-rod bundle (~9-15/26 vs ~20/26)")
+ap.add_argument("--raft", default="", help="R,C: hex-packed raft of R rows x C cols touching rods instead of the 3-rod triangle (log-jam stress test: many long-lived closures + many simultaneous formerObstacle conversions, unlike the 3-rod case). Bumps the domain/blocks unless --cpb/--dom given.")
 ap.add_argument("--dom", default="", help="override domain size 'x,y,z' (default: 48,36,48, or auto-sized for --raft)")
 A = ap.parse_args()
 base = pathlib.Path(__file__).parent / "prms" / "hopper_clog_cyl_frontblock_pidoff_2node_gjk_sanity_18k_gas.prm"
@@ -38,7 +38,7 @@ else:
     RAFT_R = RAFT_C = 0
     DOM = tuple(int(v) for v in A.dom.split(",")) if A.dom else (48, 36, 48)
     CPB = tuple(int(v) for v in A.cpb.split(',')) if A.cpb else (16, 12, 48)   # 3x3x1 = 9 ranks
-# SetupStages.h:71 needs >= 3 blocks per PERIODIC direction when particles are used; blocks >= the rod interaction radius (9.5)
+# SetupStages.h needs >= 3 blocks per PERIODIC direction when particles are used; blocks >= the rod interaction radius (9.5)
 R_ROD, L_ROD = 3.0, 18.0
 ZW = 34.0
 # --- geometry: three parallel rods, centres on an equilateral triangle of side 2r+gap in the plane perpendicular to the axis
@@ -148,7 +148,7 @@ mp = get_block(t, "ModelParameters")
 add = f"""   rodPrescribedVelocityX        {A.vx};    // TEST OPTION: rigid prescribed rod velocity (crash bundle: (-0.0096, 0.0043, 0.0062) at t=16300; z component dropped, the box is small)
    rodPrescribedVelocityY        {A.vy};
    rodPrescribedVelocityZ        {A.vz};
-""" + (f"   closeSealedCellsMinNeighbours {A.guard};   // EXPERIMENT: close sub-cell channels (SealedCellGuard.h)\n" if A.guard else "") + (f"   cylinderContactSkin           {A.skin};   // EXPERIMENT: rod contact skin (SimulationParams.h)\n" if A.skin else "")
+""" + (f"   closeSealedCellsMinNeighbours {A.guard};   // EXPERIMENT: close sub-cell channels (sealed-cell guard, now archived)\n" if A.guard else "") + (f"   cylinderContactSkin           {A.skin};   // EXPERIMENT: rod contact skin (SimulationParams.h)\n" if A.skin else "")
 mp_new = mp.rstrip("\n")
 assert mp_new.endswith("}"); mp_new = mp_new[:-1].rstrip("\n") + "\n" + add + "}\n"
 t = t.replace(mp, mp_new)
@@ -169,7 +169,7 @@ vt_new = re.sub(r"CellBB_filter_0 \{[^}]*\}", f"CellBB_filter_0 {{ min < 0, 0, 0
 vt_new = re.sub(r"writeFrequency\s+\d+;", "writeFrequency       500;", vt_new, count=1)
 t = t.replace(vt, vt_new)
 hdr = f"""// {A.name}_gas.prm   (GENERATED by gen_rod_bundle_channel_test_prm.py -- edit the generator, not this file)
-// [Claude, 2026-09-21] LOCAL bundle-channel test: {"three ISOLATED rods (control, no channel)" if A.nobundle else ("TWO parallel rods (gap %.3f LU, r=3, L=18) = the real 2-rod slit geometry of job 4255679's own crash" % A.gap if A.pair else "three mutually touching PARALLEL rods (gap %.3f LU, r=3, L=18) = the bundle at the crash site of job 4252482" % A.gap)}, dragged through still water with the constant velocity
+// LOCAL bundle-channel test: {"three ISOLATED rods (control, no channel)" if A.nobundle else ("TWO parallel rods (gap %.3f LU, r=3, L=18) = the 2-rod slit geometry of a crash site" % A.gap if A.pair else "three mutually touching PARALLEL rods (gap %.3f LU, r=3, L=18) = the bundle at a crash site" % A.gap)}, dragged through still water with the constant velocity
 // ({A.vx}, {A.vy}, {A.vz}); axis ({ax[0]:.3f}, {ax[1]:.3f}, {ax[2]:.3f}); domain {DOM[0]}x{DOM[1]}x{DOM[2]} periodic in X and Y, water surface at z={ZW:g}, 3x3x1 blocks of {CPB[0]}x{CPB[1]}x{CPB[2]} (9 MPI ranks); centroid start ({C[0]:.2f},{C[1]:.2f},{C[2]:.2f}).
 // Production unit system (omega 1.99753, g 5.8258e-5, sigma 1.63945e-3); fluid sweep at |u|>0.17 + dense NaN scan armed from step 0. Everything else as in prms/hopper_clog_cyl_frontblock_pidoff_2node_gjk_sanity_18k_gas.prm.
 """

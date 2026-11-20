@@ -1,59 +1,23 @@
-// clog_measurement_validation_sanity_clog_pidoff_gas.prm
-// ─────────────────────────────────────────────────────────────────────────────
-// Thesis item 3 (THESIS_PLAN.md): validates the new ClogMeasurementEvaluator (Evaluators.h) and the
-// new PIDParameters.enabled constant-forcing flag (Forcing.h), NOT yet item 4's real clogging
-// scenarios -- this is a cheap sanity check that the tool correctly distinguishes a clogged vs. open
-// channel, on the smallest setup that can actually produce an unambiguous clog.
-//
-// SANITY-CLOG, PID DISABLED (constant-forcing/fixed-hydraulic-gradient mode): identical to the PID-enabled sanity-clog file above except PIDParameters.enabled=false -- acceleration[0] stays pinned at its setupSimState-computed initial value for the whole run (Forcing.h's ForcingAdjuster). Expect the same clog signal on clogUpstream*/avgParticleTransportRate, but with meanVelocity now visibly dropping as the blockage develops (since nothing compensates), and acceleration[0] logged as bit-for-bit constant throughout -- this pair is what actually validates the new PIDParameters.enabled flag end-to-end.
-//
-// [Claude, 2026-09-14]: first release moved from t=5000 to t=20000, timesteps extended 35000 -> 56500
-// -- same fix and rationale as the PID-on file's own header comment (flow not spun up by t=5000, per
-// THESIS_PLAN.md item 3's meanVelocity_x check).
-//
-// Domain <384, 40, 90>: X elongated to 3x the widest existing two-pillar toy domain (160,
-// box_sedimentation_showcase_analytical_125floaters_realgravity_twopillars_flow_gas.prm) so the
-// piers' backwater bump has room to decay before wrapping back around through the periodic X
-// boundary and contaminating the upstream probe, and so upstream spheres have real queueing room to
-// accumulate into a jam rather than bouncing off the piers once. periodicity <1,0,0> (X periodic for
-// the recirculating current, Y walled for the piers, matching every existing two-pillar scenario).
-//
-// Two CylinderPillars, radius 6, at Y=11/29 (spacing 18) -- gap =
-// 18 - 2*6 = 6 LU, deliberately SMALLER than one sphere's own diameter
-// (8.001943372119138 LU, avgParticleDiameterOverride below) so a single sphere physically cannot pass
-// through -- guarantees a clog as soon as debris reaches the gap (the existing *_slitpass_gas.prm
-// family deliberately does the OPPOSITE -- a pass-through gap wider than a floater -- so this is a
-// new, deliberately-narrower geometry, not a reuse of that family's own gap sizing).
-//
-// liquidHeightFactor 2.0 (lower than the ~2.862 toy default) reuses this project's own precedented
-// "low-water" convention (test_bridge_v1_lowwater_bigjam_gas.prm) -- less freeboard means floaters
-// can't simply glide over/around the pier gap with excess vertical room, which a production-scale
-// run this session found let debris slip past almost without clogging at the standard freeboard.
-// domainSize.z halved to 90 to match (same pairing that file's own header uses), which is also a
-// direct performance win (fewer Z cells per rank).
-//
-// targetMeanVelocityMagnitude 0.04 is roughly double the highest value used in this project's other
-// toy/showcase scenarios (0.005-0.02) -- deliberately higher so the flow actually drives spheres into
-// the gap hard enough to jam rather than settling gently against the piers. useHardcodedUnits=false
-// (NOT true) is required at this non-standard target velocity: thousand_cuboids_two_pillars_
-// slitpass_gas.prm's own header documents a real physics bug from exactly this combination --
-// useHardcodedUnits=true freezes viscosity/gravity/surfaceTension at values calibrated for a
-// DIFFERENT specific target velocity, silently mismatching gravity/We/Fr (they scale with U^2) to
-// this scenario's own actual target. false lets them be dynamically re-derived correctly.
-//
-// avgParticleDiameterOverride/dxSIOverride reuse this project's own established floater-only-scenario
-// shortcut (SimulationParams.h; same exact values already used in
-// box_sedimentation_showcase_analytical_125floaters_realgravity_twopillars_flow_gas.prm) rather than
-// generating a new BedGeneration file -- appropriate here since useParticleBed=false means no real
-// bed is ever placed, only the SI scaling constants matter, and this is a cheap tool-sanity-check
-// scenario (not a resolution/physics comparison needing a freshly generated bed like item 1b's own).
-//
-// ClogMeasurement probes: upstream X=140 (between the release zone ~X=80-110 and the piers at
-// X=192, so it reads the true backed-up water level, not the individual spheres' own local
-// splash) and downstream X=250 (58 LU past the piers). Both far from the periodic seam either way
-// (140 and 250 from a seam effectively at X=0/384, plus 384-250+140=274 LU around the OTHER way --
-// both far larger than the ~50-150 LU local disturbance scale expected here).
-// ─────────────────────────────────────────────────────────────────────────────
+// Sanity check of the ClogMeasurement evaluator (Evaluators.h) and of PIDParameters.enabled (Forcing.h) on the smallest
+// setup that produces an unambiguous clog; PID disabled (constant forcing). Identical to
+// clog_measurement_validation_sanity_clog_pidon_gas.prm except PIDParameters.enabled false: acceleration[0] stays at
+// its initial value for the whole run (Forcing.h, ForcingAdjuster). Expected: the same clog signal, but meanVelocity
+// drops as the jam develops and acceleration[0] is logged constant; together with the PID-on file this validates
+// PIDParameters.enabled end to end.
+// Domain <384,40,90>, X periodic (recirculating current), Y walled, NoSlip top and bottom; cellsPerBlock <64,20,15>
+// -> (6, 2, 6) = 72 ranks. X is long enough for the backwater bump to decay before it wraps round to the upstream
+// probe, and gives the spheres room to queue into a jam instead of bouncing off the piers once.
+// Obstacle: two CylinderPillars at X 192, Y 11/29, radius 6: gap 18 - 2*6 = 6 LU, narrower than the 8 LU sphere
+// diameter, so a single sphere cannot pass. The BodyBC entries make them solid for the fluid.
+// Floaters: 12 spheres, radius 4, densityRatio 0.25/0.5/0.75 at Z 44/45/46, X 80..110 on the centreline (Y 20),
+// released one by one every 1500 steps from 20000 to 36500; the base flow only settles to its target velocity by
+// ~15000-20000 steps, so debris enters a spun-up flow.
+// Physics: target velocity 0.04 (above the 0.005-0.02 of the other toy scenarios, so the flow drives spheres into the
+// gap), Re 3100, Fr 1.31, We 15.62; useHardcodedUnits false so gravity, viscosity and surface tension are derived
+// for this target velocity. liquidHeightFactor 2.0 is a low-water setting (waterline 49.13 LU) that leaves little
+// freeboard to pass over the gap. avgParticleDiameterOverride/dxSIOverride set the SI scaling without a bed file.
+// 56500 steps (last release + ~20000-step tail). Probes: gap centreline (Y 20) and left-pillar face (Y 11), each at
+// X = 140 (between release zone and piers) and X = 250 (58 LU downstream), both far from the periodic seam either way.
 
 BlockForestParameters
 {
@@ -162,13 +126,9 @@ EvaluationParameters
       downstreamPos      < 250, 20, 40 >;
       probeHalfWidthXY   2;
 
-      // Second probe pair at the pillar's own Y (=11, the left CylinderPillar's own centre --
-      // matching that pillar's X=192, radius=6 footprint) instead of the gap centreline (Y=20) --
-      // per Schalko, Follett & Nepf (2023), Water Resources Research, a lateral-gap logjam study
-      // found real lateral variation (~7.5%) in water depth between a partial-width obstruction's
-      // own blocked-flow region and the open gap beside it; the pillar-face location is where the
-      // strongest backwater pile-up is actually expected. Same X/Z as the gap probes for a direct,
-      // like-for-like comparison -- only Y differs.
+      // second pair at the left pillar's Y (11), same X/Z as the gap pair: Schalko, Follett & Nepf (2023, WRR)
+      // found ~7.5 % lateral variation in water depth between a partial-width jam and the open gap beside it,
+      // and the strongest backwater is expected at the pillar face.
       pillarUpstreamPos    < 140, 11, 40 >;
       pillarDownstreamPos  < 250, 11, 40 >;
    }
@@ -185,16 +145,7 @@ BoundaryParameters
 {
    Border { direction T;  walldistance -1; NoSlip{} }
    Border { direction B;  walldistance -1; NoSlip{} }
-   // [Claude, 2026-09-17]: added BodyBC entries for the CylinderPillars above -- traced every single
-   // usage of simParams->cylinderPillars in this codebase (BuildTimeloop.h's own disabled #if 0 VTK
-   // block; SetupStages.h's bed-generation exclusion check; SetupStages.h's own createCylinder DEM
-   // rigid-body creation) and confirmed NONE of them ever touch the LBM flag field/boundary handling --
-   // CylinderPillars only gives the pillar DEM contact physics (floaters bounce off it), it does NOT by
-   // itself make the fluid see it as solid. The actual fluid-blocking NoSlip classification comes
-   // exclusively from here, via setupBoundaryHandling's initFromConfig(BoundaryParameters) (see that
-   // function's own "CellInterval pillar defined in Antidunes.prm" comment) -- confirmed against
-   // nine_stacked_release_pillar_gas.prm, which declares BOTH CylinderPillars (contact) AND matching
-   // BodyBC (fluid) for its own two pillars; this file previously had only the former.
+   // CylinderPillars only gives DEM contact; these BodyBC make the pillars solid for the fluid (full height Z 0..90).
    BodyBC { shape Cylinder; min < 192, 11, 0 >; max < 192, 11, 90 >; radius 6; NoSlip{} }
    BodyBC { shape Cylinder; min < 192, 29, 0 >; max < 192, 29, 90 >; radius 6; NoSlip{} }
 }
@@ -205,10 +156,8 @@ MeshOutputParameters
    baseFolder     mesh-out;
 }
 
-// [Claude, 2026-09-16]: writeFrequency dropped from disabled (1e10) to timesteps/5 so this run
-// produces exactly 6 sparse VTK dumps (steps 0, 11300, ..., 56500) -- fluid_field, sphere, and
-// cylinder_pillar VTK all share this same simParams->vtk.writeFrequency (see BuildTimeloop.h), so
-// one setting gives synchronized fluid+floater+pillar snapshots for thesis figures, cheaply.
+// fluid_field writeFrequency = timesteps/5: dumps at 0, 11300, 22600, 33900, 45200 (the main loop ends at
+// timesteps - 1, so step 56500 is not written). The floater VTK uses the same writeFrequency.
 VTK
 {
    fluid_field
@@ -224,14 +173,7 @@ VTK
          velocity;
       }
 
-      // [Claude, 2026-09-17]: without this, gas AND obstacle cells (the pillars) retain
-      // whatever stale PDF-derived velocity/density last happened to be there (never updated by
-      // the solver, since "the PDF values in these cells are not important" -- VtkWriter.h's own
-      // comment), rendering as salt-and-pepper noise across the free-surface/gas region AND
-      // making the pillars indistinguishable from the noisy fluid in ParaView -- found directly
-      // from a screenshot showing exactly this on the completed extreme pidoff/pidon runs
-      // (jobs 4240981/4240982), which never had this line, unlike every other scenario prm in
-      // this project (e.g. nine_stacked_release_pillar_gas.prm).
+      // zero the stale velocity/density in gas and obstacle cells, which otherwise show as noise in ParaView
       before_functions { gas_cell_zero_setter; }
    }
 

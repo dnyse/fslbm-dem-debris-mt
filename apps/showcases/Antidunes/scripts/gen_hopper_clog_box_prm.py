@@ -4,23 +4,16 @@ gen_hopper_clog_cyl_prm.py (cylinders) and gen_hopper_clog_prm.py (spheres).
 
     python3 gen_hopper_clog_box_prm.py   ->  prms/hopper_clog_box_frontblock_pidon_2node_gas.prm
 
-IDENTICAL channel / pillars / PID / water height / VTK / ModelParameters / population grid
-(positions, densities, row/column/layer counts) to the cylinder hopper -- every FloatingCylinder is
-replaced 1:1 by a FloatingBox of the SAME bounding footprint (halfExtents <r, length/2, r>, no axis
-field needed since an axis-aligned box's long dimension is simply its own Y half-extent), matching
-the same shape-comparison convention already used for the smaller 24x/48x doubling-series runs
-(boxes_24x_2x4x3_clog_gas.prm's own halfExtents <3,9,3>). This is the FULL production-scale (~406
-body) companion to that smaller series: same purpose (does the STALE-PARTICLE-IDX cross-rank
-ghost-ownership desync found with cylinders reproduce with box-box SAT contacts instead, at the same
-population/layout), but at the scale actually used for the thesis's own hopper-gap clogging scenario
-(Table 4.2's "hopper gap" row: domain 768x40x180, 406 floaters), not just the 24/48-body toy series.
+Same channel / pillars / PID / water height / VTK / ModelParameters / population grid (positions, densities,
+row/column/layer counts) as the cylinder hopper: every FloatingCylinder is replaced 1:1 by a FloatingBox of the same
+bounding footprint (halfExtents <r, length/2, r>; no axis field, the long dimension is the Y half-extent), the
+convention of the smaller box runs (e.g. boxes_24x_2x4x3_clog_gas.prm, halfExtents <3,9,3>). Production scale:
+domain 768 x 40 x 180, 406 floaters.
 
-Geometry note: since neither shape is ever rotated at setup (both released axis-aligned, long axis
-along Y), a box's XY-plan footprint IS the exact same rectangle a cylinder's own bounding box already
-occupies -- every geometry check below (Y-wall clearance, floor clearance, pillar clearance via
-rect_disc_gap) therefore carries over from the cylinder generator completely unchanged; only the
-body-body minimum-separation check needs its own box-specific (AABB) formula in place of the
-cylinder's capsule/segment-distance one.
+Geometry note: neither shape is rotated at setup (both released axis-aligned, long axis along Y), so a box's XY
+footprint is the same rectangle as a cylinder's bounding box. The Y-wall, floor and pillar clearance checks
+(rect_disc_gap) carry over from the cylinder generator unchanged; only the body-body separation uses a box-specific
+(AABB) formula instead of the cylinder one.
 """
 import argparse
 import itertools
@@ -38,11 +31,10 @@ ap.add_argument("--rows", type=int, default=29)
 ap.add_argument("--front-x", type=float, default=368.0, help="X of the row nearest the pillars")
 ap.add_argument("--pillar-clearance", type=float, default=1.0)
 ap.add_argument("--skin", type=float, default=0.0,
-                 help="boxContactSkin (LU, box analog of cd1b991b's cylinderContactSkin): box-box contact starts "
+                 help="boxContactSkin (LU, box analog of cylinderContactSkin): box-box contact starts "
                       "at a surface gap of 2*skin, box-wall/pillar at skin. 0 (default) = off, matching the "
                       "original un-adapted hopper. When >0, --clearance/--pitch must leave a real gap safely "
-                      "above that threshold or the pre-existing [RELEASE-OVERLAP] release-time guard aborts "
-                      "(see THESIS_PLAN.md, job 4282206 -- the cylinder version of this exact collision).")
+                      "above that threshold or the [RELEASE-OVERLAP] release-time check aborts the run.")
 ap.add_argument("--hold", type=int, default=2000)
 ap.add_argument("--timesteps", type=int, default=60000)
 ap.add_argument("--out", default="prms/hopper_clog_box_frontblock_pidon_2node_gas.prm")
@@ -95,12 +87,11 @@ def rect_disc_gap(x, y, xc, yc):   # XY footprint of a box is the SAME rectangle
     return math.hypot(nx - xc, ny - yc) - R
 pillar_gap = min(rect_disc_gap(x, y, PILLAR_X, yc) for x, y, _, _ in boxes for yc in (0.0, LY))
 assert pillar_gap >= args.pillar_clearance - 1e-9, f"box too close to a pillar: {pillar_gap:.3f}"
-# boxContactSkin (--skin, see its own help text): the skin's box-box contact threshold is a surface
-# gap of 2*skin, box-wall/pillar is skin. A real gap AT or below that threshold registers as a
-# genuine contact to the skin-aware detector, which the pre-existing (unconditional)
-# [RELEASE-OVERLAP] release-time guard then aborts on -- same mechanism documented for the cylinder
-# version (job 4282206). Require real margin, not just >=, so this never lands exactly on the
-# boundary the way the un-skinned default clearance does.
+# boxContactSkin (--skin): the box-box contact threshold is a surface gap of 2*skin, box-wall/pillar is
+# skin. A real gap at or below that threshold is a contact for the skin-aware detector, which the
+# unconditional [RELEASE-OVERLAP] release-time check cannot tell from an insertion overlap and aborts on
+# (same as for the cylinders). Require a real margin, not just >=, so the layout never lands exactly on
+# the threshold (as pitch 7 with skin 0.5 does: gap 1.0 = 2*skin).
 if args.skin > 0:
     assert minsep >= 2 * args.skin + 1e-9, (
         f"box-box gap {minsep:.3f} LU is at/below the skin's own 2*skin={2*args.skin:g} LU threshold "
@@ -128,29 +119,22 @@ lines = "\n".join(
 
 skin_header = "" if args.skin <= 0 else (
     "// ─────────────────────────────────────────────────────────────────────────────\n"
-    "// [Claude, 2026-10-01] SKIN-ADAPTED PRODUCTION RUN: boxContactSkin "
-    f"{args.skin:g} added (box analog of cd1b991b's cylinderContactSkin, box-box contact threshold a "
-    f"surface gap of {2*args.skin:g} LU, box-wall/pillar {args.skin:g} LU), sealed-cell guard left off, "
-    "run alongside the same skin fix applied to the cylinder version of this exact hopper "
-    "(hopper_clog_cyl_frontblock_pidon_2node_skin0p5_gas.prm). The original/default --pitch=7.0 "
-    "placed adjacent rows exactly 1.0 LU apart surface-to-surface -- precisely 2*skin -- which the "
-    "pre-existing [RELEASE-OVERLAP] release-time guard mistook for an insertion-overlap bug in the "
-    "cylinder version (job 4282206, failed in 97s); the box version shares the same row geometry so "
-    "the same fix applies pre-emptively here. Regenerated with --pitch 8.0 instead (real box-box gap "
-    f"now {minsep:.2f} LU, comfortably above 2*skin={2*args.skin:g}); every clearance (box-box, "
-    "box-Ywall, box-floor, box-pillar) is asserted against its own skin threshold by this script "
-    "(see the --skin argparse help and the asserts right after minsep/pillar_gap above). Box "
-    "geometry/count/densities are otherwise byte-for-byte identical to the un-skinned 406-box "
-    "original -- only the row pitch changed, same approach as the cylinder version (widen the gap, "
-    "don't shrink the boxes, per explicit instruction).\n"
+    "// SKIN-ADAPTED: boxContactSkin "
+    f"{args.skin:g} (box analog of cylinderContactSkin: box-box contact from a surface gap of\n"
+    f"// {2*args.skin:g} LU, box-wall/pillar from {args.skin:g} LU), as for the cylinder version\n"
+    "// (hopper_clog_cyl_frontblock_pidon_2node_skin0p5_gas.prm). The default --pitch 7.0 leaves adjacent rows exactly\n"
+    "// 1.0 LU apart, which for skin 0.5 equals 2*skin and trips the [RELEASE-OVERLAP] release check, so the skin runs\n"
+    "// use --pitch 8.0 (real box-box gap\n"
+    f"// {minsep:.2f} LU, above 2*skin = {2*args.skin:g}). Every clearance (box-box, box-Ywall, box-floor, box-pillar) is\n"
+    "// asserted to lie above its skin threshold. Box geometry, count and densities are unchanged: the gap is widened,\n"
+    "// the boxes are not shrunk.\n"
 )
 
 prm = f"""{skin_header}// {pathlib.Path(args.out).name}   (GENERATED by gen_hopper_clog_box_prm.py -- edit the script, not this file)
 // ─────────────────────────────────────────────────────────────────────────────
-// [Claude, 2026-09-30] "HOPPER" CLOGGING SETUP, BOX VERSION -- shape-comparison companion of
-// gen_hopper_clog_cyl_prm.py's own cylinder hopper (the crash chased at length in THESIS_PLAN.md,
-// section 5 / the doubling-in-X ghost-ownership desync investigation). IDENTICAL channel, pillars,
-// PID, population grid (positions/densities/counts) and ModelParameters to the cylinder version;
+// "HOPPER" CLOGGING SETUP, BOX VERSION -- shape-comparison companion of gen_hopper_clog_cyl_prm.py's
+// cylinder hopper. Same channel, pillars,
+// PID, population grid (positions/densities/counts) and ModelParameters as the cylinder version;
 // every FloatingCylinder is replaced 1:1 by a FloatingBox of the SAME bounding footprint
 // (halfExtents <{r:g},{L/2:g},{r:g}>). Two cylindrical pillars centred on the Y walls (X={PILLAR_X:g},
 // radius {R:g}, central gap {gap:g} LU) -- but the debris are CUBOIDS, half-extents <{r:g},{L/2:g},{r:g}>
@@ -168,10 +152,9 @@ prm = f"""{skin_header}// {pathlib.Path(args.out).name}   (GENERATED by gen_hopp
 // All boxes are held FIXED for {args.hold} steps (settlingSteps, no startInactive) and then released together.
 //
 // CONTACT MODEL: useAnalyticalContactDetection true (Box x Box = SAT, exact for convex polyhedra) +
-// useContactFilterOwnerTiebreak true; every experimental contact/buoyancy fix explicitly OFF, matching
-// the cylinder hopper's own baseline (useRotationalEffectiveMass true, useTightLayer1 true -- the
-// latter is a cylinder-specific pre-filter, a no-op with zero cylinders present, kept only for an
-// exact side-by-side diff against the cylinder prm). Friction/restitution as in the cylinder hopper
+// useContactFilterOwnerTiebreak true; same contact/buoyancy options as the cylinder hopper
+// (useRotationalEffectiveMass true; useTightLayer1 true, which for Box x Box is a conservative
+// single-axis centre-line test ahead of the SAT; the rest OFF). Friction/restitution as in the cylinder hopper
 // (0.5 / 0.5). FLOW/UNITS: identical (PID on, target 0.04, water Z=49.13, Z=180 headroom,
 // <768,40,180> / <64,20,30> = 144 ranks / 2 nodes).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,24 +233,13 @@ ModelParameters
 {{
    useAnalyticalContactDetection true;   // Box x Box: exact SAT
    usePureAnalyticalCylinder     false;  // no-op (no cylinders present); kept for an exact diff against the cylinder prm
-   useContactFilterOwnerTiebreak true;   // one rank accepts each boundary-straddling contact (min owner rank){"" if args.skin <= 0 else chr(10) + f"   boxContactSkin                {args.skin:g};   // [Claude, 2026-10-01] box contact skin in LU (box analog of cylinderContactSkin, cd1b991b): box-box contact starts at a surface gap of {2*args.skin:g}, box-wall/pillar at {args.skin:g}. Sealed-cell guard stays off (not set below)."}
+   useContactFilterOwnerTiebreak true;   // one rank accepts each boundary-straddling contact (min owner rank){"" if args.skin <= 0 else chr(10) + f"   boxContactSkin                {args.skin:g};   // box contact skin (LU): box-box contact from a surface gap of {2*args.skin:g}, box-wall/pillar from {args.skin:g}"}
 
-   // Experimental contact/buoyancy fixes: same baseline as the cylinder hopper
-   useTightTier1                 false;
-   useTightLayer1                true;   // no-op for Box x Box (cylinder-specific pre-filter); kept for an exact diff
-   skipTier1                     false;
-   useRoundedBoxCorners          false;
-   useMultiPointBoxContact       false;
-   useBoxOverlapCap              false;
-   useAxisHysteresis             false;
-   useContactManifold            false;
+   // Contact/buoyancy options: same as the cylinder hopper
+   useTightLayer1                true;   // Box x Box: conservative centre-line pre-filter ahead of the SAT
    useRotationalEffectiveMass    true;   // same as the cylinder hopper (generalised effective mass incl. rotational inertia)
-   useSpheroBoxContact           false;
-   useSpheroBoxAnalytical        false;
-   useFraigeBoxContactModel      false;
    useFullVolumeAnalyticBuoyancy false;
    usePass3Reresolution          false;
-   useAnalyticBoxBuoyancy        false;
 
    pdfReconstructionModel        OnlyMissing;
    pdfRefillingModel             EquilibriumRefilling;

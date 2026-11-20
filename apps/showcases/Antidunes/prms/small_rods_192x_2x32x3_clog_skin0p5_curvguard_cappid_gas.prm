@@ -1,29 +1,19 @@
-// [Claude, 2026-10-03] CAPPED-PID TEST (author's request: "run the 192 with this capped pid as a first test").
-// Identical to small_rods_192x_2x32x3_clog_skin0p5_curvguard_gas.prm (job 4284594, 51000 steps COMPLETED, PID on,
-// uncapped) except: (1) PIDParameters.maxActuatingVariable 1e-3 -> 2.65e-6; (2) ClogMeasurement.flowRateEnabled true;
-// (3) timesteps 51000 -> 100000 (author's request; ~1.7 flow-throughs at the bulk velocity ~0.013).
-// Cap = k a_ref with a_ref = 7.8e-7 (clean converged force of the centred-pillar channel, same domain/flow, job 4242918;
-// the hopper's own a_ref comes from the clean reference hopper_clean_reference_pidon_gas.prm, run alongside) and
-// k = 1 + F / (a_ref L_x / g) = 1 + 24.6 / 10.3 = 3.4 for a freeboard F = 0.5 h0 (h0 = 49.1): the forcing holds the
-// discharge until the backwater would exceed half the water depth, then acts as a fixed force (THESIS_PLAN.md item 4,
-// capped PID). For comparison: 4284594 used a median 1.97e-6 over steps 3k-20k, max 3.31e-6 -> the cap binds at the
-// jam peaks only. maxRamp kept at 1e-4: the integral term accumulates only while |new - current| < maxRamp, so a small
-// maxRamp would freeze the integral and leave a steady-state error; at the cap the windup is bounded by maxRamp.
-// [Claude, 2026-10-02] CURVATURE-GUARD TEST: guardCurvatureInputs true added (new prm switch, off by default -- skips a curvature neighbour that is neither liquid/interface/gas/obstacle or whose normal isn't finite, sets curvature 0 if nothing usable is left, logs each case as [CURVATURE-GUARD]). Verified a true no-op on valid inputs elsewhere (box_pair_repro_gas.prm: 5828 force/position lines identical on/off, guard never fires). VTK switched to the discrete snapshot schedule 500/1000/2000/4000/8000/16000/32000/49000 (fluid_field_snapshots, same mechanism as the production hopper reruns) instead of the uniform every-10000-steps cadence. Also adds denseNanScanEnabled for steps 8900-9100, bracketing this run's own actual crash step (9069, job 4284164).
-// ─────────────────────────────────────────────────────────────────────────────
-// small_rods_192x_2x32x3_clog_skin0p5_gas.prm
-// ─────────────────────────────────────────────────────────────────────────────
-// [Claude, 2026-10-01] DOUBLING-IN-X continues after the clean 48-rod skin test (job 4282396:
-// full 51000 steps, exit 0, zero crash markers -- confirmed by direct log inspection, same result
-// as the 24-rod test 4282267). Per explicit request ("we know the 48 cylinder works, then on two
-// new freed directory run the 96 and the 192 version with the skin activated"), this is the next
-// doubling step: 32 rows in X instead of 8 -- 2(Y) x 32(X) x 3(Z) = 192 rods --
-// same geometry/densities/contact-mode/cylinderContactSkin 0.5/sealed-cell-guard-off as 4282267
-// and 4282396, extended upstream at the SAME WIDENED 8 LU pitch: 364 (front, unchanged) down to
-// 116 (32 rows total). No fixes besides the skin (Option A/B, SimpleBB.h
-// guard all OFF), matching every other scenario in this series. VTK writeFrequency 10000,
-// timesteps 51000 (same as every prior scenario in this series).
-// ─────────────────────────────────────────────────────────────────────────────
+// HOPPER GAP, 192 RODS, CAPPED PID.
+// Channel 768 x 40 x 180, periodic in x (<64, 20, 30> blocks = 144 ranks / 2 nodes), PID-driven flow (target mean
+// velocity 0.04). Two cylindrical pillars R 12 centred on the y walls at x = 384 leave a 16 LU gap.
+// Floaters: 192 rods R 3, L 18, axis y: 2 across (y = 10 / 30) x 32 rows (x = 364 down to 116, pitch 8) x 3 layers
+// (z = 10 / 25 / 45, densityRatio 1.2 / 1.0 / 0.5), held fixed for 500 steps. cylinderContactSkin 0.5 (pitch 8
+// leaves a rod-rod gap of 2 > 2*skin); guardCurvatureInputs true (FD curvature skips uninitialised/non-finite neighbour
+// normals, logged as [CURVATURE-GUARD]; a no-op on valid inputs).
+// PID cap maxActuatingVariable 2.65e-6 = k a_ref with a_ref = 7.8e-7 (clean converged force of the centred-pillar
+// channel, same domain and flow) and k = 1 + F / (a_ref L_x / g) = 1 + 24.6 / 10.3 = 3.4 for a freeboard F = 0.5 h0
+// (h0 = 49.1): the forcing holds the discharge until the backwater would exceed half the water depth, then acts as a
+// fixed force. The uncapped run needed a median 1.97e-6 (max 3.31e-6), so the cap binds only at the jam peaks.
+// maxRamp stays 1e-4: the integral term accumulates only while |new - current| < maxRamp, so a small maxRamp would
+// freeze the integral and leave a steady-state error; at the cap the windup is bounded by maxRamp.
+// 100000 steps (~1.7 flow-throughs at the bulk velocity ~0.013); dense NaN scan over steps 8900..9100; discharge, wet
+// area at the probes (x = 336 / 432, z = 40); fluid VTK (x 100..500, z 0..100) and floater VTK at 8 snapshot steps.
+// Lineage: small_rods_192x_2x32x3_clog_skin0p5_gas.prm (192-rod step of the rod-doubling series) + curv. guard, cap.
 
 BlockForestParameters
 {
@@ -52,19 +42,19 @@ PIDParameters
    integralGain                2e-4;
    maxRamp                     1e-4;
    minActuatingVariable        0;
-   maxActuatingVariable        2.65e-6;  // [Claude, 2026-10-03] CAPPED PID, see header
+   maxActuatingVariable        2.65e-6;  // cap = 3.4 a_ref, see header
    enabled                     true;
 }
 
 PhysicsParameters
 {
    enableWetting     false;
-   timesteps         100000;  // [Claude, 2026-10-03] 100k on request (51000 in 4284594)
+   timesteps         100000;
    Re                3100;
    Fr                1.31;
    We                15.6188;
    useHardcodedUnits false;
-   denseNanScanEnabled           true;   // [Claude, 2026-10-02] pinpoint the first NaN near this run's own crash step
+   denseNanScanEnabled           true;   // per-step NaN scan around the step where the uncapped series crashed
    denseNanScanFromStep          8900;
    denseNanScanToStep            9100;
 }
@@ -357,24 +347,13 @@ ModelParameters
    usePureAnalyticalCylinder     false;
    useContactFilterOwnerTiebreak true;
    useCapsuleShapeForCylinders   false;
-   cylinderContactSkin           0.5;   // [Claude, 2026-10-01] rod contact skin in LU (cd1b991b), same as the clean 4282267 (24-rod) run. Sealed-cell guard stays OFF (not set below).
-   guardCurvatureInputs          true;   // [Claude, 2026-10-02] off by default; see file header
+   cylinderContactSkin           0.5;   // rod-rod contact from a surface gap of 2*skin = 1, rod-wall/pillar from 0.5
+   guardCurvatureInputs          true;   // off by default; see file header
 
-   useTightTier1                 false;
    useTightLayer1                true;
-   skipTier1                     false;
-   useRoundedBoxCorners          false;
-   useMultiPointBoxContact       false;
-   useBoxOverlapCap              false;
-   useAxisHysteresis             false;
-   useContactManifold            false;
    useRotationalEffectiveMass    true;
-   useSpheroBoxContact           false;
-   useSpheroBoxAnalytical        false;
-   useFraigeBoxContactModel      false;
    useFullVolumeAnalyticBuoyancy false;
    usePass3Reresolution          false;
-   useAnalyticBoxBuoyancy        false;
 
    pdfReconstructionModel        OnlyMissing;
    pdfRefillingModel             EquilibriumRefilling;
@@ -403,7 +382,7 @@ EvaluationParameters
 
       pillarUpstreamPos    < 336, 6, 40 >;
       pillarDownstreamPos  < 432, 6, 40 >;
-      flowRateEnabled      true;   // [Claude, 2026-10-03] discharge Q and wet area A at x=336/432 (primary metric of the capped-PID test)
+      flowRateEnabled      true;   // discharge Q and wet area A at x = 336 / 432 (primary metric of this test)
    }
 }
 
@@ -428,7 +407,7 @@ MeshOutputParameters
    baseFolder     mesh-out;
 }
 
-// fluid cropped near the pillars and all eight rows (X 250..500, Z 0..100); the rods are unfiltered.
+// fluid_field off; fluid_field_snapshots cropped to x 100..500, z 0..100 (all 32 rows, the pillars); rods unfiltered.
 VTK
 {
    fluid_field
@@ -445,7 +424,7 @@ VTK
          mapped_flag;
       }
 
-      CellBB_filter_0 { min < 100, 0, 0 >;  max < 500, 40, 100 >; }   // [Claude, 2026-10-01] widened from 250 to cover all 32 rows down to X=116
+      CellBB_filter_0 { min < 100, 0, 0 >;  max < 500, 40, 100 >; }   // covers all 32 rows down to x = 116
 
       inclusion_filters
       {

@@ -1,9 +1,6 @@
-// [Claude, 2026-10-28] New: ROTATIONAL-effective-mass counterpart of
-// dem_validation_wall_box_sweep_translational.prm -- same geometry/protocol, same widened 0-90deg, step-5deg sweep,
-// useRotationalEffectiveMass true. Data source for the thesis's Kodam-style cuboid-wall-impact result figures
-// (Section 5.2).
-// [Claude, 2026-10-29] tangentialSpeedFraction 0.0 added -- see dem_validation_wall_box_sweep_translational.prm's
-// own 2026-10-29 comment for why (author: "we will only use the drop test not the oblique test").
+// Rotational-effective-mass counterpart of dem_validation_wall_box_sweep_translational.prm: same geometry and 0-90 deg,
+// 5 deg sweep with purely normal impact, useRotationalEffectiveMass true. Data source of the cuboid wall-impact
+// figures (Section 5.2).
 DEMValidation{
     testCase wallImpactBox;
     useRotationalEffectiveMass true;
