@@ -3,7 +3,7 @@
 // so the same driving force, 150000 steps, wallOuterGhostLayer, probes at z = 20, blockage ratio, VTK at fixed steps.
 // Domain <768,40,180>, X periodic, Y walled, NoSlip top and bottom. Z = 180 keeps the backed-up free surface upstream
 // of the jam below the ceiling (at Z = 90 it reaches it); the pillar's BodyBC spans the full height.
-// Obstacle: one CylinderPillar at (384, 20), radius 12 (60 % of the 40 LU width), leaving two 8 LU slits that are
+// Obstacle: one CylinderPillar at (384, 20), radius 12 (diameter 24 = 60 % of the 40 LU width), leaving two 8 LU slits that are
 // narrower than the 10 LU sphere diameter, so a single sphere cannot pass.
 // Physics: target velocity 0.04 (high enough to drive spheres into the slits), Re 3100, Fr 1.31, We 15.62,
 // useHardcodedUnits false so gravity, viscosity and surface tension are derived for this target velocity.
@@ -83,7 +83,7 @@ ParticleParameters
 
 CylinderPillars
 {
-   // radius 12 = 60 % of the 40 LU width: two 8 LU slits, narrower than the 10 LU sphere diameter
+   // radius 12 (diameter 24 = 60 % of the 40 LU width): two 8 LU slits, narrower than the 10 LU sphere diameter
    CylinderPillar { center < 384, 20, 45 >; radius 12; }
 }
 FloatingSpheres

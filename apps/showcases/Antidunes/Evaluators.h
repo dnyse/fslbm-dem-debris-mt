@@ -399,11 +399,11 @@ class ClogMeasurementEvaluator
    // area (Panici & de Almeida 2018), hence the fixed denominator channelWidthY_ * absoluteLiquidHeight_
    // rather than the local wetted area; this makes the ratio comparable across runs.
    //
-   // Pillar area is analytic from the fixed geometry (vertical circular prism over the full height, see
-   // createCylinder in Utility.h, called from SetupStages.h): the circle's y-chord at planeX, clipped to [0, channelWidthY_], times the
-   // reference depth. Jam area counts moving-obstacle cells at or below the reference depth, averaged over the
-   // same 2w+1 planes as flowRateAt, and excludes cells inside a pillar footprint (pillars are mesa_pd bodies
-   // and may carry the moving-obstacle flag themselves). Units: cells^2 for the areas, ratio dimensionless.
+   // Pillar area is analytic from the fixed geometry (vertical circular prism over the full height, see createCylinder
+   // in Utility.h, called from SetupStages.h): the circle's y-chord at planeX, clipped to [0, channelWidthY_], times
+   // the reference depth. Jam area counts moving-obstacle cells at or below the reference depth, averaged over the same
+   // 2w+1 planes as flowRateAt, and excludes cells inside a pillar footprint (pillars are mesa_pd bodies and may carry
+   // the moving-obstacle flag themselves). Units: cells^2 for the areas, ratio dimensionless.
    void blockageAt(real_t planeX, real_t& blockageRatio, real_t& pillarArea, real_t& jamArea) const
    {
       const cell_idx_t planeCell  = cell_idx_c(std::floor(planeX));

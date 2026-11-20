@@ -71,7 +71,7 @@ ParticleParameters
 
 CylinderPillars
 {
-   // same pillar as the jam runs (radius 12 = 60 % of the width, two 8 LU slits) so the reference subtraction is valid
+   // same pillar as the jam runs (radius 12, diameter 24 = 60 % of the width, two 8 LU slits) so the reference subtraction is valid
    CylinderPillar { center < 384, 20, 45 >; radius 12; }
 }
 

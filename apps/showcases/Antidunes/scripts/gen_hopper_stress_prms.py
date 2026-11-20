@@ -2,7 +2,8 @@
 """Variants of the 406-rod capped-PID hopper, written by text substitution on the base prm
 BASE = prms/hopper_clog_cyl_frontblock_pidon_2node_skin0p5_curvguard_cappid_gas.prm (block pressed against the pillars).
 
-Changes common to every variant (common()):
+Changes common to the hopper and two-pillar variants (common(); the centred-pillar variants apply their own subset
+in make_centred):
  - settlingSteps 2000 -> 500 (the floaters are held fixed for 500 steps);
  - VTK snapshot list gets step 0 (written before the first step) and 120000, 149000;
  - wallOuterGhostLayer true (the outer ghost layer becomes wall too; removes the side-wall NaN normals);

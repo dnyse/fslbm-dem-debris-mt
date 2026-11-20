@@ -188,7 +188,7 @@ PhysicsParameters
    Fr                1.31;
    We                15.6188;
    useHardcodedUnits false;
-   // no gravityOverride -- derived from U, Re and Fr (useHardcodedUnits false)
+   // no gravityOverride -- derived from U, Fr and the liquid height (useHardcodedUnits false)
 }}
 
 ParticleParameters

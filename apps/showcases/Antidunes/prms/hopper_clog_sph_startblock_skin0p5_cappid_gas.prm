@@ -52,7 +52,7 @@ PhysicsParameters
    Fr                1.31;
    We                15.6188;
    useHardcodedUnits false;
-   // no gravityOverride -- derived from U, Re and Fr (useHardcodedUnits false)
+   // no gravityOverride -- derived from U, Fr and the liquid height (useHardcodedUnits false)
 }
 
 ParticleParameters
@@ -1105,7 +1105,7 @@ ModelParameters
    usePureAnalyticalCylinder     false;  // (default, explicit) keep the GJK/EPA fallback for uncertain pairs
    useContactFilterOwnerTiebreak true;   // one rank accepts each boundary-straddling contact (min owner rank)
    cylinderContactSkin           0.5;   // rod-rod contact from a surface gap of 2*skin = 1, rod-wall/pillar from 0.5
-   guardCurvatureInputs          true;   // FD curvature skips uninitialised/non-finite neighbour normals
+   guardCurvatureInputs          true;   // FD curvature skips neighbours in no flag group and non-finite neighbour normals
 
    // Contact/buoyancy options: tight layer-1 pre-filter and rotational effective mass ON, the rest OFF
    useTightLayer1                true;   // conservative pre-filter ahead of the closed-form contact tests

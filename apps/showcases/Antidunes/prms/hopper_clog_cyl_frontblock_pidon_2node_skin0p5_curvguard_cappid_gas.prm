@@ -8,7 +8,7 @@
 // Contacts: analytical Cylinder x Cylinder (Kodam + Guo hybrid, GJK/EPA fallback), friction/restitution 0.5 / 0.5.
 // cylinderContactSkin 0.5: rod-rod contact starts at a surface gap of 2*skin = 1, rod-wall/pillar at 0.5. The x/z pitch
 // 8/7.52 leaves rod-rod gaps of 2/1.52 > 2*skin (x pitch 7 would give exactly 1.0, which [RELEASE-OVERLAP] rejects).
-// guardCurvatureInputs true: the FD curvature skips uninitialised/non-finite neighbour normals.
+// guardCurvatureInputs true: the FD curvature skips neighbours in no flag group and non-finite neighbour normals.
 // PID cap maxActuatingVariable 2.65e-6 = 5.0 a_ref of the clean hopper (a_ref = 5.31e-7): a tight jam can then hold
 // back at most (k - 1) a_ref L_x / g ~ 28 LU of head, about the freeboard 0.5 h0 = 24.6.
 // Probes at x = 336 (inside the rod block, not usable as a clog signal) and x = 432, z = 40; discharge and wet area.
@@ -53,7 +53,7 @@ PhysicsParameters
    Fr                1.31;
    We                15.6188;
    useHardcodedUnits false;
-   // no gravityOverride -- derived from U, Re and Fr (useHardcodedUnits false)
+   // no gravityOverride -- derived from U, Fr and the liquid height (useHardcodedUnits false)
 }
 
 ParticleParameters
@@ -496,7 +496,7 @@ ModelParameters
    usePureAnalyticalCylinder     false;  // (default, explicit) keep the GJK/EPA fallback for uncertain pairs
    useContactFilterOwnerTiebreak true;   // one rank accepts each boundary-straddling contact (min owner rank)
    cylinderContactSkin           0.5;   // rod-rod contact from a surface gap of 2*skin = 1, rod-wall/pillar from 0.5
-   guardCurvatureInputs          true;   // FD curvature skips uninitialised/non-finite neighbour normals
+   guardCurvatureInputs          true;   // FD curvature skips neighbours in no flag group and non-finite neighbour normals
 
    // Contact/buoyancy options: tight layer-1 pre-filter and rotational effective mass ON, the rest OFF
    useTightLayer1                true;   // conservative pre-filter ahead of the closed-form contact tests

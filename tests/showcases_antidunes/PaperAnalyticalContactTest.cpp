@@ -799,8 +799,8 @@ void testCylinderCylinderFaceBandPartiallyInside()
    WALBERLA_CHECK(kodam.contact);
    WALBERLA_CHECK_EQUAL(std::string(kodam.scenario), "face-band");
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.overlap, real_t(0.1), real_t(1e-3));
-   // point = midpoint of B and the disc-crossing nearer A, t=(-1+0.453939)/2 -> (0.226970, 0.3) (Kodam et al. 2010 eq.
-   // 44)
+   // point = midpoint of B and the disc-crossing nearer A, t=(-1+0.453939)/2 -> (0.226970, 0.3)
+   // (Kodam et al. 2010 eq. 44)
    WALBERLA_CHECK_FLOAT_EQUAL_EPSILON(kodam.point, Vec3(real_t(0.226970), real_t(0.3), real_t(0.95)),
                                        real_t(1e-3));
 
@@ -2118,10 +2118,10 @@ void testCylinderCylinderEdgeEdgeGenuine()
 //!   (a) misclassified scenario: angle between kodam.normal and gjk.normal > 15 degrees, i.e. the wrong feature
 //!       pairing was chosen and only re-dispatching could fix it;
 //!   (b) wrong point, same scenario: normal within 15 degrees, but the scenario's point is not the extremal one.
-//! special-contact is classified separately: its axial depth is taken at P (rim point closest to the host axis)
-//! instead of E (rim point closest to the host face plane, detail::rimPointTowardPlane); since E minimises the
-//! axial distance over the rim, |z_E| <= |z_P| and depth(P) underestimates. E is recomputed for the firing
-//! host/probe pairing and delta_a(E) compared with GJK/EPA.
+//! special-contact is classified separately: its depth is the deepest rim point inside the host (the rim's lowest
+//! point E, detail::rimPointTowardPlane, if it lies in the host disc, otherwise a crossing with the host's lateral
+//! surface, with Guo's P as last resort). E is recomputed for the firing host/probe pairing and delta_a(E) compared
+//! with GJK/EPA.
 const char* classifyMagnitudeCause(const CylinderState& ci, const CylinderState& cj, const ContactResult& kodam,
                                     const GjkResult& gjk, real_t& outMetric)
 {

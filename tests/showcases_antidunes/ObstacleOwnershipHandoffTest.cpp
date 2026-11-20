@@ -200,7 +200,7 @@ void runTest()
 
    // Inject a non-equilibrium PDF, standing in for what A's obstacle dynamics may leave behind: D3Q27 rest
    // equilibrium (w0=8/27, w[1-6]=2/27, w[7-18]=1/54, w[19-26]=1/216) with one asymmetric perturbation. Any nonzero
-   // deviation would do; the question is whether the handoff keeps it unchanged.
+   // deviation would do; the handoff must replace it with rest equilibrium.
    std::array< real_t, 27 > injectedPdf{};
    injectedPdf[0] = real_t( 8.0 / 27.0 );
    for (uint_t q = uint_t( 1 ); q <= uint_t( 6 ); ++q) injectedPdf[q] = real_t( 2.0 / 27.0 );

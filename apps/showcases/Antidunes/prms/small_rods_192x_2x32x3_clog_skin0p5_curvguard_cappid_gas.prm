@@ -3,8 +3,8 @@
 // velocity 0.04). Two cylindrical pillars R 12 centred on the y walls at x = 384 leave a 16 LU gap.
 // Floaters: 192 rods R 3, L 18, axis y: 2 across (y = 10 / 30) x 32 rows (x = 364 down to 116, pitch 8) x 3 layers
 // (z = 10 / 25 / 45, densityRatio 1.2 / 1.0 / 0.5), held fixed for 500 steps. cylinderContactSkin 0.5 (pitch 8
-// leaves a rod-rod gap of 2 > 2*skin); guardCurvatureInputs true (FD curvature skips uninitialised/non-finite neighbour
-// normals, logged as [CURVATURE-GUARD]; a no-op on valid inputs).
+// leaves a rod-rod gap of 2 > 2*skin); guardCurvatureInputs true (FD curvature skips neighbours in no flag group and
+// non-finite neighbour normals, logged as [CURVATURE-GUARD]; a no-op on valid inputs).
 // PID cap maxActuatingVariable 2.65e-6 = k a_ref with a_ref = 7.8e-7 (clean converged force of the centred-pillar
 // channel, same domain and flow) and k = 1 + F / (a_ref L_x / g) = 1 + 24.6 / 10.3 = 3.4 for a freeboard F = 0.5 h0
 // (h0 = 49.1): the forcing holds the discharge until the backwater would exceed half the water depth, then acts as a

@@ -891,8 +891,8 @@ void addSweepSurfaceDynamics(const std::shared_ptr< const SimulationParams >& si
    };
 
    // Debug probe: state (PDFs, density, fill, flag) of two fixed watch cells immediately before and after the generated
-   // collision, every step
-   // (shows whether collide() also iterates obstacle cells, whose PDFs MovingParticleMapping leaves untouched).
+   // collision, every step (shows whether collide() also iterates obstacle cells, whose PDFs MovingParticleMapping
+   // leaves untouched).
    static const std::vector< Vector3< real_t > > collideProbeCells = {
       Vector3< real_t >(real_t(608.5), real_t(18.5), real_t(30.5)),
       Vector3< real_t >(real_t(609.5), real_t(18.5), real_t(30.5))

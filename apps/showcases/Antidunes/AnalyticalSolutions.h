@@ -265,7 +265,7 @@ inline ImpactResult sphereWallImpact(real_t radius, real_t mass, const Vec3& vel
 }
 
 //! Cylinder-wall impact, replicating Kodam et al. (2010) Part II Test 1: the contact point is the
-//! point on the cylinder's rim closest to the wall plane, from closed_form_contacts::rimPointTowardPlane
+//! point on the cylinder's rim closest to the wall plane, from closed_form_contacts::detail::rimPointTowardPlane
 //! (ClosedFormContactsCylinderPlaneGeometry.h), i.e. the Kodam/Guo closed forms as reference geometry.
 //!
 //! FACE-PLANE / BAND-PLANE SPECIAL CASE: near axis-parallel (face-on) or axis-perpendicular (band-on) orientations

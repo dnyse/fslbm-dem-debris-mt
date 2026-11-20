@@ -259,7 +259,6 @@ struct ParticleParams {
    bool        useLubricationCorrection;
    bool        useNoSlipParticles;
    bool        useParticleBed;
-                                  // (ParticleKernels.h); the sphere V_sub plane fit does not read it.
    // Both > 0: the SI scaling skips inFileName's header (getAvgDiameterScalingFactor, Utility.h) and uses
    // avgParticleDiameterOverride [LU] (sets liquidHeight, floorHeight, particleFixingHeight) and dxSIOverride [m/LU]
    // (sets dx_SI, dt_SI) directly, e.g. for floater-only scenarios. Either alone is ignored. Default 0.
@@ -682,7 +681,7 @@ struct ModelParams {
    bool        logMomentumBudget;
 
    // true -> finite-difference curvature (CurvatureSweepFiniteDifferences) skips neighbour directions whose flag is in
-   //         no group (upstream reads an uninitialised normal there) or whose normal is non-finite, sets curvature 0 if
+   //         no group (upstream counts these with a zero normal) or whose normal is non-finite, sets curvature 0 if
    //         none remain, and logs [CURVATURE-GUARD]. Identical results for valid inputs. false (default) -> upstream.
    bool        guardCurvatureInputs;
    // true -> after flag initialisation, the outer ghost layer (layer 2) beyond every non-periodic domain border also
@@ -728,8 +727,8 @@ struct ModelParams {
    bool        useAnalyticalContactDetection;
 
    // true -> (only with useAnalyticalContactDetection) no Cylinder-Cylinder GJK/EPA fallback: the Kodam + Guo dispatch
-   //         is the sole answer, as in the papers (tier 1 "no contact" accepted, tier 2 contacts applied as-is). The
-   //         raw centre-distance pre-filter in SolidCylinderContactDetection stays active.
+   //         is the sole answer, as in the papers (Tier 1 "no contact" accepted, special-contact results applied as-is).
+   //         The Layer-1 pre-filter in SolidCylinderContactDetection (useTightLayer1) stays active.
    // false (default) -> fall back to GJK/EPA whenever cylinderCylinderResultIsUncertain() flags the result.
    bool        usePureAnalyticalCylinder;
 
@@ -738,7 +737,7 @@ struct ModelParams {
    //         (closed_form_contacts::refineCylinderContact): exact closed-form scenarios are unchanged, inexact ones get
    //         the minimising depth/normal, "no scenario" pairs are decided by the same descent; no GJK/EPA call. Also
    //         used, independently of useAnalyticalContactDetection, for rod vs. solid cylindrical pillar
-   //         (cylinderPillarCore, ParticleKernels.h). Validated in PaperAnalyticalContactTest.cpp (depth error
+   //         (cylinderPillarCore, ParticleKernels.h). Validated in PaperAnalyticalContactTest.cpp, testRefinedCylinderContactVsGjk (depth error
    //         <= 5e-4; separated pairs closer than ~0.01 may be reported as grazing contacts, overlap <= 0.006).
    // false (default) -> GJK/EPA fallback for "no scenario" and special contacts.
    bool        refineCylinderContacts;

@@ -689,10 +689,11 @@ void setupBoundaryHandling(const std::shared_ptr< const SimulationParams >& simP
 {
    WALBERLA_LOG_INFO_ON_ROOT("setupBoundaryHandling");
 
-   // Live MEM reference height (ModelParameters.useDynamicReferenceHeight): seeded with the still-water level;
-   // with the toggle on, ParticleKernels' computeSubmergedVolumes() EMA-updates it every step from the sphere
-   // floaters' fitted local waterlines (only when useMemOnlyBuoyancy=false, which gates that function). It only enters the force (SimpleBB's rhoHydStat), never the fluid. With the
-   // toggle off it is never written and the static-height functor below is used.
+   // Live MEM reference height (ModelParameters.useDynamicReferenceHeight): seeded with the still-water level; with the
+   // toggle on, ParticleKernels' computeSubmergedVolumes() EMA-updates it every step from the sphere floaters' fitted
+   // local waterlines (only when useMemOnlyBuoyancy=false, which gates that function). It only enters the force
+   // (SimpleBB's rhoHydStat), never the fluid. With the toggle off it is never written and the static-height functor
+   // below is used.
    simObjs->memReferenceHeight = std::make_shared< real_t >(simParams->staticReferenceHeight());
 
    WALBERLA_LOG_INFO_ON_ROOT("[MEM reference height] "
@@ -1768,9 +1769,9 @@ void checkHighAltitudeWater(const std::shared_ptr< SimulationObjects >& simObjs,
    }
 }
 
-// Check the closed-interface-layer invariant: in FSLBM a liquid cell may never be a (D3Q27) neighbour of a gas
-// cell; an interface cell must separate them. A violation is a "hole" in the interface layer. Counts the holes, logs the first one with its 3x3x3 neighbourhood and returns the global
-// count. Does not abort.
+// Check the closed-interface-layer invariant: in FSLBM a liquid cell may never be a (D3Q27) neighbour of a gas cell; an
+// interface cell must separate them. A violation is a "hole" in the interface layer. Counts the holes, logs the first
+// one with its 3x3x3 neighbourhood and returns the global count. Does not abort.
 uint_t checkClosedInterfaceLayer(const std::shared_ptr< SimulationObjects >& simObjs,
                                  const char* const location, const uint_t t)
 {

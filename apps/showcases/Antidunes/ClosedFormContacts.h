@@ -45,9 +45,9 @@
 //! penetration depth and normal (track the axis with the SMALLEST overlap instead of exiting on the first
 //! separating axis) is the standard textbook extension of the same theorem (e.g. Ericson, "Real-Time Collision
 //! Detection", 2004, ch. 4), not a result of the 1996 paper. The contact-POINT construction is not from the paper
-//! either. A flush face-face contact has no unique contact point (ContactDetectionTest.cpp's testBoxBoxContact
-//! applies the same restriction to the GJK/EPA result; pybullet picks a different, equally valid point on the same
-//! shared face).
+//! either. A flush face-face contact has no unique contact point: ContactDetectionTest.cpp's testBoxBoxContact therefore
+//! asserts only the normal-axis component of the GJK/EPA point (pybullet picks a different, equally valid point on the
+//! same shared face).
 //!
 //! -------------------------------------------------------------------------------------------------
 //! Cylinder x Cylinder / Cylinder x Plane: Kodam, M., Bharadwaj, R., Curtis, J., Hancock, B., &

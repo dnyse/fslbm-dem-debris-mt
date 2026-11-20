@@ -120,8 +120,8 @@ inline CircleFarthestResult circleFarthestFromAxisClipped(
 
    if (!hasClip || onSolidSide(candidate)) return { candidate, radialSq(candidate), true };
 
-// Unconstrained farthest point is on the clipped-away side: restrict to the (up to two) points where the
-// circle crosses the clip plane.
+   // Unconstrained farthest point is on the clipped-away side: restrict to the (up to two) points where the
+   // circle crosses the clip plane.
    const real_t A1 = u * clipNormal, A2 = v * clipNormal;
    const real_t Amag = std::sqrt(A1 * A1 + A2 * A2);
    if (Amag < real_t(1e-12)) return { candidate, real_t(0), false }; // circle plane || clip plane: all on wrong side
@@ -2629,7 +2629,7 @@ public:
       if (logForces_ && isFloater)
       {
          const auto fContact = ac.getForce(idx);
-         // Y-tilt angle, same convention as [BoxRightingMoment]'s tiltDeg below (Bogner & Rude 2013, Fig. 5.6
+         // Y-tilt angle, same convention as [BoxRightingMoment]'s tiltDeg below (Bogner 2017, Fig. 5.6
          // validation): for a pure rotation about Y, R(0,2)=sin(theta), R(0,0)=cos(theta). Box/cylinder floaters
          // only (spheres carry no physical tilt).
          std::string tiltStr;
@@ -2656,7 +2656,7 @@ public:
 
       mesa_pd::addForceAtomic(idx, ac, hydro_force + bodyForce);
 
-      // Buoyancy righting / capsizing moment (Bogner & Rude 2013, Fig. 5.4): the buoyancy force (vertical,
+      // Buoyancy righting / capsizing moment (Bogner 2017, Fig. 5.4): the buoyancy force (vertical,
       // +vSub g) acts at the centre of buoyancy B (centroid of the submerged volume), not at the COM G. When the
       // body tilts, B shifts off G and the buoyancy produces the moment (B - G) x F_buoy, applied here as an
       // explicit torque (net force unchanged). It self-rights when the metacentre is above G and tips further
@@ -2722,7 +2722,6 @@ private:
    // true → floater X/Y drive is m_p * a_xy instead of vFull * a_xy (see SimulationParams driveFloatersByMass).
    bool                                                     driveFloatersByMass_;
    const std::unordered_map< walberla::id_t, real_t >*     submergedVolumes_;
-   // Option A vertical MEM correction; null = disabled
    const std::unordered_map< walberla::id_t, Vector3< real_t > >* buoyancyCenterOffset_;
    const std::unordered_map< walberla::id_t, real_t >*     comOffsetZ_ = nullptr; // per box/cylinder COM offset
 
@@ -4611,7 +4610,7 @@ public:
                      : std::string(""))
                << "]");
 
-            // --- RIGHTING MOMENT (Bogner & Rüde 2013, Fig. 5.6 validation) ------------------------------
+            // --- RIGHTING MOMENT (Bogner 2017, Fig. 5.6 validation, data of Bogner & Rüde 2013) ------------------------------
             // Stability curve of a half-immersed box heeled about its longitudinal (y) axis: the buoyancy
             // F_buoy = +V_sub·|g| acts at the centre of buoyancy B = centroid of the submerged volume; the
             // horizontal offset of B from the centre of gravity G (= box centre) gives the restoring moment
@@ -4693,12 +4692,10 @@ private:
    std::vector< ClipFloater >                         clipFloaters_;          // same order/size on all ranks
    // keyed by UID; populated by both compute* methods
    std::unordered_map< walberla::id_t, real_t >       submergedVolumes_;
-   // keyed by UID; tapered F_pred_z per sphere (Option A vertical MEM correction); currently never filled
    // box/cylinder C_b − C_com (world frame), for the righting torque
    std::unordered_map< walberla::id_t, Vector3< real_t > > buoyancyCenterOffset_;
    // per-floater COM offset below the centroid (body z, const), for the pendulum righting torque
    std::unordered_map< walberla::id_t, real_t >       boxComOffsetZ_;
-   // Option A: subtract F_pred_z from the vertical MEM force
    // (default) true → skip computeSubmergedVolumes()/computeSubmergedVolumesBox() in doDEMSubCycles: no vSub, no
    // righting torque, as in Bogner & Rude (2013) (buoyant support and righting moment come solely from the raw
    // MEM force/torque). false → run them (Antidunes' extended split).
@@ -4753,7 +4750,7 @@ private:
    real_t                                             planeFitRadiusFactor_;
    // box/cylinder plane-fit shell reach, in units of max(halfExtents) (prm boxPlaneFitBandFactor)
    real_t                                             boxPlaneFitBandFactor_;
-   // static free-surface reference height (absoluteLiquidHeight); used in logs and the disabled Option A block
+   // static free-surface reference height (absoluteLiquidHeight); used only in logs
    real_t                                             surfaceHeight_;
    // body acceleration incl. gravity; for net-force logging
    std::shared_ptr< Vector3< real_t > >               acceleration_;

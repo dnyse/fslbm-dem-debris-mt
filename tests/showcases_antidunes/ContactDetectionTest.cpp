@@ -17,7 +17,7 @@
 //! Unit tests for walberla::antidunes::SolidCylinderContactDetection. Covers every floater shape (Sphere, Box,
 //! Cylinder) against every floater, HalfSpace (wall/floor) and CylindricalBoundary (pillar): 12 pairs, since the two
 //! static shapes never contact each other. Each pair has a contact case and a no-contact control; mixed-type pairs
-//! also check argument-order invariance.
+//! other than Sphere x Box also check argument-order invariance.
 //!
 //! By resolution path:
 //! - 6 custom overloads (hand-traced expected values): Sphere x Cylinder, Sphere x CylindricalBoundary,
